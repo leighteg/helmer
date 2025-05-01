@@ -1,3 +1,3 @@
 mod renderer;
-mod ecs;
-mod runtime;
+pub mod ecs;
+pub mod runtime;

@@ -7,3 +7,4 @@ edition = "2024"
 mev = { path = "/Users/leighton/Downloads/mev-main" }
 winit = "0.30.10"
 proc = { path = "proc" }
+glam = "0.30.2"

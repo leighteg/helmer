@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::{component::Component, component_pool::ComponentPool};
+use super::{component::Component, component_pool::ComponentPool, system_manager::SystemManager};
 
 pub type Entity = usize;
 
@@ -8,6 +8,7 @@ pub struct ECSCore {
     next_entity_id: Entity,
     entities: HashSet<Entity>,
     component_pool: ComponentPool,
+    pub system_manager: SystemManager,
 }
 
 impl ECSCore {
@@ -16,6 +17,7 @@ impl ECSCore {
             next_entity_id: 0,
             entities: HashSet::new(),
             component_pool: ComponentPool::new(),
+            system_manager: SystemManager::new(),
         }
     }
 

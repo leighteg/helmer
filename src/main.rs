@@ -12,5 +12,5 @@ fn main() {
     let entity = ecs_core.create_entity();
     ecs_core.add_component(entity, Position(0,0));
     println!("sigma entity components: {:?}", ecs_core.get_components(entity));
-    println!("getting sigma's position comp: {:?}", ecs_core.get_components_of_type::<Position>(entity))
+    println!("getting sigma's position comp: {:?}", ecs_core.get_component::<Position>(entity))
 }

@@ -8,3 +8,6 @@ mev = { path = "/Users/ltegland/Downloads/mev-main" }
 winit = "0.30.10"
 proc = { path = "proc" }
 glam = "0.30.2"
+rayon = "1.10.0"
+hashbrown = { version = "0.15.3", features = ["rayon"] }
+parking_lot = "0.12.3"

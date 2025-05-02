@@ -276,7 +276,7 @@ impl System for RenderSystem {
         "RenderSystem"
     }
 
-    fn run(&mut self, ecs: &mut ECSCore) {
+    fn run(&self, ecs: &mut ECSCore) {
         if let Some(renderer) = &self.renderer {
             let mut renderer_guard = renderer.lock().unwrap();
             renderer_guard.render(ecs);

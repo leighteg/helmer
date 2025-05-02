@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use rayon::prelude::*;
+use hashbrown::HashMap;
 
 use super::{component::Component, ecs_core::Entity};
 
@@ -36,14 +37,14 @@ impl ComponentPool {
 
     pub fn get_all_for_entity(&self, entity: Entity) -> Vec<&dyn Component> {
         self.components
-            .values()
+            .par_values()
             .filter_map(|map| map.get(&entity).map(|boxed| boxed.as_ref() as &dyn Component))
             .collect()
     }
     
     pub fn get_all_for_entity_mut(&mut self, entity: Entity) -> Vec<&mut dyn Component> {
         self.components
-            .values_mut()
+            .par_values_mut()
             .filter_map(|map| map.get_mut(&entity).map(|boxed| boxed.as_mut() as &mut dyn Component))
             .collect()
     }
@@ -57,7 +58,7 @@ impl ComponentPool {
     pub fn get_all<T: Component + 'static>(&self) -> Vec<&T> {
         self.components.get(&TypeId::of::<T>())
             .map(|map| {
-                map.values()
+                map.par_values()
                     .filter_map(|boxed| boxed.as_any().downcast_ref::<T>())
                     .collect()
             })
@@ -67,7 +68,7 @@ impl ComponentPool {
     pub fn get_all_mut<T: Component + 'static>(&mut self) -> Vec<&mut T> {
         self.components.get_mut(&TypeId::of::<T>())
             .map(|map| {
-                map.values_mut()
+                map.par_values_mut()
                     .filter_map(|boxed| boxed.as_any_mut().downcast_mut::<T>())
                     .collect()
             })
@@ -75,8 +76,8 @@ impl ComponentPool {
     }
 
     pub fn remove_entity(&mut self, entity: Entity) {
-        for map in self.components.values_mut() {
+        self.components.par_values_mut().for_each(|map| {
             map.remove(&entity);
-        }
+        })
     }
 }

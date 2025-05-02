@@ -87,21 +87,16 @@ impl Renderer {
     }
 
     fn create_pipeline(&mut self, shader_type: &ShaderType, target_format: mev::PixelFormat) -> mev::RenderPipeline {
-        // Choose the appropriate shader path based on shader type
-        let shader_path = match shader_type {
-            ShaderType::Triangle => "shaders/triangle.wgsl",
-            ShaderType::Quad => "shaders/quad.wgsl",
-            ShaderType::Custom(name) => name,
+        let shader_input = match shader_type {
+            ShaderType::Triangle => mev::include_library!("shaders/triangle.wgsl" as mev::ShaderLanguage::Wgsl),
+            _ => mev::include_library!("shaders/quad.wgsl" as mev::ShaderLanguage::Wgsl),
         };
 
-        // Fixed macro call - using literal string directly
         let library = self
             .queue
             .new_shader_library(mev::LibraryDesc {
                 name: "shader",
-                input: mev::include_library!(
-                    "shaders/triangle.wgsl" as mev::ShaderLanguage::Wgsl
-                ), // Using direct literal instead of variable
+                input: shader_input,
             })
             .unwrap();
 

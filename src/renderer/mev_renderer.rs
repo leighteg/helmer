@@ -189,6 +189,8 @@ impl Renderer {
                     // Set up constants for this draw
                     render.with_constants(&RenderConstants {
                         time: elapsed_time,
+                        x: 0.0,
+                        y: 0.0,
                         width: target_extent.width(),
                         height: target_extent.height(),
                     });
@@ -230,6 +232,8 @@ impl Renderer {
 #[derive(mev::DeviceRepr)]
 pub struct RenderConstants {
     pub time: f32,
+    pub x: f32,
+    pub y: f32,
     pub width: u32,
     pub height: u32,
 }

@@ -75,6 +75,32 @@ impl ComponentPool {
             .unwrap_or_default()
     }
 
+    pub fn get_all_with_entities<T: Component + 'static>(&self) -> Vec<(Entity, &T)> {
+        self.components.get(&TypeId::of::<T>())
+            .map(|map| {
+                map.par_iter()
+                    .filter_map(|(entity, boxed)| {
+                        boxed.as_any().downcast_ref::<T>()
+                            .map(|component| (*entity, component))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_all_with_entities_mut<T: Component + 'static>(&mut self) -> Vec<(Entity, &mut T)> {
+        self.components.get_mut(&TypeId::of::<T>())
+            .map(|map| {
+                map.par_iter_mut()
+                    .filter_map(|(entity, boxed)| {
+                        boxed.as_any_mut().downcast_mut::<T>()
+                            .map(|component| (*entity, component))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn remove_entity(&mut self, entity: Entity) {
         self.components.par_values_mut().for_each(|map| {
             map.remove(&entity);

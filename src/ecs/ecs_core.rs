@@ -60,4 +60,8 @@ impl ECSCore {
     pub fn get_all_components_of_type_mut<T: Component + 'static>(&mut self) -> Vec<&mut T> {
         self.component_pool.get_all_mut::<T>()
     }
+
+    pub fn get_all_entities_with_component<T: Component + 'static>(&self) -> Vec<(Entity, &T)> {
+        self.component_pool.get_all_with_entities::<T>()
+    }
 }

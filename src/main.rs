@@ -2,42 +2,29 @@ mod ecs;
 
 use helmer_rs::{
     ecs::component::Component,
-    renderer::mev_renderer::{RenderableComponent, ShaderType},
-    runtime::Runtime,
+    provided::world_space::{Position, Scale},
+    runtime::Runtime
 };
-use proc::Component;
-
-#[derive(Debug, Component)]
-struct Position(i64, i64);
 
 fn main() {
     let mut runtime = Runtime::new(|app| {
-        let entity = app.ecs.write().unwrap().create_entity();
-        app.ecs.write().unwrap().add_component(
-            entity,
-            RenderableComponent {
-                visible: true,
-                shader_type: ShaderType::Quad,
-            },
-        );
+        let mut ecs = app.ecs.write().unwrap();
+
+        let entity = ecs.create_entity();
+        ecs.add_component(entity, Position(0.0, 0.0, 0.0));
+        ecs.add_component(entity, Scale(1, 1, 0));
 
         println!(
             "entity's components: {:?}",
-            app.ecs.read().unwrap().get_components(entity)
+            ecs.get_components(entity)
         );
         println!(
             "getting entity's position comp: {:?}",
-            app.ecs.read().unwrap().get_component::<Position>(entity)
+            ecs.get_component::<Position>(entity)
         );
 
-        let entity = app.ecs.write().unwrap().create_entity();
-        app.ecs.write().unwrap().add_component(
-            entity,
-            RenderableComponent {
-                visible: true,
-                shader_type: ShaderType::Triangle,
-            },
-        );
+        let pos = ecs.get_component::<Position>(entity);
+        pos.unwrap().0;
     });
     runtime.init();
 }

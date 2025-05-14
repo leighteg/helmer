@@ -12,7 +12,7 @@ fn main() {
 
         let entity = ecs.create_entity();
         ecs.add_component(entity, Position(0.0, 0.0, 0.0));
-        ecs.add_component(entity, Scale(1, 1, 0));
+        ecs.add_component(entity, Scale(1.0, 1.0, 1.0));
 
         println!(
             "entity's components: {:?}",

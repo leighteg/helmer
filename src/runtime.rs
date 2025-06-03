@@ -195,16 +195,16 @@ impl Runtime {
 impl ApplicationHandler for Runtime {
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
         match event {
             WindowEvent::CloseRequested => {
                 self.shutdown();
+                event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                // Redraw is handled by render thread
                 if let Some(window) = &self.window {
                     if let Some(renderer) = &mut self.renderer {
                         match self.render_receiver.try_recv() {
@@ -213,13 +213,15 @@ impl ApplicationHandler for Runtime {
                             }
                             _ => {}
                         }
-                        
-                        self.frame_barrier.wait();
 
                         renderer.render(window);
                     }
-                    
-                    window.request_redraw();
+
+                    if self.running.load(Ordering::Relaxed) == true {
+                        self.frame_barrier.wait();
+
+                        window.request_redraw();
+                    }
                 }
             }
             _ => {}
@@ -242,8 +244,6 @@ impl ApplicationHandler for Runtime {
             
             self.initialized = true;
         }
-
-        self.frame_barrier.wait();
 
         if let Some(window) = &self.window {
             window.request_redraw();

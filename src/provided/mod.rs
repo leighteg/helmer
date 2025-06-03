@@ -1,1 +1,1 @@
-pub mod world_space;
+pub mod components;

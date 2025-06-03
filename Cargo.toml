@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mev = { path = "/Users/ltegland/Downloads/mev-main" }
+mev = { path = "/Users/leighton/Downloads/mev-main" }
 winit = "0.30.10"
 proc = { path = "proc" }
 glam = "0.30.2"
@@ -12,3 +12,7 @@ rayon = "1.10.0"
 hashbrown = { version = "0.15.3", features = ["rayon"] }
 parking_lot = "0.12.3"
 raw-window-handle = "0.6.2"
+float-derive = "0.1.0"
+thiserror = "2.0.12"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

@@ -30,11 +30,8 @@ pub fn derive_system(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl System for #name {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-                self
+            fn name(&self) -> &str {
+                name
             }
         }
     };

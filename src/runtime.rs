@@ -207,6 +207,13 @@ impl ApplicationHandler for Runtime {
                 // Redraw is handled by render thread
                 if let Some(window) = &self.window {
                     if let Some(renderer) = &mut self.renderer {
+                        match self.render_receiver.try_recv() {
+                            Ok(Message::RenderData(data)) => {
+                                renderer.update_render_data(data);
+                            }
+                            _ => {}
+                        }
+                        
                         self.frame_barrier.wait();
 
                         renderer.render(window);

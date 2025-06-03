@@ -238,7 +238,7 @@ impl ApplicationHandler for Runtime {
         }
 
         if !self.initialized {
-            self.renderer = Some(Renderer::new(&self.window.as_ref().unwrap()));
+            self.renderer = Some(Renderer::new(&self.window.as_ref().unwrap()).unwrap());
 
             (self.init_callback)(self);
             

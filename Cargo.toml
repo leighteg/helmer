@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mev = { path = "/Users/leighton/Downloads/mev-main" }
+mev = { git = "https://github.com/zakarumych/mev.git" }
 winit = "0.30.10"
 proc = { path = "proc" }
 glam = "0.30.2"
@@ -16,3 +16,4 @@ float-derive = "0.1.0"
 thiserror = "2.0.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+bytemuck = "1.23.0"

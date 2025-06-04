@@ -26,21 +26,20 @@ fn main() {
         );
         ecs_guard.add_component(
             cube_entity,
-            Transform::default(),
-        );
-        ecs_guard.add_component(
-            cube_entity,
             MeshRenderer::new(0, 0),
         );
+
+        let mut light_transform = Transform::default();
+        light_transform.position = [0.0, -0.1, 0.0].into();
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity,
-            Transform::default(),
+            light_transform,
         );
         ecs_guard.add_component(
             light_entity,
-            Light::directional(Default::default(), Default::default()),
+            Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0),
         );
     });
     runtime.init();

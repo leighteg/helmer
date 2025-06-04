@@ -40,6 +40,7 @@ struct MaterialData {
     metallic: f32,
     roughness: f32,
     ao: f32,
+    _padding: f32,
 }
 
 // Push constants

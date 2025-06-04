@@ -17,7 +17,9 @@ use winit::{
 
 use crate::{
     ecs::ecs_core::ECSCore,
-    graphics::renderer::renderer::{Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
+    graphics::renderer::renderer::{
+        Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
+    },
     provided::components::{Light, MeshAsset, MeshRenderer, Transform},
 };
 
@@ -131,7 +133,7 @@ impl Runtime {
                     {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             objects.push(RenderObject {
-                                transform: transform.clone(),
+                                transform: *transform,
                                 mesh_id: mesh.mesh_id,
                                 material_id: mesh.material_id,
                             });
@@ -142,18 +144,21 @@ impl Runtime {
                     for (entity, light) in ecs_guard.get_all_entities_with_component::<Light>() {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             lights.push(RenderLight {
-                                transform: transform.clone(),
-                                color: light.color.to_array(),
+                                transform: *transform,
+                                color: light.color.into(),
                                 intensity: light.intensity,
-                                light_type: light.light_type.clone(),
+                                light_type: light.light_type,
                             });
                         }
                     }
 
+                    let mut camera_transform = Transform::default();
+                    camera_transform.position = [0.0, 0.0, 3.0].into(); // Move camera back along Z
+
                     RenderData {
                         objects,
                         lights,
-                        camera_transform: Transform::default(),
+                        camera_transform,
                     }
                 };
 
@@ -233,10 +238,20 @@ impl ApplicationHandler for Runtime {
 
         if !self.initialized {
             self.renderer = Some(Renderer::new(&self.window.as_ref().unwrap()).unwrap());
-            self.renderer.as_mut().unwrap().render(&self.window.as_mut().unwrap());
+            self.renderer
+                .as_mut()
+                .unwrap()
+                .render(&self.window.as_mut().unwrap());
             let cube_mesh = MeshAsset::cube("cube mesh".into());
-            self.renderer.as_mut().unwrap().add_mesh(0, &cube_mesh.vertices.unwrap(), &cube_mesh.indices);
-            self.renderer.as_mut().unwrap().add_material(0, Material::default());
+            self.renderer.as_mut().unwrap().add_mesh(
+                0,
+                &cube_mesh.vertices.unwrap(),
+                &cube_mesh.indices,
+            );
+            self.renderer
+                .as_mut()
+                .unwrap()
+                .add_material(0, Material::default());
             (self.init_callback)(self);
 
             self.initialized = true;

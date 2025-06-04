@@ -18,7 +18,7 @@ use winit::{
 use crate::{
     ecs::ecs_core::ECSCore,
     graphics::renderer::renderer::{RenderData, RenderLight, RenderObject, Renderer},
-    provided::components::{LightComponent, MeshComponent, Transform},
+    provided::components::{Light, MeshRenderer, Transform},
 };
 
 pub enum Message {
@@ -127,7 +127,7 @@ impl Runtime {
 
                     // Collect renderable objects
                     for (entity, mesh) in
-                        ecs_guard.get_all_entities_with_component::<MeshComponent>()
+                        ecs_guard.get_all_entities_with_component::<MeshRenderer>()
                     {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             objects.push(RenderObject {
@@ -140,12 +140,12 @@ impl Runtime {
 
                     // Collect lights
                     for (entity, light) in
-                        ecs_guard.get_all_entities_with_component::<LightComponent>()
+                        ecs_guard.get_all_entities_with_component::<Light>()
                     {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             lights.push(RenderLight {
                                 transform: transform.clone(),
-                                color: light.color,
+                                color: light.color.to_array(),
                                 intensity: light.intensity,
                                 light_type: light.light_type.clone(),
                             });
@@ -155,11 +155,7 @@ impl Runtime {
                     RenderData {
                         objects,
                         lights,
-                        camera_transform: Transform {
-                            position: [0.0, 0.0, 5.0],
-                            rotation: [0.0, 0.0, 0.0, 1.0],
-                            scale: [1.0, 1.0, 1.0],
-                        },
+                        camera_transform: Transform::default(),
                     }
                 };
 

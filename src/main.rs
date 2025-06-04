@@ -1,7 +1,7 @@
 mod ecs;
 
 use helmer_rs::{
-    provided::components::{LightComponent, LightType, MeshComponent, Transform},
+    provided::components::{Light, LightType, MeshRenderer, Transform},
     runtime::Runtime,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -22,36 +22,25 @@ fn main() {
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             cube_entity,
-            Transform {
-                position: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            Transform::default(),
         );
         ecs_guard.add_component(
             cube_entity,
-            MeshComponent {
-                mesh_id: 1,
-                material_id: 1,
-            },
+            Transform::default(),
+        );
+        ecs_guard.add_component(
+            cube_entity,
+            MeshRenderer::new(1, 1),
         );
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity,
-            Transform {
-                position: [5.0, 5.0, 5.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            Transform::default(),
         );
         ecs_guard.add_component(
             light_entity,
-            LightComponent {
-                color: [1.0, 1.0, 1.0],
-                intensity: 1.0,
-                light_type: LightType::Point,
-            },
+            Light::directional(Default::default(), Default::default()),
         );
     });
     runtime.init();

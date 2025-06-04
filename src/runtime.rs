@@ -17,8 +17,8 @@ use winit::{
 
 use crate::{
     ecs::ecs_core::ECSCore,
-    graphics::renderer::renderer::{RenderData, RenderLight, RenderObject, Renderer},
-    provided::components::{Light, MeshRenderer, Transform},
+    graphics::renderer::renderer::{Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
+    provided::components::{Light, MeshAsset, MeshRenderer, Transform},
 };
 
 pub enum Message {
@@ -37,7 +37,7 @@ pub struct Runtime {
 
     // Communication
     render_receiver: mpsc::Receiver<Message>,
-    
+
     frame_barrier: Arc<Barrier>,
 
     renderer: Option<Renderer>,
@@ -76,9 +76,9 @@ impl Runtime {
         // We need to move the sender into the logic thread
         let (render_sender, render_receiver) = mpsc::channel();
         self.render_receiver = render_receiver;
-        
+
         self.start_logic_thread(render_sender);
-        
+
         let event_loop = EventLoop::new().unwrap();
         let _ = event_loop.run_app(self);
     }
@@ -139,9 +139,7 @@ impl Runtime {
                     }
 
                     // Collect lights
-                    for (entity, light) in
-                        ecs_guard.get_all_entities_with_component::<Light>()
-                    {
+                    for (entity, light) in ecs_guard.get_all_entities_with_component::<Light>() {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             lights.push(RenderLight {
                                 transform: transform.clone(),
@@ -235,9 +233,12 @@ impl ApplicationHandler for Runtime {
 
         if !self.initialized {
             self.renderer = Some(Renderer::new(&self.window.as_ref().unwrap()).unwrap());
-
+            self.renderer.as_mut().unwrap().render(&self.window.as_mut().unwrap());
+            let cube_mesh = MeshAsset::cube("cube mesh".into());
+            self.renderer.as_mut().unwrap().add_mesh(0, &cube_mesh.vertices.unwrap(), &cube_mesh.indices);
+            self.renderer.as_mut().unwrap().add_material(0, Material::default());
             (self.init_callback)(self);
-            
+
             self.initialized = true;
         }
 

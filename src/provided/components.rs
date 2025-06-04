@@ -1,6 +1,6 @@
-use crate::ecs::component::Component;
+use crate::{ecs::component::Component, graphics::renderer::renderer::Vertex};
 use proc::Component;
-use glam::{Vec3, Quat}; // Using glam for mathematical types
+use glam::{Quat, Vec2, Vec3}; // Using glam for mathematical types
 
 // --- Core Transform Component ---
 // This is fundamental for any spatial entity.
@@ -46,12 +46,12 @@ impl Transform {
 // which the renderer then uses to look up the `mev::Buffer`s.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MeshRenderer {
-    pub mesh_id: u32,
-    pub material_id: u32, // The ID of the material to use for this mesh instance
+    pub mesh_id: usize,
+    pub material_id: usize, // The ID of the material to use for this mesh instance
 }
 
 impl MeshRenderer {
-    pub fn new(mesh_id: u32, material_id: u32) -> Self {
+    pub fn new(mesh_id: usize, material_id: usize) -> Self {
         Self { mesh_id, material_id }
     }
 }
@@ -162,35 +162,153 @@ impl MaterialAsset {
 
 // --- Mesh Asset Component ---
 // Similar to MaterialAsset, this describes a mesh asset.
+// In your ECS components or asset definition file (where MeshAsset is defined)
+
+// In your `provided::components` module or wherever MeshAsset is defined
+
 #[derive(Component, Debug, Clone)]
 pub struct MeshAsset {
     pub name: String,
-    pub vertex_data: Vec<u8>, // Raw vertex data, format depends on your `Vertex` struct
-    pub index_data: Vec<u32>, // Raw index data
-    // Or, more commonly, a path to a mesh file (e.g., GLTF, OBJ)
+    pub vertices: Option<Vec<Vertex>>, // Store Vec<Vertex> directly
+    pub indices: Vec<u32>,
     pub mesh_file_path: Option<String>,
 }
 
 impl MeshAsset {
-    pub fn from_raw_data(name: String, vertex_data: Vec<u8>, index_data: Vec<u32>) -> Self {
+    // New constructor for already generated/loaded raw data
+    pub fn new_raw(name: String, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         Self {
             name,
-            vertex_data,
-            index_data,
+            vertices: Some(vertices),
+            indices,
             mesh_file_path: None,
         }
     }
 
+    // Existing constructor for file-based assets (vertices/indices loaded later)
     pub fn from_file(name: String, mesh_file_path: String) -> Self {
         Self {
             name,
-            vertex_data: Vec::new(), // Will be loaded by asset system
-            index_data: Vec::new(),  // Will be loaded by asset system
+            vertices: None,
+            indices: Vec::new(),
             mesh_file_path: Some(mesh_file_path),
         }
     }
-}
 
+    // --- Default Primitive Mesh Generation Methods ---
+    // These now use `Self::new_raw` to create the MeshAsset
+
+    pub fn cube(name: String) -> Self {
+        let vertices = vec![
+            // ... (your existing cube vertex data)
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 1.0], tangent: [-1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 1.0], tangent: [-1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 0.0], tangent: [-1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 0.0], tangent: [-1.0, 0.0, 0.0] },
+
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+
+            Vertex { position: [0.5, -0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, -1.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, -1.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, -1.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, -1.0] },
+
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, 1.0] },
+        ];
+
+        let indices = vec![
+            0, 1, 2, 2, 3, 0, // Front
+            4, 6, 5, 6, 4, 7, // Back
+            8, 9, 10, 10, 11, 8, // Top
+            12, 14, 13, 14, 12, 15, // Bottom
+            16, 17, 18, 18, 19, 16, // Right
+            20, 22, 21, 22, 20, 23, // Left
+        ];
+        Self::new_raw(name, vertices, indices)
+    }
+
+    pub fn plane(name: String) -> Self {
+        let vertices = vec![
+            Vertex { position: [-0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+        ];
+        let indices = vec![
+            0, 1, 2,
+            2, 3, 0,
+        ];
+        Self::new_raw(name, vertices, indices)
+    }
+
+    pub fn uv_sphere(name: String, segments: u32, rings: u32) -> Self {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // Vertices
+        for r in 0..=rings {
+            let v = r as f32 / rings as f32;
+            let phi = v * std::f32::consts::PI;
+
+            for s in 0..=segments {
+                let u = s as f32 / segments as f32;
+                let theta = u * std::f32::consts::TAU;
+
+                let x = -phi.sin() * theta.sin();
+                let y = phi.cos();
+                let z = phi.sin() * theta.cos();
+
+                let position = Vec3::new(x, y, z);
+                let normal = position.normalize();
+                let tex_coord = Vec2::new(u, 1.0 - v);
+
+                let tangent = Vec3::new(-theta.cos(), 0.0, -theta.sin()).normalize();
+
+                vertices.push(Vertex {
+                    position: position.into(),
+                    normal: normal.into(),
+                    tex_coord: tex_coord.into(),
+                    tangent: tangent.into(),
+                });
+            }
+        }
+
+        // Indices
+        for r in 0..rings {
+            for s in 0..segments {
+                let p0 = r * (segments + 1) + s;
+                let p1 = p0 + 1;
+                let p2 = (r + 1) * (segments + 1) + s;
+                let p3 = p2 + 1;
+
+                indices.push(p0);
+                indices.push(p2);
+                indices.push(p1);
+
+                indices.push(p1);
+                indices.push(p2);
+                indices.push(p3);
+            }
+        }
+        Self::new_raw(name, vertices, indices)
+    }
+}
 
 // --- Asset ID Mapping Component ---
 // This component would be used if you have a separate asset loading/management system

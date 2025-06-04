@@ -1,7 +1,7 @@
 mod ecs;
 
 use helmer_rs::{
-    provided::components::{Light, LightType, MeshRenderer, Transform},
+    provided::components::{Light, LightType, MeshAsset, MeshRenderer, Transform},
     runtime::Runtime,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -30,7 +30,7 @@ fn main() {
         );
         ecs_guard.add_component(
             cube_entity,
-            MeshRenderer::new(1, 1),
+            MeshRenderer::new(0, 0),
         );
 
         let light_entity = ecs_guard.create_entity();

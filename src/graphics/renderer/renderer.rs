@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec3Swizzles}; // Using glam for proper matrix and vector math
-use mev::{Arguments, DeviceRepr};
+use mev::{Arguments, BufferDesc, DeviceRepr};
 use winit::window::Window;
 use crate::{
     graphics::renderer::{device::RenderDevice, error::RendererError},
@@ -24,9 +25,23 @@ pub struct Material {
     pub metallic: f32,
     pub roughness: f32,
     pub ao: f32,
-    pub albedo_texture_id: Option<u32>,      // Optional texture ID
-    pub normal_texture_id: Option<u32>,      // Optional texture ID
-    pub metallic_roughness_texture_id: Option<u32>, // Optional texture ID
+    pub albedo_texture_id: Option<usize>,      // Optional texture ID
+    pub normal_texture_id: Option<usize>,      // Optional texture ID
+    pub metallic_roughness_texture_id: Option<usize>, // Optional texture ID
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            albedo: [1.0, 1.0, 1.0, 1.0], // Default to white, fully opaque
+            metallic: 0.0,              // Default to non-metallic
+            roughness: 0.8,             // Default to somewhat rough
+            ao: 1.0,                    // Default to full ambient occlusion (no darkening)
+            albedo_texture_id: None,
+            normal_texture_id: None,
+            metallic_roughness_texture_id: None,
+        }
+    }
 }
 
 /// A handle to a loaded texture.
@@ -40,8 +55,8 @@ pub struct TextureHandle {
 #[derive(Debug, Clone)]
 pub struct RenderObject {
     pub transform: Transform,
-    pub mesh_id: u32,
-    pub material_id: u32,
+    pub mesh_id: usize,
+    pub material_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -107,21 +122,41 @@ struct LightData {
 }
 
 // Material data structure (aligned for shader, no padding needed for f32)
-#[derive(mev::DeviceRepr)]
+#[repr(C)] // Crucial for memory layout consistency with C/GPU
+#[derive(mev::DeviceRepr, Clone, Copy)] // mev::DeviceRepr should handle the repr(C) correctly
 struct MaterialShaderData {
-    albedo: [f32; 4],
-    metallic: f32,
-    roughness: f32,
-    ao: f32,
+    albedo: [f32; 4], // 16 bytes, naturally aligned
+    metallic: f32,    // 4 bytes
+    roughness: f32,   // 4 bytes
+    ao: f32,          // 4 bytes
+    // Total so far: 28 bytes.
+    // Need to pad to 32 bytes to match GPU's 16-byte (or 32-byte) alignment for array elements.
+    _padding: [f32; 1], // Add 4 bytes of padding (1 * 4 bytes = 4 bytes)
+                        // This makes the total size 28 + 4 = 32 bytes.
+}
+// Derive Pod and Zeroable after the padding has been correctly applied.
+// Assuming MaterialShaderData will be used in slices/buffers.
+unsafe impl Pod for MaterialShaderData {}
+unsafe impl Zeroable for MaterialShaderData {}
+
+#[repr(C)] // Crucial for memory layout consistency with C/GPU
+#[derive(Debug, Clone, Copy, DeviceRepr, Pod, Zeroable)] // Derive Pod and Zeroable
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tex_coord: [f32; 2],
+    pub tangent: [f32; 3],
 }
 
-// Vertex data structure
-#[derive(mev::DeviceRepr)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    tex_coord: [f32; 2],
-    tangent: [f32; 3],
+impl From<([f32; 3], [f32; 3], [f32; 2], [f32; 3])> for Vertex {
+    fn from(data: ([f32; 3], [f32; 3], [f32; 2], [f32; 3])) -> Self {
+        Vertex {
+            position: data.0,
+            normal: data.1,
+            tex_coord: data.2,
+            tangent: data.3,
+        }
+    }
 }
 
 pub struct Renderer {
@@ -141,9 +176,9 @@ pub struct Renderer {
     material_uniform_buffer: Option<mev::Buffer>,
 
     // Asset storage
-    meshes: HashMap<u32, Mesh>,
-    materials: HashMap<u32, Material>,
-    textures: HashMap<u32, TextureHandle>,
+    meshes: HashMap<usize, Mesh>,
+    materials: HashMap<usize, Material>,
+    textures: HashMap<usize, TextureHandle>,
 
     // Default textures
     default_albedo_tex: Option<mev::Image>,
@@ -334,27 +369,37 @@ impl Renderer {
         Ok(image)
     }
 
-    // New: Add a mesh to the renderer
-    pub fn add_mesh(&mut self, id: u32, vertices: &[Vertex], indices: &[u32]) -> Result<(), RendererError> {
+    pub fn add_mesh(&mut self, id: usize, vertices: &[Vertex], indices: &[u32]) -> Result<(), RendererError> {
+        if self.meshes.contains_key(&id) {
+            tracing::warn!("Mesh with ID {} already exists, overwriting.", id);
+        }
+
+        // Create the vertex buffer (target on the GPU)
         let vertex_buffer = self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of_val(vertices),
+            size: std::mem::size_of_val(vertices), // Size in bytes
             usage: mev::BufferUsage::VERTEX | mev::BufferUsage::TRANSFER_DST,
-            memory: mev::Memory::Device,
+            memory: mev::Memory::Device, // Data lives on the GPU
             name: &format!("mesh-{}-vertex-buffer", id),
         }).map_err(|e| RendererError::MevError(format!("Failed to create vertex buffer: {}", e)))?;
 
+        // Create the index buffer (target on the GPU)
         let index_buffer = self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of_val(indices),
+            size: std::mem::size_of_val(indices), // Size in bytes
             usage: mev::BufferUsage::INDEX | mev::BufferUsage::TRANSFER_DST,
-            memory: mev::Memory::Device,
+            memory: mev::Memory::Device, // Data lives on the GPU
             name: &format!("mesh-{}-index-buffer", id),
         }).map_err(|e| RendererError::MevError(format!("Failed to create index buffer: {}", e)))?;
 
-        // Use the persistent asset_upload_encoder
-        let encoder = self.asset_upload_encoder.as_mut().unwrap();
+        // Use the persistent asset_upload_encoder for copies
+        // Ensure asset_upload_encoder is initialized before this method is called.
+        // (See the `Renderer::new` fix below for this initialization).
+        let encoder = self.asset_upload_encoder.as_mut().expect("Asset upload encoder not initialized!");
+
+        // Use write_buffer directly with the slices
+        // mev's write_buffer for a full buffer typically takes &[T::Repr]
         unsafe {
-            encoder.copy().write_buffer(&vertex_buffer, &vertices.as_ptr().read().as_repr());
-            encoder.copy().write_buffer(&index_buffer, &indices.as_ptr().read().as_repr());
+            encoder.copy().write_buffer(&vertex_buffer, &vertices.as_ptr().read().as_repr()); // Directly pass &[Vertex]
+            encoder.copy().write_buffer(&index_buffer, &indices.as_ptr().read().as_repr());   // Directly pass &[u32]
         }
 
         self.meshes.insert(id, Mesh {
@@ -362,16 +407,18 @@ impl Renderer {
             index_buffer,
             index_count: indices.len() as u32,
         });
+        tracing::info!("Added mesh with ID: {}", id);
         Ok(())
     }
 
     // New: Add a material to the renderer and upload its shader data
-    pub fn add_material(&mut self, id: u32, material: Material) -> Result<(), RendererError> {
+    pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
         let shader_data = MaterialShaderData {
             albedo: material.albedo,
             metallic: material.metallic,
             roughness: material.roughness,
             ao: material.ao,
+            _padding: [0.0],
         };
 
         let material_offset = id as usize * std::mem::size_of::<MaterialShaderData>();
@@ -387,7 +434,7 @@ impl Renderer {
     }
 
     // New: Add a texture to the renderer
-    pub fn add_texture(&mut self, id: u32, data: &[u8], width: u32, height: u32, format: mev::PixelFormat) -> Result<(), RendererError> {
+    pub fn add_texture(&mut self, id: usize, data: &[u8], width: u32, height: u32, format: mev::PixelFormat) -> Result<(), RendererError> {
         let mev_image = self.create_texture_from_data(data, width, height, format, &format!("texture-{}", id)).unwrap();
         self.textures.insert(id, TextureHandle { mev_image, format, width, height });
         Ok(())

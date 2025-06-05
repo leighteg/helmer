@@ -677,7 +677,7 @@ impl Renderer {
         // FIXED: Better forward vector calculation
         let forward: Vec3 = camera_transform.forward().into();
         let forward = if forward.length_squared() < 1e-6 {
-            println!("WARNING: Using default forward vector");
+            tracing::warn!("WARNING: Using default forward vector");
             Vec3::NEG_Z // Default forward in right-handed coordinates
         } else {
             forward.normalize()
@@ -688,14 +688,14 @@ impl Renderer {
         // FIXED: Better up vector calculation  
         let up: Vec3 = camera_transform.up().into();
         let up = if up.length_squared() < 1e-6 {
-            println!("WARNING: Using default up vector");
+            tracing::warn!("WARNING: Using default up vector");
             Vec3::Y
         } else {
             up.normalize()
         };
 
         // POTENTIAL FIX: Try different matrix construction
-        println!("Creating view matrix with eye={:?}, center={:?}, up={:?}", eye, center, up);
+        //println!("Creating view matrix with eye={:?}, center={:?}, up={:?}", eye, center, up);
         let view_matrix = Mat4::look_at_rh(eye, center, up);
         
         // DEBUGGING: Try a simple identity matrix first
@@ -707,8 +707,8 @@ impl Renderer {
         // DEBUGGING: Try a simple orthographic projection
         // let projection_matrix = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 1000.0);
 
-        println!("Final view matrix: {:?}", view_matrix.to_cols_array_2d());
-        println!("Final projection matrix: {:?}", projection_matrix.to_cols_array_2d());
+        //println!("Final view matrix: {:?}", view_matrix.to_cols_array_2d());
+        //println!("Final projection matrix: {:?}", projection_matrix.to_cols_array_2d());
 
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
@@ -770,7 +770,7 @@ impl Renderer {
         let rotation: Quat = transform.rotation.into();
         let scale: Vec3 = transform.scale.into();
 
-        println!("Transform - pos: {:?}, rot: {:?}, scale: {:?}", position, rotation, scale);
+        //println!("Transform - pos: {:?}, rot: {:?}, scale: {:?}", position, rotation, scale);
 
         let safe_scale = Vec3::new(
             if scale.x.abs() < 1e-6 { 1.0 } else { scale.x },
@@ -779,7 +779,7 @@ impl Renderer {
         );
 
         let safe_rotation = if rotation.length_squared() < 1e-6 {
-            println!("Using identity rotation");
+            //println!("Using identity rotation");
             Quat::IDENTITY
         } else {
             rotation.normalize()
@@ -796,7 +796,7 @@ impl Renderer {
         // DEBUGGING: Try a simple identity matrix
         // let model_matrix = Mat4::IDENTITY;
         
-        println!("Final model matrix: {:?}", model_matrix.to_cols_array_2d());
+        //println!("Final model matrix: {:?}", model_matrix.to_cols_array_2d());
         
         model_matrix.to_cols_array_2d()
     }

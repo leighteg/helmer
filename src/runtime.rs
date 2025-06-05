@@ -104,21 +104,7 @@ impl Runtime {
                 // Run ECS systems
                 {
                     let mut ecs_guard = ecs.write().unwrap();
-
-                    ecs_guard.system_manager.run_all(&ecs);
-
-                    // Update scene graph
-                    /*
-                    {
-                        let mut root = scene_root.write().unwrap();
-                        let identity = Transform {
-                            position: [0.0, 0.0, 0.0],
-                            rotation: [0.0, 0.0, 0.0, 1.0],
-                            scale: [1.0, 1.0, 1.0],
-                        };
-                        root.update_transforms(&ecs_guard, &identity);
-                    }
-                    */
+                    ecs_guard.system_scheduler.run_all(&ecs);
                 }
 
                 // Extract render data
@@ -169,7 +155,7 @@ impl Runtime {
                     // This prevents the logic thread from blocking
                 }
 
-                frame_barrier.wait();
+                //frame_barrier.wait();
 
                 // Frame rate limiting
                 let elapsed = now.elapsed();
@@ -218,7 +204,7 @@ impl ApplicationHandler for Runtime {
                     }
 
                     if self.running.load(Ordering::Relaxed) == true {
-                        self.frame_barrier.wait();
+                        //self.frame_barrier.wait();
 
                         window.request_redraw();
                     }

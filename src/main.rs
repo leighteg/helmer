@@ -18,6 +18,9 @@ fn main() {
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write().unwrap();
 
+        let mut cube_transform = Transform::default();
+        cube_transform.position = [0.0, 0.0, 0.0].into();
+
         // Create some demo entities
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -30,7 +33,7 @@ fn main() {
         );
 
         let mut light_transform = Transform::default();
-        light_transform.position = [0.0, -0.1, 0.0].into();
+        light_transform.position = [0.0, 1.0, 0.0].into();
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -39,7 +42,7 @@ fn main() {
         );
         ecs_guard.add_component(
             light_entity,
-            Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0),
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 10.0),
         );
     });
     runtime.init();

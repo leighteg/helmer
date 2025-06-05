@@ -154,6 +154,7 @@ impl Runtime {
 
                     let mut camera_transform = Transform::default();
                     camera_transform.position = [0.0, 0.0, 3.0].into(); // Move camera back along Z
+                    //camera_transform.rotation.y = 20.0;
 
                     RenderData {
                         objects,

@@ -3,7 +3,7 @@ use crate::{
     provided::components::{LightType, Transform},
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3, Vec3Swizzles}; // Using glam for proper matrix and vector math
+use glam::{Mat3, Mat4, Quat, Vec3, Vec3Swizzles}; // Using glam for proper matrix and vector math
 use mev::{Arguments, BufferDesc, DeviceRepr};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -427,23 +427,30 @@ impl Renderer {
                 RendererError::MevError(format!("Failed to create index buffer: {}", e))
             })?;
 
-        let encoder = self
-            .asset_upload_encoder
-            .as_mut()
-            .expect("Asset upload encoder not initialized!");
+        // Create a temporary encoder for immediate upload
+        let mut upload_encoder = self.queue.new_command_encoder().map_err(|e| {
+            RendererError::MevError(format!("Failed to create upload encoder: {}", e))
+        })?;
 
-        // Use write_buffer_slice for uploading slices of data.
-        // Assuming Vertex and u32 are Pod and their DeviceRepr::Repr is themselves.
         if !vertices.is_empty() {
-            encoder
+            upload_encoder
                 .copy()
                 .write_buffer_slice(vertex_buffer.slice(0..vertex_buffer_size), vertices);
         }
         if !indices.is_empty() {
-            encoder
+            upload_encoder
                 .copy()
                 .write_buffer_slice(index_buffer.slice(0..index_buffer_size), indices);
         }
+
+        // Submit immediately
+        let cbuf = upload_encoder.finish().map_err(|e| {
+            RendererError::MevError(format!("Failed to finish upload command buffer: {}", e))
+        })?;
+
+        self.queue
+            .submit(std::iter::once(cbuf), true)
+            .map_err(|e| RendererError::MevError(format!("Failed to submit mesh upload: {}", e)))?;
 
         self.meshes.insert(
             id,
@@ -467,7 +474,7 @@ impl Renderer {
             _padding: [0.0],
         };
 
-        let material_offset = id as usize * std::mem::size_of::<MaterialShaderData>();
+        let material_offset = id * std::mem::size_of::<MaterialShaderData>();
         let material_slice =
             self.material_uniform_buffer.as_ref().unwrap().slice(
                 material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()),
@@ -477,7 +484,7 @@ impl Renderer {
         let encoder = self.asset_upload_encoder.as_mut().unwrap();
         encoder
             .copy()
-            .write_buffer_slice(material_slice, &[shader_data.as_repr()]);
+            .write_buffer_slice(material_slice, &[shader_data]);
 
         self.materials.insert(id, material);
         tracing::info!("Added material with ID: {}", id);
@@ -678,10 +685,11 @@ impl Renderer {
     // Use glam for inverse transpose for normal matrix
     fn create_normal_matrix(model_matrix: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         let model_mat4 = Mat4::from_cols_array_2d(model_matrix);
-        // For normals, it's the inverse transpose of the model matrix.
-        // If you only care about the direction, the transpose of the inverse of the 3x3 part is sufficient.
-        // Using the full 4x4 inverse transpose is also common.
-        model_mat4.inverse().transpose().to_cols_array_2d()
+        // For uniform scaling, we can use just the upper 3x3 part
+        // For non-uniform scaling, we need the inverse transpose of the 3x3 part
+        let upper_3x3 = Mat3::from_mat4(model_mat4);
+        let normal_mat3 = upper_3x3.inverse().transpose();
+        Mat4::from_mat3(normal_mat3).to_cols_array_2d()
     }
 
     pub fn update_render_data(&mut self, render_data: RenderData) {

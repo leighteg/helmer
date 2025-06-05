@@ -152,14 +152,14 @@ impl Runtime {
                         }
                     }
 
-                    let mut camera_transform = Transform::default();
-                    camera_transform.position = [0.0, 0.0, 3.0].into(); // Move camera back along Z
-                    //camera_transform.rotation.y = 20.0;
-
                     RenderData {
                         objects,
                         lights,
-                        camera_transform,
+                        camera_transform: Transform {
+                            position: glam::Vec3::new(0.0, 0.0, -3.0), // Camera 3 units back on Z axis
+                            rotation: glam::Quat::IDENTITY, // Looking down negative Z (forward for camera)
+                            scale: glam::Vec3::ONE,
+                        },
                     }
                 };
 

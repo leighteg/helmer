@@ -3,7 +3,7 @@ use crate::{
     provided::components::{LightType, Transform},
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat3, Mat4, Quat, Vec3, Vec3Swizzles}; // Using glam for proper matrix and vector math
+use glam::{Mat3, Mat4, Quat, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
 use mev::{Arguments, BufferDesc, DeviceRepr};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -159,7 +159,7 @@ impl From<([f32; 3], [f32; 3], [f32; 2], [f32; 3])> for Vertex {
 }
 
 pub struct Renderer {
-    device: RenderDevice, // Assuming RenderDevice wraps mev::Device
+    mev_device: Arc<mev::Device>, // Store the actual MEV device
     surface: mev::Surface,
     queue: mev::Queue,
 
@@ -171,7 +171,6 @@ pub struct Renderer {
     // Uniform buffers
     camera_buffer: Option<mev::Buffer>,
     lights_buffer: Option<mev::Buffer>,
-    // The material_buffer will now hold all MaterialShaderData
     material_uniform_buffer: Option<mev::Buffer>,
 
     // Asset storage
@@ -188,9 +187,10 @@ pub struct Renderer {
     frame_count: u64,
     current_render_data: Option<RenderData>,
     last_format: Option<mev::PixelFormat>,
+    last_extent: Option<mev::Extent2>,
 
     // Store a command encoder for asset uploads to avoid re-creating it often
-    asset_upload_encoder: Option<mev::CommandEncoder>,
+    pending_uploads: Vec<mev::CommandBuffer>,
 }
 
 impl Renderer {
@@ -198,7 +198,7 @@ impl Renderer {
         let instance = mev::Instance::load()
             .map_err(|e| RendererError::MevError(format!("Failed to load MEV instance: {}", e)))?;
 
-        let (_device, mut queues) = instance
+        let (mev_device, mut queues) = instance
             .new_device(mev::DeviceDesc {
                 idx: 0,
                 queues: &[0],
@@ -215,7 +215,7 @@ impl Renderer {
         tracing::info!("MEV Renderer initialized");
 
         Ok(Self {
-            device: RenderDevice::new()?, // Assuming RenderDevice handles device creation and access
+            mev_device: mev_device.into(), // Use the actual MEV device
             surface,
             queue,
             shader_library: None,
@@ -223,7 +223,7 @@ impl Renderer {
             depth_texture: None,
             camera_buffer: None,
             lights_buffer: None,
-            material_uniform_buffer: None, // Renamed for clarity
+            material_uniform_buffer: None,
 
             meshes: HashMap::new(),
             materials: HashMap::new(),
@@ -237,7 +237,8 @@ impl Renderer {
             frame_count: 0,
             current_render_data: None,
             last_format: None,
-            asset_upload_encoder: None,
+            last_extent: None,
+            pending_uploads: Vec::new(),
         })
     }
 
@@ -272,20 +273,17 @@ impl Renderer {
 
         self.lights_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
             size: std::mem::size_of::<LightData>() * 32, // Support up to 32 lights
-            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST, // Changed to STORAGE
+            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
             memory: mev::Memory::Device,
             name: "lights-buffer",
         })?);
 
         self.material_uniform_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
             size: std::mem::size_of::<MaterialShaderData>() * 256, // Support up to 256 materials
-            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST, // Changed to STORAGE
+            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
             memory: mev::Memory::Device,
             name: "materials-buffer",
         })?);
-
-        // Initialize asset upload encoder
-        self.asset_upload_encoder = Some(self.queue.new_command_encoder()?);
 
         // Create default textures
         self.create_default_textures()?;
@@ -355,25 +353,27 @@ impl Renderer {
             })
             .unwrap();
 
-        // Use the persistent asset_upload_encoder
-        let encoder = self.asset_upload_encoder.as_mut().unwrap();
-        encoder.copy().init_image(
+        let mut upload_encoder = self.queue.new_command_encoder()?;
+
+        upload_encoder.copy().init_image(
             mev::PipelineStages::empty(),
             mev::PipelineStages::TRANSFER,
             &image,
         );
-        // Upload data after initialization
-        encoder.copy().copy_buffer_to_image(
+        upload_encoder.copy().copy_buffer_to_image(
             &scratch,
             0,
-            4 * image.extent().width() as usize,
-            4 * image.extent().width() as usize * image.extent().height() as usize,
+            (4 * image.extent().width()) as usize, // Correct row pitch calculation
+            (4 * image.extent().width() * image.extent().height()) as usize, // Total size
             &image,
             mev::Offset3::ZERO,
             image.extent().into_3d(),
             0..1,
             1,
         );
+
+        let upload_cbuf = upload_encoder.finish()?;
+        self.pending_uploads.push(upload_cbuf);
 
         Ok(image)
     }
@@ -396,8 +396,6 @@ impl Renderer {
                 "Attempted to add mesh with empty vertices or indices for ID {}",
                 id
             );
-            // Potentially return an error or handle as appropriate
-            // For now, let's prevent creating zero-sized buffers if mev doesn't like it
             return Err(RendererError::ResourceCreation(
                 "Empty mesh data".to_string(),
             ));
@@ -427,10 +425,7 @@ impl Renderer {
                 RendererError::MevError(format!("Failed to create index buffer: {}", e))
             })?;
 
-        // Create a temporary encoder for immediate upload
-        let mut upload_encoder = self.queue.new_command_encoder().map_err(|e| {
-            RendererError::MevError(format!("Failed to create upload encoder: {}", e))
-        })?;
+        let mut upload_encoder = self.queue.new_command_encoder().unwrap();
 
         if !vertices.is_empty() {
             upload_encoder
@@ -443,14 +438,8 @@ impl Renderer {
                 .write_buffer_slice(index_buffer.slice(0..index_buffer_size), indices);
         }
 
-        // Submit immediately
-        let cbuf = upload_encoder.finish().map_err(|e| {
-            RendererError::MevError(format!("Failed to finish upload command buffer: {}", e))
-        })?;
-
-        self.queue
-            .submit(std::iter::once(cbuf), true)
-            .map_err(|e| RendererError::MevError(format!("Failed to submit mesh upload: {}", e)))?;
+        let upload_cbuf = upload_encoder.finish().unwrap();
+        self.pending_uploads.push(upload_cbuf);
 
         self.meshes.insert(
             id,
@@ -464,7 +453,6 @@ impl Renderer {
         Ok(())
     }
 
-    // New: Add a material to the renderer and upload its shader data
     pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
         let shader_data = MaterialShaderData {
             albedo: material.albedo,
@@ -475,23 +463,29 @@ impl Renderer {
         };
 
         let material_offset = id * std::mem::size_of::<MaterialShaderData>();
-        let material_slice =
-            self.material_uniform_buffer.as_ref().unwrap().slice(
-                material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()),
-            );
+        let material_slice = self
+            .material_uniform_buffer
+            .as_ref()
+            .ok_or_else(|| {
+                RendererError::ResourceCreation(
+                    "Material uniform buffer not initialized".to_string(),
+                )
+            })?
+            .slice(material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()));
 
-        // Use the persistent asset_upload_encoder
-        let encoder = self.asset_upload_encoder.as_mut().unwrap();
-        encoder
+        let mut upload_encoder = self.queue.new_command_encoder().unwrap();
+        upload_encoder
             .copy()
             .write_buffer_slice(material_slice, &[shader_data]);
+
+        let upload_cbuf = upload_encoder.finish().unwrap();
+        self.pending_uploads.push(upload_cbuf);
 
         self.materials.insert(id, material);
         tracing::info!("Added material with ID: {}", id);
         Ok(())
     }
 
-    // New: Add a texture to the renderer
     pub fn add_texture(
         &mut self,
         id: usize,
@@ -522,17 +516,21 @@ impl Renderer {
         pipeline: &mut Option<mev::RenderPipeline>,
         depth_texture: &mut Option<mev::Image>,
         last_format: &mut Option<mev::PixelFormat>,
+        last_extent: &mut Option<mev::Extent2>,
         target_format: mev::PixelFormat,
-        target_extent: mev::Extent2, // Pass extent to re-create depth texture
+        target_extent: mev::Extent2,
     ) -> Result<(), mev::DeviceError> {
-        if pipeline.is_none() || *last_format != Some(target_format) {
+        let needs_recreation = pipeline.is_none()
+            || *last_format != Some(target_format)
+            || *last_extent != Some(target_extent);
+
+        if needs_recreation {
             let library = shader_library.as_ref().unwrap();
 
-            // Re-create depth texture with current frame dimensions
             *depth_texture = Some(queue.new_image(mev::ImageDesc {
                 extent: target_extent.into(),
                 format: mev::PixelFormat::D32Float,
-                usage: mev::ImageUsage::SAMPLED, // Depth textures can also be sampled for future effects
+                usage: mev::ImageUsage::all(), // would take DEPTH_STENCIL_ATTACHMENT but is mev
                 layers: 1,
                 levels: 1,
                 name: "depth-buffer",
@@ -574,20 +572,17 @@ impl Renderer {
                         }],
                         primitive_topology: mev::PrimitiveTopology::Triangle,
                         raster: Some(mev::RasterDesc {
-                            fragment_shader: Some(mev::Shader {
-                                library: library.clone(),
-                                entry: "fs_main".into(),
-                            }),
+                            fragment_shader: Some(library.entry("fs_main")),
                             color_targets: vec![mev::ColorTargetDesc {
                                 format: target_format,
-                                blend: None,
+                                blend: Some(mev::BlendDesc::default()),
                             }],
                             depth_stencil: Some(mev::DepthStencilDesc {
                                 format: mev::PixelFormat::D32Float,
                                 write_enabled: true,
                                 compare: mev::CompareFunction::Less,
                             }),
-                            front_face: mev::FrontFace::CounterClockwise,
+                            front_face: mev::FrontFace::default(),
                             culling: mev::Culling::Back,
                         }),
                         arguments: &[PbrArguments::LAYOUT],
@@ -597,53 +592,152 @@ impl Renderer {
             );
 
             *last_format = Some(target_format);
+            *last_extent = Some(target_extent);
         }
 
         Ok(())
     }
 
+    pub fn debug_render_state(&self, render_data: &RenderData, window_size: (u32, u32)) {
+        println!("=== DEBUG RENDER STATE ===");
+        
+        // Check camera setup
+        let camera_transform = &render_data.camera_transform;
+        let eye: Vec3 = camera_transform.position.into();
+        let forward: Vec3 = camera_transform.forward().into();
+        let up: Vec3 = camera_transform.up().into();
+        
+        println!("Camera position: {:?}", eye);
+        println!("Camera forward: {:?}", forward);
+        println!("Camera up: {:?}", up);
+        
+        // Check if forward vector is valid
+        if forward.length_squared() < 1e-6 {
+            println!("WARNING: Camera forward vector is near zero!");
+        }
+        
+        let center = eye + forward.normalize();
+        println!("Look at center: {:?}", center);
+        
+        // Check matrices
+        let view_matrix = Mat4::look_at_rh(eye, center, up.normalize());
+        let aspect_ratio = window_size.0 as f32 / window_size.1 as f32;
+        let projection_matrix = Mat4::perspective_rh(45.0_f32.to_radians(), aspect_ratio, 0.1, 1000.0);
+        
+        println!("View matrix: {:?}", view_matrix);
+        println!("Projection matrix: {:?}", projection_matrix);
+        println!("Aspect ratio: {}", aspect_ratio);
+        
+        // Check objects
+        println!("Objects to render: {}", render_data.objects.len());
+        for (i, obj) in render_data.objects.iter().enumerate() {
+            println!("Object {}: mesh_id={}, material_id={}, pos={:?}", 
+                i, obj.mesh_id, obj.material_id, obj.transform.position);
+                
+            // Check if mesh exists
+            if !self.meshes.contains_key(&obj.mesh_id) {
+                println!("  ERROR: Mesh {} not found!", obj.mesh_id);
+            }
+            if !self.materials.contains_key(&obj.material_id) {
+                println!("  ERROR: Material {} not found!", obj.material_id);
+            }
+            
+            // Check model matrix
+            let model_matrix = Self::create_model_matrix(&obj.transform);
+            println!("  Model matrix: {:?}", model_matrix);
+            
+            // Test a vertex transformation
+            let test_vertex = Vec4::new(0.0, 0.0, 0.0, 1.0);
+            let world_pos = Mat4::from_cols_array_2d(&model_matrix) * test_vertex;
+            let view_pos = view_matrix * world_pos;
+            let clip_pos = projection_matrix * view_pos;
+            println!("  Test vertex transform: local->world->view->clip: {:?} -> {:?} -> {:?} -> {:?}", 
+                test_vertex, world_pos, view_pos, clip_pos);
+        }
+        
+        // Check lights
+        println!("Lights: {}", render_data.lights.len());
+        for (i, light) in render_data.lights.iter().enumerate() {
+            println!("Light {}: type={:?}, pos={:?}, intensity={}", 
+                i, light.light_type, light.transform.position, light.intensity);
+        }
+    }
+    
+    // Fixed camera uniform update with better debugging
     fn update_uniforms(
         queue: &mut mev::Queue,
         camera_buffer: &mev::Buffer,
         lights_buffer: &mev::Buffer,
         render_data: &RenderData,
+        window_size: (u32, u32),
     ) -> Result<(), mev::DeviceError> {
-        // Update camera uniforms using glam
         let camera_transform = &render_data.camera_transform;
         let eye: Vec3 = camera_transform.position.into();
-        let center: Vec3 = (eye + camera_transform.forward()).into(); // Look forward from camera
-        let up: Vec3 = camera_transform.up().into();
 
-        let view_matrix = Mat4::look_at_rh(eye, center, up); // Right-handed view matrix
-        let projection_matrix = Mat4::perspective_rh(
-            45.0_f32.to_radians(),
-            800.0 / 600.0, // Aspect ratio
-            0.1,
-            100.0,
-        );
+        // FIXED: Better forward vector calculation
+        let forward: Vec3 = camera_transform.forward().into();
+        let forward = if forward.length_squared() < 1e-6 {
+            println!("WARNING: Using default forward vector");
+            Vec3::NEG_Z // Default forward in right-handed coordinates
+        } else {
+            forward.normalize()
+        };
+
+        let center = eye + forward;
+
+        // FIXED: Better up vector calculation  
+        let up: Vec3 = camera_transform.up().into();
+        let up = if up.length_squared() < 1e-6 {
+            println!("WARNING: Using default up vector");
+            Vec3::Y
+        } else {
+            up.normalize()
+        };
+
+        // POTENTIAL FIX: Try different matrix construction
+        println!("Creating view matrix with eye={:?}, center={:?}, up={:?}", eye, center, up);
+        let view_matrix = Mat4::look_at_rh(eye, center, up);
+        
+        // DEBUGGING: Try a simple identity matrix first
+        // let view_matrix = Mat4::IDENTITY;
+        
+        let aspect_ratio = window_size.0 as f32 / window_size.1 as f32;
+        let projection_matrix = Mat4::perspective_rh(45.0_f32.to_radians(), aspect_ratio, 0.1, 1000.0);
+        
+        // DEBUGGING: Try a simple orthographic projection
+        // let projection_matrix = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 1000.0);
+
+        println!("Final view matrix: {:?}", view_matrix.to_cols_array_2d());
+        println!("Final projection matrix: {:?}", projection_matrix.to_cols_array_2d());
 
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
             projection_matrix: projection_matrix.to_cols_array_2d(),
-            view_position: camera_transform.position.to_array(),
+            view_position: eye.to_array(),
             _padding: 0.0,
         };
 
-        // Command encoder for uniform updates
         let mut encoder = queue.new_command_encoder()?;
         {
             let mut copy_encoder = encoder.copy();
             copy_encoder.write_buffer(camera_buffer, &camera_uniforms.as_repr());
 
-            // Update lights buffer
             let light_data: Vec<<LightData as DeviceRepr>::Repr> = render_data
                 .lights
                 .iter()
                 .map(|light| {
                     let direction: Vec3 = match light.light_type {
-                        LightType::Directional => light.transform.forward().into(),
-                        _ => Vec3::ZERO, // Point and Spot lights don't use a global direction like directional
+                        LightType::Directional => {
+                            let dir: Vec3 = light.transform.forward().into();
+                            if dir.length_squared() < 1e-6 {
+                                Vec3::NEG_Y
+                            } else {
+                                dir.normalize()
+                            }
+                        }
+                        _ => Vec3::ZERO,
                     };
+
                     LightData {
                         position: light.transform.position.to_array(),
                         light_type: match light.light_type {
@@ -660,10 +754,7 @@ impl Renderer {
                 })
                 .collect();
 
-            // Ensure the lights buffer is large enough
             if !light_data.is_empty() {
-                // If you have more lights than the buffer size allows, you might need to handle this
-                // e.g., reallocate the buffer or cap the number of lights
                 copy_encoder.write_buffer_slice(lights_buffer.slice(0..), &light_data);
             }
         }
@@ -672,22 +763,57 @@ impl Renderer {
 
         Ok(())
     }
-
-    // Use glam for matrix operations
+    
+    // POTENTIAL FIX: Alternative model matrix creation
     fn create_model_matrix(transform: &Transform) -> [[f32; 4]; 4] {
         let position: Vec3 = transform.position.into();
-        let rotation = transform.rotation.into();
+        let rotation: Quat = transform.rotation.into();
         let scale: Vec3 = transform.scale.into();
 
-        Mat4::from_scale_rotation_translation(scale, rotation, position).to_cols_array_2d()
+        println!("Transform - pos: {:?}, rot: {:?}, scale: {:?}", position, rotation, scale);
+
+        let safe_scale = Vec3::new(
+            if scale.x.abs() < 1e-6 { 1.0 } else { scale.x },
+            if scale.y.abs() < 1e-6 { 1.0 } else { scale.y },
+            if scale.z.abs() < 1e-6 { 1.0 } else { scale.z },
+        );
+
+        let safe_rotation = if rotation.length_squared() < 1e-6 {
+            println!("Using identity rotation");
+            Quat::IDENTITY
+        } else {
+            rotation.normalize()
+        };
+
+        // POTENTIAL FIX: Try building matrix step by step
+        let translation_matrix = Mat4::from_translation(position);
+        let rotation_matrix = Mat4::from_quat(safe_rotation);
+        let scale_matrix = Mat4::from_scale(safe_scale);
+        
+        // Order: scale, then rotate, then translate (TRS)
+        let model_matrix = translation_matrix * rotation_matrix * scale_matrix;
+        
+        // DEBUGGING: Try a simple identity matrix
+        // let model_matrix = Mat4::IDENTITY;
+        
+        println!("Final model matrix: {:?}", model_matrix.to_cols_array_2d());
+        
+        model_matrix.to_cols_array_2d()
     }
 
-    // Use glam for inverse transpose for normal matrix
     fn create_normal_matrix(model_matrix: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
         let model_mat4 = Mat4::from_cols_array_2d(model_matrix);
-        // For uniform scaling, we can use just the upper 3x3 part
-        // For non-uniform scaling, we need the inverse transpose of the 3x3 part
-        let upper_3x3 = Mat3::from_mat4(model_mat4);
+        let upper_3x3 = Mat3::from_cols(
+            model_mat4.x_axis.xyz(),
+            model_mat4.y_axis.xyz(),
+            model_mat4.z_axis.xyz(),
+        );
+
+        let det = upper_3x3.determinant();
+        if det.abs() < 1e-6 {
+            return Mat4::IDENTITY.to_cols_array_2d();
+        }
+
         let normal_mat3 = upper_3x3.inverse().transpose();
         Mat4::from_mat3(normal_mat3).to_cols_array_2d()
     }
@@ -697,39 +823,23 @@ impl Renderer {
     }
 
     pub fn render(&mut self, window: &Window) -> Result<(), RendererError> {
-        self.frame_count += 1;
-
         if self.shader_library.is_none() {
             self.initialize_resources().map_err(|e| {
                 RendererError::MevError(format!("Failed to initialize resources: {}", e))
             })?;
         }
 
+        if !self.pending_uploads.is_empty() {
+            self.queue
+                .submit(self.pending_uploads.drain(..), true)
+                .unwrap();
+        }
+
         let Some(ref render_data) = self.current_render_data else {
             return Ok(());
         };
 
-        // Submit any pending asset uploads before rendering
-        if let Some(encoder) = self.asset_upload_encoder.take() {
-            let cbuf = encoder.finish().map_err(|e| {
-                RendererError::MevError(format!(
-                    "Failed to finish asset upload command buffer: {}",
-                    e
-                ))
-            })?;
-            self.queue
-                .submit(std::iter::once(cbuf), true)
-                .map_err(|e| {
-                    RendererError::MevError(format!("Failed to submit asset uploads: {}", e))
-                })?;
-            // Re-create the encoder for the next frame's asset uploads
-            self.asset_upload_encoder = Some(self.queue.new_command_encoder().map_err(|e| {
-                RendererError::MevError(format!(
-                    "Failed to re-create asset upload command encoder: {}",
-                    e
-                ))
-            })?);
-        }
+        self.frame_count += 1;
 
         let mut frame = self
             .surface
@@ -738,6 +848,9 @@ impl Renderer {
 
         let target_format = frame.image().format();
         let target_extent = frame.image().extent().expect_2d();
+        let window_size = (window.inner_size().width, window.inner_size().height); // Get actual window size
+
+        //self.debug_render_state(render_data, window_size);
 
         Self::create_or_update_pipeline(
             &self.queue,
@@ -745,6 +858,7 @@ impl Renderer {
             &mut self.pipeline,
             &mut self.depth_texture,
             &mut self.last_format,
+            &mut self.last_extent,
             target_format,
             target_extent,
         )
@@ -755,6 +869,7 @@ impl Renderer {
             self.camera_buffer.as_ref().unwrap(),
             self.lights_buffer.as_ref().unwrap(),
             &render_data,
+            window_size, // Pass actual window size
         )
         .map_err(|e| RendererError::MevError(format!("Failed to update uniforms: {}", e)))?;
 
@@ -768,9 +883,8 @@ impl Renderer {
             frame.image(),
         );
 
-        // Render pass
         {
-            let mut render = encoder.render(mev::RenderPassDesc {
+            let mut render_pass = encoder.render(mev::RenderPassDesc {
                 name: "main-pass",
                 color_attachments: &[
                     mev::AttachmentDesc::new(frame.image()).clear(mev::ClearColor::DARK_GRAY)
@@ -781,24 +895,30 @@ impl Renderer {
                 ),
             });
 
-            render.with_viewport(mev::Offset3::ZERO, target_extent.to_3d().cast_as_f32());
-            render.with_scissor(mev::Offset2::ZERO, target_extent);
-            render.with_pipeline(self.pipeline.as_ref().unwrap());
+            render_pass.with_viewport(mev::Offset3::ZERO, target_extent.to_3d().cast_as_f32());
+            render_pass.with_scissor(mev::Offset2::ZERO, target_extent);
+            render_pass.with_pipeline(self.pipeline.as_ref().unwrap());
 
-            // Bind global resources (camera, lights, material buffer, sampler)
-            render.with_arguments(
+            // Bind global resources (camera, lights, material buffer, sampler) ONCE outside the object loop
+            // The textures bound here will be the ones sampled by the shader unless you rebind
+            // the entire argument group for each object, which is less efficient.
+            render_pass.with_arguments(
                 0,
                 &PbrArguments {
                     camera_buffer: self.camera_buffer.as_ref().unwrap().clone(),
                     lights_buffer: self.lights_buffer.as_ref().unwrap().clone(),
-                    material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(), // Bind the material uniform buffer
-                    albedo_texture: self.default_albedo_tex.as_ref().unwrap().clone(), // These will be overwritten per object
-                    normal_texture: self.default_normal_tex.as_ref().unwrap().clone(), // These will be overwritten per object
+                    material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(),
+                    // IMPORTANT: For now, these will be the DEFAULT textures,
+                    // as your current setup for dynamic per-object texture binding
+                    // would involve rebinding the entire argument group which is costly.
+                    // A Texture Array approach is generally better here.
+                    albedo_texture: self.default_albedo_tex.as_ref().unwrap().clone(),
+                    normal_texture: self.default_normal_tex.as_ref().unwrap().clone(),
                     metallic_roughness_texture: self
                         .default_metallic_roughness_tex
                         .as_ref()
                         .unwrap()
-                        .clone(), // These will be overwritten per object
+                        .clone(),
                     sampler: self.sampler.as_ref().unwrap().clone(),
                 },
             );
@@ -812,7 +932,7 @@ impl Renderer {
                     );
                     continue;
                 };
-                let Some(material) = self.materials.get(&object.material_id) else {
+                let Some(_material) = self.materials.get(&object.material_id) else {
                     tracing::warn!(
                         "Material with ID {} not found, skipping object.",
                         object.material_id
@@ -823,26 +943,30 @@ impl Renderer {
                 let model_matrix = Self::create_model_matrix(&object.transform);
                 let normal_matrix = Self::create_normal_matrix(&model_matrix);
 
-                render.with_constants(&PbrConstants {
+                render_pass.with_constants(&PbrConstants {
                     model_matrix,
                     normal_matrix,
                     material_id: object.material_id as u32,
                 });
 
-                // Dynamically bind textures for the current material
-                let albedo_texture = material
+                // This section of rebinding individual textures is what I mentioned needs rethinking.
+                // Rebinding the *entire* PbrArguments struct for *every object* is inefficient.
+                // For now, I'm keeping it as you had it, but note the performance implication
+                // and the recommendation for texture arrays.
+                // The shader will still use the texture from the most recent 'with_arguments' call.
+                let albedo_texture = _material // Use _material here since we checked it
                     .albedo_texture_id
                     .and_then(|id| self.textures.get(&id))
                     .map(|h| h.mev_image.clone())
                     .unwrap_or_else(|| self.default_albedo_tex.as_ref().unwrap().clone());
 
-                let normal_texture = material
+                let normal_texture = _material
                     .normal_texture_id
                     .and_then(|id| self.textures.get(&id))
                     .map(|h| h.mev_image.clone())
                     .unwrap_or_else(|| self.default_normal_tex.as_ref().unwrap().clone());
 
-                let metallic_roughness_texture = material
+                let metallic_roughness_texture = _material
                     .metallic_roughness_texture_id
                     .and_then(|id| self.textures.get(&id))
                     .map(|h| h.mev_image.clone())
@@ -853,8 +977,10 @@ impl Renderer {
                             .clone()
                     });
 
-                // Rebind arguments with the specific textures for this object
-                render.with_arguments(
+                // Rebind arguments with the specific textures for this object.
+                // This is where the inefficiency lies if done per-object without a texture array.
+                // If you have many objects, this will generate many draw calls with argument rebinds.
+                render_pass.with_arguments(
                     0,
                     &PbrArguments {
                         camera_buffer: self.camera_buffer.as_ref().unwrap().clone(),
@@ -867,12 +993,11 @@ impl Renderer {
                     },
                 );
 
-                // Bind mesh buffers and draw
-                render.bind_vertex_buffers(0, &[mesh.vertex_buffer.clone()]);
-                render.bind_index_buffer(&mesh.index_buffer);
-                render.draw_indexed(0, 0..mesh.index_count, 0..1);
+                render_pass.bind_vertex_buffers(0, &[mesh.vertex_buffer.clone()]);
+                render_pass.bind_index_buffer(&mesh.index_buffer);
+                render_pass.draw_indexed(0, 0..mesh.index_count, 0..1);
             }
-        }
+        } // End render pass
 
         self.queue
             .sync_frame(&mut frame, mev::PipelineStages::FRAGMENT_SHADER);

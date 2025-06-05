@@ -1,5 +1,6 @@
 mod ecs;
 
+use glam::Quat;
 use helmer_rs::{
     provided::components::{Light, LightType, MeshAsset, MeshRenderer, Transform},
     runtime::Runtime,
@@ -18,14 +19,17 @@ fn main() {
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write().unwrap();
 
-        let mut cube_transform = Transform::default();
-        cube_transform.position = [0.0, 0.0, 0.0].into();
+        let mut cube_transform = Transform {
+            position: glam::Vec3::new(0.0, 0.0, 0.0),
+            rotation: glam::Quat::from_array([30.0, 30.0, 0.0, 30.0]),
+            scale: glam::Vec3::ONE,
+        };
 
         // Create some demo entities
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             cube_entity,
-            Transform::default(),
+            cube_transform,
         );
         ecs_guard.add_component(
             cube_entity,
@@ -33,7 +37,7 @@ fn main() {
         );
 
         let mut light_transform = Transform::default();
-        light_transform.position = [0.0, 1.0, 0.0].into();
+        light_transform.position = [2.0, 2.0, 2.0].into();
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -42,7 +46,7 @@ fn main() {
         );
         ecs_guard.add_component(
             light_entity,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 10.0),
+            Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0),
         );
     });
     runtime.init();

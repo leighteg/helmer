@@ -165,7 +165,7 @@ impl SystemScheduler {
         self.dirty = false;
     }
 
-    pub fn run_all(&mut self, ecs_core: &Arc<RwLock<ECSCore>>) {
+    pub fn run_all(&mut self, ecs_core: &mut ECSCore) {
         println!("SystemScheduler::run_all() called");
         self.rebuild_execution_groups();
 
@@ -189,20 +189,14 @@ impl SystemScheduler {
 
             // Run systems in parallel
             let execution_times: Vec<_> = systems_to_run
-                .par_iter()
+                .iter()
                 .map(|(system, idx)| {
                     let start = Instant::now();
                     let mut execution_time = Duration::from_nanos(0);
 
                     if let Ok(mut sys) = system.lock() {
-                        // Use write() to ensure the system waits for the lock instead of failing.
-                        if let Ok(mut ecs_lock) = ecs_core.write() {
-                            sys.run(&mut ecs_lock);
-                            execution_time = start.elapsed();
-                        } else {
-                            // This path is now less likely, but good for robustness.
-                            tracing::error!("could not lock ECSCore to run system!")
-                        }
+                        sys.run(ecs_core);
+                        execution_time = start.elapsed();
                     } else {
                         tracing::error!("failed to lock system!")
                     }

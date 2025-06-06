@@ -23,6 +23,8 @@ use crate::{
     provided::components::{Light, MeshAsset, MeshRenderer, Transform},
 };
 
+use super::ecs::system_scheduler::SystemScheduler;
+
 pub enum Message {
     Init(Window),
     Shutdown,
@@ -104,7 +106,20 @@ impl Runtime {
                 // Run ECS systems
                 {
                     let mut ecs_guard = ecs.write().unwrap();
-                    ecs_guard.system_scheduler.run_all(&ecs);
+
+                    // 1. Temporarily take ownership of the scheduler, leaving a placeholder.
+                    // This is a zero-cost operation that satisfies the borrow checker.
+                    let mut scheduler = std::mem::replace(
+                        &mut ecs_guard.system_scheduler,
+                        SystemScheduler::new(), // A temporary, empty scheduler
+                    );
+
+                    // 2. Now we can call run_all. We pass the ECS data (without the real scheduler).
+                    // The borrow checker is happy because `scheduler` and `ecs_guard` are separate variables.
+                    scheduler.run_all(&mut ecs_guard);
+
+                    // 3. Put the scheduler back where it belongs.
+                    let _ = std::mem::replace(&mut ecs_guard.system_scheduler, scheduler);
                 }
 
                 // Extract render data

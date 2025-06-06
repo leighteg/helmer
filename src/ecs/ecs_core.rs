@@ -7,7 +7,7 @@ pub type Entity = usize;
 pub struct ECSCore {
     next_entity_id: Entity,
     entities: HashSet<Entity>,
-    component_pool: ComponentPool,
+    pub component_pool: ComponentPool,
     pub system_scheduler: SystemScheduler,
 }
 

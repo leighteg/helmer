@@ -122,7 +122,7 @@ struct LightData {
 
 // Material data structure (aligned for shader, no padding needed for f32)
 #[repr(C)] // Crucial for memory layout consistency with C/GPU
-#[derive(mev::DeviceRepr, Clone, Copy)] // mev::DeviceRepr should handle the repr(C) correctly
+#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)] // mev::DeviceRepr should handle the repr(C) correctly
 struct MaterialShaderData {
     albedo: [f32; 4], // 16 bytes, naturally aligned
     metallic: f32,    // 4 bytes
@@ -130,13 +130,9 @@ struct MaterialShaderData {
     ao: f32,          // 4 bytes
     // Total so far: 28 bytes.
     // Need to pad to 32 bytes to match GPU's 16-byte (or 32-byte) alignment for array elements.
-    _padding: [f32; 1], // Add 4 bytes of padding (1 * 4 bytes = 4 bytes)
+    _padding: f32, // Add 4 bytes of padding (1 * 4 bytes = 4 bytes)
                         // This makes the total size 28 + 4 = 32 bytes.
 }
-// Derive Pod and Zeroable after the padding has been correctly applied.
-// Assuming MaterialShaderData will be used in slices/buffers.
-unsafe impl Pod for MaterialShaderData {}
-unsafe impl Zeroable for MaterialShaderData {}
 
 #[repr(C)] // Crucial for memory layout consistency with C/GPU
 #[derive(Debug, Clone, Copy, DeviceRepr, Pod, Zeroable)] // Derive Pod and Zeroable
@@ -459,7 +455,7 @@ impl Renderer {
             metallic: material.metallic,
             roughness: material.roughness,
             ao: material.ao,
-            _padding: [0.0],
+            _padding: 0.0,
         };
 
         let material_offset = id * std::mem::size_of::<MaterialShaderData>();
@@ -575,7 +571,19 @@ impl Renderer {
                             fragment_shader: Some(library.entry("fs_main")),
                             color_targets: vec![mev::ColorTargetDesc {
                                 format: target_format,
-                                blend: Some(mev::BlendDesc::default()),
+                                blend: Some(mev::BlendDesc {
+                                    mask: mev::WriteMask::all(),
+                                    color: mev::Blend {
+                                        op: mev::BlendOp::Add,
+                                        src: mev::BlendFactor::SrcAlpha,
+                                        dst: mev::BlendFactor::OneMinusSrcAlpha,
+                                    },
+                                    alpha: mev::Blend {
+                                        op: mev::BlendOp::Add,
+                                        src: mev::BlendFactor::One,
+                                        dst: mev::BlendFactor::OneMinusSrcAlpha,
+                                    },
+                                }),
                             }],
                             depth_stencil: Some(mev::DepthStencilDesc {
                                 format: mev::PixelFormat::D32Float,
@@ -764,7 +772,6 @@ impl Renderer {
         Ok(())
     }
     
-    // POTENTIAL FIX: Alternative model matrix creation
     fn create_model_matrix(transform: &Transform) -> [[f32; 4]; 4] {
         let position: Vec3 = transform.position.into();
         let rotation: Quat = transform.rotation.into();
@@ -785,13 +792,7 @@ impl Renderer {
             rotation.normalize()
         };
 
-        // POTENTIAL FIX: Try building matrix step by step
-        let translation_matrix = Mat4::from_translation(position);
-        let rotation_matrix = Mat4::from_quat(safe_rotation);
-        let scale_matrix = Mat4::from_scale(safe_scale);
-        
-        // Order: scale, then rotate, then translate (TRS)
-        let model_matrix = translation_matrix * rotation_matrix * scale_matrix;
+        let model_matrix = Mat4::from_scale_rotation_translation(safe_scale, safe_rotation, position);
         
         // DEBUGGING: Try a simple identity matrix
         // let model_matrix = Mat4::IDENTITY;
@@ -908,10 +909,7 @@ impl Renderer {
                     camera_buffer: self.camera_buffer.as_ref().unwrap().clone(),
                     lights_buffer: self.lights_buffer.as_ref().unwrap().clone(),
                     material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(),
-                    // IMPORTANT: For now, these will be the DEFAULT textures,
-                    // as your current setup for dynamic per-object texture binding
-                    // would involve rebinding the entire argument group which is costly.
-                    // A Texture Array approach is generally better here.
+                    
                     albedo_texture: self.default_albedo_tex.as_ref().unwrap().clone(),
                     normal_texture: self.default_normal_tex.as_ref().unwrap().clone(),
                     metallic_roughness_texture: self
@@ -948,50 +946,6 @@ impl Renderer {
                     normal_matrix,
                     material_id: object.material_id as u32,
                 });
-
-                // This section of rebinding individual textures is what I mentioned needs rethinking.
-                // Rebinding the *entire* PbrArguments struct for *every object* is inefficient.
-                // For now, I'm keeping it as you had it, but note the performance implication
-                // and the recommendation for texture arrays.
-                // The shader will still use the texture from the most recent 'with_arguments' call.
-                let albedo_texture = _material // Use _material here since we checked it
-                    .albedo_texture_id
-                    .and_then(|id| self.textures.get(&id))
-                    .map(|h| h.mev_image.clone())
-                    .unwrap_or_else(|| self.default_albedo_tex.as_ref().unwrap().clone());
-
-                let normal_texture = _material
-                    .normal_texture_id
-                    .and_then(|id| self.textures.get(&id))
-                    .map(|h| h.mev_image.clone())
-                    .unwrap_or_else(|| self.default_normal_tex.as_ref().unwrap().clone());
-
-                let metallic_roughness_texture = _material
-                    .metallic_roughness_texture_id
-                    .and_then(|id| self.textures.get(&id))
-                    .map(|h| h.mev_image.clone())
-                    .unwrap_or_else(|| {
-                        self.default_metallic_roughness_tex
-                            .as_ref()
-                            .unwrap()
-                            .clone()
-                    });
-
-                // Rebind arguments with the specific textures for this object.
-                // This is where the inefficiency lies if done per-object without a texture array.
-                // If you have many objects, this will generate many draw calls with argument rebinds.
-                render_pass.with_arguments(
-                    0,
-                    &PbrArguments {
-                        camera_buffer: self.camera_buffer.as_ref().unwrap().clone(),
-                        lights_buffer: self.lights_buffer.as_ref().unwrap().clone(),
-                        material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(),
-                        albedo_texture,
-                        normal_texture,
-                        metallic_roughness_texture,
-                        sampler: self.sampler.as_ref().unwrap().clone(),
-                    },
-                );
 
                 render_pass.bind_vertex_buffers(0, &[mesh.vertex_buffer.clone()]);
                 render_pass.bind_index_buffer(&mesh.index_buffer);

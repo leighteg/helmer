@@ -53,9 +53,24 @@ fn main() {
         );
         ecs_guard.add_component(
             light_entity,
-            Light::point(glam::vec3(1.0, 1.0, 1.0), 100.0),
+            Light::spot(glam::vec3(1.0, 1.0, 5.0), 10.0, 60.0),
         );
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 0));
+
+        let light_entity_2 = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            light_entity_2,
+            Transform {
+                position: glam::Vec3::new(-1.5, 0.0, 0.0),
+                rotation: glam::Quat::from_array([0.0, 0.0, 0.0, 1.0]),
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            light_entity_2,
+            Light::point(glam::vec3(5.0, 1.0, 1.0), 10.0),
+        );
+        ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 0));
     });
     runtime.init();
 }

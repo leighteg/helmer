@@ -231,9 +231,12 @@ impl ApplicationHandler for Runtime {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
+            let mut window = Window::default_attributes();
+            window.title = "helmer engine — 2025 leighton tegland".into();
+            
             self.window = Some(
                 event_loop
-                    .create_window(Window::default_attributes())
+                    .create_window(window)
                     .unwrap(),
             );
         }

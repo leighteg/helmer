@@ -30,13 +30,21 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
+        let yaw = 30.0f32.to_radians();
+        let pitch = 30.0f32.to_radians();
+        let roll = 0.0f32.to_radians();
+
+        let rotation = glam::Quat::from_axis_angle(glam::Vec3::Y, yaw) * // Yaw
+               glam::Quat::from_axis_angle(glam::Vec3::X, pitch) * // Pitch
+               glam::Quat::from_axis_angle(glam::Vec3::Z, roll); // Roll
+
         // Create some demo entities
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             cube_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, 0.0),
-                rotation: glam::Quat::from_array([30.0, 30.0, 0.0, 30.0]),
+                rotation,
                 scale: glam::Vec3::ONE,
             },
         );
@@ -46,14 +54,14 @@ fn main() {
         ecs_guard.add_component(
             light_entity,
             Transform {
-                position: glam::Vec3::new(0.0, 1.5, 0.0),
+                position: glam::Vec3::new(0.0, 1.5, 5.0),
                 rotation: glam::Quat::from_array([0.0, 0.0, 0.0, 1.0]),
                 scale: glam::Vec3::ONE,
             },
         );
         ecs_guard.add_component(
             light_entity,
-            Light::spot(glam::vec3(1.0, 1.0, 5.0), 10.0, 60.0),
+            Light::spot(glam::vec3(0.0, 0.0, 1.0), 10.0, 60.0),
         );
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 0));
 
@@ -68,7 +76,7 @@ fn main() {
         );
         ecs_guard.add_component(
             light_entity_2,
-            Light::point(glam::vec3(5.0, 1.0, 1.0), 10.0),
+            Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 0));
     });
@@ -85,12 +93,17 @@ impl System for SpinnerSystem {
         tracing::info!("SpinnerSystem running...");
 
         let rotation_speed = 0.01;
-        let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed); // rotation_speed * dt
+        let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
         let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);
 
-        ecs.component_pool.query_exact_mut_for_each::<(Transform, MeshRenderer), _>(|(transform, mesh_renderer)| {
-            transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
-        });
+        ecs.component_pool
+            .query_exact_mut_for_each::<(Transform, MeshRenderer), _>(
+                |(transform, mesh_renderer)| {
+                    transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
+                    // Re-normalize the quaternion to prevent floating-point drift over time.
+                    transform.rotation = transform.rotation.normalize();
+                },
+            );
     }
 }

@@ -1,3 +1,11 @@
+//=============== CONSTANTS ===============//
+
+const PI: f32 = 3.14159265359;
+const MIN_ROUGHNESS: f32 = 0.04; // Used to prevent numerical instability with perfect mirrors.
+const MAX_TEXTURE_COUNT_F32: f32 = 256.0; // Should match your renderer's texture array capacity.
+
+//=============== STRUCTS ===============//
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -18,15 +26,20 @@ struct CameraUniforms {
     view_matrix: mat4x4<f32>,
     projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
-    _padding: f32,
+    light_count: u32,
 }
 
+// Correctly packed and aligned LightData struct.
+// Your CPU-side struct in Rust/C++ must match this layout exactly.
 struct LightData {
     position: vec3<f32>,
     light_type: u32,
+
     color: vec3<f32>,
     intensity: f32,
+
     direction: vec3<f32>,
+    // Final padding to ensure struct size is a multiple of 16 bytes.
     _padding: f32,
 }
 
@@ -35,44 +48,47 @@ struct MaterialData {
     metallic: f32,
     roughness: f32,
     ao: f32,
-    _padding: f32,
+    _p1: f32,
+    albedo_texture_index: i32,
+    normal_texture_index: i32,
+    metallic_roughness_texture_index: i32,
+    _p2: i32,
 }
 
 struct PbrConstants {
     model_matrix: mat4x4<f32>,
     normal_matrix: mat4x4<f32>,
     material_id: u32,
+    _p: vec3<u32>,
 }
+
+//=============== BINDINGS ===============//
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<storage, read> lights: array<LightData>;
 @group(0) @binding(2) var<storage, read> materials: array<MaterialData>;
-@group(0) @binding(3) var albedo_texture: texture_2d<f32>;
-@group(0) @binding(4) var normal_texture: texture_2d<f32>;
-@group(0) @binding(5) var metallic_roughness_texture: texture_2d<f32>;
+
+@group(0) @binding(3) var albedo_textures: texture_3d<f32>;
+@group(0) @binding(4) var normal_textures: texture_3d<f32>;
+@group(0) @binding(5) var metallic_roughness_textures: texture_3d<f32>;
+
 @group(0) @binding(6) var texture_sampler: sampler;
 
 var<push_constant> constants: PbrConstants;
+
+//=============== VERTEX SHADER ===============//
 
 @vertex
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     
-    let world_position = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
-    out.world_position = world_position.xyz;
+    let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
+    out.world_position = world_position_vec4.xyz;
     
-    let view_position = camera.view_matrix * world_position;
-    out.clip_position = camera.projection_matrix * view_position;
+    out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
     
-    // Safe normal transformation
-    let world_normal = (constants.normal_matrix * vec4<f32>(vertex.normal, 0.0)).xyz;
-    let normal_length = length(world_normal);
-    out.world_normal = select(vec3<f32>(0.0, 1.0, 0.0), world_normal / normal_length, normal_length > 0.001);
-    
-    let world_tangent = (constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz;
-    let tangent_length = length(world_tangent);
-    out.world_tangent = select(vec3<f32>(1.0, 0.0, 0.0), world_tangent / tangent_length, tangent_length > 0.001);
-    
+    out.world_normal = normalize((constants.normal_matrix * vec4<f32>(vertex.normal, 0.0)).xyz);
+    out.world_tangent = normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
     out.world_bitangent = normalize(cross(out.world_normal, out.world_tangent));
     
     out.tex_coord = vertex.tex_coord;
@@ -80,166 +96,113 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Safe utility functions with bounds checking
-fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
-    let a = clamp(roughness, 0.01, 1.0);
+//=============== PBR UTILITY FUNCTIONS ===============//
+
+fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
     let a2 = a * a;
-    let n_dot_h_clamped = clamp(n_dot_h, 0.0, 1.0);
-    let denom = n_dot_h_clamped * n_dot_h_clamped * (a2 - 1.0) + 1.0;
-    return a2 / (3.14159265 * max(denom * denom, 0.0001));
+    let NdotH2 = NdotH * NdotH;
+    let denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    return a2 / (PI * denom * denom);
 }
 
-fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
-    let r = clamp(roughness + 1.0, 1.0, 2.0);
+fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
+    let r = (roughness + 1.0);
     let k = (r * r) / 8.0;
-    let n_dot_v_clamped = clamp(n_dot_v, 0.0, 1.0);
-    let denom = n_dot_v_clamped * (1.0 - k) + k;
-    return n_dot_v_clamped / max(denom, 0.0001);
+    return NdotV / (NdotV * (1.0 - k) + k);
 }
 
-fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
-    let n_dot_v = clamp(dot(n, v), 0.0, 1.0);
-    let n_dot_l = clamp(dot(n, l), 0.0, 1.0);
-    let ggx2 = geometry_schlick_ggx(n_dot_v, roughness);
-    let ggx1 = geometry_schlick_ggx(n_dot_l, roughness);
+fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
+    let NdotV = max(dot(N, V), 0.0);
+    let NdotL = max(dot(N, L), 0.0);
+    let ggx2 = geometry_schlick_ggx(NdotV, roughness);
+    let ggx1 = geometry_schlick_ggx(NdotL, roughness);
     return ggx1 * ggx2;
 }
 
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    let cos_theta_clamped = clamp(cos_theta, 0.0, 1.0);
-    let f0_clamped = clamp(f0, vec3<f32>(0.0), vec3<f32>(1.0));
-    return f0_clamped + (1.0 - f0_clamped) * pow(1.0 - cos_theta_clamped, 5.0);
+fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-fn sample_normal_map(tex_coord: vec2<f32>, world_normal: vec3<f32>, world_tangent: vec3<f32>, world_bitangent: vec3<f32>) -> vec3<f32> {
-    // Clamp texture coordinates to prevent out-of-bounds access
-    let safe_tex_coord = clamp(tex_coord, vec2<f32>(0.0), vec2<f32>(1.0));
-    let normal_sample = textureSample(normal_texture, texture_sampler, safe_tex_coord).rgb;
-    let normal_tangent = normalize(normal_sample * 2.0 - 1.0);
-    
-    // Ensure all vectors are normalized and valid
-    let t = normalize(world_tangent);
-    let b = normalize(world_bitangent);
-    let n = normalize(world_normal);
-    
-    let tbn = mat3x3<f32>(t, b, n);
-    return normalize(tbn * normal_tangent);
-}
-
-fn calculate_light_contribution(
-    light: LightData,
-    world_pos: vec3<f32>,
-    normal: vec3<f32>,
-    view_dir: vec3<f32>,
-    albedo: vec3<f32>,
-    metallic: f32,
-    roughness: f32
-) -> vec3<f32> {
-    var light_dir: vec3<f32>;
-    var attenuation: f32 = 1.0;
-    
-    // Safe light direction calculation
-    if (light.light_type == 0u) {
-        // Directional light
-        let dir_length = length(light.direction);
-        light_dir = select(vec3<f32>(0.0, -1.0, 0.0), -light.direction / dir_length, dir_length > 0.001);
-    } else {
-        // Point/spot light
-        let light_vec = light.position - world_pos;
-        let distance = length(light_vec);
-        light_dir = select(vec3<f32>(0.0, 1.0, 0.0), light_vec / distance, distance > 0.001);
-        attenuation = 1.0 / max(distance * distance + 1.0, 1.0);
-    }
-    
-    let half_dir = normalize(view_dir + light_dir);
-    
-    let n_dot_l = clamp(dot(normal, light_dir), 0.0, 1.0);
-    let n_dot_v = clamp(dot(normal, view_dir), 0.0, 1.0);
-    let n_dot_h = clamp(dot(normal, half_dir), 0.0, 1.0);
-    let v_dot_h = clamp(dot(view_dir, half_dir), 0.0, 1.0);
-    
-    // Early exit if no light contribution
-    if (n_dot_l < 0.001) {
-        return vec3<f32>(0.0);
-    }
-    
-    let f0 = mix(vec3<f32>(0.04), clamp(albedo, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(metallic, 0.0, 1.0));
-    
-    let ndf = distribution_ggx(n_dot_h, roughness);
-    let g = geometry_smith(normal, view_dir, light_dir, roughness);
-    let f = fresnel_schlick(v_dot_h, f0);
-    
-    let numerator = ndf * g * f;
-    let denominator = max(4.0 * n_dot_v * n_dot_l, 0.0001);
-    let specular = numerator / denominator;
-    
-    let ks = f;
-    var kd = clamp(vec3<f32>(1.0) - ks, vec3<f32>(0.0), vec3<f32>(1.0));
-    kd = kd * (1.0 - clamp(metallic, 0.0, 1.0));
-    
-    let safe_color = clamp(light.color, vec3<f32>(0.0), vec3<f32>(10.0));
-    let safe_intensity = clamp(light.intensity, 0.0, 100.0);
-    let radiance = safe_color * safe_intensity * clamp(attenuation, 0.0, 1.0);
-    
-    return (kd * albedo / 3.14159265 + specular) * radiance * n_dot_l;
-}
+//=============== FRAGMENT SHADER ===============//
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // CRITICAL: Early bounds checking to prevent crashes
-    let material_count = arrayLength(&materials);
-    if (material_count == 0u) {
-        return vec4<f32>(1.0, 0.0, 1.0, 1.0); // Magenta error color
+    // --- 1. Material & PBR Property Setup ---
+    
+    let material = materials[constants.material_id];
+    let albedo_z = (f32(material.albedo_texture_index) + 0.5) / MAX_TEXTURE_COUNT_F32;
+    let albedo_coords = vec3<f32>(in.tex_coord, albedo_z);
+    let albedo_sample = textureSample(albedo_textures, texture_sampler, albedo_coords);
+    let albedo = albedo_sample.rgb * material.albedo.rgb;
+    let alpha = albedo_sample.a * material.albedo.a;
+
+    let mr_z = (f32(material.metallic_roughness_texture_index) + 0.5) / MAX_TEXTURE_COUNT_F32;
+    let mr_coords = vec3<f32>(in.tex_coord, mr_z);
+    let mr_sample = textureSample(metallic_roughness_textures, texture_sampler, mr_coords);
+    
+    let ao = mr_sample.r * material.ao;
+    let metallic = mr_sample.b * material.metallic;
+    
+    // ✅ FIX #1: Clamp roughness to prevent the PBR math from exploding to infinity.
+    let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
+
+    // ✅ FIX #2: Bypass the broken TBN matrix calculation by using the vertex normal.
+    // This prevents the immediate NaN generation from your model's tangent data.
+    let N = normalize(in.world_normal);
+
+    // --- 2. View & Fresnel Setup ---
+    let to_camera_vector = camera.view_position - in.world_position;
+    let V = select(normalize(to_camera_vector), N, length(to_camera_vector) < 0.0001);
+    let F0 = mix(vec3<f32>(0.04), albedo, metallic);
+    
+    // --- 3. Lighting Calculation ---
+    var Lo = vec3<f32>(0.0);
+    for (var i = 0u; i < camera.light_count; i = i + 1u) {
+        let light = lights[i];
+        var L: vec3<f32>;
+        var radiance: vec3<f32>;
+        if (light.light_type == 0u) {
+            if (length(light.direction) < 0.0001) { continue; }
+            L = normalize(-light.direction);
+            radiance = light.color * light.intensity;
+        } else {
+            let to_light_vector = light.position - in.world_position;
+            let dist_sq = dot(to_light_vector, to_light_vector);
+            if (dist_sq < 0.0001) { continue; }
+            L = normalize(to_light_vector);
+            let attenuation = 1.0 / dist_sq;
+            radiance = light.color * light.intensity * attenuation;
+        }
+        let H = normalize(V + L);
+        let NdotL = max(dot(N, L), 0.0);
+        if (NdotL > 0.0) {
+            let NdotV = max(dot(N, V), 0.0);
+            let NdotH = max(dot(N, H), 0.0);
+            let HdotV = max(dot(H, V), 0.0);
+            let NDF = distribution_ggx(NdotH, roughness);
+            let G = geometry_smith(N, V, L, roughness);
+            let F = fresnel_schlick(HdotV, F0);
+            let numerator = NDF * G * F;
+            let denominator = 4.0 * NdotV * NdotL + 0.001;
+            let specular = numerator / denominator;
+            let kS = F;
+            var kD = vec3<f32>(1.0) - kS;
+            kD *= (1.0 - metallic);
+            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+        }
     }
     
-    // Safe texture coordinate clamping
-    let safe_tex_coord = clamp(in.tex_coord, vec2<f32>(0.0), vec2<f32>(1.0));
-    
-    // Safe texture sampling
-    let albedo_sample = textureSample(albedo_texture, texture_sampler, safe_tex_coord);
-    let metallic_roughness_sample = textureSample(metallic_roughness_texture, texture_sampler, safe_tex_coord);
-    
-    // Safe material access with bounds checking
-    let safe_material_id = min(constants.material_id, material_count - 1u);
-    let material = materials[safe_material_id];
-    
-    // Safe material properties
-    let albedo = clamp(albedo_sample.rgb * material.albedo.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    let metallic = clamp(metallic_roughness_sample.b * material.metallic, 0.0, 1.0);
-    let roughness = clamp(metallic_roughness_sample.g * material.roughness, 0.04, 1.0);
-    let ao = clamp(material.ao, 0.0, 1.0);
-    
-    // Safe normal calculation
-    let normal = sample_normal_map(safe_tex_coord, in.world_normal, in.world_tangent, in.world_bitangent);
-    
-    // Safe view direction
-    let view_vec = camera.view_position - in.world_position;
-    let view_distance = length(view_vec);
-    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), view_vec / view_distance, view_distance > 0.001);
-    
-    // Safe ambient calculation
-    var final_color = clamp(vec3<f32>(0.03) * albedo * ao, vec3<f32>(0.0), vec3<f32>(1.0));
-    
-    // Safe light loop with hard limit
-    let light_count = min(arrayLength(&lights), 32u); // Hard limit to prevent infinite loops
-    for (var i = 0u; i < light_count; i = i + 1u) {
-        let light_contribution = calculate_light_contribution(
-            lights[i],
-            in.world_position,
-            normal,
-            view_dir,
-            albedo,
-            metallic,
-            roughness
-        );
-        final_color += clamp(light_contribution, vec3<f32>(0.0), vec3<f32>(10.0));
-    }
-    
-    // Safe tone mapping
-    final_color = clamp(final_color, vec3<f32>(0.0), vec3<f32>(100.0));
+    // --- 4. Final Color Composition ---
+    let ambient = vec3<f32>(0.03) * albedo * ao;
+    var final_color = ambient + Lo;
+
+    // ✅ FIX #3: A final "safety net" clamp to guarantee no `inf` value can
+    // ever reach the tonemapper and become `NaN`.
+    final_color = min(final_color, vec3<f32>(100.0));
+
     final_color = final_color / (final_color + vec3<f32>(1.0));
-    final_color = pow(clamp(final_color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2));
+    final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
     
-    let final_alpha = clamp(albedo_sample.a * material.albedo.a, 0.0, 1.0);
-    return vec4<f32>(final_color, final_alpha);
+    return vec4<f32>(final_color, alpha);
 }

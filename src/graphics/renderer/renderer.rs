@@ -9,7 +9,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use winit::window::Window;
 
-// --- New and Modified Data Structures ---
+const MAX_TEXTURE_COUNT: u32 = 256;
+const TEXTURE_RESOLUTION: u32 = 1024;
+
+const MAX_LIGHTS: usize = 32;
+
+const FRAMES_IN_FLIGHT: usize = 3;
 
 /// Represents a loaded mesh with its vertex and index buffers.
 pub struct Mesh {
@@ -18,38 +23,64 @@ pub struct Mesh {
     pub index_count: u32,
 }
 
-/// Represents a material with its properties and texture IDs.
+pub struct TextureManager {
+    pub textures: HashMap<String, usize>,
+    pub next_texture_index: usize,
+}
+
+impl Default for TextureManager {
+    fn default() -> Self {
+        Self {
+            textures: HashMap::new(),
+            // Reserve index 0 for default textures, start assigning from 1.
+            next_texture_index: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Material {
     pub albedo: [f32; 4],
     pub metallic: f32,
     pub roughness: f32,
     pub ao: f32,
-    pub albedo_texture_id: Option<usize>, // Optional texture ID
-    pub normal_texture_id: Option<usize>, // Optional texture ID
-    pub metallic_roughness_texture_id: Option<usize>, // Optional texture ID
+    pub albedo_texture_index: i32,
+    pub normal_texture_index: i32,
+    pub metallic_roughness_texture_index: i32,
 }
 
 impl Default for Material {
     fn default() -> Self {
         Self {
-            albedo: [1.0, 1.0, 1.0, 1.0], // Default to white, fully opaque
-            metallic: 0.0,                // Default to non-metallic
-            roughness: 0.8,               // Default to somewhat rough
-            ao: 1.0,                      // Default to full ambient occlusion (no darkening)
-            albedo_texture_id: None,
-            normal_texture_id: None,
-            metallic_roughness_texture_id: None,
+            albedo: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.8,
+            ao: 1.0,
+            // Point to the guaranteed default textures at index 0.
+            albedo_texture_index: 0,
+            normal_texture_index: 0,
+            metallic_roughness_texture_index: 0,
         }
     }
 }
 
-/// A handle to a loaded texture.
 pub struct TextureHandle {
     pub mev_image: mev::Image,
     pub format: mev::PixelFormat,
     pub width: u32,
     pub height: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct DefaultProperties {
+    pub albedo: [f32; 4],
+    pub normal: [f32; 3],
+    pub _p1: f32,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub ao: f32,
+    pub _p2: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -73,69 +104,71 @@ pub struct RenderData {
     pub camera_transform: Transform,
 }
 
-// MEV Arguments for PBR rendering
 #[derive(mev::Arguments)]
 struct PbrArguments {
     #[mev(vertex, fragment)]
     camera_buffer: mev::Buffer,
-    #[mev(fragment)] // Lights are only used in fragment shader
+    #[mev(fragment)]
     lights_buffer: mev::Buffer,
-    #[mev(fragment)] // Materials are only used in fragment shader
+    #[mev(fragment)]
     material_buffer: mev::Buffer,
-    #[mev(fragment)]
-    albedo_texture: mev::Image,
-    #[mev(fragment)]
-    normal_texture: mev::Image,
-    #[mev(fragment)]
-    metallic_roughness_texture: mev::Image,
+    #[mev(shader(fragment), sampled)]
+    albedo_texture_array: mev::Image,
+    #[mev(shader(fragment), sampled)]
+    normal_texture_array: mev::Image,
+    #[mev(shader(fragment), sampled)]
+    metallic_roughness_texture_array: mev::Image,
     #[mev(fragment)]
     sampler: mev::Sampler,
+    #[mev(fragment)]
+    default_properties_buffer: mev::Buffer,
 }
 
-// Constants for PBR shader
-#[derive(mev::DeviceRepr)]
-struct PbrConstants {
-    model_matrix: [[f32; 4]; 4],
-    normal_matrix: [[f32; 4]; 4],
-    material_id: u32,
-}
-
-// Camera uniform buffer
+#[repr(C)]
 #[derive(mev::DeviceRepr)]
 struct CameraUniforms {
     view_matrix: [[f32; 4]; 4],
     projection_matrix: [[f32; 4]; 4],
     view_position: [f32; 3],
-    _padding: f32,
+    light_count: u32,
 }
 
-// Light data structure
-#[derive(mev::DeviceRepr)]
+#[repr(C)]
+#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)]
 struct LightData {
     position: [f32; 3],
-    light_type: u32, // 0: directional, 1: point, 2: spot
+    light_type: u32,
     color: [f32; 3],
     intensity: f32,
     direction: [f32; 3],
     _padding: f32,
 }
 
-// Material data structure (aligned for shader, no padding needed for f32)
-#[repr(C)] // Crucial for memory layout consistency with C/GPU
-#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)] // mev::DeviceRepr should handle the repr(C) correctly
-struct MaterialShaderData {
-    albedo: [f32; 4], // 16 bytes, naturally aligned
-    metallic: f32,    // 4 bytes
-    roughness: f32,   // 4 bytes
-    ao: f32,          // 4 bytes
-    // Total so far: 28 bytes.
-    // Need to pad to 32 bytes to match GPU's 16-byte (or 32-byte) alignment for array elements.
-    _padding: f32, // Add 4 bytes of padding (1 * 4 bytes = 4 bytes)
-                        // This makes the total size 28 + 4 = 32 bytes.
+#[repr(C)]
+#[derive(mev::DeviceRepr)]
+struct PbrConstants {
+    model_matrix: [[f32; 4]; 4],
+    normal_matrix: [[f32; 4]; 4],
+    material_id: u32,
+    _p: [u32; 3],
 }
 
-#[repr(C)] // Crucial for memory layout consistency with C/GPU
-#[derive(Debug, Clone, Copy, DeviceRepr, Pod, Zeroable)] // Derive Pod and Zeroable
+#[repr(C)]
+#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)]
+struct MaterialShaderData {
+    albedo: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    ao: f32,
+    _p1: f32,
+    albedo_texture_index: i32,
+    normal_texture_index: i32,
+    metallic_roughness_texture_index: i32,
+    _p2: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, DeviceRepr, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -155,45 +188,168 @@ impl From<([f32; 3], [f32; 3], [f32; 2], [f32; 3])> for Vertex {
 }
 
 pub struct Renderer {
-    mev_device: Arc<mev::Device>, // Store the actual MEV device
+    mev_device: Arc<mev::Device>,
     surface: mev::Surface,
     queue: mev::Queue,
-
-    // Rendering resources
     shader_library: Option<mev::Library>,
     pipeline: Option<mev::RenderPipeline>,
     depth_texture: Option<mev::Image>,
 
-    // Uniform buffers
-    camera_buffer: Option<mev::Buffer>,
-    lights_buffer: Option<mev::Buffer>,
-    material_uniform_buffer: Option<mev::Buffer>,
+    camera_buffers: Vec<mev::Buffer>,
+    lights_buffers: Vec<mev::Buffer>,
 
-    // Asset storage
+    material_uniform_buffer: Option<mev::Buffer>,
     meshes: HashMap<usize, Mesh>,
     materials: HashMap<usize, Material>,
     textures: HashMap<usize, TextureHandle>,
-
-    // Default textures
-    default_albedo_tex: Option<mev::Image>,
-    default_normal_tex: Option<mev::Image>,
-    default_metallic_roughness_tex: Option<mev::Image>,
+    albedo_texture_array: Option<mev::Image>,
+    normal_texture_array: Option<mev::Image>,
+    metallic_roughness_texture_array: Option<mev::Image>,
+    default_properties_buffer: Option<mev::Buffer>,
+    texture_manager: TextureManager,
     sampler: Option<mev::Sampler>,
 
-    frame_count: u64,
+    frame_index: usize,
+
     current_render_data: Option<RenderData>,
     last_format: Option<mev::PixelFormat>,
     last_extent: Option<mev::Extent2>,
-
-    // Store a command encoder for asset uploads to avoid re-creating it often
     pending_uploads: Vec<mev::CommandBuffer>,
+}
+
+fn prepare_texture_slice_upload(
+    queue: &mut mev::Queue,
+    data: &[u8],
+    target_array: &mev::Image,
+    layer_index: u32,
+) -> Result<mev::CommandBuffer, mev::OutOfMemory> {
+    // This part of your logic for padding the buffer is correct and should be kept.
+    let bytes_per_pixel = 4;
+    let align = 256u32;
+    let bytes_per_row_unaligned = TEXTURE_RESOLUTION * bytes_per_pixel;
+    let bytes_per_row = (bytes_per_row_unaligned + align - 1) & !(align - 1);
+    let padded_data_size = (bytes_per_row * TEXTURE_RESOLUTION) as usize;
+
+    let mut padded_data = vec![0; padded_data_size];
+    for y in 0..TEXTURE_RESOLUTION {
+        let src_offset = (y * bytes_per_row_unaligned) as usize;
+        let dst_offset = (y * bytes_per_row) as usize;
+        if src_offset + bytes_per_row_unaligned as usize > data.len() {
+            continue;
+        }
+        let src_slice = &data[src_offset..src_offset + bytes_per_row_unaligned as usize];
+        padded_data[dst_offset..dst_offset + bytes_per_row_unaligned as usize]
+            .copy_from_slice(src_slice);
+    }
+
+    let scratch = queue
+        .device()
+        .new_buffer_init(mev::BufferInitDesc {
+            data: &padded_data,
+            usage: mev::BufferUsage::TRANSFER_SRC,
+            memory: mev::Memory::Upload,
+            name: &format!("tex-slice-upload-{}", layer_index),
+        })
+        .unwrap();
+
+    let mut upload_encoder = queue.new_command_encoder().unwrap();
+
+    // ========================================================================
+    // --- CHANGE #1: Perform the initial layout transition on the texture ---
+    // This only needs to happen once, but doing it before each copy is safe.
+    upload_encoder.init_image(
+        mev::PipelineStages::empty(),
+        mev::PipelineStages::TRANSFER, // Transition TO Transfer-Ready
+        target_array,
+    );
+
+    // --- CHANGE #2: Modify the copy_buffer_to_image call arguments ---
+    upload_encoder.copy().copy_buffer_to_image(
+        &scratch,
+        0,                      // source_offset
+        bytes_per_row as usize, // source_bytes_per_row
+        padded_data_size,       // source_bytes_per_image
+        target_array,
+        mev::Offset3::ZERO, // destination_origin is ZERO
+        mev::Extent3::new(TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, 1), // copy_extent
+        0..1,               // destination_mip_levels (copy 1 mip)
+        layer_index,        // Use this parameter for the array slice index
+    );
+    // ========================================================================
+
+    // We still need a barrier to make the texture readable by the shader.
+    // Transition FROM Transfer-Ready TO Fragment-Shader-Ready.
+    // Following your guidance on the (after, before) signature:
+    upload_encoder.barrier(
+        mev::PipelineStages::FRAGMENT_SHADER,
+        mev::PipelineStages::TRANSFER,
+    );
+
+    upload_encoder.finish()
+}
+
+fn prepare_uniform_updates(
+    queue: &mut mev::Queue,
+    camera_buffer: &mev::Buffer,
+    lights_buffer: &mev::Buffer,
+    render_data: &RenderData,
+    window_size: (u32, u32),
+) -> Result<mev::CommandBuffer, mev::OutOfMemory> {
+    let camera_transform = &render_data.camera_transform;
+    let eye: Vec3 = camera_transform.position.into();
+    let forward = camera_transform.forward().normalize_or_zero();
+    let view_matrix = Mat4::look_at_rh(
+        eye,
+        eye + forward,
+        camera_transform.up().normalize_or(Vec3::Y),
+    );
+    let projection_matrix = Mat4::perspective_rh(
+        (45.0_f32).to_radians(),
+        window_size.0 as f32 / window_size.1 as f32,
+        0.1,
+        1000.0,
+    );
+
+    let light_data: Vec<LightData> = render_data
+        .lights
+        .iter()
+        .take(MAX_LIGHTS)
+        .map(|light| LightData {
+            position: light.transform.position.into(),
+            light_type: match light.light_type {
+                LightType::Directional => 0,
+                LightType::Point => 1,
+                LightType::Spot { .. } => 2,
+            },
+            color: light.color,
+            intensity: light.intensity,
+            direction: light.transform.forward().into(),
+            _padding: 0.0,
+        })
+        .collect();
+
+    let num_lights = light_data.len() as u32;
+
+    let camera_uniforms = CameraUniforms {
+        view_matrix: view_matrix.to_cols_array_2d(),
+        projection_matrix: projection_matrix.to_cols_array_2d(),
+        view_position: eye.to_array(),
+        light_count: num_lights,
+    };
+
+    let mut encoder = queue.new_command_encoder().unwrap();
+    {
+        let mut copy_pass = encoder.copy();
+        copy_pass.write_buffer(camera_buffer, &camera_uniforms.as_repr());
+        copy_pass.write_buffer_slice(lights_buffer.slice(0..), &light_data);
+    }
+    encoder.finish()
 }
 
 impl Renderer {
     pub fn new(window: &Window) -> Result<Self, RendererError> {
         let instance = mev::Instance::load()
             .map_err(|e| RendererError::MevError(format!("Failed to load MEV instance: {}", e)))?;
-
         let (mev_device, mut queues) = instance
             .new_device(mev::DeviceDesc {
                 idx: 0,
@@ -201,36 +357,30 @@ impl Renderer {
                 features: mev::Features::SURFACE,
             })
             .map_err(|e| RendererError::MevError(format!("Failed to create device: {}", e)))?;
-
         let queue = queues.pop().unwrap();
-
         let surface = queue
             .new_surface(window, window)
             .map_err(|e| RendererError::MevError(format!("Failed to create surface: {}", e)))?;
-
-        tracing::info!("MEV Renderer initialized");
-
         Ok(Self {
-            mev_device: mev_device.into(), // Use the actual MEV device
+            mev_device: mev_device.into(),
             surface,
             queue,
             shader_library: None,
             pipeline: None,
             depth_texture: None,
-            camera_buffer: None,
-            lights_buffer: None,
+            camera_buffers: Vec::new(),
+            lights_buffers: Vec::new(),
             material_uniform_buffer: None,
-
             meshes: HashMap::new(),
             materials: HashMap::new(),
             textures: HashMap::new(),
-
-            default_albedo_tex: None,
-            default_normal_tex: None,
-            default_metallic_roughness_tex: None,
+            albedo_texture_array: None,
+            normal_texture_array: None,
+            metallic_roughness_texture_array: None,
+            default_properties_buffer: None,
+            texture_manager: TextureManager::default(),
             sampler: None,
-
-            frame_count: 0,
+            frame_index: 0,
             current_render_data: None,
             last_format: None,
             last_extent: None,
@@ -239,7 +389,6 @@ impl Renderer {
     }
 
     fn initialize_resources(&mut self) -> Result<(), mev::DeviceError> {
-        // Create shader library
         self.shader_library = Some(
             self.queue
                 .new_shader_library(mev::LibraryDesc {
@@ -250,8 +399,6 @@ impl Renderer {
                 })
                 .unwrap(),
         );
-
-        // Create sampler
         self.sampler = Some(self.queue.new_sampler(mev::SamplerDesc {
             min_filter: mev::Filter::Linear,
             mag_filter: mev::Filter::Linear,
@@ -259,119 +406,181 @@ impl Renderer {
             ..mev::SamplerDesc::new()
         })?);
 
-        // Create uniform buffers
-        self.camera_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of::<CameraUniforms>(),
-            usage: mev::BufferUsage::UNIFORM | mev::BufferUsage::TRANSFER_DST,
+        let default_props = DefaultProperties {
+            albedo: [1.0, 1.0, 1.0, 1.0],
+            normal: [0.5, 0.5, 1.0],
+            _p1: 0.0,
+            metallic: 0.0,
+            roughness: 0.8,
+            ao: 1.0,
+            _p2: 0.0,
+        };
+        self.default_properties_buffer = Some(self.queue.new_buffer_init(mev::BufferInitDesc {
+            data: bytemuck::bytes_of(&default_props),
+            usage: mev::BufferUsage::UNIFORM,
             memory: mev::Memory::Device,
-            name: "camera-uniforms",
+            name: "default-properties-buffer",
         })?);
 
-        self.lights_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of::<LightData>() * 32, // Support up to 32 lights
-            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
-            memory: mev::Memory::Device,
-            name: "lights-buffer",
-        })?);
+        self.albedo_texture_array =
+            Some(
+                self.queue.new_image(mev::ImageDesc {
+                    extent: mev::Extent3::new(
+                        TEXTURE_RESOLUTION,
+                        TEXTURE_RESOLUTION,
+                        MAX_TEXTURE_COUNT,
+                    )
+                    .into(),
+                    format: mev::PixelFormat::Rgba8Srgb,
+                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
+                    layers: 1,
+                    levels: 1,
+                    name: "albedo-texture-array",
+                })?,
+            );
+        self.normal_texture_array =
+            Some(
+                self.queue.new_image(mev::ImageDesc {
+                    extent: mev::Extent3::new(
+                        TEXTURE_RESOLUTION,
+                        TEXTURE_RESOLUTION,
+                        MAX_TEXTURE_COUNT,
+                    )
+                    .into(),
+                    format: mev::PixelFormat::Rgba8Unorm,
+                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
+                    layers: 1,
+                    levels: 1,
+                    name: "normal-texture-array",
+                })?,
+            );
+        self.metallic_roughness_texture_array =
+            Some(
+                self.queue.new_image(mev::ImageDesc {
+                    extent: mev::Extent3::new(
+                        TEXTURE_RESOLUTION,
+                        TEXTURE_RESOLUTION,
+                        MAX_TEXTURE_COUNT,
+                    )
+                    .into(),
+                    format: mev::PixelFormat::Rgba8Unorm,
+                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
+                    layers: 1,
+                    levels: 1,
+                    name: "metallic-roughness-texture-array",
+                })?,
+            );
+
+        let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
+        let white_pixel = [255u8, 255, 255, 255];
+        let default_albedo_data: Vec<u8> = white_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        let albedo_upload_cbuf = prepare_texture_slice_upload(
+            &mut self.queue,
+            &default_albedo_data,
+            self.albedo_texture_array.as_ref().unwrap(),
+            0,
+        )
+        .unwrap();
+        //self.pending_uploads.push(albedo_upload_cbuf);
+
+        let flat_normal_pixel = [128u8, 128, 255, 255];
+        let default_normal_data: Vec<u8> = flat_normal_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        let normal_upload_cbuf = prepare_texture_slice_upload(
+            &mut self.queue,
+            &default_normal_data,
+            self.normal_texture_array.as_ref().unwrap(),
+            0,
+        )
+        .unwrap();
+        //self.pending_uploads.push(normal_upload_cbuf);
+
+        let default_mr_pixel = [255u8, 204, 0, 255];
+        let default_mr_data: Vec<u8> = default_mr_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        let mr_upload_cbuf = prepare_texture_slice_upload(
+            &mut self.queue,
+            &default_mr_data,
+            self.metallic_roughness_texture_array.as_ref().unwrap(),
+            0,
+        )
+        .unwrap();
+        //self.pending_uploads.push(mr_upload_cbuf);
+
+        let initial_uploads = vec![albedo_upload_cbuf, normal_upload_cbuf, mr_upload_cbuf];
+        self.queue.submit(initial_uploads, true).unwrap();
+        self.queue.wait_idle().unwrap();
+
+        self.camera_buffers = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                self.queue.new_buffer(mev::BufferDesc {
+                    size: std::mem::size_of::<CameraUniforms>(),
+                    usage: mev::BufferUsage::UNIFORM | mev::BufferUsage::TRANSFER_DST,
+                    memory: mev::Memory::Device,
+                    name: &format!("camera-uniforms-{}", i),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.lights_buffers = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                self.queue.new_buffer(mev::BufferDesc {
+                    size: std::mem::size_of::<LightData>() * MAX_LIGHTS,
+                    usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
+                    memory: mev::Memory::Device,
+                    name: &format!("lights-buffer-{}", i),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         self.material_uniform_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of::<MaterialShaderData>() * 256, // Support up to 256 materials
+            size: std::mem::size_of::<MaterialShaderData>() * 256,
             usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
             memory: mev::Memory::Device,
             name: "materials-buffer",
         })?);
 
-        // Create default textures
-        self.create_default_textures()?;
-
         Ok(())
     }
 
-    fn create_default_textures(&mut self) -> Result<(), mev::DeviceError> {
-        // Create default white albedo texture
-        let white_pixel = [255u8, 255, 255, 255];
-        self.default_albedo_tex = Some(self.create_texture_from_data(
-            &white_pixel,
-            1,
-            1,
-            mev::PixelFormat::Rgba8Srgb,
-            "default-albedo",
-        )?);
-
-        // Create default normal texture (flat normal: 128, 128, 255, 255)
-        let normal_pixel = [128u8, 128, 255, 255];
-        self.default_normal_tex = Some(self.create_texture_from_data(
-            &normal_pixel,
-            1,
-            1,
-            mev::PixelFormat::Rgba8Unorm,
-            "default-normal",
-        )?);
-
-        // Create default metallic-roughness texture (no metallic, medium roughness: 0, 128, 0, 255)
-        let mr_pixel = [0u8, 128, 0, 255];
-        self.default_metallic_roughness_tex = Some(self.create_texture_from_data(
-            &mr_pixel,
-            1,
-            1,
-            mev::PixelFormat::Rgba8Unorm,
-            "default-metallic-roughness",
-        )?);
-
-        Ok(())
-    }
-
-    fn create_texture_from_data(
+    pub fn add_texture_to_array(
         &mut self,
-        data: &[u8],
-        width: u32,
-        height: u32,
-        format: mev::PixelFormat,
         name: &str,
-    ) -> Result<mev::Image, mev::DeviceError> {
-        let image = self.queue.new_image(mev::ImageDesc {
-            extent: mev::Extent2::new(width, height).into(),
-            format,
-            usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
-            layers: 1,
-            levels: 1,
-            name,
-        })?;
+        data: &[u8],
+        target_array: &mev::Image,
+    ) -> Result<usize, RendererError> {
+        if let Some(index) = self.texture_manager.textures.get(name) {
+            return Ok(*index);
+        }
+        if self.texture_manager.next_texture_index >= MAX_TEXTURE_COUNT as usize {
+            return Err(RendererError::ResourceCreation(
+                "Texture array is full".to_string(),
+            ));
+        }
 
-        let scratch = self
-            .queue
-            .device()
-            .new_buffer_init(mev::BufferInitDesc {
-                data,
-                usage: mev::BufferUsage::TRANSFER_SRC,
-                memory: mev::Memory::Upload,
-                name: "scratch",
-            })
-            .unwrap();
-
-        let mut upload_encoder = self.queue.new_command_encoder()?;
-
-        upload_encoder.copy().init_image(
-            mev::PipelineStages::empty(),
-            mev::PipelineStages::TRANSFER,
-            &image,
-        );
-        upload_encoder.copy().copy_buffer_to_image(
-            &scratch,
-            0,
-            (4 * image.extent().width()) as usize, // Correct row pitch calculation
-            (4 * image.extent().width() * image.extent().height()) as usize, // Total size
-            &image,
-            mev::Offset3::ZERO,
-            image.extent().into_3d(),
-            0..1,
-            1,
-        );
-
-        let upload_cbuf = upload_encoder.finish()?;
+        let index = self.texture_manager.next_texture_index;
+        self.texture_manager.next_texture_index += 1;
+        let upload_cbuf =
+            prepare_texture_slice_upload(&mut self.queue, data, target_array, index as u32)
+                .unwrap();
         self.pending_uploads.push(upload_cbuf);
-
-        Ok(image)
+        self.texture_manager
+            .textures
+            .insert(name.to_string(), index);
+        Ok(index)
     }
 
     pub fn add_mesh(
@@ -380,63 +589,28 @@ impl Renderer {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> Result<(), RendererError> {
-        if self.meshes.contains_key(&id) {
-            tracing::warn!("Mesh with ID {} already exists, overwriting.", id);
-        }
-
-        let vertex_buffer_size = std::mem::size_of_val(vertices);
-        let index_buffer_size = std::mem::size_of_val(indices);
-
-        if vertex_buffer_size == 0 || index_buffer_size == 0 {
-            tracing::warn!(
-                "Attempted to add mesh with empty vertices or indices for ID {}",
-                id
-            );
-            return Err(RendererError::ResourceCreation(
-                "Empty mesh data".to_string(),
-            ));
-        }
-
         let vertex_buffer = self
             .queue
-            .new_buffer(mev::BufferDesc {
-                size: vertex_buffer_size,
-                usage: mev::BufferUsage::VERTEX | mev::BufferUsage::TRANSFER_DST,
+            .new_buffer_init(mev::BufferInitDesc {
+                data: bytemuck::cast_slice(vertices),
+                usage: mev::BufferUsage::VERTEX,
                 memory: mev::Memory::Device,
-                name: &format!("mesh-{}-vertex-buffer", id),
+                name: &format!("mesh-vbo-{}", id),
             })
             .map_err(|e| {
                 RendererError::MevError(format!("Failed to create vertex buffer: {}", e))
             })?;
-
         let index_buffer = self
             .queue
-            .new_buffer(mev::BufferDesc {
-                size: index_buffer_size,
-                usage: mev::BufferUsage::INDEX | mev::BufferUsage::TRANSFER_DST,
+            .new_buffer_init(mev::BufferInitDesc {
+                data: bytemuck::cast_slice(indices),
+                usage: mev::BufferUsage::INDEX,
                 memory: mev::Memory::Device,
-                name: &format!("mesh-{}-index-buffer", id),
+                name: &format!("mesh-ibo-{}", id),
             })
             .map_err(|e| {
                 RendererError::MevError(format!("Failed to create index buffer: {}", e))
             })?;
-
-        let mut upload_encoder = self.queue.new_command_encoder().unwrap();
-
-        if !vertices.is_empty() {
-            upload_encoder
-                .copy()
-                .write_buffer_slice(vertex_buffer.slice(0..vertex_buffer_size), vertices);
-        }
-        if !indices.is_empty() {
-            upload_encoder
-                .copy()
-                .write_buffer_slice(index_buffer.slice(0..index_buffer_size), indices);
-        }
-
-        let upload_cbuf = upload_encoder.finish().unwrap();
-        self.pending_uploads.push(upload_cbuf);
-
         self.meshes.insert(
             id,
             Mesh {
@@ -445,67 +619,44 @@ impl Renderer {
                 index_count: indices.len() as u32,
             },
         );
-        tracing::info!("Added mesh with ID: {}", id);
         Ok(())
     }
 
     pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
+        if id >= 256 {
+            return Err(RendererError::ResourceCreation(format!(
+                "Material ID {} is out of bounds. Maximum is 255.",
+                id
+            )));
+        }
         let shader_data = MaterialShaderData {
             albedo: material.albedo,
             metallic: material.metallic,
             roughness: material.roughness,
             ao: material.ao,
-            _padding: 0.0,
+            _p1: 0.0,
+            albedo_texture_index: material.albedo_texture_index,
+            normal_texture_index: material.normal_texture_index,
+            metallic_roughness_texture_index: material.metallic_roughness_texture_index,
+            _p2: 0,
         };
-
         let material_offset = id * std::mem::size_of::<MaterialShaderData>();
-        let material_slice = self
-            .material_uniform_buffer
-            .as_ref()
-            .ok_or_else(|| {
-                RendererError::ResourceCreation(
-                    "Material uniform buffer not initialized".to_string(),
-                )
-            })?
-            .slice(material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()));
+        let material_slice =
+            self.material_uniform_buffer.as_ref().unwrap().slice(
+                material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()),
+            );
 
         let mut upload_encoder = self.queue.new_command_encoder().unwrap();
         upload_encoder
             .copy()
             .write_buffer_slice(material_slice, &[shader_data]);
-
         let upload_cbuf = upload_encoder.finish().unwrap();
         self.pending_uploads.push(upload_cbuf);
-
         self.materials.insert(id, material);
-        tracing::info!("Added material with ID: {}", id);
         Ok(())
     }
 
-    pub fn add_texture(
-        &mut self,
-        id: usize,
-        data: &[u8],
-        width: u32,
-        height: u32,
-        format: mev::PixelFormat,
-    ) -> Result<(), RendererError> {
-        let mev_image = self
-            .create_texture_from_data(data, width, height, format, &format!("texture-{}", id))
-            .unwrap();
-        self.textures.insert(
-            id,
-            TextureHandle {
-                mev_image,
-                format,
-                width,
-                height,
-            },
-        );
-        tracing::info!("Added texture with ID: {}", id);
-        Ok(())
-    }
-
+    // ✅ CORRECTED: Reverted to an associated function (`Self::`) to avoid the borrow conflict.
     fn create_or_update_pipeline(
         queue: &mev::Queue,
         shader_library: &Option<mev::Library>,
@@ -516,307 +667,75 @@ impl Renderer {
         target_format: mev::PixelFormat,
         target_extent: mev::Extent2,
     ) -> Result<(), mev::DeviceError> {
-        let needs_recreation = pipeline.is_none()
-            || *last_format != Some(target_format)
-            || *last_extent != Some(target_extent);
-
-        if needs_recreation {
-            let library = shader_library.as_ref().unwrap();
-
-            *depth_texture = Some(queue.new_image(mev::ImageDesc {
-                extent: target_extent.into(),
-                format: mev::PixelFormat::D32Float,
-                usage: mev::ImageUsage::all(), // would take DEPTH_STENCIL_ATTACHMENT but is mev
-                layers: 1,
-                levels: 1,
-                name: "depth-buffer",
-            })?);
-
-            *pipeline = Some(
-                queue
-                    .new_render_pipeline(mev::RenderPipelineDesc {
-                        name: "pbr-pipeline",
-                        vertex_shader: mev::Shader {
-                            library: library.clone(),
-                            entry: "vs_main".into(),
-                        },
-                        vertex_attributes: vec![
-                            mev::VertexAttributeDesc {
-                                format: mev::VertexFormat::Float32x3,
-                                offset: 0,
-                                buffer_index: 0,
-                            },
-                            mev::VertexAttributeDesc {
-                                format: mev::VertexFormat::Float32x3,
-                                offset: 12,
-                                buffer_index: 0,
-                            },
-                            mev::VertexAttributeDesc {
-                                format: mev::VertexFormat::Float32x2,
-                                offset: 24,
-                                buffer_index: 0,
-                            },
-                            mev::VertexAttributeDesc {
-                                format: mev::VertexFormat::Float32x3,
-                                offset: 32,
-                                buffer_index: 0,
-                            },
-                        ],
-                        vertex_layouts: vec![mev::VertexLayoutDesc {
-                            stride: std::mem::size_of::<Vertex>() as u32,
-                            step_mode: mev::VertexStepMode::Vertex,
-                        }],
-                        primitive_topology: mev::PrimitiveTopology::Triangle,
-                        raster: Some(mev::RasterDesc {
-                            fragment_shader: Some(library.entry("fs_main")),
-                            color_targets: vec![mev::ColorTargetDesc {
-                                format: target_format,
-                                blend: Some(mev::BlendDesc {
-                                    mask: mev::WriteMask::all(),
-                                    color: mev::Blend {
-                                        op: mev::BlendOp::Add,
-                                        src: mev::BlendFactor::SrcAlpha,
-                                        dst: mev::BlendFactor::OneMinusSrcAlpha,
-                                    },
-                                    alpha: mev::Blend {
-                                        op: mev::BlendOp::Add,
-                                        src: mev::BlendFactor::One,
-                                        dst: mev::BlendFactor::OneMinusSrcAlpha,
-                                    },
-                                }),
-                            }],
-                            depth_stencil: Some(mev::DepthStencilDesc {
-                                format: mev::PixelFormat::D32Float,
-                                write_enabled: true,
-                                compare: mev::CompareFunction::Less,
-                            }),
-                            front_face: mev::FrontFace::default(),
-                            culling: mev::Culling::Back,
-                        }),
-                        arguments: &[PbrArguments::LAYOUT],
-                        constants: PbrConstants::SIZE,
-                    })
-                    .unwrap(),
-            );
-
-            *last_format = Some(target_format);
-            *last_extent = Some(target_extent);
-        }
-
-        Ok(())
-    }
-
-    pub fn debug_render_state(&self, render_data: &RenderData, window_size: (u32, u32)) {
-        println!("=== DEBUG RENDER STATE ===");
-        
-        // Check camera setup
-        let camera_transform = &render_data.camera_transform;
-        let eye: Vec3 = camera_transform.position.into();
-        let forward: Vec3 = camera_transform.forward().into();
-        let up: Vec3 = camera_transform.up().into();
-        
-        println!("Camera position: {:?}", eye);
-        println!("Camera forward: {:?}", forward);
-        println!("Camera up: {:?}", up);
-        
-        // Check if forward vector is valid
-        if forward.length_squared() < 1e-6 {
-            println!("WARNING: Camera forward vector is near zero!");
-        }
-        
-        let center = eye + forward.normalize();
-        println!("Look at center: {:?}", center);
-        
-        // Check matrices
-        let view_matrix = Mat4::look_at_rh(eye, center, up.normalize());
-        let aspect_ratio = window_size.0 as f32 / window_size.1 as f32;
-        let projection_matrix = Mat4::perspective_rh(45.0_f32.to_radians(), aspect_ratio, 0.1, 1000.0);
-        
-        println!("View matrix: {:?}", view_matrix);
-        println!("Projection matrix: {:?}", projection_matrix);
-        println!("Aspect ratio: {}", aspect_ratio);
-        
-        // Check objects
-        println!("Objects to render: {}", render_data.objects.len());
-        for (i, obj) in render_data.objects.iter().enumerate() {
-            println!("Object {}: mesh_id={}, material_id={}, pos={:?}", 
-                i, obj.mesh_id, obj.material_id, obj.transform.position);
-                
-            // Check if mesh exists
-            if !self.meshes.contains_key(&obj.mesh_id) {
-                println!("  ERROR: Mesh {} not found!", obj.mesh_id);
-            }
-            if !self.materials.contains_key(&obj.material_id) {
-                println!("  ERROR: Material {} not found!", obj.material_id);
-            }
-            
-            // Check model matrix
-            let model_matrix = Self::create_model_matrix(&obj.transform);
-            println!("  Model matrix: {:?}", model_matrix);
-            
-            // Test a vertex transformation
-            let test_vertex = Vec4::new(0.0, 0.0, 0.0, 1.0);
-            let world_pos = Mat4::from_cols_array_2d(&model_matrix) * test_vertex;
-            let view_pos = view_matrix * world_pos;
-            let clip_pos = projection_matrix * view_pos;
-            println!("  Test vertex transform: local->world->view->clip: {:?} -> {:?} -> {:?} -> {:?}", 
-                test_vertex, world_pos, view_pos, clip_pos);
-        }
-        
-        // Check lights
-        println!("Lights: {}", render_data.lights.len());
-        for (i, light) in render_data.lights.iter().enumerate() {
-            println!("Light {}: type={:?}, pos={:?}, intensity={}", 
-                i, light.light_type, light.transform.position, light.intensity);
-        }
-    }
-    
-    // Fixed camera uniform update with better debugging
-    fn update_uniforms(
-        queue: &mut mev::Queue,
-        camera_buffer: &mev::Buffer,
-        lights_buffer: &mev::Buffer,
-        render_data: &RenderData,
-        window_size: (u32, u32),
-    ) -> Result<(), mev::DeviceError> {
-        let camera_transform = &render_data.camera_transform;
-        let eye: Vec3 = camera_transform.position.into();
-
-        // FIXED: Better forward vector calculation
-        let forward: Vec3 = camera_transform.forward().into();
-        let forward = if forward.length_squared() < 1e-6 {
-            tracing::warn!("WARNING: Using default forward vector");
-            Vec3::NEG_Z // Default forward in right-handed coordinates
-        } else {
-            forward.normalize()
-        };
-
-        let center = eye + forward;
-
-        // FIXED: Better up vector calculation  
-        let up: Vec3 = camera_transform.up().into();
-        let up = if up.length_squared() < 1e-6 {
-            tracing::warn!("WARNING: Using default up vector");
-            Vec3::Y
-        } else {
-            up.normalize()
-        };
-
-        // POTENTIAL FIX: Try different matrix construction
-        //println!("Creating view matrix with eye={:?}, center={:?}, up={:?}", eye, center, up);
-        let view_matrix = Mat4::look_at_rh(eye, center, up);
-        
-        // DEBUGGING: Try a simple identity matrix first
-        // let view_matrix = Mat4::IDENTITY;
-        
-        let aspect_ratio = window_size.0 as f32 / window_size.1 as f32;
-        let projection_matrix = Mat4::perspective_rh(45.0_f32.to_radians(), aspect_ratio, 0.1, 1000.0);
-        
-        // DEBUGGING: Try a simple orthographic projection
-        // let projection_matrix = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 1000.0);
-
-        //println!("Final view matrix: {:?}", view_matrix.to_cols_array_2d());
-        //println!("Final projection matrix: {:?}", projection_matrix.to_cols_array_2d());
-
-        let camera_uniforms = CameraUniforms {
-            view_matrix: view_matrix.to_cols_array_2d(),
-            projection_matrix: projection_matrix.to_cols_array_2d(),
-            view_position: eye.to_array(),
-            _padding: 0.0,
-        };
-
-        let mut encoder = queue.new_command_encoder()?;
+        if pipeline.is_some()
+            && *last_format == Some(target_format)
+            && *last_extent == Some(target_extent)
         {
-            let mut copy_encoder = encoder.copy();
-            copy_encoder.write_buffer(camera_buffer, &camera_uniforms.as_repr());
-
-            let light_data: Vec<<LightData as DeviceRepr>::Repr> = render_data
-                .lights
-                .iter()
-                .map(|light| {
-                    let direction: Vec3 = match light.light_type {
-                        LightType::Directional => {
-                            let dir: Vec3 = light.transform.forward().into();
-                            if dir.length_squared() < 1e-6 {
-                                Vec3::NEG_Y
-                            } else {
-                                dir.normalize()
-                            }
-                        }
-                        _ => Vec3::ZERO,
-                    };
-
-                    LightData {
-                        position: light.transform.position.to_array(),
-                        light_type: match light.light_type {
-                            LightType::Directional => 0,
-                            LightType::Point => 1,
-                            LightType::Spot { angle: _ } => 2,
+            return Ok(());
+        }
+        let library = shader_library.as_ref().unwrap();
+        *depth_texture = Some(queue.new_image(mev::ImageDesc {
+            extent: target_extent.into(),
+            format: mev::PixelFormat::D32Float,
+            usage: mev::ImageUsage::all(),
+            layers: 1,
+            levels: 1,
+            name: "depth-buffer",
+        })?);
+        *pipeline = Some(
+            queue
+                .new_render_pipeline(mev::RenderPipelineDesc {
+                    name: "pbr-pipeline",
+                    vertex_shader: library.entry("vs_main"),
+                    vertex_attributes: vec![
+                        mev::VertexAttributeDesc {
+                            format: mev::VertexFormat::Float32x3,
+                            offset: 0,
+                            buffer_index: 0,
                         },
-                        color: light.color,
-                        intensity: light.intensity,
-                        direction: direction.to_array(),
-                        _padding: 0.0,
-                    }
-                    .as_repr()
+                        mev::VertexAttributeDesc {
+                            format: mev::VertexFormat::Float32x3,
+                            offset: 12,
+                            buffer_index: 0,
+                        },
+                        mev::VertexAttributeDesc {
+                            format: mev::VertexFormat::Float32x2,
+                            offset: 24,
+                            buffer_index: 0,
+                        },
+                        mev::VertexAttributeDesc {
+                            format: mev::VertexFormat::Float32x3,
+                            offset: 32,
+                            buffer_index: 0,
+                        },
+                    ],
+                    vertex_layouts: vec![mev::VertexLayoutDesc {
+                        stride: std::mem::size_of::<Vertex>() as u32,
+                        step_mode: mev::VertexStepMode::Vertex,
+                    }],
+                    primitive_topology: mev::PrimitiveTopology::Triangle,
+                    raster: Some(mev::RasterDesc {
+                        fragment_shader: Some(library.entry("fs_main")),
+                        color_targets: vec![mev::ColorTargetDesc {
+                            format: target_format,
+                            blend: None,
+                        }],
+                        depth_stencil: Some(mev::DepthStencilDesc {
+                            format: mev::PixelFormat::D32Float,
+                            write_enabled: true,
+                            compare: mev::CompareFunction::Less,
+                        }),
+                        front_face: mev::FrontFace::CounterClockwise,
+                        culling: mev::Culling::Back,
+                    }),
+                    arguments: &[PbrArguments::LAYOUT],
+                    constants: PbrConstants::SIZE,
                 })
-                .collect();
-
-            if !light_data.is_empty() {
-                copy_encoder.write_buffer_slice(lights_buffer.slice(0..), &light_data);
-            }
-        }
-        let cbuf = encoder.finish()?;
-        queue.submit(std::iter::once(cbuf), true)?;
-
+                .unwrap(),
+        );
+        *last_format = Some(target_format);
+        *last_extent = Some(target_extent);
         Ok(())
-    }
-    
-    fn create_model_matrix(transform: &Transform) -> [[f32; 4]; 4] {
-        let position: Vec3 = transform.position.into();
-        let rotation: Quat = transform.rotation.into();
-        let scale: Vec3 = transform.scale.into();
-
-        //println!("Transform - pos: {:?}, rot: {:?}, scale: {:?}", position, rotation, scale);
-
-        let safe_scale = Vec3::new(
-            if scale.x.abs() < 1e-6 { 1.0 } else { scale.x },
-            if scale.y.abs() < 1e-6 { 1.0 } else { scale.y },
-            if scale.z.abs() < 1e-6 { 1.0 } else { scale.z },
-        );
-
-        let safe_rotation = if rotation.length_squared() < 1e-6 {
-            //println!("Using identity rotation");
-            Quat::IDENTITY
-        } else {
-            rotation.normalize()
-        };
-
-        let model_matrix = Mat4::from_scale_rotation_translation(safe_scale, safe_rotation, position);
-        
-        // DEBUGGING: Try a simple identity matrix
-        // let model_matrix = Mat4::IDENTITY;
-        
-        //println!("Final model matrix: {:?}", model_matrix.to_cols_array_2d());
-        
-        model_matrix.to_cols_array_2d()
-    }
-
-    fn create_normal_matrix(model_matrix: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-        let model_mat4 = Mat4::from_cols_array_2d(model_matrix);
-        let upper_3x3 = Mat3::from_cols(
-            model_mat4.x_axis.xyz(),
-            model_mat4.y_axis.xyz(),
-            model_mat4.z_axis.xyz(),
-        );
-
-        let det = upper_3x3.determinant();
-        if det.abs() < 1e-6 {
-            return Mat4::IDENTITY.to_cols_array_2d();
-        }
-
-        let normal_mat3 = upper_3x3.inverse().transpose();
-        Mat4::from_mat3(normal_mat3).to_cols_array_2d()
     }
 
     pub fn update_render_data(&mut self, render_data: RenderData) {
@@ -830,29 +749,19 @@ impl Renderer {
             })?;
         }
 
-        if !self.pending_uploads.is_empty() {
-            self.queue
-                .submit(self.pending_uploads.drain(..), true)
-                .unwrap();
-        }
-
         let Some(ref render_data) = self.current_render_data else {
             return Ok(());
         };
-
-        self.frame_count += 1;
 
         let mut frame = self
             .surface
             .next_frame()
             .map_err(|e| RendererError::MevError(format!("Failed to get next frame: {}", e)))?;
-
         let target_format = frame.image().format();
         let target_extent = frame.image().extent().expect_2d();
-        let window_size = (window.inner_size().width, window.inner_size().height); // Get actual window size
 
-        //self.debug_render_state(render_data, window_size);
-
+        // ✅ CORRECTED: Call the associated function `Self::` and pass the mutable fields explicitly.
+        // This resolves the borrow checker error.
         Self::create_or_update_pipeline(
             &self.queue,
             &self.shader_library,
@@ -865,23 +774,31 @@ impl Renderer {
         )
         .map_err(|e| RendererError::MevError(format!("Failed to create pipeline: {}", e)))?;
 
-        Self::update_uniforms(
+        let current_camera_buffer = &self.camera_buffers[self.frame_index];
+        let current_lights_buffer = &self.lights_buffers[self.frame_index];
+
+        let mut command_buffers_for_frame = std::mem::take(&mut self.pending_uploads);
+
+        let uniform_cbuf = prepare_uniform_updates(
             &mut self.queue,
-            self.camera_buffer.as_ref().unwrap(),
-            self.lights_buffer.as_ref().unwrap(),
-            &render_data,
-            window_size, // Pass actual window size
+            current_camera_buffer,
+            current_lights_buffer,
+            render_data,
+            (window.inner_size().width, window.inner_size().height),
         )
-        .map_err(|e| RendererError::MevError(format!("Failed to update uniforms: {}", e)))?;
+        .unwrap();
+        command_buffers_for_frame.push(uniform_cbuf);
 
-        let mut encoder = self.queue.new_command_encoder().map_err(|e| {
-            RendererError::MevError(format!("Failed to create command encoder: {}", e))
-        })?;
-
+        let mut encoder = self.queue.new_command_encoder().unwrap();
         encoder.init_image(
+            mev::PipelineStages::COLOR_OUTPUT,
             mev::PipelineStages::empty(),
-            mev::PipelineStages::FRAGMENT_SHADER,
             frame.image(),
+        );
+
+        encoder.barrier(
+            mev::PipelineStages::all(),
+            mev::PipelineStages::FRAGMENT_SHADER,
         );
 
         {
@@ -895,83 +812,86 @@ impl Renderer {
                         .clear(mev::ClearDepthStencil::default()),
                 ),
             });
-
             render_pass.with_viewport(mev::Offset3::ZERO, target_extent.to_3d().cast_as_f32());
             render_pass.with_scissor(mev::Offset2::ZERO, target_extent);
             render_pass.with_pipeline(self.pipeline.as_ref().unwrap());
-
-            // Bind global resources (camera, lights, material buffer, sampler) ONCE outside the object loop
-            // The textures bound here will be the ones sampled by the shader unless you rebind
-            // the entire argument group for each object, which is less efficient.
             render_pass.with_arguments(
                 0,
                 &PbrArguments {
-                    camera_buffer: self.camera_buffer.as_ref().unwrap().clone(),
-                    lights_buffer: self.lights_buffer.as_ref().unwrap().clone(),
+                    camera_buffer: current_camera_buffer.clone(),
+                    lights_buffer: current_lights_buffer.clone(),
                     material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(),
-                    
-                    albedo_texture: self.default_albedo_tex.as_ref().unwrap().clone(),
-                    normal_texture: self.default_normal_tex.as_ref().unwrap().clone(),
-                    metallic_roughness_texture: self
-                        .default_metallic_roughness_tex
+                    albedo_texture_array: self.albedo_texture_array.as_ref().unwrap().clone(),
+                    normal_texture_array: self.normal_texture_array.as_ref().unwrap().clone(),
+                    metallic_roughness_texture_array: self
+                        .metallic_roughness_texture_array
                         .as_ref()
                         .unwrap()
                         .clone(),
                     sampler: self.sampler.as_ref().unwrap().clone(),
+                    default_properties_buffer: self
+                        .default_properties_buffer
+                        .as_ref()
+                        .unwrap()
+                        .clone(),
                 },
             );
 
-            // Render each object
             for object in &render_data.objects {
                 let Some(mesh) = self.meshes.get(&object.mesh_id) else {
-                    tracing::warn!(
-                        "Mesh with ID {} not found, skipping object.",
-                        object.mesh_id
-                    );
                     continue;
                 };
-                let Some(_material) = self.materials.get(&object.material_id) else {
-                    tracing::warn!(
-                        "Material with ID {} not found, skipping object.",
-                        object.material_id
-                    );
+                if !self.materials.contains_key(&object.material_id) {
                     continue;
                 };
 
-                let model_matrix = Self::create_model_matrix(&object.transform);
-                let normal_matrix = Self::create_normal_matrix(&model_matrix);
+                let transform = &object.transform;
+                let scale: Vec3 = transform.scale.into();
+
+                // check to prevent NaN generation
+                let is_scale_valid =
+                    scale.x.abs() > 0.0001 && scale.y.abs() > 0.0001 && scale.z.abs() > 0.0001;
+
+                let model_matrix = Mat4::from_scale_rotation_translation(
+                    object.transform.scale.into(),
+                    Quat::from(object.transform.rotation).normalize(),
+                    object.transform.position.into(),
+                ).to_cols_array_2d(); 
+                
+                // Use a safe fallback if the scale is zero
+                let normal_matrix = if is_scale_valid {
+                    // The inverse transpose of the model matrix is correct for normals
+                    Mat4::from_mat3(
+                    Mat3::from_mat4(Mat4::from_cols_array_2d(&model_matrix))
+                        .inverse()
+                        .transpose(),
+                    ).to_cols_array_2d()
+                } else {
+                    // Fallback to a non-inverted matrix if scale is zero
+                    model_matrix
+                };
 
                 render_pass.with_constants(&PbrConstants {
                     model_matrix,
                     normal_matrix,
                     material_id: object.material_id as u32,
+                    _p: [0; 3],
                 });
-
                 render_pass.bind_vertex_buffers(0, &[mesh.vertex_buffer.clone()]);
                 render_pass.bind_index_buffer(&mesh.index_buffer);
                 render_pass.draw_indexed(0, 0..mesh.index_count, 0..1);
             }
-        } // End render pass
-
+        }
         self.queue
-            .sync_frame(&mut frame, mev::PipelineStages::FRAGMENT_SHADER);
-        encoder.present(frame, mev::PipelineStages::FRAGMENT_SHADER);
-
-        let cbuf = encoder.finish().map_err(|e| {
-            RendererError::MevError(format!("Failed to finish command buffer: {}", e))
-        })?;
+            .sync_frame(&mut frame, mev::PipelineStages::COLOR_OUTPUT);
+        encoder.present(frame, mev::PipelineStages::COLOR_OUTPUT);
+        let main_render_cbuf = encoder.finish().unwrap();
+        command_buffers_for_frame.push(main_render_cbuf);
 
         window.pre_present_notify();
-        self.queue
-            .submit([cbuf], true)
-            .map_err(|e| RendererError::MevError(format!("Failed to submit commands: {}", e)))?;
+        self.queue.submit(command_buffers_for_frame, true).unwrap();
 
-        tracing::debug!(
-            "Rendered frame {} with {} objects and {} lights",
-            self.frame_count,
-            render_data.objects.len(),
-            render_data.lights.len()
-        );
+        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
 
         Ok(())
     }

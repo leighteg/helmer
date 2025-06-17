@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use tracing::{info, trace, error};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -97,11 +98,11 @@ impl SystemScheduler {
     // Build execution groups with parallel safety
     fn rebuild_execution_groups(&mut self) {
         if !self.dirty {
-            println!("Groups not dirty, skipping rebuild");
+            trace!("Groups not dirty, skipping rebuild");
             return;
         }
 
-        println!(
+        info!(
             "Rebuilding execution groups for {} systems",
             self.systems.len()
         );
@@ -110,7 +111,7 @@ impl SystemScheduler {
 
         // Sort by priority (higher priority first)
         remaining.sort_by(|&a, &b| self.systems[b].priority.cmp(&self.systems[a].priority));
-        println!(
+        trace!(
             "Systems sorted by priority: {:?}",
             remaining
                 .iter()
@@ -138,7 +139,7 @@ impl SystemScheduler {
                 if can_add {
                     current_group.push(system_idx);
                     remaining.remove(i);
-                    println!(
+                    trace!(
                         "Added system '{}' to group {}",
                         self.systems[system_idx].name, group_count
                     );
@@ -148,7 +149,7 @@ impl SystemScheduler {
             }
 
             if !current_group.is_empty() {
-                println!(
+                trace!(
                     "Created group {} with {} systems",
                     group_count,
                     current_group.len()
@@ -156,26 +157,26 @@ impl SystemScheduler {
                 self.execution_groups.push(current_group);
                 group_count += 1;
             } else {
-                println!("ERROR: Empty group created, breaking to avoid infinite loop");
+                error!("ERROR: Empty group created, breaking to avoid infinite loop");
                 break;
             }
         }
 
-        println!("Total execution groups: {}", self.execution_groups.len());
+        trace!("Total execution groups: {}", self.execution_groups.len());
         self.dirty = false;
     }
 
     pub fn run_all(&mut self, ecs_core: &mut ECSCore) {
-        println!("SystemScheduler::run_all() called");
+        trace!("SystemScheduler::run_all() called");
         self.rebuild_execution_groups();
 
-        println!(
+        trace!(
             "Processing {} execution groups",
             self.execution_groups.len()
         );
 
         for (group_idx, group) in self.execution_groups.iter().enumerate() {
-            println!(
+            trace!(
                 "Processing group {} with {} systems",
                 group_idx,
                 group.len()

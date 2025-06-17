@@ -47,7 +47,7 @@ pub struct Runtime {
     renderer: Option<Renderer>,
 
     // Window management
-    window: Option<Window>,
+    window: Option<Arc<Window>>,
     initialized: bool,
 
     init_callback: fn(&mut Runtime),
@@ -215,7 +215,7 @@ impl ApplicationHandler for Runtime {
                             _ => {}
                         }
 
-                        renderer.render(window);
+                        renderer.render().unwrap(); // literally everything lacks proper err handling. todo: refactor all non-critical unwraps
                     }
 
                     if self.running.load(Ordering::Relaxed) == true {
@@ -224,6 +224,9 @@ impl ApplicationHandler for Runtime {
                         window.request_redraw();
                     }
                 }
+            }
+            WindowEvent::Resized(new_size) => {
+                self.renderer.as_mut().unwrap().resize(new_size);
             }
             _ => {}
         }
@@ -234,19 +237,19 @@ impl ApplicationHandler for Runtime {
             let mut window = Window::default_attributes();
             window.title = "helmer engine — 2025 leighton tegland".into();
             
-            self.window = Some(
+            self.window = Some(Arc::new(
                 event_loop
                     .create_window(window)
                     .unwrap(),
-            );
+            ));
         }
 
         if !self.initialized {
-            self.renderer = Some(Renderer::new(&self.window.as_ref().unwrap()).unwrap());
+            self.renderer = Some(pollster::block_on(Renderer::new(Arc::clone(self.window.as_ref().unwrap()))).unwrap());
             self.renderer
                 .as_mut()
                 .unwrap()
-                .render(&self.window.as_mut().unwrap());
+                .render();
             let cube_mesh = MeshAsset::cube("cube mesh".into());
             self.renderer.as_mut().unwrap().add_mesh(
                 0,

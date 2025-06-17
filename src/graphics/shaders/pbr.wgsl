@@ -1,11 +1,11 @@
 //=============== CONSTANTS ===============//
 
 const PI: f32 = 3.14159265359;
-const MIN_ROUGHNESS: f32 = 0.04; // Used to prevent numerical instability with perfect mirrors.
-const MAX_TEXTURE_COUNT_F32: f32 = 256.0; // Should match your renderer's texture array capacity.
+const MIN_ROUGHNESS: f32 = 0.04;
 
 //=============== STRUCTS ===============//
 
+// (Structs are unchanged from your original code)
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -29,17 +29,12 @@ struct CameraUniforms {
     light_count: u32,
 }
 
-// Correctly packed and aligned LightData struct.
-// Your CPU-side struct in Rust/C++ must match this layout exactly.
 struct LightData {
     position: vec3<f32>,
     light_type: u32,
-
     color: vec3<f32>,
     intensity: f32,
-
     direction: vec3<f32>,
-    // Final padding to ensure struct size is a multiple of 16 bytes.
     _padding: f32,
 }
 
@@ -65,39 +60,42 @@ struct PbrConstants {
 //=============== BINDINGS ===============//
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-@group(0) @binding(1) var<storage, read> lights: array<LightData>;
-@group(0) @binding(2) var<storage, read> materials: array<MaterialData>;
+@group(0) @binding(1) var<storage, read> lights_buffer: array<LightData>; // Renamed for clarity
+@group(0) @binding(2) var<storage, read> materials_buffer: array<MaterialData>; // Renamed for clarity
 
-@group(0) @binding(3) var albedo_textures: texture_3d<f32>;
-@group(0) @binding(4) var normal_textures: texture_3d<f32>;
-@group(0) @binding(5) var metallic_roughness_textures: texture_3d<f32>;
+// ✅ CHANGE #1: Use the correct texture_2d_array type.
+@group(0) @binding(3) var albedo_texture_array: texture_2d_array<f32>;
+@group(0) @binding(4) var normal_texture_array: texture_2d_array<f32>;
+@group(0) @binding(5) var metallic_roughness_texture_array: texture_2d_array<f32>;
 
-@group(0) @binding(6) var texture_sampler: sampler;
+@group(0) @binding(6) var pbr_sampler: sampler;
 
 var<push_constant> constants: PbrConstants;
 
 //=============== VERTEX SHADER ===============//
 
+// (Vertex shader is unchanged)
 @vertex
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    
+
     let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
-    
+
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
-    
+
     out.world_normal = normalize((constants.normal_matrix * vec4<f32>(vertex.normal, 0.0)).xyz);
     out.world_tangent = normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
     out.world_bitangent = normalize(cross(out.world_normal, out.world_tangent));
-    
+
     out.tex_coord = vertex.tex_coord;
-    
+
     return out;
 }
 
 //=============== PBR UTILITY FUNCTIONS ===============//
 
+// (PBR utility functions are unchanged)
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
     let a2 = a * a;
@@ -129,80 +127,124 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- 1. Material & PBR Property Setup ---
-    
-    let material = materials[constants.material_id];
-    let albedo_z = (f32(material.albedo_texture_index) + 0.5) / MAX_TEXTURE_COUNT_F32;
-    let albedo_coords = vec3<f32>(in.tex_coord, albedo_z);
-    let albedo_sample = textureSample(albedo_textures, texture_sampler, albedo_coords);
+
+    let material = materials_buffer[constants.material_id];
+
+    // ✅ FIX: Use the 4-argument version of textureSample.
+    let albedo_sample = textureSample(
+        albedo_texture_array,
+        pbr_sampler,
+        in.tex_coord,
+        material.albedo_texture_index
+    );
     let albedo = albedo_sample.rgb * material.albedo.rgb;
     let alpha = albedo_sample.a * material.albedo.a;
 
-    let mr_z = (f32(material.metallic_roughness_texture_index) + 0.5) / MAX_TEXTURE_COUNT_F32;
-    let mr_coords = vec3<f32>(in.tex_coord, mr_z);
-    let mr_sample = textureSample(metallic_roughness_textures, texture_sampler, mr_coords);
-    
+    let mr_sample = textureSample(
+        metallic_roughness_texture_array,
+        pbr_sampler,
+        in.tex_coord,
+        material.metallic_roughness_texture_index
+    );
+
     let ao = mr_sample.r * material.ao;
     let metallic = mr_sample.b * material.metallic;
-    
-    // ✅ FIX #1: Clamp roughness to prevent the PBR math from exploding to infinity.
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
 
-    // ✅ FIX #2: Bypass the broken TBN matrix calculation by using the vertex normal.
-    // This prevents the immediate NaN generation from your model's tangent data.
-    let N = normalize(in.world_normal);
+    // --- 2. Normal Mapping ---
 
-    // --- 2. View & Fresnel Setup ---
-    let to_camera_vector = camera.view_position - in.world_position;
-    let V = select(normalize(to_camera_vector), N, length(to_camera_vector) < 0.0001);
+    var N: vec3<f32>;
+    if material.normal_texture_index > 0i {
+        // ✅ FIX: Use the 4-argument version of textureSample here as well.
+        let tangent_space_normal = textureSample(
+            normal_texture_array,
+            pbr_sampler,
+            in.tex_coord,
+            material.normal_texture_index
+        ).xyz * 2.0 - 1.0;
+
+        let T = normalize(in.world_tangent);
+        let B = normalize(in.world_bitangent);
+        let N_geom = normalize(in.world_normal);
+        let tbn = mat3x3<f32>(T, B, N_geom);
+
+        N = normalize(tbn * tangent_space_normal);
+    } else {
+        N = normalize(in.world_normal);
+    }
+
+    // --- 3. View & Fresnel Setup ---
+    let V = normalize(camera.view_position - in.world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
     
-    // --- 3. Lighting Calculation ---
+    // --- 4. Lighting Calculation ---
     var Lo = vec3<f32>(0.0);
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
-        let light = lights[i];
+        let light = lights_buffer[i];
         var L: vec3<f32>;
         var radiance: vec3<f32>;
-        if (light.light_type == 0u) {
-            if (length(light.direction) < 0.0001) { continue; }
+
+        if light.light_type == 0u { // Directional Light
+            if length(light.direction) < 0.0001 { continue; }
             L = normalize(-light.direction);
             radiance = light.color * light.intensity;
-        } else {
+        } else if light.light_type == 2u { // ✅ NEW: Spot Light
+            let to_light_vector = light.position - in.world_position;
+            let light_dir = normalize(light.direction);
+            let spot_cos_angle = dot(normalize(to_light_vector), -light_dir);
+
+            // 60 degrees was your spot light angle from main.rs. cos(30) is half the angle.
+            let spot_cos_cutoff = 0.866; // cos(30 degrees)
+
+            if spot_cos_angle > spot_cos_cutoff {
+                let dist_sq = dot(to_light_vector, to_light_vector);
+                if dist_sq < 0.0001 { continue; }
+                L = normalize(to_light_vector);
+                let attenuation = 1.0 / dist_sq;
+                let spot_effect = smoothstep(spot_cos_cutoff, spot_cos_cutoff + 0.05, spot_cos_angle);
+                radiance = light.color * light.intensity * attenuation * spot_effect;
+            } else {
+                // Outside the cone, radiance is zero.
+                radiance = vec3f(0.0);
+            }
+        } else { // Point Light (light_type == 1u)
             let to_light_vector = light.position - in.world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
-            if (dist_sq < 0.0001) { continue; }
+            if dist_sq < 0.0001 { continue; }
             L = normalize(to_light_vector);
             let attenuation = 1.0 / dist_sq;
             radiance = light.color * light.intensity * attenuation;
         }
+
         let H = normalize(V + L);
         let NdotL = max(dot(N, L), 0.0);
-        if (NdotL > 0.0) {
+        if NdotL > 0.0 {
             let NdotV = max(dot(N, V), 0.0);
             let NdotH = max(dot(N, H), 0.0);
             let HdotV = max(dot(H, V), 0.0);
+
             let NDF = distribution_ggx(NdotH, roughness);
             let G = geometry_smith(N, V, L, roughness);
             let F = fresnel_schlick(HdotV, F0);
+
             let numerator = NDF * G * F;
             let denominator = 4.0 * NdotV * NdotL + 0.001;
             let specular = numerator / denominator;
+
             let kS = F;
             var kD = vec3<f32>(1.0) - kS;
             kD *= (1.0 - metallic);
+
             Lo += (kD * albedo / PI + specular) * radiance * NdotL;
         }
     }
     
-    // --- 4. Final Color Composition ---
+    // --- 5. Final Color Composition ---
     let ambient = vec3<f32>(0.03) * albedo * ao;
     var final_color = ambient + Lo;
 
-    // ✅ FIX #3: A final "safety net" clamp to guarantee no `inf` value can
-    // ever reach the tonemapper and become `NaN`.
-    final_color = min(final_color, vec3<f32>(100.0));
-
     final_color = final_color / (final_color + vec3<f32>(1.0));
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
-    
+
     return vec4<f32>(final_color, alpha);
 }

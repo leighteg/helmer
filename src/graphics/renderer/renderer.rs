@@ -1,25 +1,26 @@
 use crate::{
-    graphics::renderer::{device::RenderDevice, error::RendererError},
+    graphics::renderer::error::RendererError,
     provided::components::{LightType, Transform},
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat3, Mat4, Quat, Vec3, Vec3Swizzles, Vec4, Vec4Swizzles};
-use mev::{Arguments, BufferDesc, DeviceRepr};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use std::collections::HashMap;
 use std::sync::Arc;
+use wgpu::{util::DeviceExt, Adapter}; // Import for create_buffer_init
 use winit::window::Window;
 
+// --- CONSTANTS (Unchanged) ---
 const MAX_TEXTURE_COUNT: u32 = 256;
 const TEXTURE_RESOLUTION: u32 = 1024;
-
 const MAX_LIGHTS: usize = 32;
-
 const FRAMES_IN_FLIGHT: usize = 3;
+
+// --- RESOURCE STRUCTS (wgpu types) ---
 
 /// Represents a loaded mesh with its vertex and index buffers.
 pub struct Mesh {
-    pub vertex_buffer: mev::Buffer,
-    pub index_buffer: mev::Buffer,
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
 }
 
@@ -32,12 +33,12 @@ impl Default for TextureManager {
     fn default() -> Self {
         Self {
             textures: HashMap::new(),
-            // Reserve index 0 for default textures, start assigning from 1.
-            next_texture_index: 1,
+            next_texture_index: 1, // Reserve index 0 for default textures
         }
     }
 }
 
+// Material struct remains the same logically.
 #[derive(Debug, Clone)]
 pub struct Material {
     pub albedo: [f32; 4],
@@ -56,7 +57,6 @@ impl Default for Material {
             metallic: 0.0,
             roughness: 0.8,
             ao: 1.0,
-            // Point to the guaranteed default textures at index 0.
             albedo_texture_index: 0,
             normal_texture_index: 0,
             metallic_roughness_texture_index: 0,
@@ -64,25 +64,7 @@ impl Default for Material {
     }
 }
 
-pub struct TextureHandle {
-    pub mev_image: mev::Image,
-    pub format: mev::PixelFormat,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-struct DefaultProperties {
-    pub albedo: [f32; 4],
-    pub normal: [f32; 3],
-    pub _p1: f32,
-    pub metallic: f32,
-    pub roughness: f32,
-    pub ao: f32,
-    pub _p2: f32,
-}
-
+// RenderObject, RenderLight, RenderData structs remain the same logically.
 #[derive(Debug, Clone)]
 pub struct RenderObject {
     pub transform: Transform,
@@ -104,28 +86,10 @@ pub struct RenderData {
     pub camera_transform: Transform,
 }
 
-#[derive(mev::Arguments)]
-struct PbrArguments {
-    #[mev(vertex, fragment)]
-    camera_buffer: mev::Buffer,
-    #[mev(fragment)]
-    lights_buffer: mev::Buffer,
-    #[mev(fragment)]
-    material_buffer: mev::Buffer,
-    #[mev(shader(fragment), sampled)]
-    albedo_texture_array: mev::Image,
-    #[mev(shader(fragment), sampled)]
-    normal_texture_array: mev::Image,
-    #[mev(shader(fragment), sampled)]
-    metallic_roughness_texture_array: mev::Image,
-    #[mev(fragment)]
-    sampler: mev::Sampler,
-    #[mev(fragment)]
-    default_properties_buffer: mev::Buffer,
-}
+// --- SHADER DATA STRUCTS (bytemuck, no mev) ---
 
 #[repr(C)]
-#[derive(mev::DeviceRepr)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct CameraUniforms {
     view_matrix: [[f32; 4]; 4],
     projection_matrix: [[f32; 4]; 4],
@@ -134,7 +98,7 @@ struct CameraUniforms {
 }
 
 #[repr(C)]
-#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct LightData {
     position: [f32; 3],
     light_type: u32,
@@ -145,7 +109,7 @@ struct LightData {
 }
 
 #[repr(C)]
-#[derive(mev::DeviceRepr)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct PbrConstants {
     model_matrix: [[f32; 4]; 4],
     normal_matrix: [[f32; 4]; 4],
@@ -154,7 +118,7 @@ struct PbrConstants {
 }
 
 #[repr(C)]
-#[derive(mev::DeviceRepr, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct MaterialShaderData {
     albedo: [f32; 4],
     metallic: f32,
@@ -168,7 +132,7 @@ struct MaterialShaderData {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, DeviceRepr, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -176,441 +140,332 @@ pub struct Vertex {
     pub tangent: [f32; 3],
 }
 
-impl From<([f32; 3], [f32; 3], [f32; 2], [f32; 3])> for Vertex {
-    fn from(data: ([f32; 3], [f32; 3], [f32; 2], [f32; 3])) -> Self {
-        Vertex {
-            position: data.0,
-            normal: data.1,
-            tex_coord: data.2,
-            tangent: data.3,
+impl Vertex {
+    // CHANGE: Add a descriptor function for wgpu pipeline creation.
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        0 => Float32x3, // position
+        1 => Float32x3, // normal
+        2 => Float32x2, // tex_coord
+        3 => Float32x3, // tangent
+    ];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
         }
     }
 }
+
+// --- MAIN RENDERER STRUCT (wgpu) ---
 
 pub struct Renderer {
-    mev_device: Arc<mev::Device>,
-    surface: mev::Surface,
-    queue: mev::Queue,
-    shader_library: Option<mev::Library>,
-    pipeline: Option<mev::RenderPipeline>,
-    depth_texture: Option<mev::Image>,
+    // CHANGE: wgpu core components
+    instance: wgpu::Instance,
+    device: Arc<wgpu::Device>,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>, // Use 'static lifetime with Arc<Window>
+    surface_config: wgpu::SurfaceConfiguration,
+    window: Arc<Window>,
 
-    camera_buffers: Vec<mev::Buffer>,
-    lights_buffers: Vec<mev::Buffer>,
+    // CHANGE: wgpu resources
+    pipeline: Option<wgpu::RenderPipeline>,
+    pbr_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pbr_bind_groups: Vec<wgpu::BindGroup>,
+    depth_texture: Option<wgpu::Texture>,
+    depth_texture_view: Option<wgpu::TextureView>,
 
-    material_uniform_buffer: Option<mev::Buffer>,
+    camera_buffers: Vec<wgpu::Buffer>,
+    lights_buffers: Vec<wgpu::Buffer>,
+    material_uniform_buffer: Option<wgpu::Buffer>,
+
     meshes: HashMap<usize, Mesh>,
     materials: HashMap<usize, Material>,
-    textures: HashMap<usize, TextureHandle>,
-    albedo_texture_array: Option<mev::Image>,
-    normal_texture_array: Option<mev::Image>,
-    metallic_roughness_texture_array: Option<mev::Image>,
-    default_properties_buffer: Option<mev::Buffer>,
     texture_manager: TextureManager,
-    sampler: Option<mev::Sampler>,
+
+    albedo_texture_array: Option<wgpu::Texture>,
+    normal_texture_array: Option<wgpu::Texture>,
+    metallic_roughness_texture_array: Option<wgpu::Texture>,
+    sampler: Option<wgpu::Sampler>,
 
     frame_index: usize,
-
     current_render_data: Option<RenderData>,
-    last_format: Option<mev::PixelFormat>,
-    last_extent: Option<mev::Extent2>,
-    pending_uploads: Vec<mev::CommandBuffer>,
-}
-
-fn prepare_texture_slice_upload(
-    queue: &mut mev::Queue,
-    data: &[u8],
-    target_array: &mev::Image,
-    layer_index: u32,
-) -> Result<mev::CommandBuffer, mev::OutOfMemory> {
-    // This part of your logic for padding the buffer is correct and should be kept.
-    let bytes_per_pixel = 4;
-    let align = 256u32;
-    let bytes_per_row_unaligned = TEXTURE_RESOLUTION * bytes_per_pixel;
-    let bytes_per_row = (bytes_per_row_unaligned + align - 1) & !(align - 1);
-    let padded_data_size = (bytes_per_row * TEXTURE_RESOLUTION) as usize;
-
-    let mut padded_data = vec![0; padded_data_size];
-    for y in 0..TEXTURE_RESOLUTION {
-        let src_offset = (y * bytes_per_row_unaligned) as usize;
-        let dst_offset = (y * bytes_per_row) as usize;
-        if src_offset + bytes_per_row_unaligned as usize > data.len() {
-            continue;
-        }
-        let src_slice = &data[src_offset..src_offset + bytes_per_row_unaligned as usize];
-        padded_data[dst_offset..dst_offset + bytes_per_row_unaligned as usize]
-            .copy_from_slice(src_slice);
-    }
-
-    let scratch = queue
-        .device()
-        .new_buffer_init(mev::BufferInitDesc {
-            data: &padded_data,
-            usage: mev::BufferUsage::TRANSFER_SRC,
-            memory: mev::Memory::Upload,
-            name: &format!("tex-slice-upload-{}", layer_index),
-        })
-        .unwrap();
-
-    let mut upload_encoder = queue.new_command_encoder().unwrap();
-
-    // ========================================================================
-    // --- CHANGE #1: Perform the initial layout transition on the texture ---
-    // This only needs to happen once, but doing it before each copy is safe.
-    upload_encoder.init_image(
-        mev::PipelineStages::empty(),
-        mev::PipelineStages::TRANSFER, // Transition TO Transfer-Ready
-        target_array,
-    );
-
-    // --- CHANGE #2: Modify the copy_buffer_to_image call arguments ---
-    upload_encoder.copy().copy_buffer_to_image(
-        &scratch,
-        0,                      // source_offset
-        bytes_per_row as usize, // source_bytes_per_row
-        padded_data_size,       // source_bytes_per_image
-        target_array,
-        mev::Offset3::ZERO, // destination_origin is ZERO
-        mev::Extent3::new(TEXTURE_RESOLUTION, TEXTURE_RESOLUTION, 1), // copy_extent
-        0..1,               // destination_mip_levels (copy 1 mip)
-        layer_index,        // Use this parameter for the array slice index
-    );
-    // ========================================================================
-
-    // We still need a barrier to make the texture readable by the shader.
-    // Transition FROM Transfer-Ready TO Fragment-Shader-Ready.
-    // Following your guidance on the (after, before) signature:
-    upload_encoder.barrier(
-        mev::PipelineStages::FRAGMENT_SHADER,
-        mev::PipelineStages::TRANSFER,
-    );
-
-    upload_encoder.finish()
-}
-
-fn prepare_uniform_updates(
-    queue: &mut mev::Queue,
-    camera_buffer: &mev::Buffer,
-    lights_buffer: &mev::Buffer,
-    render_data: &RenderData,
-    window_size: (u32, u32),
-) -> Result<mev::CommandBuffer, mev::OutOfMemory> {
-    let camera_transform = &render_data.camera_transform;
-    let eye: Vec3 = camera_transform.position.into();
-    let forward = camera_transform.forward().normalize_or_zero();
-    let view_matrix = Mat4::look_at_rh(
-        eye,
-        eye + forward,
-        camera_transform.up().normalize_or(Vec3::Y),
-    );
-    let projection_matrix = Mat4::perspective_rh(
-        (45.0_f32).to_radians(),
-        window_size.0 as f32 / window_size.1 as f32,
-        0.1,
-        1000.0,
-    );
-
-    let light_data: Vec<LightData> = render_data
-        .lights
-        .iter()
-        .take(MAX_LIGHTS)
-        .map(|light| LightData {
-            position: light.transform.position.into(),
-            light_type: match light.light_type {
-                LightType::Directional => 0,
-                LightType::Point => 1,
-                LightType::Spot { .. } => 2,
-            },
-            color: light.color,
-            intensity: light.intensity,
-            direction: light.transform.forward().into(),
-            _padding: 0.0,
-        })
-        .collect();
-
-    let num_lights = light_data.len() as u32;
-
-    let camera_uniforms = CameraUniforms {
-        view_matrix: view_matrix.to_cols_array_2d(),
-        projection_matrix: projection_matrix.to_cols_array_2d(),
-        view_position: eye.to_array(),
-        light_count: num_lights,
-    };
-
-    let mut encoder = queue.new_command_encoder().unwrap();
-    {
-        let mut copy_pass = encoder.copy();
-        copy_pass.write_buffer(camera_buffer, &camera_uniforms.as_repr());
-        copy_pass.write_buffer_slice(lights_buffer.slice(0..), &light_data);
-    }
-    encoder.finish()
 }
 
 impl Renderer {
-    pub fn new(window: &Window) -> Result<Self, RendererError> {
-        let instance = mev::Instance::load()
-            .map_err(|e| RendererError::MevError(format!("Failed to load MEV instance: {}", e)))?;
-        let (mev_device, mut queues) = instance
-            .new_device(mev::DeviceDesc {
-                idx: 0,
-                queues: &[0],
-                features: mev::Features::SURFACE,
+    // CHANGE: `new` is now async due to wgpu's adapter/device request flow.
+    pub async fn new(window: Arc<Window>) -> Result<Self, RendererError> {
+        let size = window.inner_size();
+
+        // --- Instance, Adapter, Device, Queue ---
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        // The surface needs to live as long as the window that created it.
+        // `Arc<Window>` ensures safety.
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter: Adapter;
+        match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
             })
-            .map_err(|e| RendererError::MevError(format!("Failed to create device: {}", e)))?;
-        let queue = queues.pop().unwrap();
-        let surface = queue
-            .new_surface(window, window)
-            .map_err(|e| RendererError::MevError(format!("Failed to create surface: {}", e)))?;
+            .await {
+                Ok(new_adapter) => {
+                    adapter = new_adapter
+                }
+                Err(err) => {
+                    return Err(RendererError::ResourceCreation(
+                        format!("Failed to find a suitable GPU adapter: {}", err),
+                    ))
+                }
+            };
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("Primary Device"),
+                    required_features: wgpu::Features::PUSH_CONSTANTS,
+                    required_limits: wgpu::Limits {
+                        // Add push constant limit
+                        max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| {
+                RendererError::ResourceCreation(format!("Failed to create device: {}", e))
+            })?;
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(surface_caps.formats[0]);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width,
+            height: size.height,
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
         Ok(Self {
-            mev_device: mev_device.into(),
-            surface,
+            instance,
+            device: Arc::new(device),
             queue,
-            shader_library: None,
+            surface,
+            surface_config,
+            window,
             pipeline: None,
+            pbr_bind_group_layout: None,
+            pbr_bind_groups: Vec::new(),
             depth_texture: None,
+            depth_texture_view: None,
             camera_buffers: Vec::new(),
             lights_buffers: Vec::new(),
             material_uniform_buffer: None,
             meshes: HashMap::new(),
             materials: HashMap::new(),
-            textures: HashMap::new(),
+            texture_manager: TextureManager::default(),
             albedo_texture_array: None,
             normal_texture_array: None,
             metallic_roughness_texture_array: None,
-            default_properties_buffer: None,
-            texture_manager: TextureManager::default(),
             sampler: None,
             frame_index: 0,
             current_render_data: None,
-            last_format: None,
-            last_extent: None,
-            pending_uploads: Vec::new(),
         })
     }
 
-    fn initialize_resources(&mut self) -> Result<(), mev::DeviceError> {
-        self.shader_library = Some(
-            self.queue
-                .new_shader_library(mev::LibraryDesc {
-                    name: "pbr",
-                    input: mev::include_library!(
-                        "../shaders/pbr.wgsl" as mev::ShaderLanguage::Wgsl
-                    ),
-                })
-                .unwrap(),
-        );
-        self.sampler = Some(self.queue.new_sampler(mev::SamplerDesc {
-            min_filter: mev::Filter::Linear,
-            mag_filter: mev::Filter::Linear,
-            address_mode: [mev::AddressMode::Repeat; 3],
-            ..mev::SamplerDesc::new()
-        })?);
+    // --- Resource Initialization ---
+    fn initialize_resources(&mut self) -> Result<(), RendererError> {
+        let device = &self.device;
 
-        let default_props = DefaultProperties {
-            albedo: [1.0, 1.0, 1.0, 1.0],
-            normal: [0.5, 0.5, 1.0],
-            _p1: 0.0,
-            metallic: 0.0,
-            roughness: 0.8,
-            ao: 1.0,
-            _p2: 0.0,
-        };
-        self.default_properties_buffer = Some(self.queue.new_buffer_init(mev::BufferInitDesc {
-            data: bytemuck::bytes_of(&default_props),
-            usage: mev::BufferUsage::UNIFORM,
-            memory: mev::Memory::Device,
-            name: "default-properties-buffer",
-        })?);
-
-        self.albedo_texture_array =
-            Some(
-                self.queue.new_image(mev::ImageDesc {
-                    extent: mev::Extent3::new(
-                        TEXTURE_RESOLUTION,
-                        TEXTURE_RESOLUTION,
-                        MAX_TEXTURE_COUNT,
-                    )
-                    .into(),
-                    format: mev::PixelFormat::Rgba8Srgb,
-                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
-                    layers: 1,
-                    levels: 1,
-                    name: "albedo-texture-array",
-                })?,
-            );
-        self.normal_texture_array =
-            Some(
-                self.queue.new_image(mev::ImageDesc {
-                    extent: mev::Extent3::new(
-                        TEXTURE_RESOLUTION,
-                        TEXTURE_RESOLUTION,
-                        MAX_TEXTURE_COUNT,
-                    )
-                    .into(),
-                    format: mev::PixelFormat::Rgba8Unorm,
-                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
-                    layers: 1,
-                    levels: 1,
-                    name: "normal-texture-array",
-                })?,
-            );
-        self.metallic_roughness_texture_array =
-            Some(
-                self.queue.new_image(mev::ImageDesc {
-                    extent: mev::Extent3::new(
-                        TEXTURE_RESOLUTION,
-                        TEXTURE_RESOLUTION,
-                        MAX_TEXTURE_COUNT,
-                    )
-                    .into(),
-                    format: mev::PixelFormat::Rgba8Unorm,
-                    usage: mev::ImageUsage::SAMPLED | mev::ImageUsage::TRANSFER_DST,
-                    layers: 1,
-                    levels: 1,
-                    name: "metallic-roughness-texture-array",
-                })?,
-            );
-
-        let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
-        let white_pixel = [255u8, 255, 255, 255];
-        let default_albedo_data: Vec<u8> = white_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        let albedo_upload_cbuf = prepare_texture_slice_upload(
-            &mut self.queue,
-            &default_albedo_data,
-            self.albedo_texture_array.as_ref().unwrap(),
-            0,
-        )
-        .unwrap();
-        //self.pending_uploads.push(albedo_upload_cbuf);
-
-        let flat_normal_pixel = [128u8, 128, 255, 255];
-        let default_normal_data: Vec<u8> = flat_normal_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        let normal_upload_cbuf = prepare_texture_slice_upload(
-            &mut self.queue,
-            &default_normal_data,
-            self.normal_texture_array.as_ref().unwrap(),
-            0,
-        )
-        .unwrap();
-        //self.pending_uploads.push(normal_upload_cbuf);
-
-        let default_mr_pixel = [255u8, 204, 0, 255];
-        let default_mr_data: Vec<u8> = default_mr_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        let mr_upload_cbuf = prepare_texture_slice_upload(
-            &mut self.queue,
-            &default_mr_data,
-            self.metallic_roughness_texture_array.as_ref().unwrap(),
-            0,
-        )
-        .unwrap();
-        //self.pending_uploads.push(mr_upload_cbuf);
-
-        let initial_uploads = vec![albedo_upload_cbuf, normal_upload_cbuf, mr_upload_cbuf];
-        self.queue.submit(initial_uploads, true).unwrap();
-        self.queue.wait_idle().unwrap();
-
+        // --- Create Buffers ---
         self.camera_buffers = (0..FRAMES_IN_FLIGHT)
             .map(|i| {
-                self.queue.new_buffer(mev::BufferDesc {
-                    size: std::mem::size_of::<CameraUniforms>(),
-                    usage: mev::BufferUsage::UNIFORM | mev::BufferUsage::TRANSFER_DST,
-                    memory: mev::Memory::Device,
-                    name: &format!("camera-uniforms-{}", i),
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("camera-uniforms-{}", i)),
+                    size: std::mem::size_of::<CameraUniforms>() as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
 
         self.lights_buffers = (0..FRAMES_IN_FLIGHT)
             .map(|i| {
-                self.queue.new_buffer(mev::BufferDesc {
-                    size: std::mem::size_of::<LightData>() * MAX_LIGHTS,
-                    usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
-                    memory: mev::Memory::Device,
-                    name: &format!("lights-buffer-{}", i),
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("lights-buffer-{}", i)),
+                    size: (std::mem::size_of::<LightData>() * MAX_LIGHTS) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
 
-        self.material_uniform_buffer = Some(self.queue.new_buffer(mev::BufferDesc {
-            size: std::mem::size_of::<MaterialShaderData>() * 256,
-            usage: mev::BufferUsage::STORAGE | mev::BufferUsage::TRANSFER_DST,
-            memory: mev::Memory::Device,
-            name: "materials-buffer",
-        })?);
+        self.material_uniform_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("materials-buffer"),
+            size: (std::mem::size_of::<MaterialShaderData>() * 256) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
+        // --- Create Textures and Sampler ---
+        let texture_desc = wgpu::TextureDescriptor {
+            label: Some("Texture Array"),
+            size: wgpu::Extent3d {
+                width: TEXTURE_RESOLUTION,
+                height: TEXTURE_RESOLUTION,
+                depth_or_array_layers: MAX_TEXTURE_COUNT,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Usage must include COPY_DST to be a destination for copy operations.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        };
+
+        self.albedo_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("albedo-texture-array"),
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            ..texture_desc
+        }));
+
+        self.normal_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("normal-texture-array"),
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            ..texture_desc
+        }));
+
+        self.metallic_roughness_texture_array = Some(device.create_texture(
+            &wgpu::TextureDescriptor {
+                label: Some("metallic-roughness-texture-array"),
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                ..texture_desc
+            },
+        ));
+
+        self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Default Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+
+        // --- Upload Default Texture Data ---
+        self.upload_default_textures();
+        self.create_depth_texture();
+        self.create_pbr_bind_groups();
+        self.create_pipeline();
+        
         Ok(())
     }
+    
+    // Helper for uploading default textures
+    fn upload_default_textures(&self) {
+        let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
+        
+        // Albedo (White)
+        let white_pixel = [255u8, 255, 255, 255];
+        let default_albedo_data: Vec<u8> = white_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
+        self.upload_texture_slice(&default_albedo_data, self.albedo_texture_array.as_ref().unwrap(), 0);
 
-    pub fn add_texture_to_array(
+        // Normal (Flat)
+        let flat_normal_pixel = [128u8, 128, 255, 255]; // Represents (0, 0, 1)
+        let default_normal_data: Vec<u8> = flat_normal_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
+        self.upload_texture_slice(&default_normal_data, self.normal_texture_array.as_ref().unwrap(), 0);
+
+        // Metallic/Roughness (Black/Grey)
+        let default_mr_pixel = [255u8, 204, 0, 255]; // R=AO, G=Roughness, B=Metallic
+        let default_mr_data: Vec<u8> = default_mr_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
+        self.upload_texture_slice(&default_mr_data, self.metallic_roughness_texture_array.as_ref().unwrap(), 0);
+    }
+    
+    // Helper to upload a single texture slice
+    fn upload_texture_slice(&self, data: &[u8], target_array: &wgpu::Texture, layer_index: u32) {
+         let bytes_per_pixel = 4u32;
+         let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
+         
+         self.queue.write_texture(
+             wgpu::ImageCopyTexture {
+                 texture: target_array,
+                 mip_level: 0,
+                 origin: wgpu::Origin3d { x: 0, y: 0, z: layer_index },
+                 aspect: wgpu::TextureAspect::All,
+             },
+             data,
+             wgpu::ImageDataLayout {
+                 offset: 0,
+                 bytes_per_row: Some(bytes_per_row),
+                 rows_per_image: Some(TEXTURE_RESOLUTION),
+             },
+             wgpu::Extent3d {
+                 width: TEXTURE_RESOLUTION,
+                 height: TEXTURE_RESOLUTION,
+                 depth_or_array_layers: 1,
+             },
+         );
+    }
+
+
+    // --- Public Resource Management ---
+    
+    pub fn add_texture(
         &mut self,
         name: &str,
         data: &[u8],
-        target_array: &mev::Image,
+        target_array: &wgpu::Texture, // Pass the specific array to add to
     ) -> Result<usize, RendererError> {
         if let Some(index) = self.texture_manager.textures.get(name) {
             return Ok(*index);
         }
         if self.texture_manager.next_texture_index >= MAX_TEXTURE_COUNT as usize {
-            return Err(RendererError::ResourceCreation(
-                "Texture array is full".to_string(),
-            ));
+            return Err(RendererError::ResourceCreation("Texture array is full".to_string()));
         }
 
         let index = self.texture_manager.next_texture_index;
         self.texture_manager.next_texture_index += 1;
-        let upload_cbuf =
-            prepare_texture_slice_upload(&mut self.queue, data, target_array, index as u32)
-                .unwrap();
-        self.pending_uploads.push(upload_cbuf);
-        self.texture_manager
-            .textures
-            .insert(name.to_string(), index);
+        
+        self.upload_texture_slice(data, target_array, index as u32);
+        
+        self.texture_manager.textures.insert(name.to_string(), index);
         Ok(index)
     }
 
-    pub fn add_mesh(
-        &mut self,
-        id: usize,
-        vertices: &[Vertex],
-        indices: &[u32],
-    ) -> Result<(), RendererError> {
-        let vertex_buffer = self
-            .queue
-            .new_buffer_init(mev::BufferInitDesc {
-                data: bytemuck::cast_slice(vertices),
-                usage: mev::BufferUsage::VERTEX,
-                memory: mev::Memory::Device,
-                name: &format!("mesh-vbo-{}", id),
-            })
-            .map_err(|e| {
-                RendererError::MevError(format!("Failed to create vertex buffer: {}", e))
-            })?;
-        let index_buffer = self
-            .queue
-            .new_buffer_init(mev::BufferInitDesc {
-                data: bytemuck::cast_slice(indices),
-                usage: mev::BufferUsage::INDEX,
-                memory: mev::Memory::Device,
-                name: &format!("mesh-ibo-{}", id),
-            })
-            .map_err(|e| {
-                RendererError::MevError(format!("Failed to create index buffer: {}", e))
-            })?;
+
+    pub fn add_mesh(&mut self, id: usize, vertices: &[Vertex], indices: &[u32]) -> Result<(), RendererError> {
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("mesh-vbo-{}", id)),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("mesh-ibo-{}", id)),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
         self.meshes.insert(
             id,
             Mesh {
@@ -625,10 +480,10 @@ impl Renderer {
     pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
         if id >= 256 {
             return Err(RendererError::ResourceCreation(format!(
-                "Material ID {} is out of bounds. Maximum is 255.",
-                id
+                "Material ID {} is out of bounds. Maximum is 255.", id
             )));
         }
+
         let shader_data = MaterialShaderData {
             albedo: material.albedo,
             metallic: material.metallic,
@@ -640,256 +495,364 @@ impl Renderer {
             metallic_roughness_texture_index: material.metallic_roughness_texture_index,
             _p2: 0,
         };
-        let material_offset = id * std::mem::size_of::<MaterialShaderData>();
-        let material_slice =
-            self.material_uniform_buffer.as_ref().unwrap().slice(
-                material_offset..(material_offset + std::mem::size_of::<MaterialShaderData>()),
-            );
 
-        let mut upload_encoder = self.queue.new_command_encoder().unwrap();
-        upload_encoder
-            .copy()
-            .write_buffer_slice(material_slice, &[shader_data]);
-        let upload_cbuf = upload_encoder.finish().unwrap();
-        self.pending_uploads.push(upload_cbuf);
+        let material_offset = (id * std::mem::size_of::<MaterialShaderData>()) as wgpu::BufferAddress;
+        self.queue.write_buffer(
+            self.material_uniform_buffer.as_ref().unwrap(),
+            material_offset,
+            bytemuck::bytes_of(&shader_data),
+        );
+        
         self.materials.insert(id, material);
         Ok(())
     }
+    
+    // --- Pipeline and Bind Group Creation ---
 
-    // ✅ CORRECTED: Reverted to an associated function (`Self::`) to avoid the borrow conflict.
-    fn create_or_update_pipeline(
-        queue: &mev::Queue,
-        shader_library: &Option<mev::Library>,
-        pipeline: &mut Option<mev::RenderPipeline>,
-        depth_texture: &mut Option<mev::Image>,
-        last_format: &mut Option<mev::PixelFormat>,
-        last_extent: &mut Option<mev::Extent2>,
-        target_format: mev::PixelFormat,
-        target_extent: mev::Extent2,
-    ) -> Result<(), mev::DeviceError> {
-        if pipeline.is_some()
-            && *last_format == Some(target_format)
-            && *last_extent == Some(target_extent)
-        {
-            return Ok(());
+    fn create_pbr_bind_groups(&mut self) {
+        let device = &self.device;
+        let albedo_view = self.albedo_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
+        let normal_view = self.normal_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
+        let mr_view = self.metallic_roughness_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
+        
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PBR Bind Group Layout"),
+            entries: &[
+                // Camera Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Lights Buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Materials Buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Albedo Texture Array
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Normal Texture Array
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Metallic/Roughness Texture Array
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        
+        self.pbr_bind_groups = (0..FRAMES_IN_FLIGHT).map(|i| {
+             device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("PBR Bind Group {}", i)),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buffers[i].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.lights_buffers[i].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.material_uniform_buffer.as_ref().unwrap().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&albedo_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&normal_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&mr_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(self.sampler.as_ref().unwrap()),
+                    },
+                ],
+            })
+        }).collect();
+
+        self.pbr_bind_group_layout = Some(bind_group_layout);
+    }
+    
+    fn create_depth_texture(&mut self) {
+        let depth_texture_desc = wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size: wgpu::Extent3d {
+                width: self.surface_config.width,
+                height: self.surface_config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        let texture = self.device.create_texture(&depth_texture_desc);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth_texture = Some(texture);
+        self.depth_texture_view = Some(view);
+    }
+    
+    fn create_pipeline(&mut self) {
+        let device = &self.device;
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/pbr.wgsl"));
+        
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Render Pipeline Layout"),
+            bind_group_layouts: &[self.pbr_bind_group_layout.as_ref().unwrap()],
+            push_constant_ranges: &[wgpu::PushConstantRange {
+                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                range: 0..std::mem::size_of::<PbrConstants>() as u32,
+            }],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("PBR Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        self.pipeline = Some(pipeline);
+    }
+    
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            self.surface_config.width = new_size.width;
+            self.surface_config.height = new_size.height;
+            self.surface.configure(&self.device, &self.surface_config);
+            // Re-create depth texture with the new size
+            self.create_depth_texture();
         }
-        let library = shader_library.as_ref().unwrap();
-        *depth_texture = Some(queue.new_image(mev::ImageDesc {
-            extent: target_extent.into(),
-            format: mev::PixelFormat::D32Float,
-            usage: mev::ImageUsage::all(),
-            layers: 1,
-            levels: 1,
-            name: "depth-buffer",
-        })?);
-        *pipeline = Some(
-            queue
-                .new_render_pipeline(mev::RenderPipelineDesc {
-                    name: "pbr-pipeline",
-                    vertex_shader: library.entry("vs_main"),
-                    vertex_attributes: vec![
-                        mev::VertexAttributeDesc {
-                            format: mev::VertexFormat::Float32x3,
-                            offset: 0,
-                            buffer_index: 0,
-                        },
-                        mev::VertexAttributeDesc {
-                            format: mev::VertexFormat::Float32x3,
-                            offset: 12,
-                            buffer_index: 0,
-                        },
-                        mev::VertexAttributeDesc {
-                            format: mev::VertexFormat::Float32x2,
-                            offset: 24,
-                            buffer_index: 0,
-                        },
-                        mev::VertexAttributeDesc {
-                            format: mev::VertexFormat::Float32x3,
-                            offset: 32,
-                            buffer_index: 0,
-                        },
-                    ],
-                    vertex_layouts: vec![mev::VertexLayoutDesc {
-                        stride: std::mem::size_of::<Vertex>() as u32,
-                        step_mode: mev::VertexStepMode::Vertex,
-                    }],
-                    primitive_topology: mev::PrimitiveTopology::Triangle,
-                    raster: Some(mev::RasterDesc {
-                        fragment_shader: Some(library.entry("fs_main")),
-                        color_targets: vec![mev::ColorTargetDesc {
-                            format: target_format,
-                            blend: None,
-                        }],
-                        depth_stencil: Some(mev::DepthStencilDesc {
-                            format: mev::PixelFormat::D32Float,
-                            write_enabled: true,
-                            compare: mev::CompareFunction::Less,
-                        }),
-                        front_face: mev::FrontFace::CounterClockwise,
-                        culling: mev::Culling::Back,
-                    }),
-                    arguments: &[PbrArguments::LAYOUT],
-                    constants: PbrConstants::SIZE,
-                })
-                .unwrap(),
-        );
-        *last_format = Some(target_format);
-        *last_extent = Some(target_extent);
-        Ok(())
     }
 
     pub fn update_render_data(&mut self, render_data: RenderData) {
         self.current_render_data = Some(render_data);
     }
 
-    pub fn render(&mut self, window: &Window) -> Result<(), RendererError> {
-        if self.shader_library.is_none() {
-            self.initialize_resources().map_err(|e| {
-                RendererError::MevError(format!("Failed to initialize resources: {}", e))
-            })?;
+    // --- RENDER FUNCTION ---
+    pub fn render(&mut self) -> Result<(), RendererError> {
+        if self.pipeline.is_none() {
+            self.initialize_resources()?;
         }
 
         let Some(ref render_data) = self.current_render_data else {
             return Ok(());
         };
 
-        let mut frame = self
-            .surface
-            .next_frame()
-            .map_err(|e| RendererError::MevError(format!("Failed to get next frame: {}", e)))?;
-        let target_format = frame.image().format();
-        let target_extent = frame.image().extent().expect_2d();
-
-        // ✅ CORRECTED: Call the associated function `Self::` and pass the mutable fields explicitly.
-        // This resolves the borrow checker error.
-        Self::create_or_update_pipeline(
-            &self.queue,
-            &self.shader_library,
-            &mut self.pipeline,
-            &mut self.depth_texture,
-            &mut self.last_format,
-            &mut self.last_extent,
-            target_format,
-            target_extent,
-        )
-        .map_err(|e| RendererError::MevError(format!("Failed to create pipeline: {}", e)))?;
-
-        let current_camera_buffer = &self.camera_buffers[self.frame_index];
-        let current_lights_buffer = &self.lights_buffers[self.frame_index];
-
-        let mut command_buffers_for_frame = std::mem::take(&mut self.pending_uploads);
-
-        let uniform_cbuf = prepare_uniform_updates(
-            &mut self.queue,
-            current_camera_buffer,
-            current_lights_buffer,
-            render_data,
-            (window.inner_size().width, window.inner_size().height),
-        )
-        .unwrap();
-        command_buffers_for_frame.push(uniform_cbuf);
-
-        let mut encoder = self.queue.new_command_encoder().unwrap();
-        encoder.init_image(
-            mev::PipelineStages::COLOR_OUTPUT,
-            mev::PipelineStages::empty(),
-            frame.image(),
-        );
-
-        encoder.barrier(
-            mev::PipelineStages::all(),
-            mev::PipelineStages::FRAGMENT_SHADER,
-        );
-
-        {
-            let mut render_pass = encoder.render(mev::RenderPassDesc {
-                name: "main-pass",
-                color_attachments: &[
-                    mev::AttachmentDesc::new(frame.image()).clear(mev::ClearColor::DARK_GRAY)
-                ],
-                depth_stencil_attachment: Some(
-                    mev::AttachmentDesc::new(self.depth_texture.as_ref().unwrap())
-                        .clear(mev::ClearDepthStencil::default()),
-                ),
-            });
-            render_pass.with_viewport(mev::Offset3::ZERO, target_extent.to_3d().cast_as_f32());
-            render_pass.with_scissor(mev::Offset2::ZERO, target_extent);
-            render_pass.with_pipeline(self.pipeline.as_ref().unwrap());
-            render_pass.with_arguments(
-                0,
-                &PbrArguments {
-                    camera_buffer: current_camera_buffer.clone(),
-                    lights_buffer: current_lights_buffer.clone(),
-                    material_buffer: self.material_uniform_buffer.as_ref().unwrap().clone(),
-                    albedo_texture_array: self.albedo_texture_array.as_ref().unwrap().clone(),
-                    normal_texture_array: self.normal_texture_array.as_ref().unwrap().clone(),
-                    metallic_roughness_texture_array: self
-                        .metallic_roughness_texture_array
-                        .as_ref()
-                        .unwrap()
-                        .clone(),
-                    sampler: self.sampler.as_ref().unwrap().clone(),
-                    default_properties_buffer: self
-                        .default_properties_buffer
-                        .as_ref()
-                        .unwrap()
-                        .clone(),
+        // --- Get Frame and Encoder ---
+        let output_frame: wgpu::SurfaceTexture;
+        match self.surface.get_current_texture() {
+            Ok(new_frame) => {
+                output_frame = new_frame
+            }
+            Err(e) => {
+            // Handle surface errors (e.g., window resized, timeout)
+            match e {
+                wgpu::SurfaceError::Lost => {
+                    self.resize(self.window.inner_size()); // Reconfigure surface
                 },
-            );
+                wgpu::SurfaceError::OutOfMemory => {
+                    // Catastrophic error, should probably panic.
+                    return Err(RendererError::ResourceCreation("WGPU Surface: Out of Memory".to_string()));
+                }
+                _ => (), // Other errors like Outdated/Timeout can be ignored for now.
+            }
+            return Err(RendererError::ResourceCreation(format!("Failed to acquire next swap chain texture: {}", e)))
+        }
+        };
 
+        let output_view = output_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        // --- Update Uniforms ---
+        let camera_transform = &render_data.camera_transform;
+        let eye: Vec3 = camera_transform.position.into();
+        let forward = camera_transform.forward().normalize_or_zero();
+        let view_matrix = Mat4::look_at_rh(eye, eye + forward, camera_transform.up().normalize_or(Vec3::Y));
+        let projection_matrix = Mat4::perspective_rh(
+            (45.0_f32).to_radians(),
+            self.surface_config.width as f32 / self.surface_config.height as f32,
+            0.1,
+            1000.0,
+        );
+        let camera_uniforms = CameraUniforms {
+            view_matrix: view_matrix.to_cols_array_2d(),
+            projection_matrix: projection_matrix.to_cols_array_2d(),
+            view_position: eye.to_array(),
+            light_count: render_data.lights.len() as u32,
+        };
+        self.queue.write_buffer(&self.camera_buffers[self.frame_index], 0, bytemuck::bytes_of(&camera_uniforms));
+
+        let light_data: Vec<LightData> = render_data
+            .lights.iter().take(MAX_LIGHTS)
+            .map(|light| LightData {
+                position: light.transform.position.into(),
+                light_type: match light.light_type {
+                    LightType::Directional => 0, LightType::Point => 1, LightType::Spot { .. } => 2,
+                },
+                color: light.color, intensity: light.intensity, direction: light.transform.forward().into(), _padding: 0.0,
+            }).collect();
+        self.queue.write_buffer(&self.lights_buffers[self.frame_index], 0, bytemuck::cast_slice(&light_data));
+
+        // --- Command Encoding ---
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Main Command Encoder"),
+        });
+
+        { // Scoped to release borrow of encoder
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Main Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.depth_texture_view.as_ref().unwrap(),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+
+            render_pass.set_pipeline(self.pipeline.as_ref().unwrap());
+            render_pass.set_bind_group(0, &self.pbr_bind_groups[self.frame_index], &[]);
+            
             for object in &render_data.objects {
-                let Some(mesh) = self.meshes.get(&object.mesh_id) else {
-                    continue;
-                };
-                if !self.materials.contains_key(&object.material_id) {
-                    continue;
-                };
-
-                let transform = &object.transform;
-                let scale: Vec3 = transform.scale.into();
-
-                // check to prevent NaN generation
-                let is_scale_valid =
-                    scale.x.abs() > 0.0001 && scale.y.abs() > 0.0001 && scale.z.abs() > 0.0001;
+                let Some(mesh) = self.meshes.get(&object.mesh_id) else { continue; };
+                if !self.materials.contains_key(&object.material_id) { continue; };
 
                 let model_matrix = Mat4::from_scale_rotation_translation(
                     object.transform.scale.into(),
                     Quat::from(object.transform.rotation).normalize(),
                     object.transform.position.into(),
-                ).to_cols_array_2d(); 
+                );
                 
-                // Use a safe fallback if the scale is zero
-                let normal_matrix = if is_scale_valid {
-                    // The inverse transpose of the model matrix is correct for normals
-                    Mat4::from_mat3(
-                    Mat3::from_mat4(Mat4::from_cols_array_2d(&model_matrix))
-                        .inverse()
-                        .transpose(),
-                    ).to_cols_array_2d()
-                } else {
-                    // Fallback to a non-inverted matrix if scale is zero
-                    model_matrix
-                };
+                let normal_matrix = Mat4::from_mat3(Mat3::from_mat4(model_matrix).inverse().transpose());
 
-                render_pass.with_constants(&PbrConstants {
-                    model_matrix,
-                    normal_matrix,
+                let constants = PbrConstants {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    normal_matrix: normal_matrix.to_cols_array_2d(),
                     material_id: object.material_id as u32,
                     _p: [0; 3],
-                });
-                render_pass.bind_vertex_buffers(0, &[mesh.vertex_buffer.clone()]);
-                render_pass.bind_index_buffer(&mesh.index_buffer);
-                render_pass.draw_indexed(0, 0..mesh.index_count, 0..1);
+                };
+                
+                render_pass.set_push_constants(
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&constants),
+                );
+
+                render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
-        self.queue
-            .sync_frame(&mut frame, mev::PipelineStages::COLOR_OUTPUT);
-        encoder.present(frame, mev::PipelineStages::COLOR_OUTPUT);
-        let main_render_cbuf = encoder.finish().unwrap();
-        command_buffers_for_frame.push(main_render_cbuf);
-
-        window.pre_present_notify();
-        self.queue.submit(command_buffers_for_frame, true).unwrap();
+        
+        // --- Submit and Present ---
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output_frame.present();
 
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
 

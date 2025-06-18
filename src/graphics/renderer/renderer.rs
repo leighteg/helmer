@@ -4,6 +4,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
+use tracing::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::{util::DeviceExt, Adapter}; // Import for create_buffer_init
@@ -264,7 +265,7 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
-        Ok(Self {
+        let mut instance = Self {
             instance,
             device: Arc::new(device),
             queue,
@@ -288,7 +289,12 @@ impl Renderer {
             sampler: None,
             frame_index: 0,
             current_render_data: None,
-        })
+        };
+
+        instance.initialize_resources().unwrap();
+        info!("initialized renderer");
+
+        return Ok(instance);
     }
 
     // --- Resource Initialization ---

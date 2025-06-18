@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use tracing::info;
+
 use super::{component::Component, component_pool::ComponentPool, system_scheduler::SystemScheduler};
 
 pub type Entity = usize;
@@ -13,12 +15,16 @@ pub struct ECSCore {
 
 impl ECSCore {
     pub fn new() -> Self {
-        Self {
+        let instance = Self {
             next_entity_id: 0,
             entities: HashSet::new(),
             component_pool: ComponentPool::new(),
             system_scheduler: SystemScheduler::new(),
-        }
+        };
+        
+        info!("initialized ECSCore");
+
+        return instance;
     }
 
     pub fn create_entity(&mut self) -> Entity {

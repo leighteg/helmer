@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::runtime::input_manager::InputManager;
+
 use super::{ecs_core::ECSCore, system::System};
 
 // Extended system entry with scheduling metadata
@@ -98,7 +100,7 @@ impl SystemScheduler {
     // Build execution groups with parallel safety
     fn rebuild_execution_groups(&mut self) {
         if !self.dirty {
-            trace!("Groups not dirty, skipping rebuild");
+            //trace!("Groups not dirty, skipping rebuild");
             return;
         }
 
@@ -111,13 +113,13 @@ impl SystemScheduler {
 
         // Sort by priority (higher priority first)
         remaining.sort_by(|&a, &b| self.systems[b].priority.cmp(&self.systems[a].priority));
-        trace!(
+        /*trace!(
             "Systems sorted by priority: {:?}",
             remaining
                 .iter()
                 .map(|&i| (&self.systems[i].name, self.systems[i].priority))
                 .collect::<Vec<_>>()
-        );
+        );*/
 
         let mut group_count = 0;
         while !remaining.is_empty() {
@@ -139,21 +141,21 @@ impl SystemScheduler {
                 if can_add {
                     current_group.push(system_idx);
                     remaining.remove(i);
-                    trace!(
+                    /*trace!(
                         "Added system '{}' to group {}",
                         self.systems[system_idx].name, group_count
-                    );
+                    );*/
                 } else {
                     i += 1;
                 }
             }
 
             if !current_group.is_empty() {
-                trace!(
+                /*trace!(
                     "Created group {} with {} systems",
                     group_count,
                     current_group.len()
-                );
+                );*/
                 self.execution_groups.push(current_group);
                 group_count += 1;
             } else {
@@ -162,25 +164,25 @@ impl SystemScheduler {
             }
         }
 
-        trace!("Total execution groups: {}", self.execution_groups.len());
+        //trace!("Total execution groups: {}", self.execution_groups.len());
         self.dirty = false;
     }
 
-    pub fn run_all(&mut self, ecs_core: &mut ECSCore) {
-        trace!("SystemScheduler::run_all() called");
+    pub fn run_all(&mut self, dt: f32, ecs_core: &mut ECSCore, input_manager: &InputManager) {
+        //trace!("SystemScheduler::run_all() called");
         self.rebuild_execution_groups();
 
-        trace!(
+        /*trace!(
             "Processing {} execution groups",
             self.execution_groups.len()
-        );
+        );*/
 
         for (group_idx, group) in self.execution_groups.iter().enumerate() {
-            trace!(
+            /*trace!(
                 "Processing group {} with {} systems",
                 group_idx,
                 group.len()
-            );
+            );*/
 
             let systems_to_run: Vec<_> = group
                 .iter()
@@ -196,7 +198,7 @@ impl SystemScheduler {
                     let mut execution_time = Duration::from_nanos(0);
 
                     if let Ok(mut sys) = system.lock() {
-                        sys.run(ecs_core);
+                        sys.run(dt, ecs_core, input_manager);
                         execution_time = start.elapsed();
                     } else {
                         tracing::error!("failed to lock system!")

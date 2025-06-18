@@ -8,22 +8,20 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use glam::{DVec2, Vec2};
+use tracing::info;
 use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    window::{Window, WindowId},
+    application::ApplicationHandler, event::{MouseScrollDelta, TouchPhase, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, platform::modifier_supplement::KeyEventExtModifierSupplement, window::{Window, WindowId}
 };
 
 use crate::{
-    ecs::ecs_core::ECSCore,
+    ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::renderer::renderer::{
         Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
     },
-    provided::components::{Light, MeshAsset, MeshRenderer, Transform},
+    provided::components::{Camera, Light, MeshAsset, MeshRenderer, Transform},
+    runtime::input_manager::InputManager,
 };
-
-use super::ecs::system_scheduler::SystemScheduler;
 
 pub enum Message {
     Init(Window),
@@ -34,6 +32,8 @@ pub enum Message {
 pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
+
+    input_manager: Arc<RwLock<InputManager>>,
 
     // Threading
     logic_thread: Option<JoinHandle<()>>,
@@ -59,6 +59,8 @@ impl Runtime {
 
         Self {
             ecs: Arc::new(RwLock::new(ECSCore::new())),
+
+            input_manager: Arc::new(RwLock::new(InputManager::new())),
 
             logic_thread: None,
             running: Arc::new(AtomicBool::new(true)),
@@ -89,6 +91,7 @@ impl Runtime {
 
     fn start_logic_thread(&mut self, sender: mpsc::Sender<Message>) {
         let ecs = Arc::clone(&self.ecs);
+        let input_manager = Arc::clone(&self.input_manager);
         //let scene_root = Arc::clone(&self.scene_root);
         let running = Arc::clone(&self.running);
         let frame_barrier = Arc::clone(&self.frame_barrier);
@@ -106,6 +109,7 @@ impl Runtime {
                 // Run ECS systems
                 {
                     let mut ecs_guard = ecs.write().unwrap();
+                    let input_manager_guard = input_manager.read().unwrap();
 
                     // 1. Temporarily take ownership of the scheduler, leaving a placeholder.
                     // This is a zero-cost operation that satisfies the borrow checker.
@@ -116,7 +120,7 @@ impl Runtime {
 
                     // 2. Now we can call run_all. We pass the ECS data (without the real scheduler).
                     // The borrow checker is happy because `scheduler` and `ecs_guard` are separate variables.
-                    scheduler.run_all(&mut ecs_guard);
+                    scheduler.run_all(dt, &mut ecs_guard, &input_manager_guard);
 
                     // 3. Put the scheduler back where it belongs.
                     let _ = std::mem::replace(&mut ecs_guard.system_scheduler, scheduler);
@@ -153,14 +157,21 @@ impl Runtime {
                         }
                     }
 
+                    let mut camera_transform = Transform { // default camera transform (if world contains no cameras)
+                        position: glam::Vec3::new(0.0, 0.0, -3.0), // Camera 3 units back on Z axis
+                        rotation: glam::Quat::IDENTITY, // Looking down negative Z (forward for camera)
+                        scale: glam::Vec3::ONE,
+                    };
+
+                    let camera_entities = ecs_guard.component_pool.query_exact::<(Transform, Camera)>();
+                    for (transform, _) in camera_entities {
+                        camera_transform = *transform;
+                    }
+
                     RenderData {
                         objects,
                         lights,
-                        camera_transform: Transform {
-                            position: glam::Vec3::new(0.0, 0.0, -3.0), // Camera 3 units back on Z axis
-                            rotation: glam::Quat::IDENTITY, // Looking down negative Z (forward for camera)
-                            scale: glam::Vec3::ONE,
-                        },
+                        camera_transform,
                     }
                 };
 
@@ -182,6 +193,8 @@ impl Runtime {
             let _ = sender.send(Message::Shutdown);
             tracing::info!("Logic thread shutting down");
         }));
+
+        info!("initialized logic thread");
     }
 
     pub fn shutdown(&mut self) {
@@ -228,6 +241,61 @@ impl ApplicationHandler for Runtime {
             WindowEvent::Resized(new_size) => {
                 self.renderer.as_mut().unwrap().resize(new_size);
             }
+
+            // INPUT HANDLING
+            WindowEvent::KeyboardInput { device_id, event, is_synthetic } => {
+                let mut key_code: Option<KeyCode> = None;
+
+                match event.physical_key {
+                    PhysicalKey::Code(code) => key_code = Some(code),
+                    _ => {}
+                }
+
+                let mut input_manager_guard = self.input_manager.write().unwrap();
+
+                if key_code.is_some() {
+                    if event.state.is_pressed() {
+                        input_manager_guard.active_keys.insert(key_code.unwrap());
+                    }
+                    else {
+                        input_manager_guard.active_keys.remove(&key_code.unwrap());
+                    }
+                }
+            }
+            WindowEvent::MouseInput { device_id, state, button } => {
+                let mut input_manager_guard = self.input_manager.write().unwrap();
+                
+                match state {
+                    winit::event::ElementState::Pressed => {
+                        input_manager_guard.active_mouse_buttons.insert(button);
+                    }
+                    winit::event::ElementState::Released => {
+                        input_manager_guard.active_mouse_buttons.remove(&button);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { device_id, position } => {
+                let mut input_manager_guard = self.input_manager.write().unwrap();
+
+                input_manager_guard.cursor_position = DVec2::from_array([position.x, position.y]);
+            }
+            WindowEvent::MouseWheel { device_id, delta, phase } => {
+                let mut input_manager_guard = self.input_manager.write().unwrap();
+
+                match phase {
+                    TouchPhase::Started | TouchPhase::Moved => {
+                        match delta {
+                            MouseScrollDelta::LineDelta(x, y) => {
+                                input_manager_guard.mouse_wheel = Vec2::from_array([x, y]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    TouchPhase::Cancelled | TouchPhase::Ended => {
+                        input_manager_guard.mouse_wheel = Vec2::ZERO;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -246,10 +314,7 @@ impl ApplicationHandler for Runtime {
 
         if !self.initialized {
             self.renderer = Some(pollster::block_on(Renderer::new(Arc::clone(self.window.as_ref().unwrap()))).unwrap());
-            self.renderer
-                .as_mut()
-                .unwrap()
-                .render();
+
             let cube_mesh = MeshAsset::cube("cube mesh".into());
             self.renderer.as_mut().unwrap().add_mesh(
                 0,
@@ -260,6 +325,7 @@ impl ApplicationHandler for Runtime {
                 .as_mut()
                 .unwrap()
                 .add_material(0, Material::default());
+
             (self.init_callback)(self);
 
             self.initialized = true;

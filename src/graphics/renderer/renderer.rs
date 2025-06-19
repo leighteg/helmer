@@ -118,7 +118,6 @@ struct LightData {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct PbrConstants {
     model_matrix: [[f32; 4]; 4],
-    normal_matrix: [[f32; 4]; 4],
     material_id: u32,
     _p: [u32; 3],
 }
@@ -211,6 +210,9 @@ impl Renderer {
 
         // --- Instance, Adapter, Device, Queue ---
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            #[cfg(target_os = "windows")]
+            backends: wgpu::Backends::DX12,
+            #[cfg(not(target_os = "windows"))]
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -258,7 +260,7 @@ impl Renderer {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
         let surface_config = wgpu::SurfaceConfiguration {
@@ -266,7 +268,7 @@ impl Renderer {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: surface_caps.present_modes[0],
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -742,7 +744,7 @@ impl Renderer {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[self.pbr_bind_group_layout.as_ref().unwrap()],
             push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                stages: wgpu::ShaderStages::VERTEX,
                 range: 0..std::mem::size_of::<PbrConstants>() as u32,
             }],
         });
@@ -964,18 +966,15 @@ impl Renderer {
                     .lerp(object.current_transform.scale, alpha);
 
                 let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
-                let normal_matrix =
-                    Mat4::from_mat3(Mat3::from_mat4(model_matrix).inverse().transpose());
 
                 let constants = PbrConstants {
                     model_matrix: model_matrix.to_cols_array_2d(),
-                    normal_matrix: normal_matrix.to_cols_array_2d(),
                     material_id: object.material_id as u32,
                     _p: [0; 3],
                 };
 
                 render_pass.set_push_constants(
-                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    wgpu::ShaderStages::VERTEX,
                     0,
                     bytemuck::bytes_of(&constants),
                 );

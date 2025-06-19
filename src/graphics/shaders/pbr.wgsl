@@ -5,7 +5,6 @@ const MIN_ROUGHNESS: f32 = 0.04;
 
 //=============== STRUCTS ===============//
 
-// (Structs are unchanged from your original code)
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -20,6 +19,7 @@ struct VertexOutput {
     @location(2) tex_coord: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) world_bitangent: vec3<f32>,
+    @location(5) @interpolate(flat) material_id: u32,
 }
 
 struct CameraUniforms {
@@ -52,50 +52,75 @@ struct MaterialData {
 
 struct PbrConstants {
     model_matrix: mat4x4<f32>,
-    normal_matrix: mat4x4<f32>,
     material_id: u32,
-    _p: vec3<u32>,
 }
 
 //=============== BINDINGS ===============//
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-@group(0) @binding(1) var<storage, read> lights_buffer: array<LightData>; // Renamed for clarity
-@group(0) @binding(2) var<storage, read> materials_buffer: array<MaterialData>; // Renamed for clarity
-
-// ✅ CHANGE #1: Use the correct texture_2d_array type.
+@group(0) @binding(1) var<storage, read> lights_buffer: array<LightData>;
+@group(0) @binding(2) var<storage, read> materials_buffer: array<MaterialData>;
 @group(0) @binding(3) var albedo_texture_array: texture_2d_array<f32>;
 @group(0) @binding(4) var normal_texture_array: texture_2d_array<f32>;
 @group(0) @binding(5) var metallic_roughness_texture_array: texture_2d_array<f32>;
-
 @group(0) @binding(6) var pbr_sampler: sampler;
 
+@vertex
 var<push_constant> constants: PbrConstants;
+
+//=============== MATRIX UTILITY FUNCTIONS ===============//
+
+fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
+              m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+              m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
+    let inv_det = 1.0 / det;
+
+    var res: mat3x3<f32>;
+    res[0][0] = (m[1][1] * m[2][2] - m[2][1] * m[1][2]) * inv_det;
+    res[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det;
+    res[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det;
+    res[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det;
+    res[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det;
+    res[1][2] = (m[1][0] * m[0][2] - m[0][0] * m[1][2]) * inv_det;
+    res[2][0] = (m[1][0] * m[2][1] - m[2][0] * m[1][1]) * inv_det;
+    res[2][1] = (m[2][0] * m[0][1] - m[0][0] * m[2][1]) * inv_det;
+    res[2][2] = (m[0][0] * m[1][1] - m[1][0] * m[0][1]) * inv_det;
+
+    return res;
+}
 
 //=============== VERTEX SHADER ===============//
 
-// (Vertex shader is unchanged)
 @vertex
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
-
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
 
-    out.world_normal = normalize((constants.normal_matrix * vec4<f32>(vertex.normal, 0.0)).xyz);
+    let model_mat3 = mat3x3<f32>(
+        constants.model_matrix[0].xyz,
+        constants.model_matrix[1].xyz,
+        constants.model_matrix[2].xyz,
+    );
+
+    let normal_matrix = transpose(mat3_inverse(model_mat3));
+    
+    out.world_normal = normalize(normal_matrix * vertex.normal);
     out.world_tangent = normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
     out.world_bitangent = normalize(cross(out.world_normal, out.world_tangent));
 
     out.tex_coord = vertex.tex_coord;
+    out.material_id = constants.material_id;
 
     return out;
 }
 
 //=============== PBR UTILITY FUNCTIONS ===============//
 
-// (PBR utility functions are unchanged)
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
     let a2 = a * a;
@@ -127,10 +152,8 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- 1. Material & PBR Property Setup ---
+    let material = materials_buffer[in.material_id];
 
-    let material = materials_buffer[constants.material_id];
-
-    // ✅ FIX: Use the 4-argument version of textureSample.
     let albedo_sample = textureSample(
         albedo_texture_array,
         pbr_sampler,
@@ -152,10 +175,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
 
     // --- 2. Normal Mapping ---
-
     var N: vec3<f32>;
     if material.normal_texture_index > 0i {
-        // ✅ FIX: Use the 4-argument version of textureSample here as well.
         let tangent_space_normal = textureSample(
             normal_texture_array,
             pbr_sampler,
@@ -167,7 +188,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let B = normalize(in.world_bitangent);
         let N_geom = normalize(in.world_normal);
         let tbn = mat3x3<f32>(T, B, N_geom);
-
         N = normalize(tbn * tangent_space_normal);
     } else {
         N = normalize(in.world_normal);
@@ -185,29 +205,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var radiance: vec3<f32>;
 
         if light.light_type == 0u { // Directional Light
-            if length(light.direction) < 0.0001 { continue; }
             L = normalize(-light.direction);
             radiance = light.color * light.intensity;
-        } else if light.light_type == 2u { // ✅ NEW: Spot Light
-            let to_light_vector = light.position - in.world_position;
-            let light_dir = normalize(light.direction);
-            let spot_cos_angle = dot(normalize(to_light_vector), -light_dir);
-
-            // 60 degrees was your spot light angle from main.rs. cos(30) is half the angle.
-            let spot_cos_cutoff = 0.866; // cos(30 degrees)
-
-            if spot_cos_angle > spot_cos_cutoff {
-                let dist_sq = dot(to_light_vector, to_light_vector);
-                if dist_sq < 0.0001 { continue; }
-                L = normalize(to_light_vector);
-                let attenuation = 1.0 / dist_sq;
-                let spot_effect = smoothstep(spot_cos_cutoff, spot_cos_cutoff + 0.05, spot_cos_angle);
-                radiance = light.color * light.intensity * attenuation * spot_effect;
-            } else {
-                // Outside the cone, radiance is zero.
-                radiance = vec3f(0.0);
-            }
-        } else { // Point Light (light_type == 1u)
+        } else { // Point Light
             let to_light_vector = light.position - in.world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
             if dist_sq < 0.0001 { continue; }

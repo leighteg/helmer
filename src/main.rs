@@ -4,7 +4,10 @@ use glam::{DVec2, Mat4, Quat, Vec3, Vec4Swizzles};
 use helmer_rs::{
     ecs::system::System,
     provided::components::{Camera, Light, LightType, MeshAsset, MeshRenderer, Transform},
-    runtime::{input_manager::{self, InputManager}, runtime::Runtime}
+    runtime::{
+        input_manager::{self, InputManager},
+        runtime::Runtime,
+    },
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -68,19 +71,27 @@ fn main() {
         );
         ecs_guard.add_component(cube_entity, MeshRenderer::new(0, 0));
 
+        let sphere_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            sphere_entity,
+            Transform {
+                position: glam::Vec3::new(1.0, 0.0, 0.0),
+                rotation,
+                scale: glam::Vec3::from_array([0.5, 0.5, 0.5]),
+            },
+        );
+        ecs_guard.add_component(sphere_entity, MeshRenderer::new(1, 0));
+
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity,
             Transform {
-                position: glam::Vec3::new(0.0, 1.5, 5.0),
+                position: glam::Vec3::new(0.0, 1.5, 2.0),
                 rotation: glam::Quat::from_array([0.0, 0.0, 0.0, 1.0]),
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
-            light_entity,
-            Light::spot(glam::vec3(0.0, 0.0, 1.0), 10.0, 60.0),
-        );
+        ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 0));
 
         let light_entity_2 = ecs_guard.create_entity();
@@ -107,7 +118,12 @@ impl System for SpinnerSystem {
         "SpinnerSystem"
     }
 
-    fn run(&mut self, dt: f32, ecs: &mut helmer_rs::ecs::ecs_core::ECSCore, input_manager: &InputManager) {
+    fn run(
+        &mut self,
+        dt: f32,
+        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        input_manager: &InputManager,
+    ) {
         let rotation_speed = 0.50 * dt;
         let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
@@ -127,10 +143,10 @@ impl System for SpinnerSystem {
 struct FreecamSystem {
     speed: f32,
     sensitivity: f32,
-    
+
     yaw: f32,
     pitch: f32,
-    
+
     // State for handling activation
     last_cursor_position: DVec2,
     is_looking: bool, // Our new state flag
@@ -154,38 +170,41 @@ impl System for FreecamSystem {
         "FreecamSystem"
     }
 
-    fn run(&mut self, dt: f32, ecs: &mut helmer_rs::ecs::ecs_core::ECSCore, input_manager: &InputManager) {
-        if self.speed >= 0.1 || input_manager.mouse_wheel.y.is_sign_positive() {
-            self.speed += input_manager.mouse_wheel.y / 12.0;
+    fn run(
+        &mut self,
+        dt: f32,
+        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        input_manager: &InputManager,
+    ) {
+        if !input_manager.is_mouse_button_active(&MouseButton::Left) {
+            self.is_looking = false;
+            return;
+        }
+
+        if self.speed >= 0.5 || input_manager.mouse_wheel.y.is_sign_positive() {
+            self.speed += input_manager.mouse_wheel.y / 2.0;
         }
         let mut speed = self.speed;
-        
+
         // --- 1. Handle Rotation from Mouse Input ---
-
-        // Check if the condition to look is met (e.g., left mouse button is down)
-        if input_manager.is_mouse_button_active(&MouseButton::Left) {
-            if !self.is_looking {
-                // This is the first frame the button is pressed.
-                // Reset last_cursor_position to the current position to avoid the "spaz".
-                self.last_cursor_position = input_manager.cursor_position;
-                self.is_looking = true;
-            } else {
-                // We are actively looking, so calculate delta and apply rotation.
-                let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
-                self.last_cursor_position = input_manager.cursor_position;
-
-                if cursor_delta.length_squared() > 0.0 {
-                    self.yaw   -= cursor_delta.x as f32 * self.sensitivity * dt;
-                    self.pitch += cursor_delta.y as f32 * self.sensitivity * dt;
-
-                    // Clamp pitch
-                    let pitch_limit = FRAC_PI_2 - 0.01;
-                    self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
-                }
-            }
+        if !self.is_looking {
+            // This is the first frame the button is pressed.
+            // Reset last_cursor_position to the current position to avoid the "spaz".
+            self.last_cursor_position = input_manager.cursor_position;
+            self.is_looking = true;
         } else {
-            // Mouse button is not pressed, so we are not looking.
-            self.is_looking = false;
+            // We are actively looking, so calculate delta and apply rotation.
+            let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
+            self.last_cursor_position = input_manager.cursor_position;
+
+            if cursor_delta.length_squared() > 0.0 {
+                self.yaw -= cursor_delta.x as f32 * self.sensitivity * dt;
+                self.pitch += cursor_delta.y as f32 * self.sensitivity * dt;
+
+                // Clamp pitch
+                let pitch_limit = FRAC_PI_2 - 0.01;
+                self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
+            }
         }
 
         // --- 2. Calculate Final Orientation ---
@@ -207,18 +226,17 @@ impl System for FreecamSystem {
                 KeyCode::Space => velocity += Vec3::Y,
                 KeyCode::KeyC => velocity -= Vec3::Y,
                 KeyCode::ShiftLeft => speed *= 2.5,
-                _ => {},
+                _ => {}
             }
         }
 
         // --- 4. Apply Updates to ECS Components ---
-        ecs.component_pool.query_exact_mut_for_each::<(Transform, Camera), _>(
-            |(transform, _)| {
+        ecs.component_pool
+            .query_exact_mut_for_each::<(Transform, Camera), _>(|(transform, _)| {
                 transform.rotation = orientation;
                 if velocity.length_squared() > 0.0 {
                     transform.position += velocity.normalize() * speed * dt;
                 }
-            },
-        );
+            });
     }
 }

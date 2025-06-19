@@ -296,13 +296,14 @@ impl MeshAsset {
                 let p1 = p0 + 1;
                 let p2 = (r + 1) * (segments + 1) + s;
                 let p3 = p2 + 1;
-
+        
+                // Counter-Clockwise (CCW) winding
                 indices.push(p0);
-                indices.push(p2);
-                indices.push(p1);
-
                 indices.push(p1);
                 indices.push(p2);
+        
+                indices.push(p2);
+                indices.push(p1);
                 indices.push(p3);
             }
         }

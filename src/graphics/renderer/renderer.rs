@@ -4,10 +4,13 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
-use tracing::info;
-use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::{util::DeviceExt, Adapter}; // Import for create_buffer_init
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use tracing::info;
+use wgpu::{Adapter, util::DeviceExt}; // Import for create_buffer_init
 use winit::window::Window;
 
 // --- CONSTANTS (Unchanged) ---
@@ -65,17 +68,18 @@ impl Default for Material {
     }
 }
 
-// RenderObject, RenderLight, RenderData structs remain the same logically.
 #[derive(Debug, Clone)]
 pub struct RenderObject {
-    pub transform: Transform,
+    pub previous_transform: Transform, // last logic tick
+    pub current_transform: Transform,  // current logic tick
     pub mesh_id: usize,
     pub material_id: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct RenderLight {
-    pub transform: Transform,
+    pub previous_transform: Transform,
+    pub current_transform: Transform,
     pub color: [f32; 3],
     pub intensity: f32,
     pub light_type: LightType,
@@ -84,7 +88,8 @@ pub struct RenderLight {
 pub struct RenderData {
     pub objects: Vec<RenderObject>,
     pub lights: Vec<RenderLight>,
-    pub camera_transform: Transform,
+    pub previous_camera_transform: Transform,
+    pub current_camera_transform: Transform,
 }
 
 // --- SHADER DATA STRUCTS (bytemuck, no mev) ---
@@ -192,11 +197,16 @@ pub struct Renderer {
 
     frame_index: usize,
     current_render_data: Option<RenderData>,
+
+    /// The fixed duration of a single logic update (e.g., 1.0 / 60.0).
+    logic_frame_duration: Duration,
+    /// The wall-clock time when the last `RenderData` packet was received.
+    last_logic_update_time: Instant,
 }
 
 impl Renderer {
     // CHANGE: `new` is now async due to wgpu's adapter/device request flow.
-    pub async fn new(window: Arc<Window>) -> Result<Self, RendererError> {
+    pub async fn new(window: Arc<Window>, logic_fps: f32) -> Result<Self, RendererError> {
         let size = window.inner_size();
 
         // --- Instance, Adapter, Device, Queue ---
@@ -216,30 +226,28 @@ impl Renderer {
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
-            .await {
-                Ok(new_adapter) => {
-                    adapter = new_adapter
-                }
-                Err(err) => {
-                    return Err(RendererError::ResourceCreation(
-                        format!("Failed to find a suitable GPU adapter: {}", err),
-                    ))
-                }
-            };
+            .await
+        {
+            Ok(new_adapter) => adapter = new_adapter,
+            Err(err) => {
+                return Err(RendererError::ResourceCreation(format!(
+                    "Failed to find a suitable GPU adapter: {}",
+                    err
+                )));
+            }
+        };
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Primary Device"),
-                    required_features: wgpu::Features::PUSH_CONSTANTS,
-                    required_limits: wgpu::Limits {
-                        // Add push constant limit
-                        max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
-                        ..Default::default()
-                    },
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Primary Device"),
+                required_features: wgpu::Features::PUSH_CONSTANTS,
+                required_limits: wgpu::Limits {
+                    // Add push constant limit
+                    max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
                     ..Default::default()
                 },
-            )
+                ..Default::default()
+            })
             .await
             .map_err(|e| {
                 RendererError::ResourceCreation(format!("Failed to create device: {}", e))
@@ -289,6 +297,8 @@ impl Renderer {
             sampler: None,
             frame_index: 0,
             current_render_data: None,
+            logic_frame_duration: Duration::from_secs_f32(1.0 / logic_fps),
+            last_logic_update_time: Instant::now(),
         };
 
         instance.initialize_resources().unwrap();
@@ -360,13 +370,12 @@ impl Renderer {
             ..texture_desc
         }));
 
-        self.metallic_roughness_texture_array = Some(device.create_texture(
-            &wgpu::TextureDescriptor {
+        self.metallic_roughness_texture_array =
+            Some(device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("metallic-roughness-texture-array"),
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 ..texture_desc
-            },
-        ));
+            }));
 
         self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Default Sampler"),
@@ -383,59 +392,89 @@ impl Renderer {
         self.create_depth_texture();
         self.create_pbr_bind_groups();
         self.create_pipeline();
-        
+
         Ok(())
     }
-    
+
     // Helper for uploading default textures
     fn upload_default_textures(&self) {
         let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
-        
+
         // Albedo (White)
         let white_pixel = [255u8, 255, 255, 255];
-        let default_albedo_data: Vec<u8> = white_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
-        self.upload_texture_slice(&default_albedo_data, self.albedo_texture_array.as_ref().unwrap(), 0);
+        let default_albedo_data: Vec<u8> = white_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        self.upload_texture_slice(
+            &default_albedo_data,
+            self.albedo_texture_array.as_ref().unwrap(),
+            0,
+        );
 
         // Normal (Flat)
         let flat_normal_pixel = [128u8, 128, 255, 255]; // Represents (0, 0, 1)
-        let default_normal_data: Vec<u8> = flat_normal_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
-        self.upload_texture_slice(&default_normal_data, self.normal_texture_array.as_ref().unwrap(), 0);
+        let default_normal_data: Vec<u8> = flat_normal_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        self.upload_texture_slice(
+            &default_normal_data,
+            self.normal_texture_array.as_ref().unwrap(),
+            0,
+        );
 
         // Metallic/Roughness (Black/Grey)
         let default_mr_pixel = [255u8, 204, 0, 255]; // R=AO, G=Roughness, B=Metallic
-        let default_mr_data: Vec<u8> = default_mr_pixel.iter().cycle().take(resolution_area * 4).copied().collect();
-        self.upload_texture_slice(&default_mr_data, self.metallic_roughness_texture_array.as_ref().unwrap(), 0);
+        let default_mr_data: Vec<u8> = default_mr_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        self.upload_texture_slice(
+            &default_mr_data,
+            self.metallic_roughness_texture_array.as_ref().unwrap(),
+            0,
+        );
     }
-    
+
     // Helper to upload a single texture slice
     fn upload_texture_slice(&self, data: &[u8], target_array: &wgpu::Texture, layer_index: u32) {
-         let bytes_per_pixel = 4u32;
-         let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
-         
-         self.queue.write_texture(
-             wgpu::ImageCopyTexture {
-                 texture: target_array,
-                 mip_level: 0,
-                 origin: wgpu::Origin3d { x: 0, y: 0, z: layer_index },
-                 aspect: wgpu::TextureAspect::All,
-             },
-             data,
-             wgpu::ImageDataLayout {
-                 offset: 0,
-                 bytes_per_row: Some(bytes_per_row),
-                 rows_per_image: Some(TEXTURE_RESOLUTION),
-             },
-             wgpu::Extent3d {
-                 width: TEXTURE_RESOLUTION,
-                 height: TEXTURE_RESOLUTION,
-                 depth_or_array_layers: 1,
-             },
-         );
+        let bytes_per_pixel = 4u32;
+        let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: target_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer_index,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(TEXTURE_RESOLUTION),
+            },
+            wgpu::Extent3d {
+                width: TEXTURE_RESOLUTION,
+                height: TEXTURE_RESOLUTION,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
-
     // --- Public Resource Management ---
-    
+
     pub fn add_texture(
         &mut self,
         name: &str,
@@ -446,31 +485,43 @@ impl Renderer {
             return Ok(*index);
         }
         if self.texture_manager.next_texture_index >= MAX_TEXTURE_COUNT as usize {
-            return Err(RendererError::ResourceCreation("Texture array is full".to_string()));
+            return Err(RendererError::ResourceCreation(
+                "Texture array is full".to_string(),
+            ));
         }
 
         let index = self.texture_manager.next_texture_index;
         self.texture_manager.next_texture_index += 1;
-        
+
         self.upload_texture_slice(data, target_array, index as u32);
-        
-        self.texture_manager.textures.insert(name.to_string(), index);
+
+        self.texture_manager
+            .textures
+            .insert(name.to_string(), index);
         Ok(index)
     }
 
+    pub fn add_mesh(
+        &mut self,
+        id: usize,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) -> Result<(), RendererError> {
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("mesh-vbo-{}", id)),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
-    pub fn add_mesh(&mut self, id: usize, vertices: &[Vertex], indices: &[u32]) -> Result<(), RendererError> {
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("mesh-vbo-{}", id)),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("mesh-ibo-{}", id)),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("mesh-ibo-{}", id)),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         self.meshes.insert(
             id,
@@ -486,7 +537,8 @@ impl Renderer {
     pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
         if id >= 256 {
             return Err(RendererError::ResourceCreation(format!(
-                "Material ID {} is out of bounds. Maximum is 255.", id
+                "Material ID {} is out of bounds. Maximum is 255.",
+                id
             )));
         }
 
@@ -502,25 +554,38 @@ impl Renderer {
             _p2: 0,
         };
 
-        let material_offset = (id * std::mem::size_of::<MaterialShaderData>()) as wgpu::BufferAddress;
+        let material_offset =
+            (id * std::mem::size_of::<MaterialShaderData>()) as wgpu::BufferAddress;
         self.queue.write_buffer(
             self.material_uniform_buffer.as_ref().unwrap(),
             material_offset,
             bytemuck::bytes_of(&shader_data),
         );
-        
+
         self.materials.insert(id, material);
         Ok(())
     }
-    
+
     // --- Pipeline and Bind Group Creation ---
 
     fn create_pbr_bind_groups(&mut self) {
         let device = &self.device;
-        let albedo_view = self.albedo_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
-        let normal_view = self.normal_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
-        let mr_view = self.metallic_roughness_texture_array.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default());
-        
+        let albedo_view = self
+            .albedo_texture_array
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let normal_view = self
+            .normal_texture_array
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mr_view = self
+            .metallic_roughness_texture_array
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PBR Bind Group Layout"),
             entries: &[
@@ -599,47 +664,55 @@ impl Renderer {
                 },
             ],
         });
-        
-        self.pbr_bind_groups = (0..FRAMES_IN_FLIGHT).map(|i| {
-             device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("PBR Bind Group {}", i)),
-                layout: &bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.camera_buffers[i].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.lights_buffers[i].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.material_uniform_buffer.as_ref().unwrap().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&albedo_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&normal_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&mr_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(self.sampler.as_ref().unwrap()),
-                    },
-                ],
+
+        self.pbr_bind_groups = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("PBR Bind Group {}", i)),
+                    layout: &bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.camera_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.lights_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self
+                                .material_uniform_buffer
+                                .as_ref()
+                                .unwrap()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&albedo_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&normal_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&mr_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(
+                                self.sampler.as_ref().unwrap(),
+                            ),
+                        },
+                    ],
+                })
             })
-        }).collect();
+            .collect();
 
         self.pbr_bind_group_layout = Some(bind_group_layout);
     }
-    
+
     fn create_depth_texture(&mut self) {
         let depth_texture_desc = wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
@@ -660,11 +733,11 @@ impl Renderer {
         self.depth_texture = Some(texture);
         self.depth_texture_view = Some(view);
     }
-    
+
     fn create_pipeline(&mut self) {
         let device = &self.device;
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/pbr.wgsl"));
-        
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
             bind_group_layouts: &[self.pbr_bind_group_layout.as_ref().unwrap()],
@@ -716,7 +789,7 @@ impl Renderer {
 
         self.pipeline = Some(pipeline);
     }
-    
+
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.surface_config.width = new_size.width;
@@ -729,6 +802,8 @@ impl Renderer {
 
     pub fn update_render_data(&mut self, render_data: RenderData) {
         self.current_render_data = Some(render_data);
+
+        self.last_logic_update_time = Instant::now();
     }
 
     // --- RENDER FUNCTION ---
@@ -741,35 +816,48 @@ impl Renderer {
             return Ok(());
         };
 
+        let time_since_update = self.last_logic_update_time.elapsed();
+        let alpha = (time_since_update.as_secs_f32() / self.logic_frame_duration.as_secs_f32())
+            .clamp(0.0, 1.0);
+
         // --- Get Frame and Encoder ---
         let output_frame: wgpu::SurfaceTexture;
         match self.surface.get_current_texture() {
-            Ok(new_frame) => {
-                output_frame = new_frame
-            }
+            Ok(new_frame) => output_frame = new_frame,
             Err(e) => {
-            // Handle surface errors (e.g., window resized, timeout)
-            match e {
-                wgpu::SurfaceError::Lost => {
-                    self.resize(self.window.inner_size()); // Reconfigure surface
-                },
-                wgpu::SurfaceError::OutOfMemory => {
-                    // Catastrophic error, should probably panic.
-                    return Err(RendererError::ResourceCreation("WGPU Surface: Out of Memory".to_string()));
+                // Handle surface errors (e.g., window resized, timeout)
+                match e {
+                    wgpu::SurfaceError::Lost => {
+                        self.resize(self.window.inner_size()); // Reconfigure surface
+                    }
+                    wgpu::SurfaceError::OutOfMemory => {
+                        // Catastrophic error, should probably panic.
+                        return Err(RendererError::ResourceCreation(
+                            "WGPU Surface: Out of Memory".to_string(),
+                        ));
+                    }
+                    _ => (), // Other errors like Outdated/Timeout can be ignored for now.
                 }
-                _ => (), // Other errors like Outdated/Timeout can be ignored for now.
+                return Err(RendererError::ResourceCreation(format!(
+                    "Failed to acquire next swap chain texture: {}",
+                    e
+                )));
             }
-            return Err(RendererError::ResourceCreation(format!("Failed to acquire next swap chain texture: {}", e)))
-        }
         };
 
-        let output_view = output_frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+        let output_view = output_frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         // --- Update Uniforms ---
-        let camera_transform = &render_data.camera_transform;
-        let eye: Vec3 = camera_transform.position.into();
-        let forward = camera_transform.forward().normalize_or_zero();
-        let view_matrix = Mat4::look_at_rh(eye, eye + forward, camera_transform.up().normalize_or(Vec3::Y));
+        // --- CAMERA INTERPOLATION ---
+        let prev_cam = &render_data.previous_camera_transform;
+        let curr_cam = &render_data.current_camera_transform;
+        let eye = prev_cam.position.lerp(curr_cam.position, alpha);
+        let rotation = Quat::from(prev_cam.rotation).slerp(curr_cam.rotation, alpha);
+        let forward = rotation * Vec3::Z;
+        let up = rotation * Vec3::Y;
+        let view_matrix = Mat4::look_at_rh(eye, eye + forward, up);
         let projection_matrix = Mat4::perspective_rh(
             (45.0_f32).to_radians(),
             self.surface_config.width as f32 / self.surface_config.height as f32,
@@ -782,25 +870,55 @@ impl Renderer {
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
         };
-        self.queue.write_buffer(&self.camera_buffers[self.frame_index], 0, bytemuck::bytes_of(&camera_uniforms));
+        self.queue.write_buffer(
+            &self.camera_buffers[self.frame_index],
+            0,
+            bytemuck::bytes_of(&camera_uniforms),
+        );
 
+        // --- LIGHT INTERPOLATION ---
         let light_data: Vec<LightData> = render_data
-            .lights.iter().take(MAX_LIGHTS)
-            .map(|light| LightData {
-                position: light.transform.position.into(),
-                light_type: match light.light_type {
-                    LightType::Directional => 0, LightType::Point => 1, LightType::Spot { .. } => 2,
-                },
-                color: light.color, intensity: light.intensity, direction: light.transform.forward().into(), _padding: 0.0,
-            }).collect();
-        self.queue.write_buffer(&self.lights_buffers[self.frame_index], 0, bytemuck::cast_slice(&light_data));
+            .lights
+            .iter()
+            .take(MAX_LIGHTS)
+            .map(|light| {
+                let position = light
+                    .previous_transform
+                    .position
+                    .lerp(light.current_transform.position, alpha);
+                let rotation = Quat::from(light.previous_transform.rotation)
+                    .slerp(light.current_transform.rotation, alpha);
+                let direction = (rotation * -Vec3::Z).normalize_or_zero();
+
+                LightData {
+                    position: position.into(),
+                    light_type: match light.light_type {
+                        LightType::Directional => 0,
+                        LightType::Point => 1,
+                        LightType::Spot { .. } => 2,
+                    },
+                    color: light.color,
+                    intensity: light.intensity,
+                    direction: direction.into(),
+                    _padding: 0.0,
+                }
+            })
+            .collect();
+        self.queue.write_buffer(
+            &self.lights_buffers[self.frame_index],
+            0,
+            bytemuck::cast_slice(&light_data),
+        );
 
         // --- Command Encoding ---
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Main Command Encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Main Command Encoder"),
+            });
 
-        { // Scoped to release borrow of encoder
+        {
+            // Scoped to release borrow of encoder
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Main Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -824,18 +942,30 @@ impl Renderer {
 
             render_pass.set_pipeline(self.pipeline.as_ref().unwrap());
             render_pass.set_bind_group(0, &self.pbr_bind_groups[self.frame_index], &[]);
-            
-            for object in &render_data.objects {
-                let Some(mesh) = self.meshes.get(&object.mesh_id) else { continue; };
-                if !self.materials.contains_key(&object.material_id) { continue; };
 
-                let model_matrix = Mat4::from_scale_rotation_translation(
-                    object.transform.scale.into(),
-                    Quat::from(object.transform.rotation).normalize(),
-                    object.transform.position.into(),
-                );
-                
-                let normal_matrix = Mat4::from_mat3(Mat3::from_mat4(model_matrix).inverse().transpose());
+            for object in &render_data.objects {
+                let Some(mesh) = self.meshes.get(&object.mesh_id) else {
+                    continue;
+                };
+                if !self.materials.contains_key(&object.material_id) {
+                    continue;
+                };
+
+                // Interpolate position, rotation, and scale for this specific object.
+                let position = object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, alpha);
+                let rotation = Quat::from(object.previous_transform.rotation)
+                    .slerp(object.current_transform.rotation, alpha);
+                let scale = object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, alpha);
+
+                let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
+                let normal_matrix =
+                    Mat4::from_mat3(Mat3::from_mat4(model_matrix).inverse().transpose());
 
                 let constants = PbrConstants {
                     model_matrix: model_matrix.to_cols_array_2d(),
@@ -843,7 +973,7 @@ impl Renderer {
                     material_id: object.material_id as u32,
                     _p: [0; 3],
                 };
-                
+
                 render_pass.set_push_constants(
                     wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     0,
@@ -851,11 +981,12 @@ impl Renderer {
                 );
 
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass
+                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
-        
+
         // --- Submit and Present ---
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();

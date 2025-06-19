@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 use glam::{DVec2, Vec2};
+use hashbrown::HashMap;
 use tracing::info;
 use winit::{
     application::ApplicationHandler, event::{MouseScrollDelta, TouchPhase, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, platform::modifier_supplement::KeyEventExtModifierSupplement, window::{Window, WindowId}
@@ -29,6 +30,13 @@ pub enum Message {
     RenderData(RenderData),
 }
 
+#[derive(Clone, Default)]
+struct ExtractedState {
+    objects: HashMap<usize, Transform>,
+    lights: HashMap<usize, Transform>,
+    camera_transform: Transform,
+}
+
 pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
@@ -45,6 +53,7 @@ pub struct Runtime {
     frame_barrier: Arc<Barrier>,
 
     renderer: Option<Renderer>,
+    target_fps: f32,
 
     // Window management
     window: Option<Arc<Window>>,
@@ -70,6 +79,7 @@ impl Runtime {
             frame_barrier: Arc::new(Barrier::new(2)),
 
             renderer: None,
+            target_fps: 240.0,
 
             window: None,
             initialized: false,
@@ -95,11 +105,14 @@ impl Runtime {
         //let scene_root = Arc::clone(&self.scene_root);
         let running = Arc::clone(&self.running);
         let frame_barrier = Arc::clone(&self.frame_barrier);
+        let target_fps = self.target_fps;
 
         self.logic_thread = Some(thread::spawn(move || {
             let mut last_time = Instant::now();
-            let target_fps = 60.0;
             let frame_duration = Duration::from_secs_f32(1.0 / target_fps);
+
+            // State tracking for interpolation.
+            let mut previous_state: Option<ExtractedState> = None;
 
             while running.load(Ordering::Relaxed) {
                 let now = Instant::now();
@@ -126,62 +139,77 @@ impl Runtime {
                     let _ = std::mem::replace(&mut ecs_guard.system_scheduler, scheduler);
                 }
 
-                // Extract render data
-                let render_data = {
+                let current_state = {
                     let ecs_guard = ecs.read().unwrap();
-                    let mut objects = Vec::new();
-                    let mut lights = Vec::new();
-
-                    // Collect renderable objects
-                    for (entity, mesh) in
-                        ecs_guard.get_all_entities_with_component::<MeshRenderer>()
-                    {
+                    let mut objects = HashMap::new();
+                    let mut lights = HashMap::new();
+    
+                    for (entity, _) in ecs_guard.get_all_entities_with_component::<MeshRenderer>() {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
-                            objects.push(RenderObject {
-                                transform: *transform,
-                                mesh_id: mesh.mesh_id,
-                                material_id: mesh.material_id,
-                            });
+                            objects.insert(entity, *transform);
                         }
                     }
-
-                    // Collect lights
-                    for (entity, light) in ecs_guard.get_all_entities_with_component::<Light>() {
+                    for (entity, _) in ecs_guard.get_all_entities_with_component::<Light>() {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
-                            lights.push(RenderLight {
-                                transform: *transform,
-                                color: light.color.into(),
-                                intensity: light.intensity,
-                                light_type: light.light_type,
-                            });
+                            lights.insert(entity, *transform);
                         }
                     }
-
-                    let mut camera_transform = Transform { // default camera transform (if world contains no cameras)
-                        position: glam::Vec3::new(0.0, 0.0, -3.0), // Camera 3 units back on Z axis
-                        rotation: glam::Quat::IDENTITY, // Looking down negative Z (forward for camera)
-                        scale: glam::Vec3::ONE,
-                    };
-
-                    let camera_entities = ecs_guard.component_pool.query_exact::<(Transform, Camera)>();
-                    for (transform, _) in camera_entities {
+                    let mut camera_transform = Transform::default();
+                    for (transform, _) in ecs_guard.component_pool.query_exact::<(Transform, Camera)>() {
                         camera_transform = *transform;
                     }
-
+                    ExtractedState { objects, lights, camera_transform }
+                };
+    
+                // 2. Build the final RenderData packet.
+                let render_data_to_send = {
+                    // Use the previous state if it exists, otherwise use the current state twice.
+                    let prev = previous_state.as_ref().unwrap_or(&current_state);
+                    let ecs_guard = ecs.read().unwrap(); // Read-lock to get component data
+    
+                    let objects = current_state.objects.iter().map(|(id, &current_transform)| {
+                        // Find the matching component data
+                        let mesh_renderer = ecs_guard.get_component::<MeshRenderer>(*id).unwrap();
+                        RenderObject {
+                            previous_transform: *prev.objects.get(id).unwrap_or(&current_transform),
+                            current_transform,
+                            mesh_id: mesh_renderer.mesh_id,
+                            material_id: mesh_renderer.material_id,
+                        }
+                    }).collect();
+    
+                    let lights = current_state.lights.iter().map(|(id, &current_transform)| {
+                        // Find the matching component data
+                        let light = ecs_guard.get_component::<Light>(*id).unwrap();
+                        RenderLight {
+                            previous_transform: *prev.lights.get(id).unwrap_or(&current_transform),
+                            current_transform,
+                            color: light.color.into(),
+                            intensity: light.intensity,
+                            light_type: light.light_type,
+                        }
+                    }).collect();
+    
                     RenderData {
                         objects,
                         lights,
-                        camera_transform,
+                        previous_camera_transform: prev.camera_transform,
+                        current_camera_transform: current_state.camera_transform,
                     }
                 };
 
                 // Send render data to main thread (non-blocking)
-                if sender.send(Message::RenderData(render_data)).is_err() {
+                if sender.send(Message::RenderData(render_data_to_send)).is_err() {
                     // Channel full or disconnected, skip this frame's render data
                     // This prevents the logic thread from blocking
                 }
 
+                // CRUCIAL: The current state becomes the previous state for the next frame.
+                previous_state = Some(current_state);
+
                 //frame_barrier.wait();
+
+                input_manager.write().unwrap().prepare_for_next_frame();
 
                 // Frame rate limiting
                 let elapsed = now.elapsed();
@@ -282,19 +310,18 @@ impl ApplicationHandler for Runtime {
             WindowEvent::MouseWheel { device_id, delta, phase } => {
                 let mut input_manager_guard = self.input_manager.write().unwrap();
 
-                match phase {
-                    TouchPhase::Started | TouchPhase::Moved => {
-                        match delta {
-                            MouseScrollDelta::LineDelta(x, y) => {
-                                input_manager_guard.mouse_wheel = Vec2::from_array([x, y]);
-                            }
-                            _ => {}
-                        }
+                let scroll_delta = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        const PIXELS_PER_LINE: f32 = 38.0;
+                        glam::vec2(
+                            pos.x as f32 / PIXELS_PER_LINE,
+                            pos.y as f32 / PIXELS_PER_LINE,
+                        )
                     }
-                    TouchPhase::Cancelled | TouchPhase::Ended => {
-                        input_manager_guard.mouse_wheel = Vec2::ZERO;
-                    }
-                }
+                };
+
+                input_manager_guard.add_scroll(scroll_delta);
             }
             _ => {}
         }
@@ -313,13 +340,19 @@ impl ApplicationHandler for Runtime {
         }
 
         if !self.initialized {
-            self.renderer = Some(pollster::block_on(Renderer::new(Arc::clone(self.window.as_ref().unwrap()))).unwrap());
+            self.renderer = Some(pollster::block_on(Renderer::new(Arc::clone(self.window.as_ref().unwrap()), self.target_fps)).unwrap());
 
-            let cube_mesh = MeshAsset::cube("cube mesh".into());
+            let cube_mesh = MeshAsset::cube("cube".into());
+            let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
             self.renderer.as_mut().unwrap().add_mesh(
                 0,
                 &cube_mesh.vertices.unwrap(),
                 &cube_mesh.indices,
+            );
+            self.renderer.as_mut().unwrap().add_mesh(
+                1,
+                &uv_sphere_mesh.vertices.unwrap(),
+                &uv_sphere_mesh.indices,
             );
             self.renderer
                 .as_mut()

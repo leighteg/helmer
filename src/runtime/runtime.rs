@@ -1,4 +1,6 @@
 use core::time;
+use glam::{DVec2, Vec2};
+use hashbrown::HashMap;
 use std::{
     sync::{
         Arc, Barrier, Mutex, RwLock,
@@ -8,11 +10,14 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use glam::{DVec2, Vec2};
-use hashbrown::HashMap;
 use tracing::info;
 use winit::{
-    application::ApplicationHandler, event::{MouseScrollDelta, TouchPhase, WindowEvent}, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, platform::modifier_supplement::KeyEventExtModifierSupplement, window::{Window, WindowId}
+    application::ApplicationHandler,
+    event::{MouseScrollDelta, TouchPhase, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
+    window::{Window, WindowId},
 };
 
 use crate::{
@@ -40,7 +45,6 @@ struct ExtractedState {
 pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
-
     input_manager: Arc<RwLock<InputManager>>,
 
     // Threading
@@ -117,7 +121,6 @@ impl Runtime {
             while running.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 let dt = (now - last_time).as_secs_f32();
-                last_time = now;
 
                 // Run ECS systems
                 {
@@ -143,7 +146,7 @@ impl Runtime {
                     let ecs_guard = ecs.read().unwrap();
                     let mut objects = HashMap::new();
                     let mut lights = HashMap::new();
-    
+
                     for (entity, _) in ecs_guard.get_all_entities_with_component::<MeshRenderer>() {
                         if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
                             objects.insert(entity, *transform);
@@ -155,41 +158,63 @@ impl Runtime {
                         }
                     }
                     let mut camera_transform = Transform::default();
-                    for (transform, _) in ecs_guard.component_pool.query_exact::<(Transform, Camera)>() {
+                    for (transform, _) in ecs_guard
+                        .component_pool
+                        .query_exact::<(Transform, Camera)>()
+                    {
                         camera_transform = *transform;
                     }
-                    ExtractedState { objects, lights, camera_transform }
+                    ExtractedState {
+                        objects,
+                        lights,
+                        camera_transform,
+                    }
                 };
-    
+
                 // 2. Build the final RenderData packet.
                 let render_data_to_send = {
                     // Use the previous state if it exists, otherwise use the current state twice.
                     let prev = previous_state.as_ref().unwrap_or(&current_state);
                     let ecs_guard = ecs.read().unwrap(); // Read-lock to get component data
-    
-                    let objects = current_state.objects.iter().map(|(id, &current_transform)| {
-                        // Find the matching component data
-                        let mesh_renderer = ecs_guard.get_component::<MeshRenderer>(*id).unwrap();
-                        RenderObject {
-                            previous_transform: *prev.objects.get(id).unwrap_or(&current_transform),
-                            current_transform,
-                            mesh_id: mesh_renderer.mesh_id,
-                            material_id: mesh_renderer.material_id,
-                        }
-                    }).collect();
-    
-                    let lights = current_state.lights.iter().map(|(id, &current_transform)| {
-                        // Find the matching component data
-                        let light = ecs_guard.get_component::<Light>(*id).unwrap();
-                        RenderLight {
-                            previous_transform: *prev.lights.get(id).unwrap_or(&current_transform),
-                            current_transform,
-                            color: light.color.into(),
-                            intensity: light.intensity,
-                            light_type: light.light_type,
-                        }
-                    }).collect();
-    
+
+                    let objects = current_state
+                        .objects
+                        .iter()
+                        .map(|(id, &current_transform)| {
+                            // Find the matching component data
+                            let mesh_renderer =
+                                ecs_guard.get_component::<MeshRenderer>(*id).unwrap();
+                            RenderObject {
+                                previous_transform: *prev
+                                    .objects
+                                    .get(id)
+                                    .unwrap_or(&current_transform),
+                                current_transform,
+                                mesh_id: mesh_renderer.mesh_id,
+                                material_id: mesh_renderer.material_id,
+                            }
+                        })
+                        .collect();
+
+                    let lights = current_state
+                        .lights
+                        .iter()
+                        .map(|(id, &current_transform)| {
+                            // Find the matching component data
+                            let light = ecs_guard.get_component::<Light>(*id).unwrap();
+                            RenderLight {
+                                previous_transform: *prev
+                                    .lights
+                                    .get(id)
+                                    .unwrap_or(&current_transform),
+                                current_transform,
+                                color: light.color.into(),
+                                intensity: light.intensity,
+                                light_type: light.light_type,
+                            }
+                        })
+                        .collect();
+
                     RenderData {
                         objects,
                         lights,
@@ -199,7 +224,10 @@ impl Runtime {
                 };
 
                 // Send render data to main thread (non-blocking)
-                if sender.send(Message::RenderData(render_data_to_send)).is_err() {
+                if sender
+                    .send(Message::RenderData(render_data_to_send))
+                    .is_err()
+                {
                     // Channel full or disconnected, skip this frame's render data
                     // This prevents the logic thread from blocking
                 }
@@ -207,15 +235,38 @@ impl Runtime {
                 // CRUCIAL: The current state becomes the previous state for the next frame.
                 previous_state = Some(current_state);
 
-                //frame_barrier.wait();
-
                 input_manager.write().unwrap().prepare_for_next_frame();
 
                 // Frame rate limiting
-                let elapsed = now.elapsed();
-                if elapsed < frame_duration {
-                    thread::sleep(frame_duration - elapsed);
+                let logic_elapsed = now.elapsed();
+                let time_to_wait = frame_duration.saturating_sub(logic_elapsed);
+
+                // Only sleep if we have more than a millisecond to spare.
+                // This `sleep` is the coarse, low-CPU part.
+                if time_to_wait > Duration::from_millis(1) {
+                    // Sleep for most of the duration, but leave the last millisecond for spinning.
+                    thread::sleep(time_to_wait - Duration::from_millis(1));
                 }
+
+                // This is the "spin" part for high-precision timing.
+                // It will use 100% of its CPU core for the final moment to hit the target time exactly.
+                while now.elapsed() < frame_duration {
+                    // Hint to the OS that it can schedule other work.
+                    thread::yield_now();
+                }
+
+                // Reset last_time for the next iteration's dt calculation
+                last_time = now;
+
+                /*let total_tick_duration = now.elapsed();
+                tracing::info!(
+                    "Target FPS: {:.2}, Actual Tick Time: {:.2}ms ({:.2} FPS)",
+                    target_fps,
+                    total_tick_duration.as_secs_f32() * 1000.0,
+                    1.0 / total_tick_duration.as_secs_f32()
+                );*/
+
+                //frame_barrier.wait();
             }
 
             let _ = sender.send(Message::Shutdown);
@@ -249,14 +300,33 @@ impl ApplicationHandler for Runtime {
             WindowEvent::RedrawRequested => {
                 if let Some(window) = &self.window {
                     if let Some(renderer) = &mut self.renderer {
-                        match self.render_receiver.try_recv() {
-                            Ok(Message::RenderData(data)) => {
-                                renderer.update_render_data(data);
+                        let mut latest_data: Option<RenderData> = None;
+                        // Loop over `try_recv` to pull all pending messages from the channel.
+                        while let Ok(message) = self.render_receiver.try_recv() {
+                            match message {
+                                Message::RenderData(data) => {
+                                    // Keep overwriting our variable, so we only end up
+                                    // with the very last, most recent RenderData packet.
+                                    latest_data = Some(data);
+                                }
+                                Message::Shutdown => {
+                                    self.running.store(false, Ordering::Relaxed);
+                                    // Break the loop if we get a shutdown message
+                                    break;
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
 
-                        renderer.render().unwrap(); // literally everything lacks proper err handling. todo: refactor all non-critical unwraps
+                        // After the loop, if we received any data at all, update the renderer
+                        // with the newest available state.
+                        if let Some(data) = latest_data {
+                            renderer.update_render_data(data);
+                        }
+
+                        if let Err(e) = renderer.render() {
+                            tracing::error!("Renderer error: {}", e);
+                        }
                     }
 
                     if self.running.load(Ordering::Relaxed) == true {
@@ -271,7 +341,11 @@ impl ApplicationHandler for Runtime {
             }
 
             // INPUT HANDLING
-            WindowEvent::KeyboardInput { device_id, event, is_synthetic } => {
+            WindowEvent::KeyboardInput {
+                device_id,
+                event,
+                is_synthetic,
+            } => {
                 let mut key_code: Option<KeyCode> = None;
 
                 match event.physical_key {
@@ -284,15 +358,18 @@ impl ApplicationHandler for Runtime {
                 if key_code.is_some() {
                     if event.state.is_pressed() {
                         input_manager_guard.active_keys.insert(key_code.unwrap());
-                    }
-                    else {
+                    } else {
                         input_manager_guard.active_keys.remove(&key_code.unwrap());
                     }
                 }
             }
-            WindowEvent::MouseInput { device_id, state, button } => {
+            WindowEvent::MouseInput {
+                device_id,
+                state,
+                button,
+            } => {
                 let mut input_manager_guard = self.input_manager.write().unwrap();
-                
+
                 match state {
                     winit::event::ElementState::Pressed => {
                         input_manager_guard.active_mouse_buttons.insert(button);
@@ -302,12 +379,19 @@ impl ApplicationHandler for Runtime {
                     }
                 }
             }
-            WindowEvent::CursorMoved { device_id, position } => {
+            WindowEvent::CursorMoved {
+                device_id,
+                position,
+            } => {
                 let mut input_manager_guard = self.input_manager.write().unwrap();
 
                 input_manager_guard.cursor_position = DVec2::from_array([position.x, position.y]);
             }
-            WindowEvent::MouseWheel { device_id, delta, phase } => {
+            WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+            } => {
                 let mut input_manager_guard = self.input_manager.write().unwrap();
 
                 let scroll_delta = match delta {
@@ -331,16 +415,18 @@ impl ApplicationHandler for Runtime {
         if self.window.is_none() {
             let mut window = Window::default_attributes();
             window.title = "helmer engine — 2025 leighton tegland".into();
-            
-            self.window = Some(Arc::new(
-                event_loop
-                    .create_window(window)
-                    .unwrap(),
-            ));
+
+            self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
         }
 
         if !self.initialized {
-            self.renderer = Some(pollster::block_on(Renderer::new(Arc::clone(self.window.as_ref().unwrap()), self.target_fps)).unwrap());
+            self.renderer = Some(
+                pollster::block_on(Renderer::new(
+                    Arc::clone(self.window.as_ref().unwrap()),
+                    self.target_fps,
+                ))
+                .unwrap(),
+            );
 
             let cube_mesh = MeshAsset::cube("cube".into());
             let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);

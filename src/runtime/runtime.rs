@@ -79,7 +79,7 @@ impl Runtime {
             frame_barrier: Arc::new(Barrier::new(2)),
 
             renderer: None,
-            target_fps: 240.0,
+            target_fps: 144.0,
 
             window: None,
             initialized: false,

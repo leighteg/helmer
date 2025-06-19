@@ -33,7 +33,7 @@ fn main() {
         );
 
         ecs_guard.system_scheduler.register_system(
-            FreecamSystem::new(1.0, 1.0),
+            FreecamSystem::new(1.0, 0.5),
             10,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
@@ -198,8 +198,8 @@ impl System for FreecamSystem {
             self.last_cursor_position = input_manager.cursor_position;
 
             if cursor_delta.length_squared() > 0.0 {
-                self.yaw -= cursor_delta.x as f32 * self.sensitivity * dt;
-                self.pitch += cursor_delta.y as f32 * self.sensitivity * dt;
+                self.yaw -= cursor_delta.x as f32 * self.sensitivity / 100.0;
+                self.pitch += cursor_delta.y as f32 * self.sensitivity / 100.0;
 
                 // Clamp pitch
                 let pitch_limit = FRAC_PI_2 - 0.01;

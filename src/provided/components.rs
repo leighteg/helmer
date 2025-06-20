@@ -48,11 +48,12 @@ impl Transform {
 pub struct MeshRenderer {
     pub mesh_id: usize,
     pub material_id: usize, // The ID of the material to use for this mesh instance
+    pub visible: bool,
 }
 
 impl MeshRenderer {
-    pub fn new(mesh_id: usize, material_id: usize) -> Self {
-        Self { mesh_id, material_id }
+    pub fn new(mesh_id: usize, material_id: usize, visible: bool) -> Self {
+        Self { mesh_id, material_id, visible }
     }
 }
 
@@ -118,6 +119,16 @@ impl Camera {
         Self { fov_y_rad, aspect_ratio, near_plane, far_plane }
     }
 }
+
+impl Default for Camera {
+    fn default() -> Self {
+        let fov_45_degrees = std::f32::consts::FRAC_PI_4; 
+        Camera::new(fov_45_degrees, 1.7, 0.1, 100.0)
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ActiveCamera {}
 
 // --- Material Asset Component ---
 // This component acts as a descriptor for a material that can be loaded and used by the renderer.

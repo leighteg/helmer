@@ -1,6 +1,6 @@
 use crate::{
     graphics::renderer::error::RendererError,
-    provided::components::{LightType, Transform},
+    provided::components::{Camera, LightType, Transform},
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
@@ -90,6 +90,7 @@ pub struct RenderData {
     pub lights: Vec<RenderLight>,
     pub previous_camera_transform: Transform,
     pub current_camera_transform: Transform,
+    pub camera_component: Camera,
 }
 
 // --- SHADER DATA STRUCTS (bytemuck, no mev) ---
@@ -268,7 +269,7 @@ impl Renderer {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Immediate,
+            present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -853,6 +854,8 @@ impl Renderer {
 
         // --- Update Uniforms ---
         // --- CAMERA INTERPOLATION ---
+        let camera = &render_data.camera_component;
+
         let prev_cam = &render_data.previous_camera_transform;
         let curr_cam = &render_data.current_camera_transform;
         let eye = prev_cam.position.lerp(curr_cam.position, alpha);
@@ -861,11 +864,12 @@ impl Renderer {
         let up = rotation * Vec3::Y;
         let view_matrix = Mat4::look_at_rh(eye, eye + forward, up);
         let projection_matrix = Mat4::perspective_rh(
-            (45.0_f32).to_radians(),
-            self.surface_config.width as f32 / self.surface_config.height as f32,
-            0.1,
-            1000.0,
+            camera.fov_y_rad,
+            camera.aspect_ratio, 
+            camera.near_plane,
+            camera.far_plane,
         );
+        
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
             projection_matrix: projection_matrix.to_cols_array_2d(),

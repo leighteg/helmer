@@ -1,4 +1,4 @@
-use glam::{DVec2, Vec2};
+use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashSet;
 use tracing::info;
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -9,6 +9,7 @@ pub struct InputManager {
     pub mouse_wheel: Vec2,
     mouse_wheel_accumulator: Vec2,
     pub cursor_position: DVec2,
+    pub window_size: UVec2,
 }
 
 impl InputManager {
@@ -19,6 +20,7 @@ impl InputManager {
             mouse_wheel: Vec2::ZERO,
             mouse_wheel_accumulator: Vec2::ZERO,
             cursor_position: DVec2::ZERO,
+            window_size: UVec2::ZERO,
         };
 
         info!("initialized InputManager");

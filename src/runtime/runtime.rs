@@ -1,5 +1,5 @@
 use core::time;
-use glam::{DVec2, Vec2};
+use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashMap;
 use std::{
     sync::{
@@ -25,7 +25,7 @@ use crate::{
     graphics::renderer::renderer::{
         Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
     },
-    provided::components::{Camera, Light, MeshAsset, MeshRenderer, Transform},
+    provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::input_manager::InputManager,
 };
 
@@ -40,6 +40,7 @@ struct ExtractedState {
     objects: HashMap<usize, Transform>,
     lights: HashMap<usize, Transform>,
     camera_transform: Transform,
+    camera_component: Camera,
 }
 
 pub struct Runtime {
@@ -157,17 +158,26 @@ impl Runtime {
                             lights.insert(entity, *transform);
                         }
                     }
-                    let mut camera_transform = Transform::default();
-                    for (transform, _) in ecs_guard
-                        .component_pool
-                        .query_exact::<(Transform, Camera)>()
-                    {
-                        camera_transform = *transform;
-                    }
+                    let (camera_transform, camera_component) = {
+                        // Try to find the entity with all three components.
+                        let active_camera_data = ecs_guard
+                            .component_pool
+                            .query_exact::<(Camera, Transform, ActiveCamera)>()
+                            .next() // Get the first (and only) result
+                            .map(|(cam, trans, _)| (*cam, *trans)); // Extract the Camera and Transform
+
+                        // If we found an active camera, use its data. Otherwise, use sane defaults.
+                        if let Some((cam, trans)) = active_camera_data {
+                            (trans, cam)
+                        } else {
+                            (Transform::default(), Camera::default())
+                        }
+                    };
                     ExtractedState {
                         objects,
                         lights,
                         camera_transform,
+                        camera_component,
                     }
                 };
 
@@ -180,18 +190,22 @@ impl Runtime {
                     let objects = current_state
                         .objects
                         .iter()
-                        .map(|(id, &current_transform)| {
+                        .filter_map(|(id, &current_transform)| {
                             // Find the matching component data
                             let mesh_renderer =
                                 ecs_guard.get_component::<MeshRenderer>(*id).unwrap();
-                            RenderObject {
-                                previous_transform: *prev
-                                    .objects
-                                    .get(id)
-                                    .unwrap_or(&current_transform),
-                                current_transform,
-                                mesh_id: mesh_renderer.mesh_id,
-                                material_id: mesh_renderer.material_id,
+
+                            match mesh_renderer.visible {
+                                true => Some(RenderObject {
+                                    previous_transform: *prev
+                                        .objects
+                                        .get(id)
+                                        .unwrap_or(&current_transform),
+                                    current_transform,
+                                    mesh_id: mesh_renderer.mesh_id,
+                                    material_id: mesh_renderer.material_id,
+                                }),
+                                false => None,
                             }
                         })
                         .collect();
@@ -220,6 +234,7 @@ impl Runtime {
                         lights,
                         previous_camera_transform: prev.camera_transform,
                         current_camera_transform: current_state.camera_transform,
+                        camera_component: current_state.camera_component,
                     }
                 };
 
@@ -337,7 +352,19 @@ impl ApplicationHandler for Runtime {
                 }
             }
             WindowEvent::Resized(new_size) => {
+                self.input_manager.write().unwrap().window_size =
+                    UVec2::new(new_size.width, new_size.height);
+
                 self.renderer.as_mut().unwrap().resize(new_size);
+
+                if new_size.width > 0 && new_size.height > 0 {
+                    let mut ecs_guard = self.ecs.write().unwrap();
+                    ecs_guard
+                        .component_pool
+                        .query_mut_for_each::<(Camera, ActiveCamera), _>(|(camera, _)| {
+                            camera.aspect_ratio = new_size.width as f32 / new_size.height as f32;
+                        });
+                }
             }
 
             // INPUT HANDLING
@@ -415,8 +442,21 @@ impl ApplicationHandler for Runtime {
         if self.window.is_none() {
             let mut window = Window::default_attributes();
             window.title = "helmer engine — 2025 leighton tegland".into();
+            window.fullscreen = Some(winit::window::Fullscreen::Borderless(None));
 
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
+
+            let window_size = self.window.as_ref().unwrap().inner_size();
+            self.input_manager.write().unwrap().window_size =
+                UVec2::new(window_size.width, window_size.height);
+            if window_size.width > 0 && window_size.height > 0 {
+                let mut ecs_guard = self.ecs.write().unwrap();
+                ecs_guard
+                    .component_pool
+                    .query_mut_for_each::<(Camera, ActiveCamera), _>(|(camera, _)| {
+                        camera.aspect_ratio = window_size.width as f32 / window_size.height as f32;
+                    });
+            }
         }
 
         if !self.initialized {

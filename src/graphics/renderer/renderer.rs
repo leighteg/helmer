@@ -42,16 +42,18 @@ impl Default for TextureManager {
     }
 }
 
-// Material struct remains the same logically.
 #[derive(Debug, Clone)]
 pub struct Material {
     pub albedo: [f32; 4],
     pub metallic: f32,
     pub roughness: f32,
     pub ao: f32,
+    pub emission_strength: f32,
+    pub emission_color: [f32; 3],
     pub albedo_texture_index: i32,
     pub normal_texture_index: i32,
     pub metallic_roughness_texture_index: i32,
+    pub emission_texture_index: i32,
 }
 
 impl Default for Material {
@@ -61,10 +63,50 @@ impl Default for Material {
             metallic: 0.0,
             roughness: 0.8,
             ao: 1.0,
+            emission_strength: 0.0,
+            emission_color: [0.0, 0.0, 0.0],
             albedo_texture_index: 0,
             normal_texture_index: 0,
             metallic_roughness_texture_index: 0,
+            emission_texture_index: -1, // -1 indicates no emission texture
         }
+    }
+}
+
+impl Material {
+    /// Creates a new emissive material with the specified emission properties
+    pub fn with_emission(
+        mut self,
+        emission_color: [f32; 3],
+        emission_strength: f32,
+        emission_texture_index: Option<i32>,
+    ) -> Self {
+        self.emission_color = emission_color;
+        self.emission_strength = emission_strength;
+        self.emission_texture_index = emission_texture_index.unwrap_or(-1);
+        self
+    }
+
+    /// Sets the emission properties of the material
+    pub fn set_emission(
+        &mut self,
+        emission_color: [f32; 3],
+        emission_strength: f32,
+        emission_texture_index: Option<i32>,
+    ) {
+        self.emission_color = emission_color;
+        self.emission_strength = emission_strength;
+        self.emission_texture_index = emission_texture_index.unwrap_or(-1);
+    }
+
+    /// Returns true if this material has any emission
+    pub fn is_emissive(&self) -> bool {
+        self.emission_strength > 0.0 && (
+            self.emission_color[0] > 0.0 ||
+            self.emission_color[1] > 0.0 ||
+            self.emission_color[2] > 0.0 ||
+            self.emission_texture_index >= 0
+        )
     }
 }
 
@@ -130,11 +172,31 @@ struct MaterialShaderData {
     metallic: f32,
     roughness: f32,
     ao: f32,
-    _p1: f32,
+    emission_strength: f32,
     albedo_texture_index: i32,
     normal_texture_index: i32,
     metallic_roughness_texture_index: i32,
-    _p2: i32,
+    emission_texture_index: i32,
+    emission_color: [f32; 3],
+    _padding: f32,
+}
+
+impl From<&Material> for MaterialShaderData {
+    fn from(material: &Material) -> Self {
+        Self {
+            albedo: material.albedo,
+            metallic: material.metallic,
+            roughness: material.roughness,
+            ao: material.ao,
+            emission_strength: material.emission_strength,
+            albedo_texture_index: material.albedo_texture_index,
+            normal_texture_index: material.normal_texture_index,
+            metallic_roughness_texture_index: material.metallic_roughness_texture_index,
+            emission_texture_index: material.emission_texture_index,
+            emission_color: material.emission_color,
+            _padding: 0.0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -193,6 +255,7 @@ pub struct Renderer {
     albedo_texture_array: Option<wgpu::Texture>,
     normal_texture_array: Option<wgpu::Texture>,
     metallic_roughness_texture_array: Option<wgpu::Texture>,
+    emission_texture_array: Option<wgpu::Texture>,
     sampler: Option<wgpu::Sampler>,
 
     frame_index: usize,
@@ -297,6 +360,7 @@ impl Renderer {
             albedo_texture_array: None,
             normal_texture_array: None,
             metallic_roughness_texture_array: None,
+            emission_texture_array: None,
             sampler: None,
             frame_index: 0,
             current_render_data: None,
@@ -380,6 +444,12 @@ impl Renderer {
                 ..texture_desc
             }));
 
+        self.emission_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("emission-texture-array"),
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            ..texture_desc
+        }));
+
         self.sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Default Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -442,6 +512,18 @@ impl Renderer {
         self.upload_texture_slice(
             &default_mr_data,
             self.metallic_roughness_texture_array.as_ref().unwrap(),
+            0,
+        );
+
+        let default_emission_data: Vec<u8> = white_pixel
+            .iter()
+            .cycle()
+            .take(resolution_area * 4)
+            .copied()
+            .collect();
+        self.upload_texture_slice(
+            &default_emission_data,
+            self.emission_texture_array.as_ref().unwrap(),
             0,
         );
     }
@@ -545,17 +627,7 @@ impl Renderer {
             )));
         }
 
-        let shader_data = MaterialShaderData {
-            albedo: material.albedo,
-            metallic: material.metallic,
-            roughness: material.roughness,
-            ao: material.ao,
-            _p1: 0.0,
-            albedo_texture_index: material.albedo_texture_index,
-            normal_texture_index: material.normal_texture_index,
-            metallic_roughness_texture_index: material.metallic_roughness_texture_index,
-            _p2: 0,
-        };
+        let shader_data = MaterialShaderData::from(&material);
 
         let material_offset =
             (id * std::mem::size_of::<MaterialShaderData>()) as wgpu::BufferAddress;
@@ -585,6 +657,11 @@ impl Renderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mr_view = self
             .metallic_roughness_texture_array
+            .as_ref()
+            .unwrap()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let emission_view = self
+            .emission_texture_array
             .as_ref()
             .unwrap()
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -658,9 +735,20 @@ impl Renderer {
                     },
                     count: None,
                 },
-                // Sampler
+                // Emission Texture Array
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -704,6 +792,10 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&emission_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
                             resource: wgpu::BindingResource::Sampler(
                                 self.sampler.as_ref().unwrap(),
                             ),

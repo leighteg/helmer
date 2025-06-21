@@ -43,11 +43,13 @@ struct MaterialData {
     metallic: f32,
     roughness: f32,
     ao: f32,
-    _p1: f32,
+    emission_strength: f32,  // Added emission strength
     albedo_texture_index: i32,
     normal_texture_index: i32,
     metallic_roughness_texture_index: i32,
-    _p2: i32,
+    emission_texture_index: i32,  // Added emission texture index
+    emission_color: vec3<f32>,    // Added emission color
+    _padding: f32,
 }
 
 struct PbrConstants {
@@ -63,7 +65,8 @@ struct PbrConstants {
 @group(0) @binding(3) var albedo_texture_array: texture_2d_array<f32>;
 @group(0) @binding(4) var normal_texture_array: texture_2d_array<f32>;
 @group(0) @binding(5) var metallic_roughness_texture_array: texture_2d_array<f32>;
-@group(0) @binding(6) var pbr_sampler: sampler;
+@group(0) @binding(6) var emission_texture_array: texture_2d_array<f32>;
+@group(0) @binding(7) var pbr_sampler: sampler;
 
 @vertex
 var<push_constant> constants: PbrConstants;
@@ -174,9 +177,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let metallic = mr_sample.b * material.metallic;
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
 
-    // --- 2. Normal Mapping ---
+    // --- 2. Emission Setup ---
+    var emission = material.emission_color * material.emission_strength;
+    if material.emission_texture_index >= 0i {
+        let emission_sample = textureSample(
+            emission_texture_array,
+            pbr_sampler,
+            in.tex_coord,
+            material.emission_texture_index
+        );
+        emission *= emission_sample.rgb;
+    }
+
+    // --- 3. Normal Mapping ---
     var N: vec3<f32>;
-    if material.normal_texture_index > 0i {
+    if material.normal_texture_index >= 0i {
         let tangent_space_normal = textureSample(
             normal_texture_array,
             pbr_sampler,
@@ -193,11 +208,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         N = normalize(in.world_normal);
     }
 
-    // --- 3. View & Fresnel Setup ---
+    // --- 4. View & Fresnel Setup ---
     let V = normalize(camera.view_position - in.world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
     
-    // --- 4. Lighting Calculation ---
+    // --- 5. Lighting Calculation ---
     var Lo = vec3<f32>(0.0);
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
@@ -239,10 +254,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     
-    // --- 5. Final Color Composition ---
+    // --- 6. Final Color Composition with Emission ---
     let ambient = vec3<f32>(0.03) * albedo * ao;
-    var final_color = ambient + Lo;
+    var final_color = ambient + Lo + emission;  // Add emission here
 
+    // Tone mapping and gamma correction
     final_color = final_color / (final_color + vec3<f32>(1.0));
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
 

@@ -112,7 +112,7 @@ fn main() {
             },
         );
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
-        ecs_guard.add_component(light_entity, MeshRenderer::new(0, 0, true));
+        ecs_guard.add_component(light_entity, MeshRenderer::new(0, 2, true));
 
         let light_entity_2 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -127,7 +127,7 @@ fn main() {
             light_entity_2,
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
-        ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 0, true));
+        ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
     });
     runtime.init();
 }

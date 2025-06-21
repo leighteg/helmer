@@ -484,7 +484,20 @@ impl ApplicationHandler for Runtime {
             self.renderer
                 .as_mut()
                 .unwrap()
-                .add_material(0, Material::default());
+                .add_material(0, Material {
+                    roughness: 0.0,
+                    metallic: 1.0,
+                    ao: 0.01,
+                    ..Default::default()
+                });
+            self.renderer
+                .as_mut()
+                .unwrap()
+                .add_material(1, Material::with_emission(Material::default(), [1.0, 0.0, 0.0], 10.0, None));
+            self.renderer
+                .as_mut()
+                .unwrap()
+                .add_material(2, Material::with_emission(Material::default(), [0.0, 0.0, 1.0], 10.0, Some(0)));
 
             (self.init_callback)(self);
         }

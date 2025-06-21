@@ -3,6 +3,12 @@ name = "helmer-rs"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+
 [dependencies]
 winit = "0.30.10"
 proc = { path = "proc" }
@@ -18,3 +24,6 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 bytemuck = "1.23.0"
 wgpu = "25.0.2"
 pollster = "0.4.0"
+resvg = "0.45.1"
+softbuffer = "0.4.6"
+colored = "3.0.0"

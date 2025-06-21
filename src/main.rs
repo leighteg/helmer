@@ -2,20 +2,19 @@ use std::{any::TypeId, collections::HashSet, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use helmer_rs::{
-    ecs::{ecs_core::{ECSCore, Entity}, system::System},
-    provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform},
-    runtime::{
+    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
         input_manager::{self, InputManager},
         runtime::Runtime,
-    },
+    }
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 fn main() {
+    colored::control::set_virtual_terminal(true).ok();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::EnvFilter::new("helmer_rs"))
         .try_init()
         .unwrap();
 
@@ -23,6 +22,8 @@ fn main() {
 
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write().unwrap();
+
+        ecs_guard.add_resource(RenderPacket::default());
 
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
@@ -43,6 +44,14 @@ fn main() {
         ecs_guard.system_scheduler.register_system(
             DragSystem::new(),
             10,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        ecs_guard.system_scheduler.register_system(
+            RenderDataSystem::new(),
+            0,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),

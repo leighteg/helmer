@@ -1,7 +1,9 @@
 use core::time;
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashMap;
+use resvg::{tiny_skia, usvg::Tree};
 use std::{
+    num::NonZeroU32,
     sync::{
         Arc, Barrier, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -10,9 +12,10 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -22,8 +25,9 @@ use winit::{
 
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
-    graphics::renderer::renderer::{
-        Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
+    graphics::{
+        renderer::renderer::{Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
+        renderer_system::RenderPacket,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::input_manager::InputManager,
@@ -143,112 +147,21 @@ impl Runtime {
                     let _ = std::mem::replace(&mut ecs_guard.system_scheduler, scheduler);
                 }
 
-                let current_state = {
-                    let ecs_guard = ecs.read().unwrap();
-                    let mut objects = HashMap::new();
-                    let mut lights = HashMap::new();
-
-                    for (entity, _) in ecs_guard.get_all_entities_with_component::<MeshRenderer>() {
-                        if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
-                            objects.insert(entity, *transform);
-                        }
-                    }
-                    for (entity, _) in ecs_guard.get_all_entities_with_component::<Light>() {
-                        if let Some(transform) = ecs_guard.get_component::<Transform>(entity) {
-                            lights.insert(entity, *transform);
-                        }
-                    }
-                    let (camera_transform, camera_component) = {
-                        // Try to find the entity with all three components.
-                        let active_camera_data = ecs_guard
-                            .component_pool
-                            .query_exact::<(Camera, Transform, ActiveCamera)>()
-                            .next() // Get the first (and only) result
-                            .map(|(cam, trans, _)| (*cam, *trans)); // Extract the Camera and Transform
-
-                        // If we found an active camera, use its data. Otherwise, use sane defaults.
-                        if let Some((cam, trans)) = active_camera_data {
-                            (trans, cam)
-                        } else {
-                            (Transform::default(), Camera::default())
-                        }
-                    };
-                    ExtractedState {
-                        objects,
-                        lights,
-                        camera_transform,
-                        camera_component,
-                    }
-                };
-
-                // 2. Build the final RenderData packet.
                 let render_data_to_send = {
-                    // Use the previous state if it exists, otherwise use the current state twice.
-                    let prev = previous_state.as_ref().unwrap_or(&current_state);
-                    let ecs_guard = ecs.read().unwrap(); // Read-lock to get component data
-
-                    let objects = current_state
-                        .objects
-                        .iter()
-                        .filter_map(|(id, &current_transform)| {
-                            // Find the matching component data
-                            let mesh_renderer =
-                                ecs_guard.get_component::<MeshRenderer>(*id).unwrap();
-
-                            match mesh_renderer.visible {
-                                true => Some(RenderObject {
-                                    previous_transform: *prev
-                                        .objects
-                                        .get(id)
-                                        .unwrap_or(&current_transform),
-                                    current_transform,
-                                    mesh_id: mesh_renderer.mesh_id,
-                                    material_id: mesh_renderer.material_id,
-                                }),
-                                false => None,
-                            }
-                        })
-                        .collect();
-
-                    let lights = current_state
-                        .lights
-                        .iter()
-                        .map(|(id, &current_transform)| {
-                            // Find the matching component data
-                            let light = ecs_guard.get_component::<Light>(*id).unwrap();
-                            RenderLight {
-                                previous_transform: *prev
-                                    .lights
-                                    .get(id)
-                                    .unwrap_or(&current_transform),
-                                current_transform,
-                                color: light.color.into(),
-                                intensity: light.intensity,
-                                light_type: light.light_type,
-                            }
-                        })
-                        .collect();
-
-                    RenderData {
-                        objects,
-                        lights,
-                        previous_camera_transform: prev.camera_transform,
-                        current_camera_transform: current_state.camera_transform,
-                        camera_component: current_state.camera_component,
+                    let mut ecs_guard = ecs.write().unwrap(); // A brief write lock to `.take()` the data
+                    if let Some(packet) = ecs_guard.get_resource_mut::<RenderPacket>() {
+                        packet.0.take() // .take() pulls the value out of the Option, leaving None
+                    } else {
+                        None
                     }
                 };
 
-                // Send render data to main thread (non-blocking)
-                if sender
-                    .send(Message::RenderData(render_data_to_send))
-                    .is_err()
-                {
-                    // Channel full or disconnected, skip this frame's render data
-                    // This prevents the logic thread from blocking
+                // Send render data if the system produced it
+                if let Some(data) = render_data_to_send {
+                    if sender.send(Message::RenderData(data)).is_err() {
+                        warn!("frame dropped/render thread disconnected!");
+                    }
                 }
-
-                // CRUCIAL: The current state becomes the previous state for the next frame.
-                previous_state = Some(current_state);
 
                 input_manager.write().unwrap().prepare_for_next_frame();
 
@@ -380,13 +293,30 @@ impl ApplicationHandler for Runtime {
                     _ => {}
                 }
 
-                let mut input_manager_guard = self.input_manager.write().unwrap();
-
                 if key_code.is_some() {
-                    if event.state.is_pressed() {
-                        input_manager_guard.active_keys.insert(key_code.unwrap());
-                    } else {
-                        input_manager_guard.active_keys.remove(&key_code.unwrap());
+                    match key_code.unwrap() {
+                        KeyCode::F11 => {
+                            if event.state.is_pressed() {
+                                let window: &mut Arc<Window> = self.window.as_mut().unwrap();
+
+                                if window.fullscreen().is_some() {
+                                    window.set_fullscreen(None);
+                                } else {
+                                    window.set_fullscreen(Some(
+                                        winit::window::Fullscreen::Borderless(None),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            let mut input_manager_guard = self.input_manager.write().unwrap();
+                            
+                            if event.state.is_pressed() {
+                                input_manager_guard.active_keys.insert(key_code.unwrap());
+                            } else {
+                                input_manager_guard.active_keys.remove(&key_code.unwrap());
+                            }
+                        }
                     }
                 }
             }
@@ -441,10 +371,88 @@ impl ApplicationHandler for Runtime {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let mut window = Window::default_attributes();
-            window.title = "helmer engine — 2025 leighton tegland".into();
-            window.fullscreen = Some(winit::window::Fullscreen::Borderless(None));
+            window.title = "helmer engine — 2025 leighton".into();
+            //window.fullscreen = Some(winit::window::Fullscreen::Borderless(None));
 
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
+
+            let window_size: PhysicalSize<u32> = self.window.as_ref().unwrap().inner_size();
+
+            // SPLASH SCREEN
+            let context = softbuffer::Context::new(self.window.as_ref().unwrap().clone()).unwrap();
+            let mut surface =
+                softbuffer::Surface::new(&context, self.window.as_ref().unwrap().clone()).unwrap();
+
+            surface
+                .resize(
+                    NonZeroU32::new(window_size.width).unwrap(),
+                    NonZeroU32::new(window_size.height).unwrap(),
+                )
+                .unwrap();
+
+            // Load and parse SVG
+            const BRAND_SVG_DATA: &[u8] = include_bytes!("../../brand/helmer.svg");
+            let svg_str = std::str::from_utf8(BRAND_SVG_DATA)
+                .map_err(|_| "Failed to convert SVG bytes to string")
+                .unwrap();
+
+            let mut opt = resvg::usvg::Options::default();
+            opt.dpi = 96.0;
+
+            let tree = resvg::usvg::Tree::from_str(svg_str, &opt)
+                .map_err(|_| "Failed to parse SVG")
+                .unwrap();
+
+            // Calculate scaling to fit 1/3 of window size while maintaining aspect ratio
+            let svg_size = tree.size();
+            let svg_width = svg_size.width();
+            let svg_height = svg_size.height();
+
+            let max_width = window_size.width as f32 / 3.0;
+            let max_height = window_size.height as f32 / 3.0;
+
+            let scale_x = max_width / svg_width;
+            let scale_y = max_height / svg_height;
+            let scale = scale_x.min(scale_y);
+
+            let scaled_width = (svg_width * scale) as u32;
+            let scaled_height = (svg_height * scale) as u32;
+
+            // Center the SVG
+            let offset_x = (window_size.width - scaled_width) / 2;
+            let offset_y = (window_size.height - scaled_height) / 2;
+
+            // Create pixmap for rendering SVG
+            if let Some(mut pixmap) = tiny_skia::Pixmap::new(scaled_width, scaled_height) {
+                // Clear with transparent background
+                pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+                // Create transform for scaling
+                let transform = tiny_skia::Transform::from_scale(scale, scale);
+
+                // Render SVG to pixmap
+                resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+                // Get buffer and fill with white background
+                let mut buffer = surface.buffer_mut().unwrap();
+                let white_u32 = 0xFFFFFFFF;
+                buffer.fill(white_u32);
+
+                // Copy pixmap to buffer with centering
+                copy_pixmap_to_buffer(
+                    &pixmap,
+                    &mut buffer,
+                    window_size.width as usize,
+                    window_size.height as usize,
+                    offset_x,
+                    offset_y,
+                );
+
+                // Present the splash screen
+                buffer.present().unwrap();
+            }
+
+            // -----
 
             let window_size = self.window.as_ref().unwrap().inner_size();
             self.input_manager.write().unwrap().window_size =
@@ -497,5 +505,60 @@ impl ApplicationHandler for Runtime {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         // Main thread can do additional work here if needed
+    }
+}
+
+fn copy_pixmap_to_buffer(
+    pixmap: &tiny_skia::Pixmap,
+    buffer: &mut [u32],
+    buffer_width: usize,
+    buffer_height: usize,
+    offset_x: u32,
+    offset_y: u32,
+) {
+    let pixmap_width = pixmap.width() as usize;
+    let pixmap_height = pixmap.height() as usize;
+    let pixmap_data = pixmap.data();
+
+    for y in 0..pixmap_height {
+        let buffer_y = y + offset_y as usize;
+        if buffer_y >= buffer_height {
+            break;
+        }
+
+        for x in 0..pixmap_width {
+            let buffer_x = x + offset_x as usize;
+            if buffer_x >= buffer_width {
+                break;
+            }
+
+            let pixmap_idx = (y * pixmap_width + x) * 4;
+            let buffer_idx = buffer_y * buffer_width + buffer_x;
+
+            if pixmap_idx + 3 < pixmap_data.len() && buffer_idx < buffer.len() {
+                let r = pixmap_data[pixmap_idx] as u32;
+                let g = pixmap_data[pixmap_idx + 1] as u32;
+                let b = pixmap_data[pixmap_idx + 2] as u32;
+                let a = pixmap_data[pixmap_idx + 3] as u32;
+
+                // Only render non-transparent pixels
+                if a > 0 {
+                    // Blend with white background
+                    if a == 255 {
+                        buffer[buffer_idx] = 0xFF000000 | (r << 16) | (g << 8) | b;
+                    } else {
+                        let alpha_f = a as f32 / 255.0;
+                        let inv_alpha = 1.0 - alpha_f;
+
+                        let blended_r = ((r as f32 * alpha_f + 255.0 * inv_alpha) as u32).min(255);
+                        let blended_g = ((g as f32 * alpha_f + 255.0 * inv_alpha) as u32).min(255);
+                        let blended_b = ((b as f32 * alpha_f + 255.0 * inv_alpha) as u32).min(255);
+
+                        buffer[buffer_idx] =
+                            0xFF000000 | (blended_r << 16) | (blended_g << 8) | blended_b;
+                    }
+                }
+            }
+        }
     }
 }

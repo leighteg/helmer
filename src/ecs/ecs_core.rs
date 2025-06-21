@@ -2,6 +2,8 @@ use std::collections::HashSet;
 
 use tracing::info;
 
+use crate::ecs::{resource::Resource, resource_pool::ResourcePool};
+
 use super::{component::Component, component_pool::ComponentPool, system_scheduler::SystemScheduler};
 
 pub type Entity = usize;
@@ -11,6 +13,7 @@ pub struct ECSCore {
     entities: HashSet<Entity>,
     pub component_pool: ComponentPool,
     pub system_scheduler: SystemScheduler,
+    pub resource_pool: ResourcePool,
 }
 
 impl ECSCore {
@@ -20,6 +23,7 @@ impl ECSCore {
             entities: HashSet::new(),
             component_pool: ComponentPool::new(),
             system_scheduler: SystemScheduler::new(),
+            resource_pool: ResourcePool::new(),
         };
         
         info!("initialized ECSCore");
@@ -69,5 +73,21 @@ impl ECSCore {
 
     pub fn get_all_entities_with_component<T: Component + 'static>(&self) -> Vec<(Entity, &T)> {
         self.component_pool.get_all_with_entities::<T>()
+    }
+
+    pub fn add_resource<T: Resource>(&mut self, resource: T) {
+        self.resource_pool.add(resource);
+    }
+
+    pub fn get_resource<T: Resource>(&self) -> Option<&T> {
+        self.resource_pool.get::<T>()
+    }
+
+    pub fn get_resource_mut<T: Resource>(&mut self) -> Option<&mut T> {
+        self.resource_pool.get_mut::<T>()
+    }
+
+    pub fn remove_resource<T: Resource>(&mut self) {
+        self.resource_pool.remove::<T>();
     }
 }

@@ -211,6 +211,84 @@ impl Runtime {
             let _ = handle.join();
         }
     }
+
+    pub fn draw_splash(&self) {
+        let window_size: PhysicalSize<u32> = self.window.as_ref().unwrap().inner_size();
+
+        // SPLASH SCREEN
+        let context = softbuffer::Context::new(self.window.as_ref().unwrap().clone()).unwrap();
+        let mut surface =
+            softbuffer::Surface::new(&context, self.window.as_ref().unwrap().clone()).unwrap();
+
+        surface
+            .resize(
+                NonZeroU32::new(window_size.width).unwrap(),
+                NonZeroU32::new(window_size.height).unwrap(),
+            )
+            .unwrap();
+
+        // Load and parse SVG
+        const BRAND_SVG_DATA: &[u8] = include_bytes!("../../brand/helmer.svg");
+        let svg_str = std::str::from_utf8(BRAND_SVG_DATA)
+            .map_err(|_| "Failed to convert SVG bytes to string")
+            .unwrap();
+
+        let mut opt = resvg::usvg::Options::default();
+        opt.dpi = 96.0;
+
+        let tree = resvg::usvg::Tree::from_str(svg_str, &opt)
+            .map_err(|_| "Failed to parse SVG")
+            .unwrap();
+
+        // Calculate scaling to fit 1/3 of window size while maintaining aspect ratio
+        let svg_size = tree.size();
+        let svg_width = svg_size.width();
+        let svg_height = svg_size.height();
+
+        let max_width = window_size.width as f32 / 3.0;
+        let max_height = window_size.height as f32 / 3.0;
+
+        let scale_x = max_width / svg_width;
+        let scale_y = max_height / svg_height;
+        let scale = scale_x.min(scale_y);
+
+        let scaled_width = (svg_width * scale) as u32;
+        let scaled_height = (svg_height * scale) as u32;
+
+        // Center the SVG
+        let offset_x = (window_size.width - scaled_width) / 2;
+        let offset_y = (window_size.height - scaled_height) / 2;
+
+        // Create pixmap for rendering SVG
+        if let Some(mut pixmap) = tiny_skia::Pixmap::new(scaled_width, scaled_height) {
+            // Clear with transparent background
+            pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+            // Create transform for scaling
+            let transform = tiny_skia::Transform::from_scale(scale, scale);
+
+            // Render SVG to pixmap
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+            // Get buffer and fill with white background
+            let mut buffer = surface.buffer_mut().unwrap();
+            let white_u32 = 0xFFFFFFFF;
+            buffer.fill(white_u32);
+
+            // Copy pixmap to buffer with centering
+            copy_pixmap_to_buffer(
+                &pixmap,
+                &mut buffer,
+                window_size.width as usize,
+                window_size.height as usize,
+                offset_x,
+                offset_y,
+            );
+
+            // Present the splash screen
+            buffer.present().unwrap();
+        }
+    }
 }
 
 impl ApplicationHandler for Runtime {
@@ -256,6 +334,9 @@ impl ApplicationHandler for Runtime {
                             tracing::error!("Renderer error: {}", e);
                         }
                     }
+                    else {
+                        self.draw_splash();
+                    }
 
                     if self.running.load(Ordering::Relaxed) == true {
                         //self.frame_barrier.wait();
@@ -268,7 +349,9 @@ impl ApplicationHandler for Runtime {
                 self.input_manager.write().unwrap().window_size =
                     UVec2::new(new_size.width, new_size.height);
 
-                self.renderer.as_mut().unwrap().resize(new_size);
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(new_size);
+                }
 
                 if new_size.width > 0 && new_size.height > 0 {
                     let mut ecs_guard = self.ecs.write().unwrap();
@@ -310,7 +393,7 @@ impl ApplicationHandler for Runtime {
                         }
                         _ => {
                             let mut input_manager_guard = self.input_manager.write().unwrap();
-                            
+
                             if event.state.is_pressed() {
                                 input_manager_guard.active_keys.insert(key_code.unwrap());
                             } else {
@@ -375,84 +458,6 @@ impl ApplicationHandler for Runtime {
             //window.fullscreen = Some(winit::window::Fullscreen::Borderless(None));
 
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
-
-            let window_size: PhysicalSize<u32> = self.window.as_ref().unwrap().inner_size();
-
-            // SPLASH SCREEN
-            let context = softbuffer::Context::new(self.window.as_ref().unwrap().clone()).unwrap();
-            let mut surface =
-                softbuffer::Surface::new(&context, self.window.as_ref().unwrap().clone()).unwrap();
-
-            surface
-                .resize(
-                    NonZeroU32::new(window_size.width).unwrap(),
-                    NonZeroU32::new(window_size.height).unwrap(),
-                )
-                .unwrap();
-
-            // Load and parse SVG
-            const BRAND_SVG_DATA: &[u8] = include_bytes!("../../brand/helmer.svg");
-            let svg_str = std::str::from_utf8(BRAND_SVG_DATA)
-                .map_err(|_| "Failed to convert SVG bytes to string")
-                .unwrap();
-
-            let mut opt = resvg::usvg::Options::default();
-            opt.dpi = 96.0;
-
-            let tree = resvg::usvg::Tree::from_str(svg_str, &opt)
-                .map_err(|_| "Failed to parse SVG")
-                .unwrap();
-
-            // Calculate scaling to fit 1/3 of window size while maintaining aspect ratio
-            let svg_size = tree.size();
-            let svg_width = svg_size.width();
-            let svg_height = svg_size.height();
-
-            let max_width = window_size.width as f32 / 3.0;
-            let max_height = window_size.height as f32 / 3.0;
-
-            let scale_x = max_width / svg_width;
-            let scale_y = max_height / svg_height;
-            let scale = scale_x.min(scale_y);
-
-            let scaled_width = (svg_width * scale) as u32;
-            let scaled_height = (svg_height * scale) as u32;
-
-            // Center the SVG
-            let offset_x = (window_size.width - scaled_width) / 2;
-            let offset_y = (window_size.height - scaled_height) / 2;
-
-            // Create pixmap for rendering SVG
-            if let Some(mut pixmap) = tiny_skia::Pixmap::new(scaled_width, scaled_height) {
-                // Clear with transparent background
-                pixmap.fill(tiny_skia::Color::TRANSPARENT);
-
-                // Create transform for scaling
-                let transform = tiny_skia::Transform::from_scale(scale, scale);
-
-                // Render SVG to pixmap
-                resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-                // Get buffer and fill with white background
-                let mut buffer = surface.buffer_mut().unwrap();
-                let white_u32 = 0xFFFFFFFF;
-                buffer.fill(white_u32);
-
-                // Copy pixmap to buffer with centering
-                copy_pixmap_to_buffer(
-                    &pixmap,
-                    &mut buffer,
-                    window_size.width as usize,
-                    window_size.height as usize,
-                    offset_x,
-                    offset_y,
-                );
-
-                // Present the splash screen
-                buffer.present().unwrap();
-            }
-
-            // -----
 
             let window_size = self.window.as_ref().unwrap().inner_size();
             self.input_manager.write().unwrap().window_size =

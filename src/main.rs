@@ -11,7 +11,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 fn main() {
+    #[cfg(windows)]
     colored::control::set_virtual_terminal(true).ok();
+    
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::new("helmer_rs"))

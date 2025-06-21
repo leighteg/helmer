@@ -66,7 +66,6 @@ pub struct Runtime {
 
     // Window management
     window: Option<Arc<Window>>,
-    initialized: bool,
 
     init_callback: fn(&mut Runtime),
 }
@@ -91,7 +90,6 @@ impl Runtime {
             target_fps: 144.0,
 
             window: None,
-            initialized: false,
 
             init_callback,
         }
@@ -459,20 +457,10 @@ impl ApplicationHandler for Runtime {
 
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
 
-            let window_size = self.window.as_ref().unwrap().inner_size();
-            self.input_manager.write().unwrap().window_size =
-                UVec2::new(window_size.width, window_size.height);
-            if window_size.width > 0 && window_size.height > 0 {
-                let mut ecs_guard = self.ecs.write().unwrap();
-                ecs_guard
-                    .component_pool
-                    .query_mut_for_each::<(Camera, ActiveCamera), _>(|(camera, _)| {
-                        camera.aspect_ratio = window_size.width as f32 / window_size.height as f32;
-                    });
-            }
+            self.draw_splash();
         }
 
-        if !self.initialized {
+        if self.renderer.is_none() {
             self.renderer = Some(
                 pollster::block_on(Renderer::new(
                     Arc::clone(self.window.as_ref().unwrap()),
@@ -499,8 +487,6 @@ impl ApplicationHandler for Runtime {
                 .add_material(0, Material::default());
 
             (self.init_callback)(self);
-
-            self.initialized = true;
         }
 
         if let Some(window) = &self.window {

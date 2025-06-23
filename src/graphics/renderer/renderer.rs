@@ -3,7 +3,7 @@ use crate::{
     provided::components::{Camera, LightType, Transform},
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4, Vec4Swizzles, vec4};
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -13,11 +13,38 @@ use tracing::info;
 use wgpu::{Adapter, util::DeviceExt}; // Import for create_buffer_init
 use winit::window::Window;
 
-// --- CONSTANTS (Unchanged) ---
+#[derive(Copy, Clone)]
+struct Aabb {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl Aabb {
+    fn get_corners(&self) -> [Vec3; 8] {
+        [
+            self.min,
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            self.max,
+        ]
+    }
+}
+
+// --- CONSTANTS ---
 const MAX_TEXTURE_COUNT: u32 = 256;
 const TEXTURE_RESOLUTION: u32 = 1024;
 const MAX_LIGHTS: usize = 32;
+const SHADOW_MAP_RESOLUTION: u32 = 2048;
+const NUM_CASCADES: usize = 4;
 const FRAMES_IN_FLIGHT: usize = 3;
+const SCENE_BOUNDS: Aabb = Aabb {
+    min: Vec3::new(-50.0, -10.0, -50.0),
+    max: Vec3::new(50.0, 50.0, 50.0),
+};
 
 // --- RESOURCE STRUCTS (wgpu types) ---
 
@@ -101,12 +128,11 @@ impl Material {
 
     /// Returns true if this material has any emission
     pub fn is_emissive(&self) -> bool {
-        self.emission_strength > 0.0 && (
-            self.emission_color[0] > 0.0 ||
-            self.emission_color[1] > 0.0 ||
-            self.emission_color[2] > 0.0 ||
-            self.emission_texture_index >= 0
-        )
+        self.emission_strength > 0.0
+            && (self.emission_color[0] > 0.0
+                || self.emission_color[1] > 0.0
+                || self.emission_color[2] > 0.0
+                || self.emission_texture_index >= 0)
     }
 }
 
@@ -226,6 +252,34 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct CascadeUniform {
+    light_view_proj: [[f32; 4]; 4],
+    split_depth: f32,
+    _padding: [f32; 3], // Ensure alignment
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ShadowUniforms {
+    cascades: [CascadeUniform; NUM_CASCADES],
+}
+
+// Helper struct to group shadow resources
+struct ShadowPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    light_vp_buffer: wgpu::Buffer,
+    light_vp_bind_group: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+struct ModelPushConstant {
+    model_matrix: [[f32; 4]; 4],
+}
+
 // --- MAIN RENDERER STRUCT (wgpu) ---
 
 pub struct Renderer {
@@ -257,6 +311,14 @@ pub struct Renderer {
     metallic_roughness_texture_array: Option<wgpu::Texture>,
     emission_texture_array: Option<wgpu::Texture>,
     sampler: Option<wgpu::Sampler>,
+
+    shadow_pipeline: Option<ShadowPipeline>,
+    shadow_map_texture: Option<wgpu::Texture>,
+    shadow_map_view: Option<wgpu::TextureView>,
+    shadow_sampler: Option<wgpu::Sampler>,
+    shadow_depth_texture: Option<wgpu::Texture>, // For depth testing during shadow pass
+    shadow_depth_view: Option<wgpu::TextureView>,
+    shadow_uniforms_buffer: Option<wgpu::Buffer>,
 
     frame_index: usize,
     current_render_data: Option<RenderData>,
@@ -306,7 +368,8 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
-                required_features: wgpu::Features::PUSH_CONSTANTS,
+                required_features: wgpu::Features::PUSH_CONSTANTS
+                    | wgpu::Features::FLOAT32_FILTERABLE,
                 required_limits: wgpu::Limits {
                     // Add push constant limit
                     max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
@@ -362,6 +425,13 @@ impl Renderer {
             metallic_roughness_texture_array: None,
             emission_texture_array: None,
             sampler: None,
+            shadow_pipeline: None,
+            shadow_map_texture: None,
+            shadow_map_view: None,
+            shadow_sampler: None,
+            shadow_depth_texture: None,
+            shadow_depth_view: None,
+            shadow_uniforms_buffer: None,
             frame_index: 0,
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / logic_fps),
@@ -463,6 +533,7 @@ impl Renderer {
         // --- Upload Default Texture Data ---
         self.upload_default_textures();
         self.create_depth_texture();
+        self.create_shadow_resources();
         self.create_pbr_bind_groups();
         self.create_pipeline();
 
@@ -526,6 +597,170 @@ impl Renderer {
             self.emission_texture_array.as_ref().unwrap(),
             0,
         );
+    }
+
+    fn create_shadow_resources(&mut self) {
+        let device = &self.device;
+
+        // 1. Shadow Map Texture (VSM stores depth and depth^2 in a color texture)
+        let shadow_texture_desc = wgpu::TextureDescriptor {
+            label: Some("VSM Shadow Map Texture Array"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_RESOLUTION,
+                height: SHADOW_MAP_RESOLUTION,
+                depth_or_array_layers: NUM_CASCADES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg32Float, // Two 32-bit floats for depth and depth^2
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        self.shadow_map_texture = Some(device.create_texture(&shadow_texture_desc));
+        self.shadow_map_view = Some(self.shadow_map_texture.as_ref().unwrap().create_view(
+            &wgpu::TextureViewDescriptor {
+                label: Some("VSM Shadow Map View"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            },
+        ));
+
+        // 2. Sampler for the shadow map
+        self.shadow_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+
+        // 3. Depth texture for the shadow pass itself
+        let shadow_depth_desc = wgpu::TextureDescriptor {
+            label: Some("Shadow Pass Depth Texture"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_RESOLUTION,
+                height: SHADOW_MAP_RESOLUTION,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        };
+        self.shadow_depth_texture = Some(device.create_texture(&shadow_depth_desc));
+        self.shadow_depth_view = Some(
+            self.shadow_depth_texture
+                .as_ref()
+                .unwrap()
+                .create_view(&Default::default()),
+        );
+
+        // 4. Uniform buffer for cascade data
+        self.shadow_uniforms_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Uniforms Buffer"),
+            size: std::mem::size_of::<ShadowUniforms>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // 5. Create the shadow pipeline
+        self.create_shadow_pipeline();
+    }
+
+    fn create_shadow_pipeline(&mut self) {
+        let device = &self.device;
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"));
+
+        let light_vp_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Light VP Buffer"),
+            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let light_vp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow Light VP Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_vp_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Shadow Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[wgpu::PushConstantRange {
+                stages: wgpu::ShaderStages::VERTEX,
+                range: 0..std::mem::size_of::<ModelPushConstant>() as u32, // Only model matrix
+            }],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rg32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Front), // "Peter Panning" fix
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    // Another "shadow acne" fix
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        self.shadow_pipeline = Some(ShadowPipeline {
+            pipeline,
+            bind_group_layout,
+            light_vp_buffer,
+            light_vp_bind_group,
+        });
     }
 
     // Helper to upload a single texture slice
@@ -665,6 +900,8 @@ impl Renderer {
             .as_ref()
             .unwrap()
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_map_view = self.shadow_map_view.as_ref().unwrap();
+        let shadow_sampler = self.shadow_sampler.as_ref().unwrap();
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PBR Bind Group Layout"),
@@ -753,6 +990,35 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // shadow map view
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // shadow sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // shadow uniforms buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT, // Vertex for view-space depth
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -799,6 +1065,22 @@ impl Renderer {
                             resource: wgpu::BindingResource::Sampler(
                                 self.sampler.as_ref().unwrap(),
                             ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(shadow_map_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: self
+                                .shadow_uniforms_buffer
+                                .as_ref()
+                                .unwrap()
+                                .as_entire_binding(),
                         },
                     ],
                 })
@@ -957,11 +1239,11 @@ impl Renderer {
         let view_matrix = Mat4::look_at_rh(eye, eye + forward, up);
         let projection_matrix = Mat4::perspective_rh(
             camera.fov_y_rad,
-            camera.aspect_ratio, 
+            camera.aspect_ratio,
             camera.near_plane,
             camera.far_plane,
         );
-        
+
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
             projection_matrix: projection_matrix.to_cols_array_2d(),
@@ -1015,6 +1297,102 @@ impl Renderer {
                 label: Some("Main Command Encoder"),
             });
 
+        // Find the primary directional light to cast shadows from
+        let shadow_light = render_data
+            .lights
+            .iter()
+            .find(|l| matches!(l.light_type, LightType::Directional));
+
+        if let Some(light) = shadow_light {
+            let shadow_pipeline = self.shadow_pipeline.as_ref().unwrap();
+
+            // 1. Calculate Cascade View-Projection Matrices
+            let shadow_uniforms = self.calculate_cascades(
+                &projection_matrix,
+                &view_matrix,
+                light.current_transform.rotation,
+            );
+            self.queue.write_buffer(
+                self.shadow_uniforms_buffer.as_ref().unwrap(),
+                0,
+                bytemuck::bytes_of(&shadow_uniforms),
+            );
+
+            // 2. Perform Shadow Render Pass for each cascade
+            let shadow_depth_view = self.shadow_depth_view.as_ref().unwrap();
+
+            for i in 0..NUM_CASCADES {
+                // Update the light's VP matrix for this specific cascade
+                self.queue.write_buffer(
+                    &shadow_pipeline.light_vp_buffer,
+                    0,
+                    bytemuck::bytes_of(&shadow_uniforms.cascades[i].light_view_proj),
+                );
+
+                // Create a view for the specific cascade layer
+                let cascade_view = self.shadow_map_texture.as_ref().unwrap().create_view(
+                    &wgpu::TextureViewDescriptor {
+                        label: Some(&format!("Cascade View {}", i)),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: i as u32,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    },
+                );
+
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(&format!("Shadow Pass {}", i)),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &cascade_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.0,
+                                g: 1.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }), // Clear to max depth
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: shadow_depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+
+                shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
+                shadow_pass.set_bind_group(0, &shadow_pipeline.light_vp_bind_group, &[]);
+
+                // Render all objects into the cascade
+                for object in &render_data.objects {
+                    if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                        let model_matrix = Mat4::from_scale_rotation_translation(
+                            object.current_transform.scale,
+                            object.current_transform.rotation.into(),
+                            object.current_transform.position,
+                        );
+                        shadow_pass.set_push_constants(
+                            wgpu::ShaderStages::VERTEX,
+                            0,
+                            bytemuck::bytes_of(&model_matrix.to_cols_array_2d()),
+                        );
+                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            mesh.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
+                }
+            }
+        }
+
         {
             // Scoped to release borrow of encoder
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1063,7 +1441,7 @@ impl Renderer {
 
                 let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
 
-                let constants = PbrConstants {
+                let push_constants = PbrConstants {
                     model_matrix: model_matrix.to_cols_array_2d(),
                     material_id: object.material_id as u32,
                     _p: [0; 3],
@@ -1072,7 +1450,7 @@ impl Renderer {
                 render_pass.set_push_constants(
                     wgpu::ShaderStages::VERTEX,
                     0,
-                    bytemuck::bytes_of(&constants),
+                    bytemuck::bytes_of(&push_constants),
                 );
 
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -1089,5 +1467,102 @@ impl Renderer {
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
 
         Ok(())
+    }
+
+    fn calculate_cascades(&self, proj: &Mat4, view: &Mat4, light_rotation: Quat) -> ShadowUniforms {
+        let light_dir = (light_rotation * -Vec3::Z).normalize();
+        let inv_camera_view_proj = (*proj * *view).inverse();
+        let camera = &self.current_render_data.as_ref().unwrap().camera_component;
+
+        let cascade_splits_percentages = [0.0, 0.07, 0.2, 0.5, 1.0];
+
+        let mut uniforms = ShadowUniforms {
+            cascades: [CascadeUniform {
+                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                split_depth: 0.0,
+                _padding: [0.0; 3],
+            }; NUM_CASCADES],
+        };
+
+        for i in 0..NUM_CASCADES {
+            let p_near_percent = cascade_splits_percentages[i];
+            let p_far_percent = cascade_splits_percentages[i + 1];
+
+            let frustum_corners_world: [Vec3; 8] = (0..8)
+                .map(|n| {
+                    let p_ndc = Vec3::new(
+                        (n % 2) as f32 * 2.0 - 1.0,
+                        (n / 2 % 2) as f32 * 2.0 - 1.0,
+                        (n / 4) as f32,
+                    );
+                    let z = p_near_percent + (p_ndc.z * (p_far_percent - p_near_percent));
+                    let p_world_h = inv_camera_view_proj * vec4(p_ndc.x, p_ndc.y, z, 1.0);
+                    p_world_h.xyz() / p_world_h.w
+                })
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+
+            let frustum_center = frustum_corners_world.iter().sum::<Vec3>() / 8.0;
+
+            let up = if light_dir.y.abs() > 0.999 {
+                Vec3::X
+            } else {
+                Vec3::Y
+            };
+            let light_view_mat = Mat4::look_at_rh(frustum_center - light_dir, frustum_center, up);
+
+            let mut frustum_min_ls = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+            let mut frustum_max_ls = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+            for &corner in &frustum_corners_world {
+                let trf = light_view_mat * corner.extend(1.0);
+                frustum_min_ls = frustum_min_ls.min(trf.xyz());
+                frustum_max_ls = frustum_max_ls.max(trf.xyz());
+            }
+
+            // Re-introduce the minimum cascade size check to prevent the projection from collapsing.
+            // This is especially important for cascade 0 when the camera is close to objects.
+            let min_cascade_size = 1.0;
+            if frustum_max_ls.x - frustum_min_ls.x < min_cascade_size {
+                let mid = (frustum_max_ls.x + frustum_min_ls.x) / 2.0;
+                frustum_max_ls.x = mid + min_cascade_size / 2.0;
+                frustum_min_ls.x = mid - min_cascade_size / 2.0;
+            }
+            if frustum_max_ls.y - frustum_min_ls.y < min_cascade_size {
+                let mid = (frustum_max_ls.y + frustum_min_ls.y) / 2.0;
+                frustum_max_ls.y = mid + min_cascade_size / 2.0;
+                frustum_min_ls.y = mid - min_cascade_size / 2.0;
+            }
+
+            let scene_corners_world = SCENE_BOUNDS.get_corners();
+            let mut scene_min_ls = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+            for &corner in &scene_corners_world {
+                let trf = light_view_mat * corner.extend(1.0);
+                scene_min_ls = scene_min_ls.min(trf.xyz());
+            }
+
+            let final_min_ls = frustum_min_ls.min(scene_min_ls);
+            let final_max_ls = frustum_max_ls; // Use the expanded frustum max
+
+            let light_proj_mat = Mat4::orthographic_rh(
+                final_min_ls.x,
+                final_max_ls.x,
+                final_min_ls.y,
+                final_max_ls.y,
+                final_min_ls.z, // Use combined near plane for casters
+                final_max_ls.z, // Use frustum far plane for precision
+            );
+
+            // The texel snapping / stability fixes should still be applied here if you want them.
+
+            let split_depth =
+                camera.near_plane + (camera.far_plane - camera.near_plane) * p_far_percent;
+            uniforms.cascades[i] = CascadeUniform {
+                light_view_proj: (light_proj_mat * light_view_mat).to_cols_array_2d(),
+                split_depth: -split_depth,
+                _padding: [0.0; 3],
+            };
+        }
+        uniforms
     }
 }

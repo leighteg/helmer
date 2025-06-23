@@ -2,6 +2,9 @@
 
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
+const NUM_CASCADES: u32 = 4u;
+const VSM_MIN_VARIANCE: f32 = 0.00002;
+const SHADOW_BLEEDING_REDUCTION: f32 = 0.4;
 
 //=============== STRUCTS ===============//
 
@@ -20,6 +23,7 @@ struct VertexOutput {
     @location(3) world_tangent: vec3<f32>,
     @location(4) world_bitangent: vec3<f32>,
     @location(5) @interpolate(flat) material_id: u32,
+    @location(6) view_space_depth: f32,
 }
 
 struct CameraUniforms {
@@ -52,6 +56,12 @@ struct MaterialData {
     _padding: f32,
 }
 
+struct CascadeData {
+    light_view_proj: mat4x4<f32>,
+    split_depth: f32,
+    // padding would be here if needed for alignment
+}
+
 struct PbrConstants {
     model_matrix: mat4x4<f32>,
     material_id: u32,
@@ -67,6 +77,9 @@ struct PbrConstants {
 @group(0) @binding(5) var metallic_roughness_texture_array: texture_2d_array<f32>;
 @group(0) @binding(6) var emission_texture_array: texture_2d_array<f32>;
 @group(0) @binding(7) var pbr_sampler: sampler;
+@group(0) @binding(8) var shadow_map: texture_2d_array<f32>;
+@group(0) @binding(9) var shadow_sampler: sampler;
+@group(0) @binding(10) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
 
 @vertex
 var<push_constant> constants: PbrConstants;
@@ -102,7 +115,9 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 
     let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
-    out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
+    let view_pos = camera.view_matrix * world_position_vec4;
+    out.clip_position = camera.projection_matrix * view_pos;
+    out.view_space_depth = view_pos.z;
 
     let model_mat3 = mat3x3<f32>(
         constants.model_matrix[0].xyz,
@@ -148,6 +163,54 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
 
 fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
+    let bias = 0.005;
+    if (depth - bias <= moments.x) {
+        return 1.0; // Not in shadow
+    }
+
+    var variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, VSM_MIN_VARIANCE);
+
+    let d = depth - moments.x;
+    let p_max = variance / (variance + d * d);
+
+    // One-tailed inequality using p_max
+    return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max);
+}
+
+fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
+    // 1. Select the correct cascade for this fragment
+    var cascade_index = -1;
+    for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
+        if (view_z > shadow_uniforms[i].split_depth) {
+            cascade_index = i;
+            break;
+        }
+    }
+
+    if (cascade_index < 0) {
+        return 1.0; // Not in any cascade, so not shadowed
+    }
+
+    // 2. Project to light space and perform lookup
+    let cascade = shadow_uniforms[cascade_index];
+    let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
+    let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
+    let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
+
+    let fragment_light_depth = shadow_pos_clip.z;
+
+    // Boundary Check
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || fragment_light_depth > 1.0) {
+        return 1.0;
+    }
+
+    // VSM Lookup and Test
+    let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
+    return chebyshev_inequality(fragment_light_depth, moments);
 }
 
 //=============== FRAGMENT SHADER ===============//
@@ -211,6 +274,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- 4. View & Fresnel Setup ---
     let V = normalize(camera.view_position - in.world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
+
+    // --- 4.5. Shadow Calculation ---
+    let shadow_factor = calculate_shadow_factor(in.world_position, in.view_space_depth);
     
     // --- 5. Lighting Calculation ---
     var Lo = vec3<f32>(0.0);
@@ -219,9 +285,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var L: vec3<f32>;
         var radiance: vec3<f32>;
 
+        var shadow_multiplier = 1.0;
         if light.light_type == 0u { // Directional Light
             L = normalize(-light.direction);
             radiance = light.color * light.intensity;
+            shadow_multiplier = shadow_factor;
         } else { // Point Light
             let to_light_vector = light.position - in.world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
@@ -250,7 +318,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             var kD = vec3<f32>(1.0) - kS;
             kD *= (1.0 - metallic);
 
-            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+            Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
         }
     }
     

@@ -80,6 +80,17 @@ fn main() {
                glam::Quat::from_axis_angle(glam::Vec3::Z, roll); // Roll
 
         // Create some demo entities
+        let ground_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            ground_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::from([30.0; 3]),
+            },
+        );
+        ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
+
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             cube_entity,
@@ -128,6 +139,20 @@ fn main() {
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
+
+        let light_entity_3 = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            light_entity_3,
+            Transform {
+                position: glam::Vec3::new(0.0, 10.0, 0.0),
+                rotation: glam::Quat::from_rotation_x(-90.0_f32.to_radians()),
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            light_entity_3,
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 1.0),
+        );
     });
     runtime.init();
 }
@@ -152,6 +177,9 @@ impl System for SpinnerSystem {
         ecs.component_pool
             .query_exact_mut_for_each::<(Transform, MeshRenderer), _>(
                 |(transform, mesh_renderer)| {
+                    if mesh_renderer.mesh_id == 2 {
+                        return;
+                    }
                     transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
                     // Re-normalize the quaternion to prevent floating-point drift over time.
                     transform.rotation = transform.rotation.normalize();

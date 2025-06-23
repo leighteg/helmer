@@ -4,3 +4,5 @@
 - asset handling (.prop (asset) & .set (archive) - packed using propmaster)
 - editor
 - ui system
+- GPU based physics
+- physically based sound (ecs system) & runtime audio engine

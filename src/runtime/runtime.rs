@@ -471,6 +471,7 @@ impl ApplicationHandler for Runtime {
 
             let cube_mesh = MeshAsset::cube("cube".into());
             let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
+            let ground_mesh = MeshAsset::plane("plane".into());
             self.renderer.as_mut().unwrap().add_mesh(
                 0,
                 &cube_mesh.vertices.unwrap(),
@@ -480,6 +481,11 @@ impl ApplicationHandler for Runtime {
                 1,
                 &uv_sphere_mesh.vertices.unwrap(),
                 &uv_sphere_mesh.indices,
+            );
+            self.renderer.as_mut().unwrap().add_mesh(
+                2,
+                &ground_mesh.vertices.unwrap(),
+                &ground_mesh.indices,
             );
             self.renderer
                 .as_mut()

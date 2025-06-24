@@ -2,12 +2,12 @@ use std::{any::TypeId, collections::HashSet, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use helmer_rs::{
-    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, physics::{components::{DynamicRigidBody, FixedCollider, PhysicsHandle}, physics_resource::PhysicsResource, systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem}}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
+    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, physics::{components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle}, physics_resource::PhysicsResource, systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem}}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
         input_manager::{self, InputManager},
         runtime::Runtime,
     }
 };
-use rapier3d::prelude::RigidBodyType;
+use rapier3d::prelude::{QueryFilter, RigidBodyType};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -122,10 +122,11 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([30.0, 0.01, 30.0]),
+                scale: glam::Vec3::from([30.0, 0.5, 30.0]),
             },
         );
         ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
+        ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
 
         let cube_entity = ecs_guard.create_entity();
@@ -138,7 +139,10 @@ fn main() {
             },
         );
         ecs_guard.add_component(cube_entity, MeshRenderer::new(0, 0, true));
-        ecs_guard.add_component(cube_entity, DynamicRigidBody {});
+        ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
+        ecs_guard.add_component(cube_entity, DynamicRigidBody {
+            mass: 1.0,
+        });
 
         let sphere_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -150,7 +154,10 @@ fn main() {
             },
         );
         ecs_guard.add_component(sphere_entity, MeshRenderer::new(1, 0, true));
-        ecs_guard.add_component(sphere_entity, DynamicRigidBody {});
+        ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
+        ecs_guard.add_component(sphere_entity, DynamicRigidBody {
+            mass: 0.5,
+        });
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -162,8 +169,11 @@ fn main() {
             },
         );
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
+        ecs_guard.add_component(light_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 2, true));
-        ecs_guard.add_component(light_entity, DynamicRigidBody {});
+        ecs_guard.add_component(light_entity, DynamicRigidBody {
+            mass: 5.0,
+        });
 
         let light_entity_2 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -179,7 +189,10 @@ fn main() {
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
-        ecs_guard.add_component(light_entity_2, DynamicRigidBody {});
+        ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
+        ecs_guard.add_component(light_entity_2, DynamicRigidBody {
+            mass: 10.0,
+        });
 
         let light_entity_3 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -344,10 +357,7 @@ pub struct Ray {
 /// It now interacts directly with the physics engine to move dynamic bodies.
 pub struct DragSystem {
     dragged_entity: Option<Entity>,
-    drag_offset: Vec3,
-    // The drag plane is now defined by an origin point and a normal vector.
-    drag_plane_origin: Vec3,
-    drag_plane_normal: Vec3,
+    drag_distance: f32,
     was_mouse_button_active_last_frame: bool,
 }
 
@@ -355,32 +365,22 @@ impl DragSystem {
     pub fn new() -> Self {
         Self {
             dragged_entity: None,
-            drag_offset: Vec3::ZERO,
-            // Default to a horizontal plane. This will be updated on click.
-            drag_plane_origin: Vec3::ZERO,
-            drag_plane_normal: Vec3::Y,
+            drag_distance: 0.0,
             was_mouse_button_active_last_frame: false,
         }
     }
 
     /// Creates a ray from the camera through the cursor's position on the screen.
-    fn screen_point_to_ray(
-        &self,
-        ecs: &ECSCore,
-        input_manager: &InputManager,
-    ) -> Option<Ray> {
-        // Correctly query for the single entity with Transform, Camera, and ActiveCamera.
+    fn screen_point_to_ray(&self, ecs: &ECSCore, input_manager: &InputManager) -> Option<Ray> {
         let (camera_transform, camera, _) = ecs
             .component_pool
             .query::<(Transform, Camera, ActiveCamera)>()
-            .next() // Get the first (and only) result from the iterator
+            .next()
             .expect("DragSystem requires one entity with Transform, Camera, and ActiveCamera components.");
 
-        // Convert cursor position to Normalized Device Coordinates (NDC)
         let x = (2.0 * input_manager.cursor_position.x as f32) / input_manager.window_size.x as f32 - 1.0;
         let y = 1.0 - (2.0 * input_manager.cursor_position.y as f32) / input_manager.window_size.y as f32;
 
-        // Define the view and projection matrices
         let view_matrix = Mat4::look_at_rh(
             camera_transform.position,
             camera_transform.position + camera_transform.forward(),
@@ -393,12 +393,10 @@ impl DragSystem {
             camera.far_plane,
         );
 
-        // Unproject the screen point back into world space.
         let view_proj_inv = (projection_matrix * view_matrix).inverse();
         let near_point = view_proj_inv * Vec4::new(x, y, -1.0, 1.0);
         let far_point = view_proj_inv * Vec4::new(x, y, 1.0, 1.0);
 
-        // Calculate the ray from these points.
         let origin = camera_transform.position;
         let direction = (far_point / far_point.w - near_point / near_point.w).normalize().truncate();
 
@@ -438,17 +436,12 @@ impl System for DragSystem {
 
         // --- DRAG START ---
         if is_pressed {
-            let mut closest_hit: Option<(Entity, f32)> = None;
-            let mut hit_ray: Option<Ray> = None;
-
             if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
-                hit_ray = Some(ray);
+                let mut closest_hit: Option<(Entity, f32)> = None;
                 let draggable_entities = ecs.component_pool.get_entities_with_all(&[TypeId::of::<Transform>()]);
 
                 for &id in &draggable_entities {
-                    if ecs.component_pool.get::<FixedCollider>(id).is_some() {
-                        continue;
-                    }
+                    if ecs.component_pool.get::<FixedCollider>(id).is_some() { continue; }
                     if let Some(transform) = ecs.component_pool.get::<Transform>(id) {
                         let radius = 0.5 * transform.scale.max_element();
                         if let Some(distance) = self.ray_sphere_intersection(&ray, transform.position, radius) {
@@ -458,29 +451,17 @@ impl System for DragSystem {
                         }
                     }
                 }
-            }
+                
+                if let Some((hit_id, distance)) = closest_hit {
+                    self.dragged_entity = Some(hit_id);
+                    self.drag_distance = distance;
 
-            if let Some(((hit_id, distance), ray)) = closest_hit.zip(hit_ray) {
-                self.dragged_entity = Some(hit_id);
-                let hit_point = ray.origin + ray.direction * distance;
-
-                // **IMPROVEMENT**: Define the drag plane based on the camera's view.
-                let (camera_transform, _, _) = ecs.component_pool.query::<(Transform, Camera, ActiveCamera)>().next().unwrap();
-                self.drag_plane_origin = hit_point;
-                self.drag_plane_normal = -camera_transform.forward(); // Plane faces the camera.
-
-                let handle_option = ecs.component_pool.get::<PhysicsHandle>(hit_id).copied();
-                if let Some(handle) = handle_option {
-                    if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
-                        if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
-                            rb.set_body_type(RigidBodyType::KinematicPositionBased, true);
-                            let rb_pos = rb.translation();
-                            self.drag_offset = hit_point - Vec3::new(rb_pos.x, rb_pos.y, rb_pos.z);
+                    if let Some(handle) = ecs.component_pool.get::<PhysicsHandle>(hit_id).copied() {
+                        if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                            if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                                rb.set_body_type(RigidBodyType::KinematicPositionBased, true);
+                            }
                         }
-                    }
-                } else {
-                    if let Some(transform) = ecs.component_pool.get::<Transform>(hit_id) {
-                        self.drag_offset = hit_point - transform.position;
                     }
                 }
             }
@@ -490,31 +471,19 @@ impl System for DragSystem {
         if is_active {
             if let Some(dragged_id) = self.dragged_entity {
                 if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
-                    // **IMPROVEMENT**: Use the stored camera-facing plane for intersection.
-                    let plane_normal = self.drag_plane_normal;
-                    let plane_origin = self.drag_plane_origin;
-                    let denom = ray.direction.dot(plane_normal);
+                    let new_pos = ray.origin + ray.direction * self.drag_distance;
 
-                    if denom.abs() > 1e-6 {
-                        let t = (plane_origin - ray.origin).dot(plane_normal) / denom;
-                        if t >= 0.0 {
-                            let hit_point = ray.origin + ray.direction * t;
-                            let new_pos = hit_point - self.drag_offset;
+                    if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
+                        transform.position = new_pos;
+                    }
 
-                            if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
-                                transform.position = new_pos;
-                            }
-
-                            let handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
-                            if let Some(handle) = handle_option {
-                                if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
-                                    if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
-                                        let mut new_isometry = *rb.position();
-                                        new_isometry.translation.x = new_pos.x;
-                                        new_isometry.translation.y = new_pos.y;
-                                        new_isometry.translation.z = new_pos.z;
-                                        rb.set_next_kinematic_position(new_isometry);
-                                    }
+                    if let Some(handle) = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied() {
+                        if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                            if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                                if rb.is_kinematic() {
+                                    let mut new_isometry = *rb.position();
+                                    new_isometry.translation.vector = new_pos.to_array().into();
+                                    rb.set_next_kinematic_position(new_isometry);
                                 }
                             }
                         }
@@ -526,15 +495,54 @@ impl System for DragSystem {
         // --- DRAG END ---
         if is_released {
             if let Some(dragged_id) = self.dragged_entity {
-                 let handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
-                 if let Some(handle) = handle_option {
-                     if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                let mut final_pos: Option<Vec3> = None;
+                
+                // Read necessary data in an immutable pass.
+                let transform_option = ecs.component_pool.get::<Transform>(dragged_id).copied();
+                let physics_handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
+
+                if let Some(transform) = transform_option {
+                    final_pos = Some(transform.position); // Default to current floating position
+
+                    // If it's a physics object, try to snap it to a surface below.
+                    if let (Some(physics), Some(handle)) = (ecs.get_resource::<PhysicsResource>(), physics_handle_option) {
+                         // A vertical raycast is more reliable for snapping than one from the camera.
+                         let ray_origin = transform.position + Vec3::Y * 0.1; 
+                         let ray_dir = -Vec3::Y;
+                         let rapier_ray = rapier3d::prelude::Ray::new(ray_origin.to_array().into(), ray_dir.to_array().into());
+                         
+                         let filter = QueryFilter::new().exclude_collider(handle.collider);
+
+                         if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_ray(&physics.rigid_body_set, &physics.collider_set, &rapier_ray, f32::MAX, true, filter) {
+                             let hit_point = rapier_ray.point_at(hit);
+                             let offset_dist = transform.scale.y * 0.5;
+                             // Update the final position to be on top of the hit surface.
+                             final_pos = Some(Vec3::new(transform.position.x, hit_point.y + offset_dist, transform.position.z));
+                         }
+                    }
+                }
+                
+                // Now, apply the final calculated position in a mutable pass.
+                if let Some(pos) = final_pos {
+                    if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
+                       transform.position = pos;
+                   }
+                }
+                
+                // Finalize the physics state.
+                if let Some(handle) = physics_handle_option {
+                    if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
                         if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
-                             rb.set_body_type(RigidBodyType::Dynamic, true);
-                             rb.wake_up(true);
+                            if let Some(pos) = final_pos {
+                                let mut new_isometry = *rb.position();
+                                new_isometry.translation.vector = pos.to_array().into();
+                                rb.set_position(new_isometry, true);
+                            }
+                            rb.set_body_type(RigidBodyType::Dynamic, true);
+                            rb.wake_up(true);
                         }
                     }
-                 }
+                }
             }
             self.dragged_entity = None;
         }

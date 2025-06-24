@@ -20,6 +20,7 @@ use helmer_rs::{
         runtime::Runtime,
     },
 };
+use rand::Rng;
 use rapier3d::{
     math::Isometry,
     na::Vector3,
@@ -68,6 +69,14 @@ fn main() {
         // Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
+            25,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        ecs_guard.system_scheduler.register_system(
+            SpawnSystem::new(),
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
@@ -588,5 +597,107 @@ impl System for DragSystem {
         }
 
         self.was_mouse_button_active_last_frame = is_active;
+    }
+}
+
+struct SpawnSystem {
+    frame: u32,
+    last_ran_frame: u32,
+    spawned_entities: HashSet<Entity>,
+}
+
+impl SpawnSystem {
+    pub fn new() -> Self {
+        Self {
+            frame: 0,
+            last_ran_frame: 0,
+            spawned_entities: HashSet::new(),
+        }
+    }
+}
+
+impl System for SpawnSystem {
+    fn name(&self) -> &str {
+        "SpawnSystem"
+    }
+
+    fn run(
+        &mut self,
+        dt: f32,
+        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        input_manager: &InputManager,
+    ) {
+        if self.frame >= 500 {
+            self.frame = 0;
+            self.last_ran_frame = 0;
+
+            for entity in self.spawned_entities.drain() {
+                ecs.destroy_entity(entity);
+            }
+
+            return;
+        }
+
+        self.frame += 1;
+
+        if self.frame >= self.last_ran_frame + 20 {
+            self.last_ran_frame = self.frame;
+
+            let new_entity = ecs.create_entity();
+
+            self.spawned_entities.insert(new_entity);
+
+            let mut rng = rand::rng(); // Get a random number generator
+
+            let mut random_x: f32 = rng.random_range(-10.0..10.0);
+            let mut random_y: f32 = rng.random_range(0.0..15.0);
+            let mut random_z: f32 = rng.random_range(-10.0..10.0);
+
+            let position = Vec3::new(random_x, random_y, random_z);
+
+            random_x = rng.random_range(-10.0..10.0);
+            random_y = rng.random_range(0.0..5.0);
+            random_z = rng.random_range(-10.0..10.0);
+
+            let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
+
+            let scale: f32 = rng.random_range(-10.0..10.0);
+
+            ecs.add_component(
+                new_entity,
+                Transform {
+                    position,
+                    rotation,
+                    scale: Vec3::from_array([scale; 3]),
+                },
+            );
+
+            let mesh_id: usize = rng.random_range(0..1);
+            let material_id: usize = rng.random_range(0..2);
+
+            match material_id {
+                1 => {
+                    ecs.add_component(new_entity, Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale));
+                }
+                2 => {
+                    ecs.add_component(new_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale));
+                }
+                _ => {}
+            }
+
+            ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
+
+            match mesh_id {
+                0 => {
+                    ecs.add_component(new_entity, ColliderShape::Cuboid);
+                }
+                1 => {
+                    ecs.add_component(new_entity, ColliderShape::Sphere);
+                }
+                _ => {}
+            }
+
+            ecs.add_component(new_entity, DynamicRigidBody { mass: rng.random_range(0.1..20.0) });
+        }
     }
 }

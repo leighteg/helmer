@@ -7,7 +7,7 @@ use helmer_rs::{
         runtime::Runtime,
     }
 };
-use rapier3d::prelude::{QueryFilter, RigidBodyType};
+use rapier3d::{math::Isometry, na::Vector3, parry::query::ShapeCastOptions, prelude::{QueryFilter, RigidBodyType}};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -497,39 +497,38 @@ impl System for DragSystem {
             if let Some(dragged_id) = self.dragged_entity {
                 let mut final_pos: Option<Vec3> = None;
                 
-                // Read necessary data in an immutable pass.
                 let transform_option = ecs.component_pool.get::<Transform>(dragged_id).copied();
                 let physics_handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
 
                 if let Some(transform) = transform_option {
-                    final_pos = Some(transform.position); // Default to current floating position
+                    final_pos = Some(transform.position);
 
-                    // If it's a physics object, try to snap it to a surface below.
                     if let (Some(physics), Some(handle)) = (ecs.get_resource::<PhysicsResource>(), physics_handle_option) {
-                         // A vertical raycast is more reliable for snapping than one from the camera.
-                         let ray_origin = transform.position + Vec3::Y * 0.1; 
-                         let ray_dir = -Vec3::Y;
-                         let rapier_ray = rapier3d::prelude::Ray::new(ray_origin.to_array().into(), ray_dir.to_array().into());
-                         
-                         let filter = QueryFilter::new().exclude_collider(handle.collider);
+                        if let Some(collider) = physics.collider_set.get(handle.collider) {
+                            let shape = collider.shape();
+                            let shape_isometry = Isometry::new(transform.position.to_array().into(), Vector3::from_vec(transform.rotation.to_array().to_vec()));
+                            let shape_vel = rapier3d::na::Vector3::new(0.0, -1.0, 0.0);
+                            let filter = QueryFilter::new().exclude_collider(handle.collider);
+                            let max_time_of_impact = 100.0;
 
-                         if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_ray(&physics.rigid_body_set, &physics.collider_set, &rapier_ray, f32::MAX, true, filter) {
-                             let hit_point = rapier_ray.point_at(hit);
-                             let offset_dist = transform.scale.y * 0.5;
-                             // Update the final position to be on top of the hit surface.
-                             final_pos = Some(Vec3::new(transform.position.x, hit_point.y + offset_dist, transform.position.z));
-                         }
+                            if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_shape(&physics.rigid_body_set, &physics.collider_set, &shape_isometry, &shape_vel, shape, ShapeCastOptions {
+                                max_time_of_impact,
+                                stop_at_penetration: true,
+                                ..Default::default()
+                            }, filter) {
+                                let snapped_y = transform.position.y - hit.time_of_impact;
+                                final_pos = Some(Vec3::new(transform.position.x, snapped_y, transform.position.z));
+                            }
+                        }
                     }
                 }
                 
-                // Now, apply the final calculated position in a mutable pass.
                 if let Some(pos) = final_pos {
                     if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
                        transform.position = pos;
                    }
                 }
                 
-                // Finalize the physics state.
                 if let Some(handle) = physics_handle_option {
                     if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
                         if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {

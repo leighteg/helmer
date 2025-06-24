@@ -2,19 +2,37 @@ use std::{any::TypeId, collections::HashSet, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use helmer_rs::{
-    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, physics::{components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle}, physics_resource::PhysicsResource, systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem}}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
+    ecs::{
+        ecs_core::{ECSCore, Entity},
+        system::System,
+    },
+    graphics::renderer_system::{RenderDataSystem, RenderPacket},
+    physics::{
+        components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},
+        physics_resource::PhysicsResource,
+        systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem},
+    },
+    provided::components::{
+        ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
+    },
+    runtime::{
         input_manager::{self, InputManager},
         runtime::Runtime,
-    }
+    },
 };
-use rapier3d::{math::Isometry, na::Vector3, parry::query::ShapeCastOptions, prelude::{QueryFilter, RigidBodyType}};
+use rapier3d::{
+    math::Isometry,
+    na::Vector3,
+    parry::query::ShapeCastOptions,
+    prelude::{QueryFilter, RigidBodyType},
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 fn main() {
     #[cfg(windows)]
     colored::control::set_virtual_terminal(true).ok();
-    
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::new("helmer_rs"))
@@ -122,7 +140,7 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([30.0, 0.5, 30.0]),
+                scale: glam::Vec3::from([30.0, 0.1, 30.0]),
             },
         );
         ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
@@ -140,9 +158,7 @@ fn main() {
         );
         ecs_guard.add_component(cube_entity, MeshRenderer::new(0, 0, true));
         ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(cube_entity, DynamicRigidBody {
-            mass: 1.0,
-        });
+        ecs_guard.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
 
         let sphere_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -150,14 +166,12 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(1.0, 0.0, 0.0),
                 rotation,
-                scale: glam::Vec3::from_array([0.5, 0.5, 0.5]),
+                scale: glam::Vec3::from_array([0.5; 3]),
             },
         );
         ecs_guard.add_component(sphere_entity, MeshRenderer::new(1, 0, true));
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
-        ecs_guard.add_component(sphere_entity, DynamicRigidBody {
-            mass: 0.5,
-        });
+        ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -171,9 +185,7 @@ fn main() {
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
         ecs_guard.add_component(light_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 2, true));
-        ecs_guard.add_component(light_entity, DynamicRigidBody {
-            mass: 5.0,
-        });
+        ecs_guard.add_component(light_entity, DynamicRigidBody { mass: 5.0 });
 
         let light_entity_2 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -190,9 +202,7 @@ fn main() {
         );
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity_2, DynamicRigidBody {
-            mass: 10.0,
-        });
+        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
 
         let light_entity_3 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -278,36 +288,35 @@ impl System for FreecamSystem {
         ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        if !input_manager.is_mouse_button_active(&MouseButton::Right) {
+        if input_manager.is_mouse_button_active(&MouseButton::Right) {
+            // --- 1. Handle Rotation from Mouse Input ---
+            if !self.is_looking {
+                // This is the first frame the button is pressed.
+                // Reset last_cursor_position to the current position to avoid the "spaz".
+                self.last_cursor_position = input_manager.cursor_position;
+                self.is_looking = true;
+            } else {
+                // We are actively looking, so calculate delta and apply rotation.
+                let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
+                self.last_cursor_position = input_manager.cursor_position;
+
+                if cursor_delta.length_squared() > 0.0 {
+                    self.yaw -= cursor_delta.x as f32 * self.sensitivity / 100.0;
+                    self.pitch += cursor_delta.y as f32 * self.sensitivity / 100.0;
+
+                    // Clamp pitch
+                    let pitch_limit = FRAC_PI_2 - 0.01;
+                    self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
+                }
+            }
+        } else {
             self.is_looking = false;
-            return;
         }
 
         if self.speed >= 0.5 || input_manager.mouse_wheel.y.is_sign_positive() {
             self.speed += input_manager.mouse_wheel.y / 2.0;
         }
         let mut speed = self.speed;
-
-        // --- 1. Handle Rotation from Mouse Input ---
-        if !self.is_looking {
-            // This is the first frame the button is pressed.
-            // Reset last_cursor_position to the current position to avoid the "spaz".
-            self.last_cursor_position = input_manager.cursor_position;
-            self.is_looking = true;
-        } else {
-            // We are actively looking, so calculate delta and apply rotation.
-            let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
-            self.last_cursor_position = input_manager.cursor_position;
-
-            if cursor_delta.length_squared() > 0.0 {
-                self.yaw -= cursor_delta.x as f32 * self.sensitivity / 100.0;
-                self.pitch += cursor_delta.y as f32 * self.sensitivity / 100.0;
-
-                // Clamp pitch
-                let pitch_limit = FRAC_PI_2 - 0.01;
-                self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
-            }
-        }
 
         // --- 2. Calculate Final Orientation ---
         let yaw_rotation = Quat::from_axis_angle(Vec3::Y, self.yaw);
@@ -334,12 +343,14 @@ impl System for FreecamSystem {
 
         // --- 4. Apply Updates to ECS Components ---
         ecs.component_pool
-            .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(|(transform, _, _)| {
-                transform.rotation = orientation;
-                if velocity.length_squared() > 0.0 {
-                    transform.position += velocity.normalize() * speed * dt;
-                }
-            });
+            .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
+                |(transform, _, _)| {
+                    transform.rotation = orientation;
+                    if velocity.length_squared() > 0.0 {
+                        transform.position += velocity.normalize() * speed * dt;
+                    }
+                },
+            );
     }
 }
 
@@ -378,8 +389,10 @@ impl DragSystem {
             .next()
             .expect("DragSystem requires one entity with Transform, Camera, and ActiveCamera components.");
 
-        let x = (2.0 * input_manager.cursor_position.x as f32) / input_manager.window_size.x as f32 - 1.0;
-        let y = 1.0 - (2.0 * input_manager.cursor_position.y as f32) / input_manager.window_size.y as f32;
+        let x = (2.0 * input_manager.cursor_position.x as f32) / input_manager.window_size.x as f32
+            - 1.0;
+        let y = 1.0
+            - (2.0 * input_manager.cursor_position.y as f32) / input_manager.window_size.y as f32;
 
         let view_matrix = Mat4::look_at_rh(
             camera_transform.position,
@@ -398,7 +411,9 @@ impl DragSystem {
         let far_point = view_proj_inv * Vec4::new(x, y, 1.0, 1.0);
 
         let origin = camera_transform.position;
-        let direction = (far_point / far_point.w - near_point / near_point.w).normalize().truncate();
+        let direction = (far_point / far_point.w - near_point / near_point.w)
+            .normalize()
+            .truncate();
 
         Some(Ray { origin, direction })
     }
@@ -438,20 +453,26 @@ impl System for DragSystem {
         if is_pressed {
             if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
                 let mut closest_hit: Option<(Entity, f32)> = None;
-                let draggable_entities = ecs.component_pool.get_entities_with_all(&[TypeId::of::<Transform>()]);
+                let draggable_entities = ecs
+                    .component_pool
+                    .get_entities_with_all(&[TypeId::of::<Transform>()]);
 
                 for &id in &draggable_entities {
-                    if ecs.component_pool.get::<FixedCollider>(id).is_some() { continue; }
+                    if ecs.component_pool.get::<FixedCollider>(id).is_some() {
+                        continue;
+                    }
                     if let Some(transform) = ecs.component_pool.get::<Transform>(id) {
                         let radius = 0.5 * transform.scale.max_element();
-                        if let Some(distance) = self.ray_sphere_intersection(&ray, transform.position, radius) {
+                        if let Some(distance) =
+                            self.ray_sphere_intersection(&ray, transform.position, radius)
+                        {
                             if closest_hit.is_none() || distance < closest_hit.unwrap().1 {
                                 closest_hit = Some((id, distance));
                             }
                         }
                     }
                 }
-                
+
                 if let Some((hit_id, distance)) = closest_hit {
                     self.dragged_entity = Some(hit_id);
                     self.drag_distance = distance;
@@ -466,7 +487,7 @@ impl System for DragSystem {
                 }
             }
         }
-        
+
         // --- DRAGGING ---
         if is_active {
             if let Some(dragged_id) = self.dragged_entity {
@@ -477,7 +498,9 @@ impl System for DragSystem {
                         transform.position = new_pos;
                     }
 
-                    if let Some(handle) = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied() {
+                    if let Some(handle) =
+                        ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied()
+                    {
                         if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
                             if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
                                 if rb.is_kinematic() {
@@ -496,39 +519,57 @@ impl System for DragSystem {
         if is_released {
             if let Some(dragged_id) = self.dragged_entity {
                 let mut final_pos: Option<Vec3> = None;
-                
+
                 let transform_option = ecs.component_pool.get::<Transform>(dragged_id).copied();
-                let physics_handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
+                let physics_handle_option =
+                    ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
 
                 if let Some(transform) = transform_option {
                     final_pos = Some(transform.position);
 
-                    if let (Some(physics), Some(handle)) = (ecs.get_resource::<PhysicsResource>(), physics_handle_option) {
+                    if let (Some(physics), Some(handle)) =
+                        (ecs.get_resource::<PhysicsResource>(), physics_handle_option)
+                    {
                         if let Some(collider) = physics.collider_set.get(handle.collider) {
                             let shape = collider.shape();
-                            let shape_isometry = Isometry::new(transform.position.to_array().into(), Vector3::from_vec(transform.rotation.to_array().to_vec()));
+                            let shape_isometry = Isometry::new(
+                                transform.position.to_array().into(),
+                                Vector3::from_vec(transform.rotation.to_array().to_vec()),
+                            );
                             let shape_vel = rapier3d::na::Vector3::new(0.0, -1.0, 0.0);
                             let filter = QueryFilter::new().exclude_collider(handle.collider);
                             let max_time_of_impact = 100.0;
 
-                            if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_shape(&physics.rigid_body_set, &physics.collider_set, &shape_isometry, &shape_vel, shape, ShapeCastOptions {
-                                max_time_of_impact,
-                                stop_at_penetration: true,
-                                ..Default::default()
-                            }, filter) {
+                            if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_shape(
+                                &physics.rigid_body_set,
+                                &physics.collider_set,
+                                &shape_isometry,
+                                &shape_vel,
+                                shape,
+                                ShapeCastOptions {
+                                    max_time_of_impact,
+                                    stop_at_penetration: true,
+                                    ..Default::default()
+                                },
+                                filter,
+                            ) {
                                 let snapped_y = transform.position.y - hit.time_of_impact;
-                                final_pos = Some(Vec3::new(transform.position.x, snapped_y, transform.position.z));
+                                final_pos = Some(Vec3::new(
+                                    transform.position.x,
+                                    snapped_y,
+                                    transform.position.z,
+                                ));
                             }
                         }
                     }
                 }
-                
+
                 if let Some(pos) = final_pos {
                     if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
-                       transform.position = pos;
-                   }
+                        transform.position = pos;
+                    }
                 }
-                
+
                 if let Some(handle) = physics_handle_option {
                     if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
                         if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {

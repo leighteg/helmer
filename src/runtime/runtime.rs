@@ -452,7 +452,7 @@ impl ApplicationHandler for Runtime {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let mut window = Window::default_attributes();
-            window.title = "helmer engine — 2025 leighton".into();
+            window.title = "helmer engine".into();
             //window.fullscreen = Some(winit::window::Fullscreen::Borderless(None));
 
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));

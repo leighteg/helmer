@@ -415,14 +415,14 @@ impl ComponentPool {
     /// Execute a closure for each entity matching the query (mutable access)
     pub fn query_mut_for_each<Q: ComponentQuery, F>(&mut self, mut f: F)
     where
-        F: FnMut(Q::ItemMut<'_>),
+        F: FnMut(Entity, Q::ItemMut<'_>),
     {
         let required_types = Q::type_ids();
         let entities = self.get_entities_with_all(&required_types);
 
         for entity in entities {
             if let Some(components) = Q::fetch_mut(self, entity) {
-                f(components);
+                f(entity, components);
             }
         }
     }

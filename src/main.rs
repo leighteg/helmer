@@ -2,11 +2,12 @@ use std::{any::TypeId, collections::HashSet, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use helmer_rs::{
-    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
+    ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer_system::{RenderDataSystem, RenderPacket}, physics::{components::{DynamicRigidBody, FixedCollider, PhysicsHandle}, physics_resource::PhysicsResource, systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem}}, provided::components::{ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform}, runtime::{
         input_manager::{self, InputManager},
         runtime::Runtime,
     }
 };
+use rapier3d::prelude::RigidBodyType;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -26,31 +27,66 @@ fn main() {
         let mut ecs_guard = app.ecs.write().unwrap();
 
         ecs_guard.add_resource(RenderPacket::default());
+        ecs_guard.add_resource(PhysicsResource::new());
 
-        ecs_guard.system_scheduler.register_system(
-            SpinnerSystem {},
-            10,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
+        // Priority 30: Input and high-level camera control. Runs first.
         ecs_guard.system_scheduler.register_system(
             FreecamSystem::new(1.0, 0.5),
-            10,
+            30,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
+        // Priority 30: Input-based object interaction. Can run in parallel with Freecam.
         ecs_guard.system_scheduler.register_system(
             DragSystem::new(),
+            30,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        // Priority 25: General game logic that modifies transforms.
+        ecs_guard.system_scheduler.register_system(
+            SpinnerSystem {},
+            25,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
+        // Must run *after* game logic and *before* the physics step.
+        ecs_guard.system_scheduler.register_system(
+            SyncEntitiesToPhysicsSystem {},
+            20,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        // Priority 10: The Physics Step. The core simulation tick.
+        // Must run *after* entities are synced to physics.
+        ecs_guard.system_scheduler.register_system(
+            PhysicsStepSystem {},
             10,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
+        // Priority 5: Post-Physics Sync. Applies simulation results back to ECS transforms.
+        // Must run *after* the physics step and *before* rendering.
+        ecs_guard.system_scheduler.register_system(
+            SyncPhysicsToEntitiesSystem {},
+            5,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        // Priority 0: Rendering. Runs last to ensure it uses the final state of all transforms.
         ecs_guard.system_scheduler.register_system(
             RenderDataSystem::new(),
             0,
@@ -86,10 +122,11 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([30.0; 3]),
+                scale: glam::Vec3::from([30.0, 0.01, 30.0]),
             },
         );
         ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
+        ecs_guard.add_component(ground_entity, FixedCollider {});
 
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -101,6 +138,7 @@ fn main() {
             },
         );
         ecs_guard.add_component(cube_entity, MeshRenderer::new(0, 0, true));
+        ecs_guard.add_component(cube_entity, DynamicRigidBody {});
 
         let sphere_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -112,6 +150,7 @@ fn main() {
             },
         );
         ecs_guard.add_component(sphere_entity, MeshRenderer::new(1, 0, true));
+        ecs_guard.add_component(sphere_entity, DynamicRigidBody {});
 
         let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -124,6 +163,7 @@ fn main() {
         );
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
         ecs_guard.add_component(light_entity, MeshRenderer::new(0, 2, true));
+        ecs_guard.add_component(light_entity, DynamicRigidBody {});
 
         let light_entity_2 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -139,6 +179,7 @@ fn main() {
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
+        ecs_guard.add_component(light_entity_2, DynamicRigidBody {});
 
         let light_entity_3 = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -300,10 +341,13 @@ pub struct Ray {
 }
 
 /// The DragSystem is responsible for handling the logic of clicking and dragging entities.
+/// It now interacts directly with the physics engine to move dynamic bodies.
 pub struct DragSystem {
     dragged_entity: Option<Entity>,
     drag_offset: Vec3,
-    drag_plane_y: f32,
+    // The drag plane is now defined by an origin point and a normal vector.
+    drag_plane_origin: Vec3,
+    drag_plane_normal: Vec3,
     was_mouse_button_active_last_frame: bool,
 }
 
@@ -312,7 +356,9 @@ impl DragSystem {
         Self {
             dragged_entity: None,
             drag_offset: Vec3::ZERO,
-            drag_plane_y: 0.0,
+            // Default to a horizontal plane. This will be updated on click.
+            drag_plane_origin: Vec3::ZERO,
+            drag_plane_normal: Vec3::Y,
             was_mouse_button_active_last_frame: false,
         }
     }
@@ -323,11 +369,12 @@ impl DragSystem {
         ecs: &ECSCore,
         input_manager: &InputManager,
     ) -> Option<Ray> {
-        let (camera, camera_transform) = ecs
+        // Correctly query for the single entity with Transform, Camera, and ActiveCamera.
+        let (camera_transform, camera, _) = ecs
             .component_pool
-            .query::<(Camera, Transform)>()
-            .next()
-            .expect("DragSystem requires one active Camera in the scene.");
+            .query::<(Transform, Camera, ActiveCamera)>()
+            .next() // Get the first (and only) result from the iterator
+            .expect("DragSystem requires one entity with Transform, Camera, and ActiveCamera components.");
 
         // Convert cursor position to Normalized Device Coordinates (NDC)
         let x = (2.0 * input_manager.cursor_position.x as f32) / input_manager.window_size.x as f32 - 1.0;
@@ -355,14 +402,9 @@ impl DragSystem {
         let origin = camera_transform.position;
         let direction = (far_point / far_point.w - near_point / near_point.w).normalize().truncate();
 
-        if ENABLE_DRAG_SYSTEM_LOGGING {
-            println!("[DEBUG] Raycast initiated: origin={:?}, direction={:?}", origin, direction);
-        }
-
         Some(Ray { origin, direction })
     }
 
-    /// Performs a simple intersection test between a ray and a sphere.
     fn ray_sphere_intersection(&self, ray: &Ray, center: Vec3, radius: f32) -> Option<f32> {
         let oc = ray.origin - center;
         let a = ray.direction.length_squared();
@@ -390,75 +432,113 @@ impl System for DragSystem {
     }
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
-        // --- 1. DETERMINE MOUSE STATE CHANGES ---
         let is_active = input_manager.is_mouse_button_active(&MouseButton::Left);
         let is_pressed = is_active && !self.was_mouse_button_active_last_frame;
+        let is_released = !is_active && self.was_mouse_button_active_last_frame;
 
-        if is_active {
-            // --- 2. HANDLE DRAG START (Single-frame event on mouse press) ---
-            if is_pressed {
-                if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Mouse Press Detected at {:?}", input_manager.cursor_position); }
+        // --- DRAG START ---
+        if is_pressed {
+            let mut closest_hit: Option<(Entity, f32)> = None;
+            let mut hit_ray: Option<Ray> = None;
 
-                if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
-                    let mut closest_hit: Option<(Entity, f32)> = None;
+            if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
+                hit_ray = Some(ray);
+                let draggable_entities = ecs.component_pool.get_entities_with_all(&[TypeId::of::<Transform>()]);
 
-                    let draggable_entities = ecs.component_pool.get_entities_with_all(&[TypeId::of::<Transform>()]);
-
-                    if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Found {} draggable entities", draggable_entities.len()); }
-
-                    for &id in &draggable_entities {
-                        if let Some(transform) = ecs.component_pool.get::<Transform>(id) {
-                            let radius = 0.5 * transform.scale.max_element();
-                            if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Testing entity {:?}, pos: {:?}, radius: {}", id, transform.position, radius); }
-                            if let Some(distance) = self.ray_sphere_intersection(&ray, transform.position, radius) {
-                                if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Intersection found! Entity {:?} at distance {}", id, distance); }
-                                if closest_hit.is_none() || distance < closest_hit.unwrap().1 {
-                                    closest_hit = Some((id, distance));
-                                }
-                            }
-                        }
+                for &id in &draggable_entities {
+                    if ecs.component_pool.get::<FixedCollider>(id).is_some() {
+                        continue;
                     }
-
-                    if let Some((hit_id, distance)) = closest_hit {
-                        let hit_point = ray.origin + ray.direction * distance;
-                        if let Some(transform) = ecs.component_pool.get_mut::<Transform>(hit_id) {
-                            if ENABLE_DRAG_SYSTEM_LOGGING { println!("[SUCCESS] Drag initiated for entity {:?}", hit_id); }
-                            self.dragged_entity = Some(hit_id);
-                            self.drag_offset = hit_point - transform.position;
-                            self.drag_plane_y = transform.position.y;
+                    if let Some(transform) = ecs.component_pool.get::<Transform>(id) {
+                        let radius = 0.5 * transform.scale.max_element();
+                        if let Some(distance) = self.ray_sphere_intersection(&ray, transform.position, radius) {
+                            if closest_hit.is_none() || distance < closest_hit.unwrap().1 {
+                                closest_hit = Some((id, distance));
+                            }
                         }
                     }
                 }
             }
-            // --- 3. HANDLE DRAGGING (When a drag is already in progress) ---
-            else if let Some(dragged_id) = self.dragged_entity {
-                if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
-                    let plane_normal = Vec3::Y;
-                    let plane_origin = Vec3::new(0.0, self.drag_plane_y, 0.0);
 
+            if let Some(((hit_id, distance), ray)) = closest_hit.zip(hit_ray) {
+                self.dragged_entity = Some(hit_id);
+                let hit_point = ray.origin + ray.direction * distance;
+
+                // **IMPROVEMENT**: Define the drag plane based on the camera's view.
+                let (camera_transform, _, _) = ecs.component_pool.query::<(Transform, Camera, ActiveCamera)>().next().unwrap();
+                self.drag_plane_origin = hit_point;
+                self.drag_plane_normal = -camera_transform.forward(); // Plane faces the camera.
+
+                let handle_option = ecs.component_pool.get::<PhysicsHandle>(hit_id).copied();
+                if let Some(handle) = handle_option {
+                    if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                        if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                            rb.set_body_type(RigidBodyType::KinematicPositionBased, true);
+                            let rb_pos = rb.translation();
+                            self.drag_offset = hit_point - Vec3::new(rb_pos.x, rb_pos.y, rb_pos.z);
+                        }
+                    }
+                } else {
+                    if let Some(transform) = ecs.component_pool.get::<Transform>(hit_id) {
+                        self.drag_offset = hit_point - transform.position;
+                    }
+                }
+            }
+        }
+        
+        // --- DRAGGING ---
+        if is_active {
+            if let Some(dragged_id) = self.dragged_entity {
+                if let Some(ray) = self.screen_point_to_ray(ecs, input_manager) {
+                    // **IMPROVEMENT**: Use the stored camera-facing plane for intersection.
+                    let plane_normal = self.drag_plane_normal;
+                    let plane_origin = self.drag_plane_origin;
                     let denom = ray.direction.dot(plane_normal);
+
                     if denom.abs() > 1e-6 {
                         let t = (plane_origin - ray.origin).dot(plane_normal) / denom;
                         if t >= 0.0 {
                             let hit_point = ray.origin + ray.direction * t;
+                            let new_pos = hit_point - self.drag_offset;
+
                             if let Some(transform) = ecs.component_pool.get_mut::<Transform>(dragged_id) {
-                                let new_pos = hit_point - self.drag_offset;
-                                if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Dragging entity {:?}, new_pos: {:?}", dragged_id, new_pos); }
                                 transform.position = new_pos;
+                            }
+
+                            let handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
+                            if let Some(handle) = handle_option {
+                                if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                                    if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                                        let mut new_isometry = *rb.position();
+                                        new_isometry.translation.x = new_pos.x;
+                                        new_isometry.translation.y = new_pos.y;
+                                        new_isometry.translation.z = new_pos.z;
+                                        rb.set_next_kinematic_position(new_isometry);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        } else {
-            // --- 4. HANDLE DRAG END (When mouse button is released) ---
-            if self.dragged_entity.is_some() {
-                if ENABLE_DRAG_SYSTEM_LOGGING { println!("[DEBUG] Drag ended."); }
-                self.dragged_entity = None;
-            }
         }
 
-        // --- 5. UPDATE STATE FOR NEXT FRAME ---
+        // --- DRAG END ---
+        if is_released {
+            if let Some(dragged_id) = self.dragged_entity {
+                 let handle_option = ecs.component_pool.get::<PhysicsHandle>(dragged_id).copied();
+                 if let Some(handle) = handle_option {
+                     if let Some(physics) = ecs.get_resource_mut::<PhysicsResource>() {
+                        if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                             rb.set_body_type(RigidBodyType::Dynamic, true);
+                             rb.wake_up(true);
+                        }
+                    }
+                 }
+            }
+            self.dragged_entity = None;
+        }
+
         self.was_mouse_button_active_last_frame = is_active;
     }
 }

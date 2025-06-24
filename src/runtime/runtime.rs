@@ -355,7 +355,7 @@ impl ApplicationHandler for Runtime {
                     let mut ecs_guard = self.ecs.write().unwrap();
                     ecs_guard
                         .component_pool
-                        .query_mut_for_each::<(Camera, ActiveCamera), _>(|(camera, _)| {
+                        .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
                             camera.aspect_ratio = new_size.width as f32 / new_size.height as f32;
                         });
                 }

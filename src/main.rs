@@ -75,13 +75,13 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        /*ecs_guard.system_scheduler.register_system(
+        ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
         // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
         // Must run *after* game logic and *before* the physics step.
@@ -635,14 +635,7 @@ impl System for SpawnSystem {
         ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        if self.frame >= 2000 {
-            self.frame = 0;
-            self.last_ran_frame = 0;
-
-            for entity in self.spawned_entities.drain() {
-                ecs.destroy_entity(entity);
-            }
-
+        if self.spawned_entities.len() >= 30 {
             return;
         }
 
@@ -680,8 +673,8 @@ impl System for SpawnSystem {
                 },
             );
 
-            let mesh_id: usize = rng.random_range(0..1);
-            let material_id: usize = rng.random_range(0..2);
+            let mesh_id: usize = rng.random_range(0..2);
+            let material_id: usize = rng.random_range(0..3);
 
             match material_id {
                 1 => {

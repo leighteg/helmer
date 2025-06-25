@@ -37,7 +37,7 @@ impl Aabb {
 // --- CONSTANTS ---
 const MAX_TEXTURE_COUNT: u32 = 256;
 const TEXTURE_RESOLUTION: u32 = 1024;
-const MAX_LIGHTS: usize = 32;
+const MAX_LIGHTS: usize = 256;
 const SHADOW_MAP_RESOLUTION: u32 = 2048;
 const NUM_CASCADES: usize = 4;
 const FRAMES_IN_FLIGHT: usize = 3;

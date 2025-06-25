@@ -91,7 +91,7 @@ impl System for SyncEntitiesToPhysicsSystem {
                             transform.scale.y * 0.5,
                             transform.scale.z * 0.5,
                         ),
-                        ColliderShape::Sphere => ColliderBuilder::ball(transform.scale.x * 0.5), // Assume uniform scale for sphere radius
+                        ColliderShape::Sphere => ColliderBuilder::ball(transform.scale.x), // Assume uniform scale for sphere radius
                     }
                     .restitution(0.7)
                     .build();
@@ -159,7 +159,7 @@ impl System for SyncEntitiesToPhysicsSystem {
                             transform.scale.y * 0.5,
                             transform.scale.z * 0.5,
                         ),
-                        ColliderShape::Sphere => ColliderBuilder::ball(transform.scale.x * 0.5),
+                        ColliderShape::Sphere => ColliderBuilder::ball(transform.scale.x),
                     }
                     .build();
 

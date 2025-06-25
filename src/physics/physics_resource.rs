@@ -27,7 +27,7 @@ impl PhysicsResource {
     pub fn new() -> Self {
         Self {
             pipeline: PhysicsPipeline::new(),
-            gravity: Vec3::new(0.0, -9.81, 0.0),
+            gravity: Vec3::new(0.0, -98.1, 0.0),
             integration_parameters: IntegrationParameters::default(),
             island_manager: IslandManager::new(),
             broad_phase: DefaultBroadPhase::new(),

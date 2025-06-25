@@ -43,6 +43,10 @@ impl ECSCore {
         self.component_pool.remove_entity(entity);
     }
 
+    pub fn entity_exists(&self, entity: Entity) -> bool {
+        self.entities.contains(&entity)
+    }
+
     pub fn add_component<T: Component + 'static>(&mut self, entity: Entity, component: T) {
         self.component_pool.insert(entity, component);
     }

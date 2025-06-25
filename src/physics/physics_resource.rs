@@ -1,5 +1,8 @@
+use hashbrown::HashMap;
 use rapier3d::prelude::*;
-use glam::Vec3; // Make sure glam is imported
+use glam::Vec3;
+
+use crate::{ecs::ecs_core::Entity, physics::components::PhysicsHandle};
 
 // This struct encapsulates the entire physics state.
 // It will be stored in the ECS as a single resource.
@@ -16,6 +19,7 @@ pub struct PhysicsResource {
     pub query_pipeline: QueryPipeline, // Important for ray-casting
     pub rigid_body_set: RigidBodySet,
     pub collider_set: ColliderSet,
+    pub physics_entities: HashMap<Entity, PhysicsHandle>,
 }
 
 impl PhysicsResource {
@@ -34,6 +38,7 @@ impl PhysicsResource {
             query_pipeline: QueryPipeline::new(),
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
+            physics_entities: HashMap::new(),
         }
     }
 }

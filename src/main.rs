@@ -10,7 +10,7 @@ use helmer_rs::{
     physics::{
         components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},
         physics_resource::PhysicsResource,
-        systems::{PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem},
+        systems::{CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem},
     },
     provided::components::{
         ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
@@ -113,6 +113,14 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
+        ecs_guard.system_scheduler.register_system(
+            CleanupPhysicsSystem {},
+            4,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );
+
         // Priority 0: Rendering. Runs last to ensure it uses the final state of all transforms.
         ecs_guard.system_scheduler.register_system(
             RenderDataSystem::new(),
@@ -149,7 +157,7 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([30.0, 0.1, 30.0]),
+                scale: glam::Vec3::from([50.0, 0.1, 50.0]),
             },
         );
         ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
@@ -627,7 +635,7 @@ impl System for SpawnSystem {
         ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        if self.frame >= 500 {
+        if self.frame >= 2000 {
             self.frame = 0;
             self.last_ran_frame = 0;
 
@@ -647,21 +655,21 @@ impl System for SpawnSystem {
 
             self.spawned_entities.insert(new_entity);
 
-            let mut rng = rand::rng(); // Get a random number generator
+            let mut rng = rand::rng();
 
-            let mut random_x: f32 = rng.random_range(-10.0..10.0);
-            let mut random_y: f32 = rng.random_range(0.0..15.0);
-            let mut random_z: f32 = rng.random_range(-10.0..10.0);
+            let mut random_x: f32 = rng.random_range(-13.0..13.0);
+            let mut random_y: f32 = rng.random_range(0.0..50.0);
+            let mut random_z: f32 = rng.random_range(-13.0..13.0);
 
             let position = Vec3::new(random_x, random_y, random_z);
 
             random_x = rng.random_range(-10.0..10.0);
-            random_y = rng.random_range(0.0..5.0);
+            random_y = rng.random_range(-10.0..10.0);
             random_z = rng.random_range(-10.0..10.0);
 
             let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
 
-            let scale: f32 = rng.random_range(-10.0..10.0);
+            let scale: f32 = rng.random_range(0.1..5.0);
 
             ecs.add_component(
                 new_entity,
@@ -697,7 +705,7 @@ impl System for SpawnSystem {
                 _ => {}
             }
 
-            ecs.add_component(new_entity, DynamicRigidBody { mass: rng.random_range(0.1..20.0) });
+            ecs.add_component(new_entity, DynamicRigidBody { mass: scale });
         }
     }
 }

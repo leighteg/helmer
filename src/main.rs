@@ -75,13 +75,13 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        ecs_guard.system_scheduler.register_system(
+        /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );
+        );*/
 
         // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
         // Must run *after* game logic and *before* the physics step.

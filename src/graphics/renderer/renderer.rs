@@ -156,6 +156,8 @@ pub struct RenderData {
     pub previous_camera_transform: Transform,
     pub current_camera_transform: Transform,
     pub camera_component: Camera,
+
+    pub timestamp: Instant,
 }
 
 // --- SHADER DATA STRUCTS (bytemuck, no mev) ---
@@ -345,12 +347,16 @@ pub struct Renderer {
 
     /// The fixed duration of a single logic update (e.g., 1.0 / 60.0).
     logic_frame_duration: Duration,
-    /// The wall-clock time when the last `RenderData` packet was received.
-    last_logic_update_time: Instant,
+    last_timestamp: Option<Instant>,
 }
 
 impl Renderer {
-    pub async fn new(instance: wgpu::Instance, surface: wgpu::Surface<'static>, size: PhysicalSize<u32>, target_tickrate: f32) -> Result<Self, RendererError> {
+    pub async fn new(
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        size: PhysicalSize<u32>,
+        target_tickrate: f32,
+    ) -> Result<Self, RendererError> {
         // --- Adapter, Device, Queue ---
         let adapter: Adapter;
         match instance
@@ -454,7 +460,7 @@ impl Renderer {
             frame_index: 0,
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
-            last_logic_update_time: Instant::now(),
+            last_timestamp: None,
         };
 
         renderer.initialize_resources()?;
@@ -1478,7 +1484,6 @@ impl Renderer {
 
     pub fn update_render_data(&mut self, render_data: RenderData) {
         self.current_render_data = Some(render_data);
-        self.last_logic_update_time = Instant::now();
     }
 
     pub fn render(&mut self) -> Result<(), RendererError> {
@@ -1491,9 +1496,23 @@ impl Renderer {
             return Ok(());
         };
 
-        let time_since_update = self.last_logic_update_time.elapsed();
-        let alpha = (time_since_update.as_secs_f32() / self.logic_frame_duration.as_secs_f32())
+        let now = Instant::now();
+        let actual_logic_duration = if let Some(last_ts) = self.last_timestamp {
+            let duration = render_data.timestamp - last_ts;
+            // Reset if gap is too large (indicates pause/hitch)
+            if duration > Duration::from_millis(200) {
+                self.logic_frame_duration
+            } else {
+                duration
+            }
+        } else {
+            self.logic_frame_duration
+        };
+        let time_since_current = now - render_data.timestamp;
+        let alpha = (time_since_current.as_secs_f32() / actual_logic_duration.as_secs_f32())
             .clamp(0.0, 1.0);
+
+        self.last_timestamp = Some(render_data.timestamp);
 
         // --- Get Frame and Encoder ---
         let output_frame = match self.surface.get_current_texture() {

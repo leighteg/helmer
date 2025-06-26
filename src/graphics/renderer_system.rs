@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use hashbrown::HashMap;
 use proc::System;
 use crate::{ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::renderer::renderer::{RenderData, RenderLight, RenderObject}, provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform}, runtime::input_manager::InputManager};
@@ -108,6 +110,7 @@ impl System for RenderDataSystem {
             camera_component: current_state.camera_component,
             current_camera_transform: current_state.camera_transform,
             previous_camera_transform: prev_state.camera_transform,
+            timestamp: Instant::now(),
         };
 
         // --- STEP 3: STORE THE PACKET IN THE RESOURCE POOL ---

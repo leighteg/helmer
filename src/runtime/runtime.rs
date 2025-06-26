@@ -150,10 +150,18 @@ impl Runtime {
 
                 input_manager.write().prepare_for_next_frame();
 
-                // Frame timing
-                let elapsed = frame_start.elapsed();
-                if elapsed < frame_duration {
-                    thread::sleep(frame_duration - elapsed);
+                // tick rate limiting
+                let logic_elapsed = frame_start.elapsed();
+                let time_to_wait = frame_duration.saturating_sub(logic_elapsed);
+
+                // Sleep for bulk of time (low CPU)
+                if time_to_wait > Duration::from_millis(1) {
+                    thread::sleep(time_to_wait - Duration::from_millis(1));
+                }
+
+                // Spin for final precision (high CPU)
+                while frame_start.elapsed() < frame_duration {
+                    thread::yield_now();
                 }
 
                 last_time = frame_start;
@@ -416,7 +424,12 @@ impl ApplicationHandler for Runtime {
                 state,
                 button,
             } => {
-                self.input_manager.read().push_event(InputEvent::MouseButton { button, pressed: state.is_pressed() });
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::MouseButton {
+                        button,
+                        pressed: state.is_pressed(),
+                    });
             }
             WindowEvent::CursorMoved {
                 device_id,
@@ -444,7 +457,9 @@ impl ApplicationHandler for Runtime {
                     }
                 };
 
-                self.input_manager.read().push_event(InputEvent::MouseWheel(scroll_delta));
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::MouseWheel(scroll_delta));
             }
             _ => {}
         }

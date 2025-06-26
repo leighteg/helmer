@@ -11,7 +11,7 @@ use std::{
 };
 use tracing::info;
 use wgpu::{Adapter, util::DeviceExt};
-use winit::window::Window;
+use winit::{dpi::PhysicalSize, window::Window};
 
 #[derive(Copy, Clone)]
 struct Aabb {
@@ -285,7 +285,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
-    window: Arc<Window>,
+    window_size: PhysicalSize<u32>,
 
     geometry_pipeline: Option<wgpu::RenderPipeline>,
     lighting_pipeline: Option<wgpu::RenderPipeline>,
@@ -350,22 +350,8 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>, logic_fps: f32) -> Result<Self, RendererError> {
-        let size = window.inner_size();
-
-        // --- Instance, Adapter, Device, Queue ---
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(target_os = "windows")]
-            backends: wgpu::Backends::DX12,
-            #[cfg(not(target_os = "windows"))]
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
-        // The surface needs to live as long as the window that created it.
-        // `Arc<Window>` ensures safety.
-        let surface = instance.create_surface(window.clone()).unwrap();
-
+    pub async fn new(instance: wgpu::Instance, surface: wgpu::Surface<'static>, size: PhysicalSize<u32>, target_tickrate: f32) -> Result<Self, RendererError> {
+        // --- Adapter, Device, Queue ---
         let adapter: Adapter;
         match instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -427,7 +413,7 @@ impl Renderer {
             queue,
             surface,
             surface_config,
-            window,
+            window_size: size,
             geometry_pipeline: None,
             lighting_pipeline: None,
             gbuffer_bind_group_layout: None,
@@ -467,7 +453,7 @@ impl Renderer {
             shadow_uniforms_buffer: None,
             frame_index: 0,
             current_render_data: None,
-            logic_frame_duration: Duration::from_secs_f32(1.0 / logic_fps),
+            logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_logic_update_time: Instant::now(),
         };
 
@@ -1479,6 +1465,8 @@ impl Renderer {
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
+            self.window_size = new_size;
+
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
@@ -1512,7 +1500,7 @@ impl Renderer {
             Ok(frame) => frame,
             Err(e) => {
                 match e {
-                    wgpu::SurfaceError::Lost => self.resize(self.window.inner_size()),
+                    wgpu::SurfaceError::Lost => self.resize(self.window_size),
                     wgpu::SurfaceError::OutOfMemory => {
                         return Err(RendererError::ResourceCreation(
                             "WGPU Surface: Out of Memory".to_string(),

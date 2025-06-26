@@ -1,11 +1,12 @@
 use core::time;
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashMap;
+use parking_lot::{Mutex, RwLock};
 use resvg::{tiny_skia, usvg::Tree};
 use std::{
     num::NonZeroU32,
     sync::{
-        Arc, Barrier, Mutex, RwLock,
+        Arc, Barrier,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -30,13 +31,15 @@ use crate::{
         renderer_system::RenderPacket,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
-    runtime::input_manager::InputManager,
+    runtime::input_manager::{InputEvent, InputManager},
 };
 
-pub enum Message {
-    Init(Window),
-    Shutdown,
+pub enum RenderMessage {
     RenderData(RenderData),
+    Resize(PhysicalSize<u32>),
+    AddMesh(usize, Vec<Vertex>, Vec<u32>),
+    AddMaterial(usize, Material),
+    Shutdown,
 }
 
 #[derive(Clone, Default)]
@@ -52,17 +55,16 @@ pub struct Runtime {
     //scene_root: Arc<RwLock<SceneNode>>,
     input_manager: Arc<RwLock<InputManager>>,
 
-    // Threading
+    // logic thread
     logic_thread: Option<JoinHandle<()>>,
-    running: Arc<AtomicBool>,
-
-    // Communication
-    render_receiver: mpsc::Receiver<Message>,
-
-    frame_barrier: Arc<Barrier>,
-
-    renderer: Option<Renderer>,
+    logic_thread_state: Arc<AtomicBool>,
     target_tickrate: f32,
+
+    // render thread
+    render_thread: Option<JoinHandle<()>>,
+    render_thread_state: Arc<AtomicBool>,
+    render_thread_sender: mpsc::Sender<RenderMessage>,
+    target_fps: Option<f32>,
 
     // Window management
     window: Option<Arc<Window>>,
@@ -80,14 +82,13 @@ impl Runtime {
             input_manager: Arc::new(RwLock::new(InputManager::new())),
 
             logic_thread: None,
-            running: Arc::new(AtomicBool::new(true)),
-
-            render_receiver,
-
-            frame_barrier: Arc::new(Barrier::new(2)),
-
-            renderer: None,
+            logic_thread_state: Arc::new(AtomicBool::new(true)),
             target_tickrate: 60.0,
+
+            render_thread: None,
+            render_thread_state: Arc::new(AtomicBool::new(true)),
+            render_thread_sender: render_sender,
+            target_fps: None,
 
             window: None,
 
@@ -96,115 +97,168 @@ impl Runtime {
     }
 
     pub fn init(&mut self) {
-        // We need to move the sender into the logic thread
-        let (render_sender, render_receiver) = mpsc::channel();
-        self.render_receiver = render_receiver;
-
-        self.start_logic_thread(render_sender);
-
         let event_loop = EventLoop::new().unwrap();
         let _ = event_loop.run_app(self);
     }
 
-    fn start_logic_thread(&mut self, sender: mpsc::Sender<Message>) {
+    fn start_logic_thread(&mut self) {
         let ecs = Arc::clone(&self.ecs);
         let input_manager = Arc::clone(&self.input_manager);
-        //let scene_root = Arc::clone(&self.scene_root);
-        let running = Arc::clone(&self.running);
-        let frame_barrier = Arc::clone(&self.frame_barrier);
+        let state = Arc::clone(&self.logic_thread_state);
         let target_tickrate = self.target_tickrate;
+
+        let sender = self.render_thread_sender.clone();
 
         self.logic_thread = Some(thread::spawn(move || {
             let mut last_time = Instant::now();
             let frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
 
-            // State tracking for interpolation.
-            let mut previous_state: Option<ExtractedState> = None;
+            while state.load(Ordering::Relaxed) {
+                let frame_start = Instant::now();
+                let dt = (frame_start - last_time).as_secs_f32();
 
-            while running.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                let dt = (now - last_time).as_secs_f32();
+                input_manager.write().process_events();
 
                 // Run ECS systems
                 {
-                    let mut ecs_guard = ecs.write().unwrap();
-                    let input_manager_guard = input_manager.read().unwrap();
+                    let mut ecs_guard = ecs.write();
+                    let input_manager_guard = input_manager.read();
 
-                    // 1. Temporarily take ownership of the scheduler, leaving a placeholder.
-                    // This is a zero-cost operation that satisfies the borrow checker.
-                    let mut scheduler = std::mem::replace(
-                        &mut ecs_guard.system_scheduler,
-                        SystemScheduler::new(), // A temporary, empty scheduler
-                    );
+                    let mut scheduler =
+                        std::mem::replace(&mut ecs_guard.system_scheduler, SystemScheduler::new());
 
-                    // 2. Now we can call run_all. We pass the ECS data (without the real scheduler).
-                    // The borrow checker is happy because `scheduler` and `ecs_guard` are separate variables.
                     scheduler.run_all(dt, &mut ecs_guard, &input_manager_guard);
-
-                    // 3. Put the scheduler back where it belongs.
                     let _ = std::mem::replace(&mut ecs_guard.system_scheduler, scheduler);
                 }
 
+                // Send render data if available - use regular send, not try_send
                 let render_data_to_send = {
-                    let mut ecs_guard = ecs.write().unwrap(); // A brief write lock to `.take()` the data
+                    let mut ecs_guard = ecs.write();
                     if let Some(packet) = ecs_guard.get_resource_mut::<RenderPacket>() {
-                        packet.0.take() // .take() pulls the value out of the Option, leaving None
+                        packet.0.take()
                     } else {
                         None
                     }
                 };
 
-                // Send render data if the system produced it
                 if let Some(data) = render_data_to_send {
-                    if sender.send(Message::RenderData(data)).is_err() {
-                        warn!("frame dropped/render thread disconnected!");
+                    if sender.send(RenderMessage::RenderData(data)).is_err() {
+                        warn!("render thread disconnected");
+                        break;
                     }
                 }
 
-                input_manager.write().unwrap().prepare_for_next_frame();
+                input_manager.write().prepare_for_next_frame();
 
-                // Frame rate limiting
-                let logic_elapsed = now.elapsed();
-                let time_to_wait = frame_duration.saturating_sub(logic_elapsed);
-
-                // Only sleep if we have more than a millisecond to spare.
-                // This `sleep` is the coarse, low-CPU part.
-                if time_to_wait > Duration::from_millis(1) {
-                    // Sleep for most of the duration, but leave the last millisecond for spinning.
-                    thread::sleep(time_to_wait - Duration::from_millis(1));
+                // Frame timing
+                let elapsed = frame_start.elapsed();
+                if elapsed < frame_duration {
+                    thread::sleep(frame_duration - elapsed);
                 }
 
-                // This is the "spin" part for high-precision timing.
-                // It will use 100% of its CPU core for the final moment to hit the target time exactly.
-                while now.elapsed() < frame_duration {
-                    // Hint to the OS that it can schedule other work.
-                    thread::yield_now();
-                }
-
-                // Reset last_time for the next iteration's dt calculation
-                last_time = now;
-
-                /*let total_tick_duration = now.elapsed();
-                tracing::info!(
-                    "Target FPS: {:.2}, Actual Tick Time: {:.2}ms ({:.2} FPS)",
-                    target_fps,
-                    total_tick_duration.as_secs_f32() * 1000.0,
-                    1.0 / total_tick_duration.as_secs_f32()
-                );*/
-
-                //frame_barrier.wait();
+                last_time = frame_start;
             }
 
-            let _ = sender.send(Message::Shutdown);
-            tracing::info!("Logic thread shutting down");
+            info!("logic thread shutting down");
         }));
 
         info!("initialized logic thread");
     }
 
-    pub fn shutdown(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
+    fn start_render_thread(&mut self, render_receiver: mpsc::Receiver<RenderMessage>) {
+        let target_tickrate = self.target_tickrate;
+        let target_fps = self.target_fps; // Use target_fps for render thread
+        let state = Arc::clone(&self.render_thread_state);
+        let window = Arc::clone(self.window.as_ref().unwrap());
+        let window_size = window.inner_size();
 
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            #[cfg(target_os = "windows")]
+            backends: wgpu::Backends::DX12,
+            #[cfg(not(target_os = "windows"))]
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window).unwrap();
+
+        let render_thread_handle = thread::spawn(move || {
+            let mut renderer = pollster::block_on(Renderer::new(
+                instance,
+                surface,
+                window_size,
+                target_tickrate,
+            ))
+            .unwrap();
+
+            let frame_duration = Duration::from_secs_f32(1.0 / target_fps.unwrap_or(60.0));
+            let mut last_render = Instant::now();
+
+            while state.load(Ordering::Relaxed) {
+                let frame_start = Instant::now();
+                let mut should_render = false;
+
+                while let Ok(message) = render_receiver.try_recv() {
+                    match message {
+                        RenderMessage::RenderData(data) => {
+                            renderer.update_render_data(data);
+                            should_render = true;
+                        }
+                        RenderMessage::Resize(new_size) => {
+                            renderer.resize(new_size);
+                            should_render = true;
+                        }
+                        RenderMessage::AddMesh(id, vertices, indices) => {
+                            renderer.add_mesh(id, &vertices, &indices).unwrap();
+                        }
+                        RenderMessage::AddMaterial(id, material) => {
+                            renderer.add_material(id, material).unwrap();
+                        }
+                        RenderMessage::Shutdown => {
+                            return;
+                        }
+                    }
+                }
+
+                if target_fps.is_some() {
+                    // Render at target FPS if we have new data OR if enough time has passed
+                    let time_since_last_render = frame_start.duration_since(last_render);
+                    if should_render || time_since_last_render >= frame_duration {
+                        if let Err(e) = renderer.render() {
+                            warn!("render error: {}", e);
+                        }
+                        last_render = frame_start;
+                    }
+
+                    // Sleep to maintain frame rate
+                    let elapsed = frame_start.elapsed();
+                    if elapsed < frame_duration {
+                        thread::sleep(frame_duration - elapsed);
+                    }
+                } else {
+                    if let Err(e) = renderer.render() {
+                        warn!("render error: {}", e);
+                    }
+                    last_render = frame_start;
+                }
+            }
+
+            info!("render thread shutting down");
+        });
+
+        info!("initialized render thread");
+        self.render_thread = Some(render_thread_handle);
+    }
+
+    pub fn shutdown_threads(&mut self) {
+        self.render_thread_state.store(false, Ordering::Relaxed);
+        self.logic_thread_state.store(false, Ordering::Relaxed);
+
+        let _ = self.render_thread_sender.send(RenderMessage::Shutdown);
+
+        if let Some(handle) = self.render_thread.take() {
+            let _ = handle.join();
+        }
         if let Some(handle) = self.logic_thread.take() {
             let _ = handle.join();
         }
@@ -298,61 +352,20 @@ impl ApplicationHandler for Runtime {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                self.shutdown();
+                self.shutdown_threads();
                 event_loop.exit();
             }
-            WindowEvent::RedrawRequested => {
-                if let Some(window) = &self.window {
-                    if let Some(renderer) = &mut self.renderer {
-                        let mut latest_data: Option<RenderData> = None;
-                        // Loop over `try_recv` to pull all pending messages from the channel.
-                        while let Ok(message) = self.render_receiver.try_recv() {
-                            match message {
-                                Message::RenderData(data) => {
-                                    // Keep overwriting our variable, so we only end up
-                                    // with the very last, most recent RenderData packet.
-                                    latest_data = Some(data);
-                                }
-                                Message::Shutdown => {
-                                    self.running.store(false, Ordering::Relaxed);
-                                    // Break the loop if we get a shutdown message
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        // After the loop, if we received any data at all, update the renderer
-                        // with the newest available state.
-                        if let Some(data) = latest_data {
-                            renderer.update_render_data(data);
-                        }
-
-                        if let Err(e) = renderer.render() {
-                            tracing::error!("Renderer error: {}", e);
-                        }
-                    }
-                    else {
-                        self.draw_splash();
-                    }
-
-                    if self.running.load(Ordering::Relaxed) == true {
-                        //self.frame_barrier.wait();
-
-                        window.request_redraw();
-                    }
-                }
-            }
+            WindowEvent::RedrawRequested => {}
             WindowEvent::Resized(new_size) => {
-                self.input_manager.write().unwrap().window_size =
+                let _ = self
+                    .render_thread_sender
+                    .send(RenderMessage::Resize(new_size));
+
+                self.input_manager.write().window_size =
                     UVec2::new(new_size.width, new_size.height);
 
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.resize(new_size);
-                }
-
                 if new_size.width > 0 && new_size.height > 0 {
-                    let mut ecs_guard = self.ecs.write().unwrap();
+                    let mut ecs_guard = self.ecs.write();
                     ecs_guard
                         .component_pool
                         .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
@@ -389,14 +402,11 @@ impl ApplicationHandler for Runtime {
                                 }
                             }
                         }
-                        _ => {
-                            let mut input_manager_guard = self.input_manager.write().unwrap();
-
-                            if event.state.is_pressed() {
-                                input_manager_guard.active_keys.insert(key_code.unwrap());
-                            } else {
-                                input_manager_guard.active_keys.remove(&key_code.unwrap());
-                            }
+                        key_code => {
+                            self.input_manager.read().push_event(InputEvent::Keyboard {
+                                key: key_code,
+                                pressed: event.state.is_pressed(),
+                            });
                         }
                     }
                 }
@@ -406,32 +416,23 @@ impl ApplicationHandler for Runtime {
                 state,
                 button,
             } => {
-                let mut input_manager_guard = self.input_manager.write().unwrap();
-
-                match state {
-                    winit::event::ElementState::Pressed => {
-                        input_manager_guard.active_mouse_buttons.insert(button);
-                    }
-                    winit::event::ElementState::Released => {
-                        input_manager_guard.active_mouse_buttons.remove(&button);
-                    }
-                }
+                self.input_manager.read().push_event(InputEvent::MouseButton { button, pressed: state.is_pressed() });
             }
             WindowEvent::CursorMoved {
                 device_id,
                 position,
             } => {
-                let mut input_manager_guard = self.input_manager.write().unwrap();
-
-                input_manager_guard.cursor_position = DVec2::from_array([position.x, position.y]);
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::CursorMoved(DVec2::from_array([
+                        position.x, position.y,
+                    ])));
             }
             WindowEvent::MouseWheel {
                 device_id,
                 delta,
                 phase,
             } => {
-                let mut input_manager_guard = self.input_manager.write().unwrap();
-
                 let scroll_delta = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
                     winit::event::MouseScrollDelta::PixelDelta(pos) => {
@@ -443,7 +444,7 @@ impl ApplicationHandler for Runtime {
                     }
                 };
 
-                input_manager_guard.add_scroll(scroll_delta);
+                self.input_manager.read().push_event(InputEvent::MouseWheel(scroll_delta));
             }
             _ => {}
         }
@@ -460,50 +461,51 @@ impl ApplicationHandler for Runtime {
             self.draw_splash();
         }
 
-        if self.renderer.is_none() {
-            self.renderer = Some(
-                pollster::block_on(Renderer::new(
-                    Arc::clone(self.window.as_ref().unwrap()),
-                    self.target_tickrate,
-                ))
-                .unwrap(),
-            );
+        if self.render_thread.is_none() && self.logic_thread.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            self.render_thread_sender = sender;
+
+            self.start_render_thread(receiver);
+            self.start_logic_thread();
 
             let cube_mesh = MeshAsset::cube("cube".into());
-            let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
-            let ground_mesh = MeshAsset::plane("plane".into());
-            self.renderer.as_mut().unwrap().add_mesh(
+            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
                 0,
-                &cube_mesh.vertices.unwrap(),
-                &cube_mesh.indices,
-            );
-            self.renderer.as_mut().unwrap().add_mesh(
+                cube_mesh.vertices.unwrap(),
+                cube_mesh.indices,
+            ));
+
+            let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
+            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
                 1,
-                &uv_sphere_mesh.vertices.unwrap(),
-                &uv_sphere_mesh.indices,
-            );
-            self.renderer.as_mut().unwrap().add_mesh(
+                uv_sphere_mesh.vertices.unwrap(),
+                uv_sphere_mesh.indices,
+            ));
+
+            let ground_mesh = MeshAsset::plane("plane".into());
+            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
                 2,
-                &ground_mesh.vertices.unwrap(),
-                &ground_mesh.indices,
-            );
-            self.renderer
-                .as_mut()
-                .unwrap()
-                .add_material(0, Material {
+                ground_mesh.vertices.unwrap(),
+                ground_mesh.indices,
+            ));
+
+            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
+                0,
+                Material {
                     roughness: 0.0,
                     metallic: 1.0,
                     ao: 0.01,
                     ..Default::default()
-                });
-            self.renderer
-                .as_mut()
-                .unwrap()
-                .add_material(1, Material::with_emission(Material::default(), [1.0, 0.0, 0.0], 10.0, None));
-            self.renderer
-                .as_mut()
-                .unwrap()
-                .add_material(2, Material::with_emission(Material::default(), [0.0, 0.0, 1.0], 10.0, Some(0)));
+                },
+            ));
+            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
+                1,
+                Material::with_emission(Material::default(), [1.0, 0.0, 0.0], 10.0, None),
+            ));
+            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
+                2,
+                Material::with_emission(Material::default(), [0.0, 0.0, 1.0], 10.0, Some(0)),
+            ));
 
             (self.init_callback)(self);
         }
@@ -513,9 +515,7 @@ impl ApplicationHandler for Runtime {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Main thread can do additional work here if needed
-    }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
 }
 
 fn copy_pixmap_to_buffer(

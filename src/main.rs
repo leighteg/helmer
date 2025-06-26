@@ -46,7 +46,7 @@ fn main() {
     tracing::info!("2025 leighton");
 
     let mut runtime = Runtime::new(|app| {
-        let mut ecs_guard = app.ecs.write().unwrap();
+        let mut ecs_guard = app.ecs.write();
 
         ecs_guard.add_resource(RenderPacket::default());
         ecs_guard.add_resource(PhysicsResource::new());

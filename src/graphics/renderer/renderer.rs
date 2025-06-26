@@ -472,7 +472,7 @@ impl Renderer {
         };
 
         renderer.initialize_resources()?;
-        info!("initialized deferred renderer");
+        info!("initialized renderer");
         Ok(renderer)
     }
 

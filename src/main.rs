@@ -10,7 +10,10 @@ use helmer_rs::{
     physics::{
         components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},
         physics_resource::PhysicsResource,
-        systems::{CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem, SyncPhysicsToEntitiesSystem},
+        systems::{
+            CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem,
+            SyncPhysicsToEntitiesSystem,
+        },
     },
     provided::components::{
         ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
@@ -139,7 +142,10 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(camera_entity, Camera::default());
+        ecs_guard.add_component(camera_entity, Camera {
+            far_plane: 300.0,
+            ..Default::default()
+        });
         ecs_guard.add_component(camera_entity, ActiveCamera {});
 
         let yaw = 30.0f32.to_radians();
@@ -220,20 +226,6 @@ fn main() {
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
-
-        let light_entity_3 = ecs_guard.create_entity();
-        ecs_guard.add_component(
-            light_entity_3,
-            Transform {
-                position: glam::Vec3::new(0.0, 10.0, 0.0),
-                rotation: glam::Quat::from_rotation_x(-90.0_f32.to_radians()),
-                scale: glam::Vec3::ONE,
-            },
-        );
-        ecs_guard.add_component(
-            light_entity_3,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 1.0),
-        );
     });
     runtime.init();
 }
@@ -609,17 +601,13 @@ impl System for DragSystem {
 }
 
 struct SpawnSystem {
-    frame: u32,
-    last_ran_frame: u32,
-    spawned_entities: HashSet<Entity>,
+    spawned_entities: Vec<Entity>,
 }
 
 impl SpawnSystem {
     pub fn new() -> Self {
         Self {
-            frame: 0,
-            last_ran_frame: 0,
-            spawned_entities: HashSet::new(),
+            spawned_entities: Vec::new(),
         }
     }
 }
@@ -635,70 +623,88 @@ impl System for SpawnSystem {
         ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        if self.spawned_entities.len() >= 30 {
-            return;
+        // CLEANUP
+        const MAX_CONCURRENT_ENTITIES: usize = 3000;
+
+        if self.spawned_entities.len() >= MAX_CONCURRENT_ENTITIES {
+            let dead_entity = self.spawned_entities.remove(0);
+            ecs.destroy_entity(dead_entity);
         }
 
-        self.frame += 1;
-
-        if self.frame >= self.last_ran_frame + 20 {
-            self.last_ran_frame = self.frame;
-
-            let new_entity = ecs.create_entity();
-
-            self.spawned_entities.insert(new_entity);
-
-            let mut rng = rand::rng();
-
-            let mut random_x: f32 = rng.random_range(-13.0..13.0);
-            let mut random_y: f32 = rng.random_range(0.0..50.0);
-            let mut random_z: f32 = rng.random_range(-13.0..13.0);
-
-            let position = Vec3::new(random_x, random_y, random_z);
-
-            random_x = rng.random_range(-10.0..10.0);
-            random_y = rng.random_range(-10.0..10.0);
-            random_z = rng.random_range(-10.0..10.0);
-
-            let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
-
-            let scale: f32 = rng.random_range(0.1..5.0);
-
-            ecs.add_component(
-                new_entity,
-                Transform {
-                    position,
-                    rotation,
-                    scale: Vec3::from_array([scale; 3]),
-                },
-            );
-
-            let mesh_id: usize = rng.random_range(0..2);
-            let material_id: usize = rng.random_range(0..3);
-
-            match material_id {
-                1 => {
-                    ecs.add_component(new_entity, Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale));
-                }
-                2 => {
-                    ecs.add_component(new_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale));
+        for entity in self.spawned_entities.iter() {
+            match ecs.get_component::<Transform>(*entity) {
+                Some(transform) => {
+                    if transform.position.y < -6.0 {
+                        ecs.destroy_entity(*entity);
+                    }
                 }
                 _ => {}
             }
-
-            ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
-
-            match mesh_id {
-                0 => {
-                    ecs.add_component(new_entity, ColliderShape::Cuboid);
-                }
-                1 => {
-                    ecs.add_component(new_entity, ColliderShape::Sphere);
-                }
-                _ => {}
-            }
-
-            ecs.add_component(new_entity, DynamicRigidBody { mass: scale });
         }
+
+        // -----
+
+        let new_entity = ecs.create_entity();
+
+        self.spawned_entities
+            .insert(self.spawned_entities.len(), new_entity);
+
+        let mut rng = rand::rng();
+
+        let mut random_x: f32 = rng.random_range(-13.0..13.0);
+        let mut random_y: f32 = rng.random_range(0.0..50.0);
+        let mut random_z: f32 = rng.random_range(-13.0..13.0);
+
+        let position = Vec3::new(random_x, random_y, random_z);
+
+        random_x = rng.random_range(-10.0..10.0);
+        random_y = rng.random_range(-10.0..10.0);
+        random_z = rng.random_range(-10.0..10.0);
+
+        let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
+
+        let scale: f32 = rng.random_range(0.1..5.0);
+
+        ecs.add_component(
+            new_entity,
+            Transform {
+                position,
+                rotation,
+                scale: Vec3::from_array([scale; 3]),
+            },
+        );
+
+        let mesh_id: usize = rng.random_range(0..2);
+        let material_id: usize = rng.random_range(0..3);
+
+        match material_id {
+            1 => {
+                ecs.add_component(
+                    new_entity,
+                    Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale),
+                );
+            }
+            2 => {
+                ecs.add_component(
+                    new_entity,
+                    Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale),
+                );
+            }
+            _ => {}
+        }
+
+        ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
+
+        match mesh_id {
+            0 => {
+                ecs.add_component(new_entity, ColliderShape::Cuboid);
+            }
+            1 => {
+                ecs.add_component(new_entity, ColliderShape::Sphere);
+            }
+            _ => {}
+        }
+
+        ecs.add_component(new_entity, DynamicRigidBody { mass: scale });
     }
 }

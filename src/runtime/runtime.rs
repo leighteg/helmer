@@ -62,7 +62,7 @@ pub struct Runtime {
     frame_barrier: Arc<Barrier>,
 
     renderer: Option<Renderer>,
-    target_fps: f32,
+    target_tickrate: f32,
 
     // Window management
     window: Option<Arc<Window>>,
@@ -87,7 +87,7 @@ impl Runtime {
             frame_barrier: Arc::new(Barrier::new(2)),
 
             renderer: None,
-            target_fps: 144.0,
+            target_tickrate: 60.0,
 
             window: None,
 
@@ -112,11 +112,11 @@ impl Runtime {
         //let scene_root = Arc::clone(&self.scene_root);
         let running = Arc::clone(&self.running);
         let frame_barrier = Arc::clone(&self.frame_barrier);
-        let target_fps = self.target_fps;
+        let target_tickrate = self.target_tickrate;
 
         self.logic_thread = Some(thread::spawn(move || {
             let mut last_time = Instant::now();
-            let frame_duration = Duration::from_secs_f32(1.0 / target_fps);
+            let frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
 
             // State tracking for interpolation.
             let mut previous_state: Option<ExtractedState> = None;
@@ -464,7 +464,7 @@ impl ApplicationHandler for Runtime {
             self.renderer = Some(
                 pollster::block_on(Renderer::new(
                     Arc::clone(self.window.as_ref().unwrap()),
-                    self.target_fps,
+                    self.target_tickrate,
                 ))
                 .unwrap(),
             );

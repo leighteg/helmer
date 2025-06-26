@@ -142,10 +142,13 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(camera_entity, Camera {
-            far_plane: 300.0,
-            ..Default::default()
-        });
+        ecs_guard.add_component(
+            camera_entity,
+            Camera {
+                far_plane: 300.0,
+                ..Default::default()
+            },
+        );
         ecs_guard.add_component(camera_entity, ActiveCamera {});
 
         let yaw = 30.0f32.to_radians();
@@ -362,9 +365,6 @@ impl System for FreecamSystem {
             );
     }
 }
-
-// --- Debug Flag ---
-const ENABLE_DRAG_SYSTEM_LOGGING: bool = false;
 
 // --- Ray Struct ---
 #[derive(Debug, Clone, Copy)]
@@ -624,19 +624,32 @@ impl System for SpawnSystem {
         input_manager: &InputManager,
     ) {
         // CLEANUP
+        const SPAWN_ITERATIONS: usize = 4;
         const MAX_CONCURRENT_ENTITIES: usize = 3000;
 
         if self.spawned_entities.len() >= MAX_CONCURRENT_ENTITIES {
-            let dead_entity = self.spawned_entities.remove(0);
-            ecs.destroy_entity(dead_entity);
+            ecs.destroy_entity(self.spawned_entities.remove(0));
         }
+
+        let mut dead_entities: Vec<Entity> = Vec::new();
 
         for entity in self.spawned_entities.iter() {
             match ecs.get_component::<Transform>(*entity) {
                 Some(transform) => {
                     if transform.position.y < -6.0 {
                         ecs.destroy_entity(*entity);
+
+                        dead_entities.insert(dead_entities.len(), *entity);
                     }
+                }
+                _ => {}
+            }
+        }
+
+        for entity in dead_entities.drain(0..dead_entities.len()) {
+            match self.spawned_entities.iter().position(|&r| r == entity) {
+                Some(index) => {
+                    self.spawned_entities.remove(index);
                 }
                 _ => {}
             }
@@ -644,67 +657,71 @@ impl System for SpawnSystem {
 
         // -----
 
-        let new_entity = ecs.create_entity();
-
-        self.spawned_entities
-            .insert(self.spawned_entities.len(), new_entity);
-
         let mut rng = rand::rng();
 
-        let mut random_x: f32 = rng.random_range(-13.0..13.0);
-        let mut random_y: f32 = rng.random_range(0.0..50.0);
-        let mut random_z: f32 = rng.random_range(-13.0..13.0);
+        for _ in 0..SPAWN_ITERATIONS {
+            let new_entity = ecs.create_entity();
 
-        let position = Vec3::new(random_x, random_y, random_z);
+            self.spawned_entities.insert(self.spawned_entities.len(), new_entity);
 
-        random_x = rng.random_range(-10.0..10.0);
-        random_y = rng.random_range(-10.0..10.0);
-        random_z = rng.random_range(-10.0..10.0);
 
-        let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
+            let mut random_x: f32 = rng.random_range(-13.0..13.0);
+            let mut random_y: f32 = rng.random_range(0.0..50.0);
+            let mut random_z: f32 = rng.random_range(-13.0..13.0);
 
-        let scale: f32 = rng.random_range(0.1..5.0);
+            let position = Vec3::new(random_x, random_y, random_z);
 
-        ecs.add_component(
-            new_entity,
-            Transform {
-                position,
-                rotation,
-                scale: Vec3::from_array([scale; 3]),
-            },
-        );
+            random_x = rng.random_range(-10.0..10.0);
+            random_y = rng.random_range(-10.0..10.0);
+            random_z = rng.random_range(-10.0..10.0);
 
-        let mesh_id: usize = rng.random_range(0..2);
-        let material_id: usize = rng.random_range(0..3);
+            let rotation = Quat::from_xyzw(random_x, random_y, random_z, 1.0);
 
-        match material_id {
-            1 => {
-                ecs.add_component(
-                    new_entity,
-                    Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale),
-                );
+            let scale: f32 = rng.random_range(0.1..5.0);
+
+            ecs.add_component(
+                new_entity,
+                Transform {
+                    position,
+                    rotation,
+                    scale: Vec3::from_array([scale; 3]),
+                },
+            );
+
+            let mesh_id: usize = rng.random_range(0..2);
+            let material_id: usize = rng.random_range(0..3);
+
+            match material_id {
+                1 => {
+                    ecs.add_component(
+                        new_entity,
+                        Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale),
+                    );
+                }
+                2 => {
+                    ecs.add_component(
+                        new_entity,
+                        Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale),
+                    );
+                }
+                _ => {}
             }
-            2 => {
-                ecs.add_component(
-                    new_entity,
-                    Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale),
-                );
+
+            ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
+
+            match mesh_id {
+                0 => {
+                    ecs.add_component(new_entity, ColliderShape::Cuboid);
+                }
+                1 => {
+                    ecs.add_component(new_entity, ColliderShape::Sphere);
+                }
+                _ => {}
             }
-            _ => {}
+
+            ecs.add_component(new_entity, DynamicRigidBody { mass: scale });
+
+            let _ = rng.reseed();
         }
-
-        ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
-
-        match mesh_id {
-            0 => {
-                ecs.add_component(new_entity, ColliderShape::Cuboid);
-            }
-            1 => {
-                ecs.add_component(new_entity, ColliderShape::Sphere);
-            }
-            _ => {}
-        }
-
-        ecs.add_component(new_entity, DynamicRigidBody { mass: scale });
     }
 }

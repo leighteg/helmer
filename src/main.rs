@@ -78,13 +78,13 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        ecs_guard.system_scheduler.register_system(
+        /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );
+        );*/
 
         // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
         // Must run *after* game logic and *before* the physics step.
@@ -229,6 +229,20 @@ fn main() {
         ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
+
+        /*let light_entity_3: usize = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            light_entity_3,
+            Transform {
+                position: glam::Vec3::new(0.0, 0.0, 0.0),
+                rotation: glam::Quat::from_array([0.0, 90.0, 90.0, 1.0]),
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            light_entity_3,
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 1.0),
+        );*/
     });
     runtime.init();
 }

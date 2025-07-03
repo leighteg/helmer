@@ -1,4 +1,5 @@
-// shaders/g_buffer.wgsl
+//=============== CONSTANTS ===============//
+const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
 
@@ -29,9 +30,13 @@ struct VertexInput {
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
     projection_matrix: mat4x4<f32>,
+    inverse_projection_matrix: mat4x4<f32>,
+    inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
+    // In WGSL uniform buffers, a vec3 is padded to 16 bytes.
+    // The following u32 will be correctly aligned.
     light_count: u32,
-}
+};
 
 struct LightData {
     position: vec3<f32>,
@@ -75,10 +80,27 @@ struct PbrConstants {
 @vertex
 var<push_constant> constants: PbrConstants;
 
+// --- STABILITY FIX: Added safe_normalize ---
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if (len < EPSILON) {
+        return vec3<f32>(0.0, 0.0, 1.0); // Return a default normal
+    }
+    return v / len;
+}
+
+// --- STABILITY FIX: Made matrix inversion safe by restoring manual implementation ---
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
               m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
               m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
+    // If the determinant is zero or very close to it, the matrix is not invertible.
+    // Return the identity matrix as a safe fallback to prevent division by zero.
+    if (abs(det) < EPSILON) {
+        return mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+    }
+
     let inv_det = 1.0 / det;
     var res: mat3x3<f32>;
     res[0][0] = (m[1][1] * m[2][2] - m[2][1] * m[1][2]) * inv_det;
@@ -100,15 +122,26 @@ fn vs_main(vertex: VertexInput) -> GBufferInput {
     out.world_position = world_position_vec4.xyz;
     let view_pos = camera.view_matrix * world_position_vec4;
     out.clip_position = camera.projection_matrix * view_pos;
+
     let model_mat3 = mat3x3<f32>(
         constants.model_matrix[0].xyz,
         constants.model_matrix[1].xyz,
-        constants.model_matrix[2].xyz,
+        constants.model_matrix[2].xyz
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
-    out.world_normal = normalize(normal_matrix * vertex.normal);
-    out.world_tangent = normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
-    out.world_bitangent = normalize(cross(out.world_normal, out.world_tangent));
+
+    // --- Robust TBN Calculation (Gram-Schmidt) ---
+    let N = safe_normalize(normal_matrix * vertex.normal);
+    let T_raw = safe_normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
+    // Orthonormalize tangent to the normal
+    let T = safe_normalize(T_raw - N * dot(N, T_raw));
+    // The bitangent is the cross product. It will be orthogonal.
+    let B = cross(N, T);
+
+    out.world_normal = N;
+    out.world_tangent = T;
+    out.world_bitangent = B;
+    
     out.tex_coord = vertex.tex_coord;
     out.material_id = constants.material_id;
     return out;
@@ -128,7 +161,6 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     let metallic = mr_sample.b * material.metallic;
     let roughness = mr_sample.g * material.roughness;
 
-    // FIXED: Calculate the full emission color
     var emission_color = material.emission_color * material.emission_strength;
     if (material.emission_texture_index >= 0i) {
         emission_color *= textureSample(emission_texture_array, pbr_sampler, in.tex_coord, material.emission_texture_index).rgb;
@@ -137,16 +169,17 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var N: vec3<f32>;
     if (material.normal_texture_index >= 0i) {
         let tangent_space_normal = textureSample(normal_texture_array, pbr_sampler, in.tex_coord, material.normal_texture_index).xyz * 2.0 - 1.0;
-        let T = normalize(in.world_tangent);
-        let B = normalize(in.world_bitangent);
-        let N_geom = normalize(in.world_normal);
+        let T = safe_normalize(in.world_tangent);
+        let B = safe_normalize(in.world_bitangent);
+        let N_geom = safe_normalize(in.world_normal);
         let tbn = mat3x3<f32>(T, B, N_geom);
-        N = normalize(tbn * tangent_space_normal);
+        N = safe_normalize(tbn * tangent_space_normal);
     } else {
-        N = normalize(in.world_normal);
+        N = safe_normalize(in.world_normal);
     }
 
     // --- Pack and Output ---
+    // Ensure the normal written to the G-Buffer is also valid
     out.normal = vec4<f32>(N * 0.5 + 0.5, 1.0);
     out.albedo = vec4<f32>(albedo_color, alpha);
     out.mra = vec4<f32>(metallic, roughness, ao, 1.0);

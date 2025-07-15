@@ -52,14 +52,14 @@ struct CascadeData {
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
-    if (len < EPSILON) { return vec3<f32>(0.0); }
+    if len < EPSILON { return vec3<f32>(0.0); }
     return v / len;
 }
 
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 { let a = roughness * roughness; let a2 = a * a; let NdotH2 = NdotH * NdotH; let denom = (NdotH2 * (a2 - 1.0) + 1.0); return a2 / (PI * denom * denom); }
 fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 { let r = (roughness + 1.0); let k = (r * r) / 8.0; return NdotV / (NdotV * (1.0 - k) + k); }
 fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 { let NdotV = max(dot(N, V), 0.0); let NdotL = max(dot(N, L), 0.0); return geometry_schlick_ggx(NdotV, roughness) * geometry_schlick_ggx(NdotL, roughness); }
-fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 { let bias = 0.005; if (depth - bias <= moments.x) { return 1.0; } var variance = moments.y - (moments.x * moments.x); variance = max(variance, VSM_MIN_VARIANCE); let d = depth - moments.x; let p_max = variance / (variance + d * d); return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max); }
+fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 { let bias = 0.005; if depth - bias <= moments.x { return 1.0; } var variance = moments.y - (moments.x * moments.x); variance = max(variance, VSM_MIN_VARIANCE); let d = depth - moments.x; let p_max = variance / (variance + d * d); return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max); }
 fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> { return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
 fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> { return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
 
@@ -69,7 +69,7 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         // Find the first cascade this fragment fits into.
         // Since view_z is negative, a "larger" z is closer to the camera.
-        if (view_z > shadow_uniforms[i].split_depth) {
+        if view_z > shadow_uniforms[i].split_depth {
             cascade_index = i;
             break;
         }
@@ -79,7 +79,7 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
 
     // Safety check before perspective divide
-    if (shadow_pos_clip.w < EPSILON) {
+    if shadow_pos_clip.w < EPSILON {
         return 1.0; // Not shadowed
     }
 
@@ -87,7 +87,7 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
 
     // If outside the light's frustum for this cascade, it's not shadowed.
-    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || shadow_coord.z > 1.0) {
+    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || shadow_coord.z > 1.0 {
         return 1.0;
     }
 
@@ -108,11 +108,11 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let screen_uv = frag_coord.xy / vec2<f32>(textureDimensions(gbuf_normal));
 
     let depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
-    if (depth >= 1.0) { discard; }
+    if depth >= 1.0 { discard; }
     let ndc = vec4<f32>(screen_uv.x * 2.0 - 1.0, (1.0 - screen_uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
-    
-    if (abs(world_pos_h.w) < EPSILON) { discard; }
+
+    if abs(world_pos_h.w) < EPSILON { discard; }
     let world_position = world_pos_h.xyz / world_pos_h.w;
 
     let packed_normal = textureSample(gbuf_normal, gbuf_sampler, screen_uv).xyz;
@@ -129,7 +129,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let V = safe_normalize(camera.view_position - world_position);
     
     // Safety check to prevent NaNs in reflect() and other calculations
-    if (length(N) < EPSILON || length(V) < EPSILON) {
+    if length(N) < EPSILON || length(V) < EPSILON {
         return vec4(albedo * 0.03 + emission, alpha);
     }
 
@@ -140,21 +140,21 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     var Lo = vec3<f32>(0.0);
     let view_pos = camera.view_matrix * vec4<f32>(world_position, 1.0);
     let shadow_factor = calculate_shadow_factor(world_position, view_pos.z);
-    
+
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
         var L: vec3<f32>;
         var radiance: vec3<f32>;
         var shadow_multiplier = 1.0;
 
-        if (light.light_type == 0u) { // Directional
+        if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
             shadow_multiplier = shadow_factor; // Apply shadows only to directional light
         } else { // Point
             let to_light_vector = light.position - world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
-            if (dist_sq < EPSILON) { continue; }
+            if dist_sq < EPSILON { continue; }
             L = to_light_vector / sqrt(dist_sq);
             let attenuation = 1.0 / (dist_sq + 1.0);
             radiance = light.color * light.intensity * attenuation;
@@ -162,16 +162,33 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
 
         let H = safe_normalize(V + L);
         let NdotL = max(dot(N, L), 0.0);
-        if (NdotL > 0.0) {
-            let NDF = distribution_ggx(dot(N, H), roughness);
+        if NdotL > 0.0 {
+            let H = safe_normalize(V + L);
+            let NdotH = max(dot(N, H), 0.0);
+    
+    // --- Cook-Torrance BRDF ---
+            let NDF = distribution_ggx(NdotH, roughness);
             let G = geometry_smith(N, V, L, roughness);
             let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-            var kD = vec3<f32>(1.0) - F;
-            kD *= (1.0 - metallic);
+    
+    // --- Specular Term ---
             let numerator = NDF * G * F;
-            let denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.001;
-            let specular = clamp(numerator / denominator, vec3(0.0), vec3(50.0));
-            Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
+    // Add epsilon to prevent division by zero at grazing angles
+            let denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + EPSILON;
+            let specular = numerator / denominator;
+
+    // --- Diffuse Term (with Energy Conservation) ---
+    // The specular ratio is determined by Fresnel (F)
+            let kS = F; 
+    // The diffuse ratio is whatever is left over
+            let kD = vec3<f32>(1.0) - kS;
+    
+    // Metals have no diffuse light, so we multiply kD by (1.0 - metallic)
+            let diffuse_color_contribution = kD * (1.0 - metallic);
+    
+    // Final combination
+    // Add the diffuse and specular parts, then multiply by light and angle
+            Lo += (diffuse_color_contribution * albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
         }
     }
 

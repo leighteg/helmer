@@ -31,15 +31,29 @@ use crate::{
         renderer_system::RenderPacket,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
-    runtime::input_manager::{InputEvent, InputManager},
+    runtime::{asset_server::{AssetKind, AssetServer, MaterialGpuData}, input_manager::{InputEvent, InputManager}},
 };
 
 pub enum RenderMessage {
     RenderData(RenderData),
     Resize(PhysicalSize<u32>),
-    AddMesh(usize, Vec<Vertex>, Vec<u32>),
-    AddMaterial(usize, Material),
     Shutdown,
+
+    // --- Asset Pipeline Messages ---
+    
+    CreateMesh {
+        id: usize,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+    },
+    CreateTexture {
+        id: usize,
+        name: String, // The file path for deduplication
+        kind: AssetKind,
+        data: Vec<u8>,
+        format: wgpu::TextureFormat,
+    },
+    CreateMaterial(MaterialGpuData),
 }
 
 #[derive(Clone, Default)]
@@ -54,6 +68,7 @@ pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
     input_manager: Arc<RwLock<InputManager>>,
+    pub asset_server: Arc<Mutex<AssetServer>>,
 
     // logic thread
     logic_thread: Option<JoinHandle<()>>,
@@ -63,7 +78,7 @@ pub struct Runtime {
     // render thread
     render_thread: Option<JoinHandle<()>>,
     render_thread_state: Arc<AtomicBool>,
-    render_thread_sender: mpsc::Sender<RenderMessage>,
+    pub render_thread_sender: mpsc::Sender<RenderMessage>,
     target_fps: Option<f32>,
 
     // Window management
@@ -80,6 +95,7 @@ impl Runtime {
             ecs: Arc::new(RwLock::new(ECSCore::new())),
 
             input_manager: Arc::new(RwLock::new(InputManager::new())),
+            asset_server: Arc::new(Mutex::new(AssetServer::new(render_sender.clone()))),
 
             logic_thread: None,
             logic_thread_state: Arc::new(AtomicBool::new(true)),
@@ -104,6 +120,7 @@ impl Runtime {
     fn start_logic_thread(&mut self) {
         let ecs = Arc::clone(&self.ecs);
         let input_manager = Arc::clone(&self.input_manager);
+        let asset_server = Arc::clone(&self.asset_server);
         let state = Arc::clone(&self.logic_thread_state);
         let target_tickrate = self.target_tickrate;
 
@@ -116,7 +133,11 @@ impl Runtime {
             while state.load(Ordering::Relaxed) {
                 let frame_start = Instant::now();
                 let dt = (frame_start - last_time).as_secs_f32();
+                
+                const MAX_DELTA_TIME: f32 = 1.0 / 30.0;
+                let dt = dt.min(MAX_DELTA_TIME);
 
+                asset_server.lock().update();
                 input_manager.write().process_events();
 
                 // Run ECS systems
@@ -203,29 +224,27 @@ impl Runtime {
             let mut last_render = Instant::now();
 
             while state.load(Ordering::Relaxed) {
-                let frame_start = Instant::now();
+                let frame_start = Instant::now();                
                 let mut should_render = false;
 
+                renderer.resolve_pending_materials();
+                
                 while let Ok(message) = render_receiver.try_recv() {
                     match message {
-                        RenderMessage::RenderData(data) => {
-                            renderer.update_render_data(data);
+                        RenderMessage::RenderData(_) => {
                             should_render = true;
                         }
-                        RenderMessage::Resize(new_size) => {
-                            renderer.resize(new_size);
+                        RenderMessage::Resize(_) => {
                             should_render = true;
-                        }
-                        RenderMessage::AddMesh(id, vertices, indices) => {
-                            renderer.add_mesh(id, &vertices, &indices).unwrap();
-                        }
-                        RenderMessage::AddMaterial(id, material) => {
-                            renderer.add_material(id, material).unwrap();
                         }
                         RenderMessage::Shutdown => {
+                            renderer.process_message(message);
                             return;
                         }
+                        _ => {}
                     }
+
+                    renderer.process_message(message);
                 }
 
                 if target_fps.is_some() {
@@ -480,47 +499,10 @@ impl ApplicationHandler for Runtime {
             let (sender, receiver) = mpsc::channel();
             self.render_thread_sender = sender;
 
+            self.asset_server = Arc::new(Mutex::new(AssetServer::new(self.render_thread_sender.clone())));
+
             self.start_render_thread(receiver);
             self.start_logic_thread();
-
-            let cube_mesh = MeshAsset::cube("cube".into());
-            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
-                0,
-                cube_mesh.vertices.unwrap(),
-                cube_mesh.indices,
-            ));
-
-            let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
-            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
-                1,
-                uv_sphere_mesh.vertices.unwrap(),
-                uv_sphere_mesh.indices,
-            ));
-
-            let ground_mesh = MeshAsset::plane("plane".into());
-            let _ = self.render_thread_sender.send(RenderMessage::AddMesh(
-                2,
-                ground_mesh.vertices.unwrap(),
-                ground_mesh.indices,
-            ));
-
-            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
-                0,
-                Material {
-                    roughness: 0.0,
-                    metallic: 1.0,
-                    ao: 0.01,
-                    ..Default::default()
-                },
-            ));
-            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
-                1,
-                Material::with_emission(Material::default(), [1.0, 0.0, 0.0], 10.0, None),
-            ));
-            let _ = self.render_thread_sender.send(RenderMessage::AddMaterial(
-                2,
-                Material::with_emission(Material::default(), [0.0, 0.0, 1.0], 10.0, Some(0)),
-            ));
 
             (self.init_callback)(self);
         }

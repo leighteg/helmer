@@ -24,7 +24,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
-    @location(3) tangent: vec3<f32>,
+    @location(3) tangent: vec4<f32>,
 }
 
 struct CameraUniforms {
@@ -118,11 +118,11 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
 @vertex
 fn vs_main(vertex: VertexInput) -> GBufferInput {
     var out: GBufferInput;
+
     let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
-    let view_pos = camera.view_matrix * world_position_vec4;
-    out.clip_position = camera.projection_matrix * view_pos;
-
+    out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
+    
     let model_mat3 = mat3x3<f32>(
         constants.model_matrix[0].xyz,
         constants.model_matrix[1].xyz,
@@ -130,20 +130,17 @@ fn vs_main(vertex: VertexInput) -> GBufferInput {
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
 
-    // --- Robust TBN Calculation (Gram-Schmidt) ---
     let N = safe_normalize(normal_matrix * vertex.normal);
-    let T_raw = safe_normalize((constants.model_matrix * vec4<f32>(vertex.tangent, 0.0)).xyz);
-    // Orthonormalize tangent to the normal
-    let T = safe_normalize(T_raw - N * dot(N, T_raw));
-    // The bitangent is the cross product. It will be orthogonal.
-    let B = cross(N, T);
+    let T = safe_normalize(normal_matrix * vertex.tangent.xyz);
+    let B = cross(N, T) * vertex.tangent.w;
 
     out.world_normal = N;
     out.world_tangent = T;
-    out.world_bitangent = B;
+    out.world_bitangent = B; 
     
     out.tex_coord = vertex.tex_coord;
     out.material_id = constants.material_id;
+    
     return out;
 }
 

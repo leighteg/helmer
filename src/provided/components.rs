@@ -211,36 +211,35 @@ impl MeshAsset {
 
     pub fn cube(name: String) -> Self {
         let vertices = vec![
-            // ... (your existing cube vertex data)
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
 
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 1.0], tangent: [-1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 1.0], tangent: [-1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 0.0], tangent: [-1.0, 0.0, 0.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 0.0], tangent: [-1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 1.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 1.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 0.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 0.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
 
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
 
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
 
-            Vertex { position: [0.5, -0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, -1.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, -1.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, -1.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, -1.0] },
+            Vertex { position: [0.5, -0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, -1.0, 1.0] },
+            Vertex { position: [0.5, -0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, -1.0, 1.0] },
+            Vertex { position: [0.5, 0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, -1.0, 1.0] },
+            Vertex { position: [0.5, 0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, -1.0, 1.0] },
 
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, -0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, 1.0, 1.0] },
+            Vertex { position: [-0.5, -0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, 1.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, 1.0, 1.0] },
+            Vertex { position: [-0.5, 0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, 1.0, 1.0] },
         ];
 
         let indices = vec![
@@ -256,10 +255,10 @@ impl MeshAsset {
 
     pub fn plane(name: String) -> Self {
         let vertices = vec![
-            Vertex { position: [-0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0] },
-            Vertex { position: [-0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0] },
+            Vertex { position: [-0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex { position: [-0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
         ];
         let indices = vec![
             0, 1, 2,
@@ -295,7 +294,7 @@ impl MeshAsset {
                     position: position.into(),
                     normal: normal.into(),
                     tex_coord: tex_coord.into(),
-                    tangent: tangent.into(),
+                    tangent: tangent.extend(1.0).into(),
                 });
             }
         }

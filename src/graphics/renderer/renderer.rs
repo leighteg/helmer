@@ -1,6 +1,10 @@
 use crate::{
     graphics::renderer::error::RendererError,
     provided::components::{Camera, LightType, Transform},
+    runtime::{
+        asset_server::{AssetKind, MaterialGpuData},
+        runtime::RenderMessage,
+    },
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles, vec4};
@@ -9,7 +13,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
@@ -227,12 +231,12 @@ impl From<&Material> for MaterialShaderData {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub tex_coord: [f32; 2],
-    pub tangent: [f32; 3],
+    pub tangent: [f32; 4],
 }
 
 impl Vertex {
@@ -240,12 +244,26 @@ impl Vertex {
         0 => Float32x3, // position
         1 => Float32x3, // normal
         2 => Float32x2, // tex_coord
-        3 => Float32x3, // tangent
+        3 => Float32x4, // tangent
     ];
 
-    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+    pub fn new(
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coord: [f32; 2],
+        tangent: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            tex_coord,
+            tangent,
+        }
+    }
+
+    pub fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBUTES,
         }
@@ -289,6 +307,12 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     window_size: PhysicalSize<u32>,
+
+    // Maps an asset Handle ID (from AssetServer) to a final GPU texture array index
+    handle_id_to_texture_index: HashMap<usize, usize>,
+
+    // A queue for materials waiting for their textures to be loaded on the GPU
+    pending_materials: Vec<MaterialGpuData>,
 
     // Core Pipelines
     geometry_pipeline: Option<wgpu::RenderPipeline>,
@@ -407,7 +431,8 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
                 required_features: wgpu::Features::PUSH_CONSTANTS
-                    | wgpu::Features::FLOAT32_FILTERABLE,
+                    | wgpu::Features::FLOAT32_FILTERABLE
+                    | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
                 required_limits: wgpu::Limits {
                     // Add push constant limit
                     max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
@@ -447,6 +472,8 @@ impl Renderer {
             surface,
             surface_config,
             window_size: size,
+            handle_id_to_texture_index: HashMap::new(),
+            pending_materials: Vec::new(),
             geometry_pipeline: None,
             lighting_pipeline: None,
             shadow_pipeline: None,
@@ -510,7 +537,6 @@ impl Renderer {
         };
 
         renderer.initialize_resources()?;
-        info!("initialized renderer");
         Ok(renderer)
     }
 
@@ -625,10 +651,12 @@ impl Renderer {
         self.create_shadow_resources();
         self.create_pipelines_and_bind_groups();
 
+        self.resize(self.window_size);
+
+        info!("initialized renderer");
         Ok(())
     }
 
-    // ... (upload_default_textures, add_texture, add_mesh, add_material are unchanged) ...
     fn upload_default_textures(&self) {
         let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
 
@@ -874,26 +902,123 @@ impl Renderer {
         );
     }
 
+    fn upload_uncompressed_texture_slice(
+        &self,
+        data: &[u8],
+        target_array: &wgpu::Texture,
+        layer_index: u32,
+        bytes_per_pixel: u32,
+    ) {
+        // This helper now takes bytes_per_pixel to be more generic.
+        let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer_index,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(TEXTURE_RESOLUTION),
+            },
+            wgpu::Extent3d {
+                width: TEXTURE_RESOLUTION,
+                height: TEXTURE_RESOLUTION,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn upload_compressed_texture_slice(
+        &self,
+        data: &[u8],
+        target_array: &wgpu::Texture,
+        layer_index: u32,
+        format: wgpu::TextureFormat,
+    ) {
+        let block_dimensions = format.block_dimensions();
+        let block_size_bytes = format.block_size(None).unwrap();
+        let width_in_blocks = TEXTURE_RESOLUTION / block_dimensions.0;
+        let bytes_per_row = width_in_blocks * block_size_bytes as u32;
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target_array,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer_index,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(TEXTURE_RESOLUTION / block_dimensions.1),
+            },
+            wgpu::Extent3d {
+                width: TEXTURE_RESOLUTION,
+                height: TEXTURE_RESOLUTION,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     pub fn add_texture(
         &mut self,
         name: &str,
         data: &[u8],
-        target_array: &wgpu::Texture,
+        kind: AssetKind,
+        format: wgpu::TextureFormat,
     ) -> Result<usize, RendererError> {
+        // 1. Check for duplicates first.
         if let Some(index) = self.texture_manager.textures.get(name) {
             return Ok(*index);
         }
+
+        // 2. Check if we have space for a new texture.
         if self.texture_manager.next_texture_index >= MAX_TEXTURE_COUNT as usize {
             return Err(RendererError::ResourceCreation(
                 "Texture array is full".to_string(),
             ));
         }
 
+        // 4. Get the target array, which is now guaranteed to exist.
+        let target_array = match kind {
+            AssetKind::Albedo => self.albedo_texture_array.as_ref().unwrap(),
+            AssetKind::Normal => self.normal_texture_array.as_ref().unwrap(),
+            AssetKind::MetallicRoughness => self.metallic_roughness_texture_array.as_ref().unwrap(),
+            AssetKind::Emission => self.emission_texture_array.as_ref().unwrap(),
+        };
+
+        // 5. Get the next available index and increment the manager.
         let index = self.texture_manager.next_texture_index;
         self.texture_manager.next_texture_index += 1;
 
-        self.upload_texture_slice(data, target_array, index as u32);
+        // 6. Upload the new texture data to its assigned slice in the array.
+        let block_size = format.block_size(None).unwrap_or(1);
+        if block_size > 1 {
+            self.upload_compressed_texture_slice(data, target_array, index as u32, format);
+        } else {
+            let bytes_per_pixel = format.block_size(None).unwrap_or(4);
+            self.upload_uncompressed_texture_slice(
+                data,
+                target_array,
+                index as u32,
+                bytes_per_pixel,
+            );
+        }
 
+        // 7. Store the name-to-index mapping for future deduplication.
         self.texture_manager
             .textures
             .insert(name.to_string(), index);
@@ -987,7 +1112,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgb10a2Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: gbuffer_usage,
             view_formats: &[],
         });
@@ -1193,10 +1318,10 @@ impl Renderer {
                     module: &g_buffer_shader,
                     entry_point: Some("fs_main"),
                     targets: &[
-                        Some(wgpu::TextureFormat::Rgb10a2Unorm.into()), // Normal
+                        Some(wgpu::TextureFormat::Rgba16Float.into()), // Normal
                         Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()), // Albedo
-                        Some(wgpu::TextureFormat::Rgba8Unorm.into()),   // MRA
-                        Some(wgpu::TextureFormat::Rgba16Float.into()),  // Emission
+                        Some(wgpu::TextureFormat::Rgba8Unorm.into()),  // MRA
+                        Some(wgpu::TextureFormat::Rgba16Float.into()), // Emission
                     ],
                     compilation_options: Default::default(),
                 }),
@@ -1207,7 +1332,7 @@ impl Renderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_compare: wgpu::CompareFunction::Greater,
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -1659,13 +1784,86 @@ impl Renderer {
         self.current_render_data = Some(render_data);
     }
 
-    pub fn render(&mut self) -> Result<(), RendererError> {
-        if self.geometry_pipeline.is_none() {
-            return Err(RendererError::ResourceCreation(
-                "Pipelines not initialized".to_string(),
-            ));
+    pub fn process_message(&mut self, message: RenderMessage) {
+        match message {
+            RenderMessage::CreateMesh { id, vertices, indices } => {
+                self.add_mesh(id, &vertices, &indices).unwrap();
+            }
+            RenderMessage::CreateTexture { id, name, kind, data, format } => {
+                if let Ok(gpu_index) = self.add_texture(&name, &data, kind, format) {
+                    self.handle_id_to_texture_index.insert(id, gpu_index);
+                }
+            }
+            RenderMessage::CreateMaterial(mat_data) => {
+                self.pending_materials.push(mat_data);
+            }
+            RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::Resize(size) => self.resize(size),
+            RenderMessage::Shutdown => { /* Handle shutdown */ }
+        }
+    }
+
+    /// Call this every frame before your `render()` call.
+    pub fn resolve_pending_materials(&mut self) {
+        if self.pending_materials.is_empty() {
+            return;
         }
 
+        let mut newly_completed = Vec::new();
+
+        self.pending_materials.retain(|mat_data| {
+            // Helper to resolve a handle ID to a final GPU index
+            let resolve = |id: Option<usize>| -> (bool, Option<i32>) {
+                match id {
+                    None => (true, Some(0)), // No texture needed, so it's "ready"
+                    Some(handle_id) => {
+                        if let Some(&gpu_index) = self.handle_id_to_texture_index.get(&handle_id) {
+                            (true, Some(gpu_index as i32)) // Found it! It's ready.
+                        } else {
+                            (false, None) // Not found yet. Not ready.
+                        }
+                    }
+                }
+            };
+
+            let (albedo_ready, albedo_idx) = resolve(mat_data.albedo_texture_id);
+            let (normal_ready, normal_idx) = resolve(mat_data.normal_texture_id);
+            let (mr_ready, mr_idx) = resolve(mat_data.metallic_roughness_texture_id);
+            let (emission_ready, emission_idx) = resolve(mat_data.emission_texture_id);
+
+            // If all textures this material needs are ready...
+            if albedo_ready && normal_ready && mr_ready && emission_ready {
+                // ...build the final material struct for the renderer...
+                let final_material = crate::graphics::renderer::renderer::Material {
+                    // Use the full path
+                    albedo: mat_data.albedo,
+                    metallic: mat_data.metallic,
+                    roughness: mat_data.roughness,
+                    ao: mat_data.ao,
+                    emission_strength: mat_data.emission_strength,
+                    emission_color: mat_data.emission_color,
+                    albedo_texture_index: albedo_idx.unwrap(),
+                    normal_texture_index: normal_idx.unwrap(),
+                    metallic_roughness_texture_index: mr_idx.unwrap(),
+                    emission_texture_index: emission_idx.unwrap(),
+                };
+
+                newly_completed.push((mat_data.id, final_material));
+                return false; // Remove from pending list
+            }
+
+            true // Keep in pending list
+        });
+
+        // Add all newly completed materials to the renderer's main storage
+        for (id, material) in newly_completed {
+            if let Err(e) = self.add_material(id, material) {
+                warn!("Failed to add material {}: {}", id, e);
+            }
+        }
+    }
+
+    pub fn render(&mut self) -> Result<(), RendererError> {
         let Some(ref render_data) = self.current_render_data else {
             return Ok(());
         };
@@ -1723,7 +1921,7 @@ impl Renderer {
         // --- 4. Lighting/Composite Pass ---
         self.run_lighting_pass(&mut encoder, &output_view);
 
-        // --- 5. NEW: Copy to History Buffer ---
+        // --- 5. Copy to History Buffer ---
         encoder.copy_texture_to_texture(
             wgpu::ImageCopyTexture {
                 texture: &output_frame.texture,
@@ -1759,11 +1957,10 @@ impl Renderer {
         let forward = rotation * Vec3::Z;
         let up = rotation * Vec3::Y;
         let view_matrix = Mat4::look_at_rh(eye, eye + forward, up);
-        let projection_matrix = Mat4::perspective_rh(
+        let projection_matrix = Mat4::perspective_infinite_reverse_rh(
             camera.fov_y_rad,
             camera.aspect_ratio,
             camera.near_plane,
-            camera.far_plane,
         );
         let inv_proj = projection_matrix.inverse();
         let inv_view_proj = (projection_matrix * view_matrix).inverse();
@@ -1959,7 +2156,7 @@ impl Renderer {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: self.main_depth_texture_view.as_ref().unwrap(),
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(0.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -2033,10 +2230,16 @@ impl Renderer {
                 view: output_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            depth_stencil_attachment: None,
             ..Default::default()
         });
         pass.set_pipeline(self.lighting_pipeline.as_ref().unwrap());

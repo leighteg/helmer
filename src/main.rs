@@ -6,7 +6,10 @@ use helmer_rs::{
         ecs_core::{ECSCore, Entity},
         system::System,
     },
-    graphics::renderer_system::{RenderDataSystem, RenderPacket},
+    graphics::{
+        renderer::renderer::Material,
+        renderer_system::{RenderDataSystem, RenderPacket},
+    },
     physics::{
         components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},
         physics_resource::PhysicsResource,
@@ -20,7 +23,7 @@ use helmer_rs::{
     },
     runtime::{
         input_manager::{self, InputManager},
-        runtime::Runtime,
+        runtime::{RenderMessage, Runtime},
     },
 };
 use rand::Rng;
@@ -133,6 +136,44 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
+        let asset_server = app.asset_server.lock();
+
+        // Load meshes from .glb files
+        let box_handle = asset_server.load_mesh("/Users/leighton/helmer-rs/src/assets/models/box.glb");
+
+        // Load materials from .ron files
+        let metal_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/shiny_metal.ron");
+        let red_light_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/red_light.ron");
+        let blue_light_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/blue_light.ron");
+
+        // Note: You don't need to explicitly load "assets/pattern.ktx2".
+        // The AssetServer will automatically find that path inside `blue_light_material.ron`
+        // and load it as a dependency.
+
+        // --- 2. Handle Procedurally Generated Meshes ---
+        // These are not loaded from files, so we create them and send them
+        // directly to the renderer via a RenderMessage.
+
+        let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
+        app
+            .render_thread_sender
+            .send(RenderMessage::CreateMesh {
+                id: 1, // Assign a unique ID
+                vertices: uv_sphere_mesh.vertices.unwrap(),
+                indices: uv_sphere_mesh.indices,
+            })
+            .unwrap();
+
+        let plane_mesh = MeshAsset::plane("plane".into());
+        app
+            .render_thread_sender
+            .send(RenderMessage::CreateMesh {
+                id: 2, // Assign a unique ID
+                vertices: plane_mesh.vertices.unwrap(),
+                indices: plane_mesh.indices,
+            })
+            .unwrap();
+
         let camera_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             camera_entity,
@@ -169,7 +210,7 @@ fn main() {
                 scale: glam::Vec3::from([50.0, 0.1, 50.0]),
             },
         );
-        ecs_guard.add_component(ground_entity, MeshRenderer::new(2, 0, true));
+        ecs_guard.add_component(ground_entity, MeshRenderer::new(2, metal_material_handle.id, true));
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
 
@@ -182,7 +223,7 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(cube_entity, MeshRenderer::new(0, 0, true));
+        ecs_guard.add_component(cube_entity, MeshRenderer::new(box_handle.id, metal_material_handle.id, true));
         ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
 
@@ -210,7 +251,7 @@ fn main() {
         );
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
         ecs_guard.add_component(light_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity, MeshRenderer::new(0, 2, true));
+        ecs_guard.add_component(light_entity, MeshRenderer::new(box_handle.id, blue_light_material_handle.id, true));
         ecs_guard.add_component(light_entity, DynamicRigidBody { mass: 5.0 });
 
         let light_entity_2 = ecs_guard.create_entity();
@@ -226,11 +267,11 @@ fn main() {
             light_entity_2,
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
-        ecs_guard.add_component(light_entity_2, MeshRenderer::new(0, 1, true));
+        ecs_guard.add_component(light_entity_2, MeshRenderer::new(box_handle.id, red_light_material_handle.id, true));
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
 
-        /*let light_entity_3: usize = ecs_guard.create_entity();
+        let light_entity_3: usize = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity_3,
             Transform {
@@ -242,7 +283,7 @@ fn main() {
         ecs_guard.add_component(
             light_entity_3,
             Light::directional(glam::vec3(1.0, 1.0, 1.0), 1.0),
-        );*/
+        );
     });
     runtime.init();
 }
@@ -676,8 +717,8 @@ impl System for SpawnSystem {
         for _ in 0..SPAWN_ITERATIONS {
             let new_entity = ecs.create_entity();
 
-            self.spawned_entities.insert(self.spawned_entities.len(), new_entity);
-
+            self.spawned_entities
+                .insert(self.spawned_entities.len(), new_entity);
 
             let mut random_x: f32 = rng.random_range(-13.0..13.0);
             let mut random_y: f32 = rng.random_range(0.0..50.0);

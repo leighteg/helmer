@@ -35,3 +35,4 @@ basis-universal = "0.3.1"
 serde = { version = "1.0.219", features = ["derive"] }
 ron = "0.10.1"
 mikktspace = "0.3.0"
+crossbeam-channel = "0.5.15"

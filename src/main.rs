@@ -139,12 +139,14 @@ fn main() {
         let asset_server = app.asset_server.lock();
 
         // Load meshes from .glb files
-        let box_handle = asset_server.load_mesh("/Users/leighton/helmer-rs/src/assets/models/box.glb");
+        let box_handle = asset_server.load_mesh("src/assets/models/box.glb");
+
+        let sponza_handle = asset_server.load_mesh("src/assets/models/sponza.glb");
 
         // Load materials from .ron files
-        let metal_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/shiny_metal.ron");
-        let red_light_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/red_light.ron");
-        let blue_light_material_handle = asset_server.load_material("/Users/leighton/helmer-rs/src/assets/materials/blue_light.ron");
+        let metal_material_handle = asset_server.load_material("src/assets/materials/shiny_metal.ron");
+        let red_light_material_handle = asset_server.load_material("src/assets/materials/red_light.ron");
+        let blue_light_material_handle = asset_server.load_material("src/assets/materials/blue_light.ron");
 
         // Note: You don't need to explicitly load "assets/pattern.ktx2".
         // The AssetServer will automatically find that path inside `blue_light_material.ron`
@@ -213,6 +215,19 @@ fn main() {
         ecs_guard.add_component(ground_entity, MeshRenderer::new(2, metal_material_handle.id, true));
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
+
+        let sponza_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            sponza_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::from([0.2; 3]),
+            },
+        );
+        ecs_guard.add_component(sponza_entity, MeshRenderer::new(sponza_handle.id, metal_material_handle.id, true));
+        ecs_guard.add_component(sponza_entity, ColliderShape::Cuboid);
+        ecs_guard.add_component(sponza_entity, FixedCollider {});
 
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(

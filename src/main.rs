@@ -143,10 +143,14 @@ fn main() {
 
         let sponza_handle = asset_server.load_mesh("src/assets/models/sponza.glb");
 
+        //let duck_handle = asset_server.load_mesh("src/assets/models/duck.glb");
+
         // Load materials from .ron files
+        let basic_material_handle = asset_server.load_material("src/assets/materials/basic.ron");
         let metal_material_handle = asset_server.load_material("src/assets/materials/shiny_metal.ron");
         let red_light_material_handle = asset_server.load_material("src/assets/materials/red_light.ron");
         let blue_light_material_handle = asset_server.load_material("src/assets/materials/blue_light.ron");
+        //let duck_material_handle = asset_server.load_material("src/assets/materials/duck.ron");
 
         // Note: You don't need to explicitly load "assets/pattern.ktx2".
         // The AssetServer will automatically find that path inside `blue_light_material.ron`
@@ -222,10 +226,10 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([0.2; 3]),
+                scale: glam::Vec3::from([0.02; 3]),
             },
         );
-        ecs_guard.add_component(sponza_entity, MeshRenderer::new(sponza_handle.id, metal_material_handle.id, true));
+        ecs_guard.add_component(sponza_entity, MeshRenderer::new(sponza_handle.id, basic_material_handle.id, true));
         ecs_guard.add_component(sponza_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(sponza_entity, FixedCollider {});
 

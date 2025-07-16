@@ -9,7 +9,9 @@ use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering}, mpsc, Arc, Mutex
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
 };
@@ -111,13 +113,13 @@ enum AssetLoadRequest {
 enum AssetLoadResult {
     Mesh {
         id: usize,
-        data: Mesh,
+        data: (Vec<Vertex>, Vec<u32>),
     },
     Texture {
         id: usize,
         name: String,
         kind: AssetKind,
-        data: Texture,
+        data: (Vec<u8>, wgpu::TextureFormat),
     },
     Material {
         id: usize,
@@ -128,6 +130,8 @@ enum AssetLoadResult {
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
+    // We only store materials loaded from .ron files here for now.
+    // glTF materials are handled internally by the renderer.
     materials: Arc<RwLock<HashMap<usize, Arc<Material>>>>,
     next_id: AtomicUsize,
     request_sender: crossbeam_channel::Sender<AssetLoadRequest>,
@@ -143,17 +147,12 @@ impl AssetServer {
         let mut worker_handles = Vec::new();
 
         for _ in 0..4 {
-            // Clone the receiver directly for each worker.
             let req_receiver = request_receiver.clone();
             let res_sender = result_sender.clone();
             let handle = thread::spawn(move || {
-                // The loop now correctly receives without a lock.
-                // `recv()` will block the *thread* if the channel is empty,
-                // but it won't block other threads.
                 while let Ok(request) = req_receiver.recv() {
-                    let path_for_name = request_path(&request).to_string_lossy().to_string();
+                    let path_str = request_path(&request).to_string_lossy().to_string();
                     let result = match request {
-                        // ... your existing match logic is unchanged ...
                         AssetLoadRequest::Mesh { id, path } => {
                             load_and_parse(id, &path, parse_glb, |id, data| AssetLoadResult::Mesh {
                                 id,
@@ -164,7 +163,7 @@ impl AssetServer {
                             load_and_parse(id, &path, decode_ktx2, |id, data| {
                                 AssetLoadResult::Texture {
                                     id,
-                                    name: String::clone(&path_for_name),
+                                    name: path_str.clone(),
                                     kind,
                                     data,
                                 }
@@ -185,6 +184,7 @@ impl AssetServer {
             });
             worker_handles.push(handle);
         }
+
         info!("initialized AssetServer");
 
         Self {
@@ -241,11 +241,12 @@ impl AssetServer {
         while let Ok(result) = self.result_receiver.try_recv() {
             match result {
                 AssetLoadResult::Mesh { id, data } => {
+                    let (vertices, indices) = data;
                     self.render_sender
                         .send(RenderMessage::CreateMesh {
                             id,
-                            vertices: data.vertices,
-                            indices: data.indices,
+                            vertices,
+                            indices,
                         })
                         .unwrap();
                 }
@@ -255,35 +256,19 @@ impl AssetServer {
                     kind,
                     data,
                 } => {
+                    let (texture_data, format) = data;
                     self.render_sender
                         .send(RenderMessage::CreateTexture {
                             id,
                             name,
                             kind,
-                            data: data.data,
-                            format: data.format,
+                            data: texture_data,
+                            format,
                         })
                         .unwrap();
                 }
                 AssetLoadResult::Material { id, data } => {
-                    let material = self.resolve_material_dependencies(id, data);
-                    let material_gpu_data = MaterialGpuData {
-                        id: material.id,
-                        albedo: material.albedo,
-                        metallic: material.metallic,
-                        roughness: material.roughness,
-                        ao: material.ao,
-                        emission_strength: material.emission_strength,
-                        emission_color: material.emission_color,
-                        albedo_texture_id: material.albedo_texture.as_ref().map(|h| h.id),
-                        normal_texture_id: material.normal_texture.as_ref().map(|h| h.id),
-                        metallic_roughness_texture_id: material
-                            .metallic_roughness_texture
-                            .as_ref()
-                            .map(|h| h.id),
-                        emission_texture_id: material.emission_texture.as_ref().map(|h| h.id),
-                    };
-                    self.materials.write().insert(id, Arc::new(material));
+                    let material_gpu_data = self.resolve_material_dependencies(id, data);
                     self.render_sender
                         .send(RenderMessage::CreateMaterial(material_gpu_data))
                         .unwrap();
@@ -292,8 +277,8 @@ impl AssetServer {
         }
     }
 
-    fn resolve_material_dependencies(&self, id: usize, data: MaterialFile) -> Material {
-        Material {
+    fn resolve_material_dependencies(&self, id: usize, data: MaterialFile) -> MaterialGpuData {
+        MaterialGpuData {
             id,
             albedo: data.albedo,
             metallic: data.metallic,
@@ -301,18 +286,18 @@ impl AssetServer {
             ao: data.ao,
             emission_strength: data.emission_strength,
             emission_color: data.emission_color,
-            albedo_texture: data
+            albedo_texture_id: data
                 .albedo_texture
-                .map(|p| self.load_texture(p, AssetKind::Albedo)),
-            normal_texture: data
+                .map(|p| self.load_texture(p, AssetKind::Albedo).id),
+            normal_texture_id: data
                 .normal_texture
-                .map(|p| self.load_texture(p, AssetKind::Normal)),
-            metallic_roughness_texture: data
+                .map(|p| self.load_texture(p, AssetKind::Normal).id),
+            metallic_roughness_texture_id: data
                 .metallic_roughness_texture
-                .map(|p| self.load_texture(p, AssetKind::MetallicRoughness)),
-            emission_texture: data
+                .map(|p| self.load_texture(p, AssetKind::MetallicRoughness).id),
+            emission_texture_id: data
                 .emission_texture
-                .map(|p| self.load_texture(p, AssetKind::Emission)),
+                .map(|p| self.load_texture(p, AssetKind::Emission).id),
         }
     }
 }
@@ -352,29 +337,54 @@ where
     }
 }
 
-fn decode_ktx2(bytes: &[u8]) -> Result<Texture, String> {
+/// A robust KTX2 decoder that handles both uncompressed and supercompressed (Basis) files.
+fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat), String> {
     let reader = Reader::new(bytes).map_err(|e| e.to_string())?;
     let header = reader.header();
-    let level0_data = reader.levels().next().ok_or("No image levels in KTX2")?;
 
+    // Case 1: The KTX2 file contains uncompressed data in a known format.
+    if let Some(format) = header.format {
+        let wgpu_format = match format {
+            ktx2::Format::R8G8B8A8_UNORM => wgpu::TextureFormat::Rgba8Unorm,
+            ktx2::Format::R8G8B8A8_SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => return Err(format!("Unsupported direct KTX2 format: {:?}", format)),
+        };
+
+        info!("KTX2 is uncompressed {:?}. Using raw data.", wgpu_format);
+        let level_data = reader
+            .levels()
+            .next()
+            .ok_or("No image levels found in uncompressed KTX2 file.")?;
+        return Ok((level_data.data.to_vec(), wgpu_format));
+    }
+
+    // Case 2: The KTX2 file is supercompressed with Basis Universal.
+    info!("KTX2 is supercompressed. Attempting to transcode...");
     let mut transcoder = Transcoder::new();
-    let target_format = TranscoderTextureFormat::BC7_RGBA;
 
-    let params = TranscodeParameters {
+    if transcoder.prepare_transcoding(bytes).is_err() {
+        return Err("Failed to prepare Basis Universal transcoder. The KTX2 file might be invalid or not supercompressed.".to_string());
+    }
+
+    // We'll transcode to BC7, a common high-quality format for desktop GPUs.
+    let target_basis_format = TranscoderTextureFormat::BC7_RGBA;
+    let target_wgpu_format = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
+
+    let transcode_params = TranscodeParameters {
         level_index: 0,
         ..Default::default()
     };
 
-    // FIX: Pass the raw byte slice of the level data, not the Level struct itself.
-    let decoded_bytes = transcoder
-        .transcode_image_level(&level0_data.data, target_format, params)
-        .map_err(|e| format!("{:?}", e))?;
-
-    Ok(Texture {
-        dimensions: (header.pixel_width, header.pixel_height),
-        data: decoded_bytes,
-        format: wgpu::TextureFormat::Bc7RgbaUnormSrgb,
-    })
+    match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
+        Ok(transcoded_data) => {
+            info!("Successfully transcoded KTX2 to {:?}.", target_wgpu_format);
+            Ok((transcoded_data, target_wgpu_format))
+        }
+        Err(e) => Err(format!(
+            "Failed to transcode KTX2 image level: {:?}. Is it a valid Basis Universal file?",
+            e
+        )),
+    }
 }
 
 fn parse_ron_material(bytes: &[u8]) -> Result<MaterialFile, String> {
@@ -390,29 +400,27 @@ impl<'a> Geometry for MikkTSpaceWrapper<'a> {
     fn num_faces(&self) -> usize {
         self.indices.len() / 3
     }
-
     fn num_vertices_of_face(&self, _face: usize) -> usize {
         3
     }
-
     fn position(&self, face: usize, vert: usize) -> [f32; 3] {
         self.vertices[self.indices[face * 3 + vert] as usize].position
     }
-
     fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
         self.vertices[self.indices[face * 3 + vert] as usize].normal
     }
-
     fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
         self.vertices[self.indices[face * 3 + vert] as usize].tex_coord
+    }
+    fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
+        self.vertices[self.indices[face * 3 + vert] as usize].tangent = tangent;
     }
 }
 
 /// Parses a .glb file's binary content, now with tangent generation.
-fn parse_glb(bytes: &[u8]) -> Result<Mesh, String> {
+fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), String> {
     let (gltf, buffers, _) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
 
-    // We'll collect all primitives from all meshes into a single Mesh object.
     let mut all_vertices = Vec::new();
     let mut all_indices = Vec::new();
 
@@ -442,7 +450,6 @@ fn parse_glb(bytes: &[u8]) -> Result<Mesh, String> {
                 .map(|iter| iter.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
 
-            // We need to offset the indices for each primitive.
             let index_offset = all_vertices.len() as u32;
             let indices: Vec<u32> = reader
                 .read_indices()
@@ -454,7 +461,6 @@ fn parse_glb(bytes: &[u8]) -> Result<Mesh, String> {
                     )
                 })?;
 
-            // Create vertices for this primitive with a placeholder tangent.
             let mut vertices: Vec<Vertex> = positions
                 .iter()
                 .zip(normals.iter())
@@ -462,21 +468,16 @@ fn parse_glb(bytes: &[u8]) -> Result<Mesh, String> {
                 .map(|((&p, &n), &t)| Vertex::new(p, n, t, [0.0; 4]))
                 .collect();
 
-            // --- CORRECTED TANGENT GENERATION ---
-            // Generate tangents for any primitive that has the required attributes,
-            // regardless of its material. This ensures a consistent vertex format.
             if !indices.is_empty()
                 && reader.read_normals().is_some()
                 && reader.read_tex_coords(0).is_some()
             {
                 let mut temp_indices: Vec<u32> =
                     reader.read_indices().unwrap().into_u32().collect();
-
                 let mut wrapper = MikkTSpaceWrapper {
                     vertices: &mut vertices,
                     indices: &temp_indices,
                 };
-
                 if !mikktspace::generate_tangents(&mut wrapper) {
                     warn!(
                         "Failed to generate tangents for primitive in mesh '{}'",
@@ -499,8 +500,5 @@ fn parse_glb(bytes: &[u8]) -> Result<Mesh, String> {
         return Err("No valid primitives found in glTF file".to_string());
     }
 
-    Ok(Mesh {
-        vertices: all_vertices,
-        indices: all_indices,
-    })
+    Ok((all_vertices, all_indices))
 }

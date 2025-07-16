@@ -301,6 +301,7 @@ struct ModelPushConstant {
 // --- MAIN RENDERER STRUCT ---
 
 pub struct Renderer {
+    adapter: wgpu::Adapter,
     instance: wgpu::Instance,
     device: Arc<wgpu::Device>,
     queue: wgpu::Queue,
@@ -466,6 +467,7 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut renderer = Self {
+            adapter,
             instance,
             device: Arc::new(device),
             queue,
@@ -1178,13 +1180,16 @@ impl Renderer {
         self.ssr_texture_view = Some(ssr_texture.create_view(&Default::default()));
         self.ssr_texture = Some(ssr_texture);
 
+        let surface_caps = self.surface.get_capabilities(&self.adapter);
+        let surface_format = surface_caps.formats[0];
+
         let history_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("History Texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8Unorm,
+            format: surface_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -1923,13 +1928,13 @@ impl Renderer {
 
         // --- 5. Copy to History Buffer ---
         encoder.copy_texture_to_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &output_frame.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: self.history_texture.as_ref().unwrap(),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,

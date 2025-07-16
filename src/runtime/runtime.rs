@@ -202,9 +202,6 @@ impl Runtime {
         let window_size = window.inner_size();
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(target_os = "windows")]
-            backends: wgpu::Backends::DX12,
-            #[cfg(not(target_os = "windows"))]
             backends: wgpu::Backends::all(),
             ..Default::default()
         });

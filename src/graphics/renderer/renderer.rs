@@ -7,7 +7,7 @@ use crate::{
     },
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3, Vec4Swizzles, vec4};
+use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles, vec4};
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -17,13 +17,35 @@ use tracing::{info, warn};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
-#[derive(Copy, Clone)]
-struct Aabb {
-    min: Vec3,
-    max: Vec3,
+const WGPU_CLIP_SPACE_CORRECTION: Mat4 = Mat4::from_cols(
+    Vec4::new(1.0, 0.0, 0.0, 0.0),
+    Vec4::new(0.0, 1.0, 0.0, 0.0),
+    Vec4::new(0.0, 0.0, 0.5, 0.0),
+    Vec4::new(0.0, 0.0, 0.5, 1.0),
+);
+
+#[derive(Copy, Clone, Debug)]
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
 }
 
 impl Aabb {
+    pub fn calculate(vertices: &Vec<Vertex>) -> Self {
+        let mut min_bounds = Vec3::splat(f32::MAX);
+        let mut max_bounds = Vec3::splat(f32::MIN);
+
+        for vertex in vertices {
+            min_bounds = min_bounds.min(Vec3::from(vertex.position));
+            max_bounds = max_bounds.max(Vec3::from(vertex.position));
+        }
+
+        Self {
+            min: min_bounds,
+            max: max_bounds,
+        }
+    }
+
     fn get_corners(&self) -> [Vec3; 8] {
         [
             self.min,
@@ -39,16 +61,13 @@ impl Aabb {
 }
 
 // --- CONSTANTS ---
+const FRAMES_IN_FLIGHT: usize = 3;
+const MAX_LIGHTS: usize = 256;
 const MAX_TEXTURE_COUNT: u32 = 256;
 const TEXTURE_RESOLUTION: u32 = 1024;
-const MAX_LIGHTS: usize = 256;
 const SHADOW_MAP_RESOLUTION: u32 = 2048;
 const NUM_CASCADES: usize = 4;
-const FRAMES_IN_FLIGHT: usize = 3;
-const SCENE_BOUNDS: Aabb = Aabb {
-    min: Vec3::new(-50.0, -10.0, -50.0),
-    max: Vec3::new(50.0, 50.0, 50.0),
-};
+const CASCADE_SPLITS: [f32; 5] = [0.1, 15.0, 40.0, 100.0, 300.0];
 
 // --- RESOURCE STRUCTS ---
 
@@ -57,6 +76,7 @@ pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    pub bounds: Aabb,
 }
 
 pub struct TextureManager {
@@ -143,6 +163,7 @@ pub struct RenderObject {
     pub current_transform: Transform,  // current logic tick
     pub mesh_id: usize,
     pub material_id: usize,
+    pub casts_shadow: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +175,7 @@ pub struct RenderLight {
     pub light_type: LightType,
 }
 
+#[derive(Debug, Clone)]
 pub struct RenderData {
     pub objects: Vec<RenderObject>,
     pub lights: Vec<RenderLight>,
@@ -278,6 +300,16 @@ struct CascadeUniform {
     _padding: [f32; 3],
 }
 
+impl Default for CascadeUniform {
+    fn default() -> Self {
+        Self {
+            light_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            split_depth: 0.0,
+            _padding: [0.0; 3],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct ShadowUniforms {
@@ -386,6 +418,7 @@ pub struct Renderer {
     gbuffer_sampler: Option<wgpu::Sampler>,
     scene_sampler: Option<wgpu::Sampler>,
     ibl_sampler: Option<wgpu::Sampler>,
+    brdf_lut_sampler: Option<wgpu::Sampler>,
 
     // Shadow Resources
     shadow_map_texture: Option<wgpu::Texture>,
@@ -394,6 +427,7 @@ pub struct Renderer {
     shadow_depth_texture: Option<wgpu::Texture>,
     shadow_depth_view: Option<wgpu::TextureView>,
     shadow_uniforms_buffer: Option<wgpu::Buffer>,
+    cascade_views: Option<Vec<wgpu::TextureView>>,
 
     // State
     frame_index: usize,
@@ -526,12 +560,14 @@ impl Renderer {
             gbuffer_sampler: None,
             scene_sampler: None,
             ibl_sampler: None,
+            brdf_lut_sampler: None,
             shadow_map_texture: None,
             shadow_map_view: None,
             shadow_sampler: None,
             shadow_depth_texture: None,
             shadow_depth_view: None,
             shadow_uniforms_buffer: None,
+            cascade_views: None,
             frame_index: 0,
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
@@ -645,6 +681,16 @@ impl Renderer {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+
+        self.brdf_lut_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("BRDF LUT Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest, // No mipmapping
             ..Default::default()
         }));
 
@@ -782,6 +828,21 @@ impl Renderer {
             mapped_at_creation: false,
         }));
 
+        let mut cascade_views = Vec::with_capacity(NUM_CASCADES);
+        for i in 0..NUM_CASCADES {
+            let cascade_view = self.shadow_map_texture.as_ref().unwrap().create_view(
+                &wgpu::TextureViewDescriptor {
+                    label: Some(&format!("Cascade View {}", i)),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                },
+            );
+            cascade_views.push(cascade_view);
+        }
+        self.cascade_views = Some(cascade_views);
+
         self.create_shadow_pipeline();
     }
 
@@ -848,13 +909,13 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Front),
+                cull_mode: Some(wgpu::Face::Front), // Use front-face culling for Peter-Panning
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Less, // Use Less for standard 0-1 depth
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
                     constant: 2,
@@ -1032,6 +1093,7 @@ impl Renderer {
         id: usize,
         vertices: &[Vertex],
         indices: &[u32],
+        bounds: Aabb,
     ) -> Result<(), RendererError> {
         let vertex_buffer = self
             .device
@@ -1055,6 +1117,7 @@ impl Renderer {
                 vertex_buffer,
                 index_buffer,
                 index_count: indices.len() as u32,
+                bounds,
             },
         );
         Ok(())
@@ -1514,6 +1577,7 @@ impl Renderer {
                     texture_binding(1, true, wgpu::TextureViewDimension::Cube, false),
                     texture_binding(2, true, wgpu::TextureViewDimension::Cube, false),
                     sampler_binding(3, true, wgpu::SamplerBindingType::Filtering),
+                    sampler_binding(4, true, wgpu::SamplerBindingType::Filtering),
                 ],
             });
 
@@ -1768,6 +1832,12 @@ impl Renderer {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(self.ibl_sampler.as_ref().unwrap()),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(
+                        self.brdf_lut_sampler.as_ref().unwrap(),
+                    ),
+                },
             ],
         }));
     }
@@ -1791,10 +1861,21 @@ impl Renderer {
 
     pub fn process_message(&mut self, message: RenderMessage) {
         match message {
-            RenderMessage::CreateMesh { id, vertices, indices } => {
-                self.add_mesh(id, &vertices, &indices).unwrap();
+            RenderMessage::CreateMesh {
+                id,
+                vertices,
+                indices,
+                bounds,
+            } => {
+                self.add_mesh(id, &vertices, &indices, bounds).unwrap();
             }
-            RenderMessage::CreateTexture { id, name, kind, data, format } => {
+            RenderMessage::CreateTexture {
+                id,
+                name,
+                kind,
+                data,
+                format,
+            } => {
                 if let Ok(gpu_index) = self.add_texture(&name, &data, kind, format) {
                     self.handle_id_to_texture_index.insert(id, gpu_index);
                 }
@@ -1869,7 +1950,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self) -> Result<(), RendererError> {
-        let Some(ref render_data) = self.current_render_data else {
+        let Some(ref render_data) = self.current_render_data.clone() else {
             return Ok(());
         };
 
@@ -1914,8 +1995,14 @@ impl Renderer {
                 label: Some("Main Command Encoder"),
             });
 
+        let camera_transform = &render_data.current_camera_transform;
+        let eye = camera_transform.position;
+        let forward = camera_transform.forward();
+        let up = camera_transform.up();
+        let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
+
         // --- 1. Shadow Pass ---
-        self.run_shadow_pass(&mut encoder, render_data);
+        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view);
 
         // --- 2. Geometry Pass ---
         self.run_geometry_pass(&mut encoder, render_data, alpha);
@@ -1967,12 +2054,16 @@ impl Renderer {
             camera.aspect_ratio,
             camera.near_plane,
         );
-        let inv_proj = projection_matrix.inverse();
-        let inv_view_proj = (projection_matrix * view_matrix).inverse();
+
+        // Apply the correction here
+        let corrected_proj = WGPU_CLIP_SPACE_CORRECTION * projection_matrix;
+
+        let inv_proj = corrected_proj.inverse();
+        let inv_view_proj = (corrected_proj * view_matrix).inverse();
 
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
-            projection_matrix: projection_matrix.to_cols_array_2d(),
+            projection_matrix: corrected_proj.to_cols_array_2d(),
             inverse_projection_matrix: inv_proj.to_cols_array_2d(),
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),
@@ -2017,30 +2108,65 @@ impl Renderer {
         );
     }
 
-    fn run_shadow_pass(&self, encoder: &mut wgpu::CommandEncoder, render_data: &RenderData) {
+    fn run_shadow_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        render_data: &RenderData,
+        static_camera_view: &Mat4,
+    ) {
         let shadow_light = render_data
             .lights
             .iter()
             .find(|l| matches!(l.light_type, LightType::Directional));
+
         if let (Some(light), Some(shadow_pipeline)) = (shadow_light, self.shadow_pipeline.as_ref())
         {
+            assert!(
+                light.current_transform.rotation.is_normalized(),
+                "Directional light rotation is not normalized!"
+            );
+
+            let mut scene_bounds_min = Vec3::splat(f32::MAX);
+            let mut scene_bounds_max = Vec3::splat(f32::MIN);
+            for object in &render_data.objects {
+                if object.casts_shadow {
+                    if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                        let model_matrix = Mat4::from_scale_rotation_translation(
+                            object.current_transform.scale,
+                            object.current_transform.rotation,
+                            object.current_transform.position,
+                        );
+                        for &corner in &mesh.bounds.get_corners() {
+                            let world_corner = (model_matrix * corner.extend(1.0)).xyz();
+                            scene_bounds_min = scene_bounds_min.min(world_corner);
+                            scene_bounds_max = scene_bounds_max.max(world_corner);
+                        }
+                    }
+                }
+            }
+            let dynamic_scene_bounds = Aabb {
+                min: scene_bounds_min,
+                max: scene_bounds_max,
+            };
+
             let camera = &render_data.camera_component;
-            let eye = render_data.current_camera_transform.position;
-            let forward = render_data.current_camera_transform.rotation * Vec3::Z;
-            let up = render_data.current_camera_transform.rotation * Vec3::Y;
-            let view_matrix = Mat4::look_at_rh(eye, eye + forward, up);
-            let projection_matrix = Mat4::perspective_rh(
+            let camera_view = Mat4::look_at_rh(
+                render_data.current_camera_transform.position,
+                render_data.current_camera_transform.position
+                    + render_data.current_camera_transform.forward(),
+                render_data.current_camera_transform.up(),
+            );
+            let camera_proj = Mat4::perspective_infinite_reverse_rh(
                 camera.fov_y_rad,
                 camera.aspect_ratio,
                 camera.near_plane,
-                camera.far_plane,
             );
 
             let shadow_uniforms = self.calculate_cascades(
                 camera,
-                &projection_matrix,
-                &view_matrix,
+                static_camera_view,
                 light.current_transform.rotation,
+                &dynamic_scene_bounds,
             );
             self.queue.write_buffer(
                 self.shadow_uniforms_buffer.as_ref().unwrap(),
@@ -2054,15 +2180,13 @@ impl Renderer {
                     0,
                     bytemuck::bytes_of(&shadow_uniforms.cascades[i].light_view_proj),
                 );
-                let cascade_view = self.shadow_map_texture.as_ref().unwrap().create_view(
-                    &wgpu::TextureViewDescriptor {
-                        label: Some(&format!("Cascade View {}", i)),
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        base_array_layer: i as u32,
-                        array_layer_count: Some(1),
-                        ..Default::default()
-                    },
-                );
+
+                let cascade_view = &self.cascade_views.as_ref().unwrap()[i];
+
+                let depth_ops = wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0), // Always clear to the furthest value
+                    store: wgpu::StoreOp::Store, // Store depth for the current pass to work correctly
+                };
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(&format!("Shadow Pass {}", i)),
@@ -2081,34 +2205,38 @@ impl Renderer {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: self.shadow_depth_view.as_ref().unwrap(),
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
+                        depth_ops: Some(depth_ops), // Use the new, corrected operations
                         stencil_ops: None,
                     }),
                     ..Default::default()
                 });
+
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.light_vp_bind_group, &[]);
+
                 for object in &render_data.objects {
-                    if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                        let model_matrix = Mat4::from_scale_rotation_translation(
-                            object.current_transform.scale,
-                            object.current_transform.rotation.into(),
-                            object.current_transform.position,
-                        );
-                        shadow_pass.set_push_constants(
-                            wgpu::ShaderStages::VERTEX,
-                            0,
-                            bytemuck::bytes_of(&model_matrix.to_cols_array_2d()),
-                        );
-                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                        shadow_pass.set_index_buffer(
-                            mesh.index_buffer.slice(..),
-                            wgpu::IndexFormat::Uint32,
-                        );
-                        shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    if object.casts_shadow {
+                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            let model_matrix = Mat4::from_scale_rotation_translation(
+                                object.current_transform.scale,
+                                object.current_transform.rotation,
+                                object.current_transform.position,
+                            );
+                            let push_constants = ModelPushConstant {
+                                model_matrix: model_matrix.to_cols_array_2d(),
+                            };
+                            shadow_pass.set_push_constants(
+                                wgpu::ShaderStages::VERTEX,
+                                0,
+                                bytemuck::bytes_of(&push_constants),
+                            );
+                            shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                            shadow_pass.set_index_buffer(
+                                mesh.index_buffer.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        }
                     }
                 }
             }
@@ -2257,91 +2385,151 @@ impl Renderer {
     fn calculate_cascades(
         &self,
         camera: &Camera,
-        proj: &Mat4,
-        view: &Mat4,
+        camera_view: &Mat4,
         light_rotation: Quat,
+        scene_bounds: &Aabb,
     ) -> ShadowUniforms {
         let light_dir = (light_rotation * -Vec3::Z).normalize();
-        let inv_camera_view_proj = (*proj * *view).inverse();
+        let inv_camera_view = camera_view.inverse();
+        let tan_half_fovy = (camera.fov_y_rad / 2.0).tan();
 
-        let cascade_splits_percentages = [0.0, 0.07, 0.2, 0.5, 1.0];
+        //  println!("Light direction: {:?}", light_dir);
 
         let mut uniforms = ShadowUniforms {
-            cascades: [CascadeUniform {
-                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                split_depth: 0.0,
-                _padding: [0.0; 3],
-            }; NUM_CASCADES],
+            cascades: [CascadeUniform::default(); NUM_CASCADES],
         };
 
         for i in 0..NUM_CASCADES {
-            let p_near_percent = cascade_splits_percentages[i];
-            let p_far_percent = cascade_splits_percentages[i + 1];
+            //  println!("\n=== CASCADE {} ===", i);
 
-            let frustum_corners_world: [Vec3; 8] = (0..8)
-                .map(|n| {
-                    let p_ndc = Vec3::new(
-                        (n % 2) as f32 * 2.0 - 1.0,
-                        (n / 2 % 2) as f32 * 2.0 - 1.0,
-                        (n / 4) as f32, // This will be 0.0 for near plane, 1.0 for far plane
-                    );
-                    // Interpolate z in view space for better distribution
-                    let z_view = camera.near_plane
-                        * (camera.far_plane / camera.near_plane)
-                            .powf(p_near_percent + (p_far_percent - p_near_percent) * p_ndc.z);
-                    // Convert to NDC z
-                    let z_ndc = (proj.z_axis.z * z_view + proj.w_axis.z) / -z_view;
+            // --- 1. Get the world-space corners of the cascade's frustum slice ---
+            let z_near = CASCADE_SPLITS[i];
+            let z_far = CASCADE_SPLITS[i + 1];
 
-                    let p_world_h = inv_camera_view_proj * vec4(p_ndc.x, p_ndc.y, z_ndc, 1.0);
-                    p_world_h.xyz() / p_world_h.w
-                })
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap();
+            // println!("z_near: {}, z_far: {}", z_near, z_far);
 
-            let frustum_center = frustum_corners_world.iter().sum::<Vec3>() / 8.0;
+            let h_near = 2.0 * tan_half_fovy * z_near;
+            let w_near = h_near * camera.aspect_ratio;
+            let h_far = 2.0 * tan_half_fovy * z_far;
+            let w_far = h_far * camera.aspect_ratio;
 
-            let up = if light_dir.y.abs() > 0.999 {
-                Vec3::X
-            } else {
-                Vec3::Y
-            };
-            let light_view_mat = Mat4::look_at_rh(frustum_center - light_dir, frustum_center, up);
+            let corners_view = [
+                Vec3::new(w_near / 2.0, h_near / 2.0, -z_near),
+                Vec3::new(-w_near / 2.0, h_near / 2.0, -z_near),
+                Vec3::new(w_near / 2.0, -h_near / 2.0, -z_near),
+                Vec3::new(-w_near / 2.0, -h_near / 2.0, -z_near),
+                Vec3::new(w_far / 2.0, h_far / 2.0, -z_far),
+                Vec3::new(-w_far / 2.0, h_far / 2.0, -z_far),
+                Vec3::new(w_far / 2.0, -h_far / 2.0, -z_far),
+                Vec3::new(-w_far / 2.0, -h_far / 2.0, -z_far),
+            ];
 
-            let mut frustum_min_ls = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
-            let mut frustum_max_ls = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
-            for &corner in &frustum_corners_world {
-                let trf = light_view_mat * corner.extend(1.0);
-                frustum_min_ls = frustum_min_ls.min(trf.xyz());
-                frustum_max_ls = frustum_max_ls.max(trf.xyz());
+            let frustum_corners_world: [Vec3; 8] =
+                std::array::from_fn(|i| (inv_camera_view * corners_view[i].extend(1.0)).xyz());
+
+            // --- 2. Find the bounds of this frustum slice in world space ---
+            let mut world_min = Vec3::splat(f32::MAX);
+            let mut world_max = Vec3::splat(f32::MIN);
+
+            for corner in frustum_corners_world {
+                world_min = world_min.min(corner);
+                world_max = world_max.max(corner);
             }
 
-            let scene_corners_world = SCENE_BOUNDS.get_corners();
-            let mut scene_min_z_ls = f32::MAX;
-            for &corner in &scene_corners_world {
-                let trf = light_view_mat * corner.extend(1.0);
-                scene_min_z_ls = scene_min_z_ls.min(trf.z);
+            let world_center = (world_min + world_max) * 0.5;
+            let world_size = world_max - world_min;
+
+            //println!("World bounds: {:?} to {:?}", world_min, world_max);
+            // println!("World center: {:?}, size: {:?}", world_center, world_size);
+
+            // --- 3. Create light view matrix ---
+            // Position light far enough back to see the entire frustum
+            let light_distance = world_size.length() * 2.0;
+            let light_position = world_center - light_dir * light_distance;
+
+            //println!("Light position: {:?} (distance: {})", light_position, light_distance);
+
+            let light_view = Mat4::look_at_rh(light_position, world_center, Vec3::Y);
+
+            // --- 4. Find the frustum bounds in light space ---
+            let mut light_space_min = Vec3::splat(f32::MAX);
+            let mut light_space_max = Vec3::splat(f32::MIN);
+
+            for corner in frustum_corners_world {
+                let ls_point = (light_view * corner.extend(1.0)).xyz();
+                light_space_min = light_space_min.min(ls_point);
+                light_space_max = light_space_max.max(ls_point);
             }
 
-            let light_proj_mat = Mat4::orthographic_rh(
-                frustum_min_ls.x,
-                frustum_max_ls.x,
-                frustum_min_ls.y,
-                frustum_max_ls.y,
-                // Use scene min z for near plane to include all potential casters
-                scene_min_z_ls,
-                // Use frustum max z for far plane for better precision
-                frustum_max_ls.z,
+            //println!("Light space bounds: {:?} to {:?}", light_space_min, light_space_max);
+
+            // --- 5. Create orthographic projection ---
+            // CRITICAL: For RH coordinate system, near > far in Z
+            // The Z values are negative, so we need to swap and negate them
+            let z_near = -light_space_max.z - 5.0; // Add padding
+            let z_far = -light_space_min.z + 5.0; // Add padding
+
+            //println!("Orthographic params: x({} to {}), y({} to {}), z({} to {})",
+            //   light_space_min.x - 5.0, light_space_max.x + 5.0,
+            //  light_space_min.y - 5.0, light_space_max.y + 5.0,
+            //   z_near, z_far);
+
+            let light_proj = Mat4::orthographic_rh(
+                light_space_min.x - 5.0,
+                light_space_max.x + 5.0,
+                light_space_min.y - 5.0,
+                light_space_max.y + 5.0,
+                z_near,
+                z_far,
             );
 
-            let split_depth =
-                camera.near_plane + (camera.far_plane - camera.near_plane) * p_far_percent;
+            // --- 3. Use scene bounds but clamp to reasonable size ---
+            let scene_size = scene_bounds.max - scene_bounds.min;
+            let scene_radius = scene_size.length() * 0.5;
+
+            // CRITICAL: Clamp scene radius to avoid precision issues
+            let clamped_radius = scene_radius.min(200.0); // Max 200 units radius
+
+            // Scale the orthographic projection based on CLAMPED scene size
+            let ortho_size = (clamped_radius * 1.2).max(20.0); // At least 20 units, with 20% padding
+            let ortho_depth = (clamped_radius * 2.5).max(50.0); // At least 50 units depth
+
+            // Scale the light distance based on CLAMPED scene size
+            let light_distance = (clamped_radius * 1.5).max(30.0); // At least 30 units back
+
+            let light_position = -light_dir * light_distance;
+            let target = Vec3::ZERO;
+
+            //println!("Scene radius: {} -> clamped: {}, ortho_size: {}, ortho_depth: {}, light_distance: {}",
+            //   scene_radius, clamped_radius, ortho_size, ortho_depth, light_distance);
+            //println!("Light position: {:?}, Target: {:?}", light_position, target);
+
+            let light_view = Mat4::look_at_rh(light_position, target, Vec3::Y);
+            let light_proj = Mat4::orthographic_rh(
+                -ortho_size,
+                ortho_size,
+                -ortho_size,
+                ortho_size,
+                0.1,
+                ortho_depth,
+            );
+
+            let final_light_vp = WGPU_CLIP_SPACE_CORRECTION * light_proj * light_view;
+
+            //println!("Final light VP matrix: {:?}", final_light_vp);
+
+            // Test that the world center projects to roughly (0,0,0) in NDC
+            let projected = final_light_vp * world_center.extend(1.0);
+            let ndc = projected.xyz() / projected.w;
+            //println!("World center NDC: {:?}", ndc);
+
             uniforms.cascades[i] = CascadeUniform {
-                light_view_proj: (light_proj_mat * light_view_mat).to_cols_array_2d(),
-                split_depth: -split_depth, // Negate for comparison in view space
+                light_view_proj: final_light_vp.to_cols_array_2d(),
+                split_depth: -z_far,
                 _padding: [0.0; 3],
             };
         }
+
         uniforms
     }
 }

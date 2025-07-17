@@ -8,7 +8,7 @@ use crate::{ecs::{ecs_core::{ECSCore, Entity}, system::System}, graphics::render
 /// to hold a snapshot of the world's state for one frame.
 #[derive(Clone, Default)]
 pub struct ExtractedState {
-    pub objects: HashMap<Entity, (Transform, usize, usize)>, // Transform, mesh_id, material_id
+    pub objects: HashMap<Entity, (Transform, usize, usize, bool)>, // Transform, mesh_id, material_id, casts_shadow
     pub lights: HashMap<Entity, (Transform, Light)>,
     pub camera_transform: Transform,
     pub camera_component: Camera,
@@ -54,7 +54,7 @@ impl System for RenderDataSystem {
         // Query for all renderable objects
         ecs.component_pool.query_for_each::<(Transform, MeshRenderer), _>(|entity, (transform, mesh_renderer)| {
             if mesh_renderer.visible {
-                current_state.objects.insert(entity, (*transform, mesh_renderer.mesh_id, mesh_renderer.material_id));
+                current_state.objects.insert(entity, (*transform, mesh_renderer.mesh_id, mesh_renderer.material_id, mesh_renderer.casts_shadow));
             }
         });
 
@@ -79,14 +79,15 @@ impl System for RenderDataSystem {
         let prev_state = self.previous_state.as_ref().unwrap_or(&current_state);
 
         let objects = current_state.objects.iter()
-            .map(|(&entity, &(current_transform, mesh_id, material_id))| {
+            .map(|(&entity, &(current_transform, mesh_id, material_id, casts_shadow))| {
                 // Find the previous transform for this entity. Default to the current one if it's a new entity.
-                let previous_transform = prev_state.objects.get(&entity).map_or(current_transform, |(prev_trans, _, _)| *prev_trans);
+                let previous_transform = prev_state.objects.get(&entity).map_or(current_transform, |(prev_trans, _, _, _)| *prev_trans);
                 RenderObject {
                     mesh_id,
                     material_id,
                     current_transform,
                     previous_transform,
+                    casts_shadow,
                 }
             })
             .collect();

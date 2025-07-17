@@ -48,12 +48,13 @@ impl Transform {
 pub struct MeshRenderer {
     pub mesh_id: usize,
     pub material_id: usize, // The ID of the material to use for this mesh instance
+    pub casts_shadow: bool,
     pub visible: bool,
 }
 
 impl MeshRenderer {
-    pub fn new(mesh_id: usize, material_id: usize, visible: bool) -> Self {
-        Self { mesh_id, material_id, visible }
+    pub fn new(mesh_id: usize, material_id: usize, casts_shadow: bool, visible: bool) -> Self {
+        Self { mesh_id, material_id, casts_shadow, visible }
     }
 }
 
@@ -313,8 +314,8 @@ impl MeshAsset {
                 indices.push(p2);
         
                 indices.push(p2);
-                indices.push(p1);
                 indices.push(p3);
+                indices.push(p1);
             }
         }
         Self::new_raw(name, vertices, indices)

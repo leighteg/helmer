@@ -47,7 +47,8 @@ struct CascadeData {
 @group(2) @binding(0) var brdf_lut: texture_2d<f32>;
 @group(2) @binding(1) var irradiance_map: texture_cube<f32>;
 @group(2) @binding(2) var prefiltered_env_map: texture_cube<f32>;
-@group(2) @binding(3) var ibl_sampler: sampler;
+@group(2) @binding(3) var env_map_sampler: sampler; 
+@group(2) @binding(4) var brdf_lut_sampler: sampler;
 
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -59,17 +60,27 @@ fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 { let a = roughness * roughness; let a2 = a * a; let NdotH2 = NdotH * NdotH; let denom = (NdotH2 * (a2 - 1.0) + 1.0); return a2 / (PI * denom * denom); }
 fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 { let r = (roughness + 1.0); let k = (r * r) / 8.0; return NdotV / (NdotV * (1.0 - k) + k); }
 fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 { let NdotV = max(dot(N, V), 0.0); let NdotL = max(dot(N, L), 0.0); return geometry_schlick_ggx(NdotV, roughness) * geometry_schlick_ggx(NdotL, roughness); }
-fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 { let bias = 0.005; if depth - bias <= moments.x { return 1.0; } var variance = moments.y - (moments.x * moments.x); variance = max(variance, VSM_MIN_VARIANCE); let d = depth - moments.x; let p_max = variance / (variance + d * d); return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max); }
+fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
+    let bias: f32 = 0.005;
+    let current_depth = depth - bias;
+    if current_depth <= moments.x {
+        return 1.0;
+    }
+    var variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, VSM_MIN_VARIANCE);
+    let d = current_depth - moments.x;
+    let p_max = variance / (variance + d * d);
+    return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max);
+}
 fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> { return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
 fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> { return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
 
 // --- SHADOW FACTOR CALCULATION ---
 fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
-    var cascade_index = i32(NUM_CASCADES - 1); // Default to the furthest cascade
+    var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
-        // Find the first cascade this fragment fits into.
         // Since view_z is negative, a "larger" z is closer to the camera.
-        if view_z > shadow_uniforms[i].split_depth {
+        if view_z > shadow_uniforms[i].split_depth { 
             cascade_index = i;
             break;
         }
@@ -78,16 +89,14 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     let cascade = shadow_uniforms[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
 
-    // Safety check before perspective divide
     if shadow_pos_clip.w < EPSILON {
-        return 1.0; // Not shadowed
+        return 1.0;
     }
 
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
 
-    // If outside the light's frustum for this cascade, it's not shadowed.
-    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || shadow_coord.z > 1.0 {
+    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
         return 1.0;
     }
 
@@ -108,7 +117,10 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let screen_uv = frag_coord.xy / vec2<f32>(textureDimensions(gbuf_normal));
 
     let depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
-    if depth >= 1.0 { discard; }
+    // Correct discard for reversed-Z depth buffer where far plane is at 0.0
+    if depth < EPSILON {
+        discard;
+    }
     let ndc = vec4<f32>(screen_uv.x * 2.0 - 1.0, (1.0 - screen_uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
 
@@ -197,10 +209,10 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let kS_ibl = F_ibl;
     var kD_ibl = vec3(1.0) - kS_ibl;
     kD_ibl *= (1.0 - metallic);
-    let irradiance = textureSample(irradiance_map, ibl_sampler, N).rgb;
+    let irradiance = textureSample(irradiance_map, brdf_lut_sampler, N).rgb;
     let diffuse_indirect = irradiance * albedo;
-    let prefiltered_color = textureSampleLevel(prefiltered_env_map, ibl_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
-    let brdf = textureSample(brdf_lut, ibl_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+    let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
+    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
     let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
     let ambient = kD_ibl * diffuse_indirect * ao;
     

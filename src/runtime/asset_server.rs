@@ -1,4 +1,5 @@
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
+use glam::Vec3;
 use gltf::import_slice;
 use hashbrown::HashMap;
 use ktx2::Reader;
@@ -17,7 +18,7 @@ use std::{
 };
 use tracing::{info, warn};
 
-use crate::{graphics::renderer::renderer::Vertex, runtime::runtime::RenderMessage};
+use crate::{graphics::renderer::renderer::{Aabb, Vertex}, runtime::runtime::RenderMessage};
 
 // FIX: Define AssetKind here so it's in scope.
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +114,7 @@ enum AssetLoadRequest {
 enum AssetLoadResult {
     Mesh {
         id: usize,
-        data: (Vec<Vertex>, Vec<u32>),
+        data: (Vec<Vertex>, Vec<u32>, Aabb),
     },
     Texture {
         id: usize,
@@ -241,12 +242,13 @@ impl AssetServer {
         while let Ok(result) = self.result_receiver.try_recv() {
             match result {
                 AssetLoadResult::Mesh { id, data } => {
-                    let (vertices, indices) = data;
+                    let (vertices, indices, bounds) = data;
                     self.render_sender
                         .send(RenderMessage::CreateMesh {
                             id,
                             vertices,
                             indices,
+                            bounds,
                         })
                         .unwrap();
                 }
@@ -418,7 +420,7 @@ impl<'a> Geometry for MikkTSpaceWrapper<'a> {
 }
 
 /// Parses a .glb file's binary content, now with tangent generation.
-fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), String> {
+fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>, Aabb), String> {
     let (gltf, buffers, _) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
 
     let mut all_vertices = Vec::new();
@@ -500,5 +502,19 @@ fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), String> {
         return Err("No valid primitives found in glTF file".to_string());
     }
 
-    Ok((all_vertices, all_indices))
+    // --- Calculate bounds ---
+    let mut min_bounds = Vec3::splat(f32::MAX);
+    let mut max_bounds = Vec3::splat(f32::MIN);
+
+    for vertex in &all_vertices {
+        min_bounds = min_bounds.min(Vec3::from(vertex.position));
+        max_bounds = max_bounds.max(Vec3::from(vertex.position));
+    }
+
+    let bounds = Aabb {
+        min: min_bounds,
+        max: max_bounds,
+    };
+
+    Ok((all_vertices, all_indices, bounds))
 }

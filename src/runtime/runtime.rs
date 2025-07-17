@@ -27,7 +27,7 @@ use winit::{
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::{
-        renderer::renderer::{Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
+        renderer::renderer::{Aabb, Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
         renderer_system::RenderPacket,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
@@ -45,6 +45,7 @@ pub enum RenderMessage {
         id: usize,
         vertices: Vec<Vertex>,
         indices: Vec<u32>,
+        bounds: Aabb,
     },
     CreateTexture {
         id: usize,

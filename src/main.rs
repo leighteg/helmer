@@ -7,7 +7,7 @@ use helmer_rs::{
         system::System,
     },
     graphics::{
-        renderer::renderer::Material,
+        renderer::renderer::{Aabb, Material},
         renderer_system::{RenderDataSystem, RenderPacket},
     },
     physics::{
@@ -147,9 +147,12 @@ fn main() {
 
         // Load materials from .ron files
         let basic_material_handle = asset_server.load_material("src/assets/materials/basic.ron");
-        let metal_material_handle = asset_server.load_material("src/assets/materials/shiny_metal.ron");
-        let red_light_material_handle = asset_server.load_material("src/assets/materials/red_light.ron");
-        let blue_light_material_handle = asset_server.load_material("src/assets/materials/blue_light.ron");
+        let metal_material_handle =
+            asset_server.load_material("src/assets/materials/shiny_metal.ron");
+        let red_light_material_handle =
+            asset_server.load_material("src/assets/materials/red_light.ron");
+        let blue_light_material_handle =
+            asset_server.load_material("src/assets/materials/blue_light.ron");
         //let duck_material_handle = asset_server.load_material("src/assets/materials/duck.ron");
 
         // Note: You don't need to explicitly load "assets/pattern.ktx2".
@@ -161,22 +164,22 @@ fn main() {
         // directly to the renderer via a RenderMessage.
 
         let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
-        app
-            .render_thread_sender
+        app.render_thread_sender
             .send(RenderMessage::CreateMesh {
-                id: 1, // Assign a unique ID
-                vertices: uv_sphere_mesh.vertices.unwrap(),
+                id: 11, // Assign a unique ID
+                vertices: uv_sphere_mesh.vertices.as_ref().unwrap().to_vec(),
                 indices: uv_sphere_mesh.indices,
+                bounds: Aabb::calculate(&uv_sphere_mesh.vertices.unwrap()),
             })
             .unwrap();
 
         let plane_mesh = MeshAsset::plane("plane".into());
-        app
-            .render_thread_sender
+        app.render_thread_sender
             .send(RenderMessage::CreateMesh {
-                id: 2, // Assign a unique ID
-                vertices: plane_mesh.vertices.unwrap(),
+                id: 10, // Assign a unique ID
+                vertices: plane_mesh.vertices.as_ref().unwrap().to_vec(),
                 indices: plane_mesh.indices,
+                bounds: Aabb::calculate(&plane_mesh.vertices.unwrap()),
             })
             .unwrap();
 
@@ -216,7 +219,10 @@ fn main() {
                 scale: glam::Vec3::from([50.0, 0.1, 50.0]),
             },
         );
-        ecs_guard.add_component(ground_entity, MeshRenderer::new(2, metal_material_handle.id, true));
+        ecs_guard.add_component(
+            ground_entity,
+            MeshRenderer::new(10, metal_material_handle.id, false, true),
+        );
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
 
@@ -229,7 +235,10 @@ fn main() {
                 scale: glam::Vec3::from([0.02; 3]),
             },
         );
-        ecs_guard.add_component(sponza_entity, MeshRenderer::new(sponza_handle.id, basic_material_handle.id, true));
+        ecs_guard.add_component(
+            sponza_entity,
+            MeshRenderer::new(sponza_handle.id, basic_material_handle.id, true, true),
+        );
         ecs_guard.add_component(sponza_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(sponza_entity, FixedCollider {});
 
@@ -242,7 +251,10 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(cube_entity, MeshRenderer::new(box_handle.id, metal_material_handle.id, true));
+        ecs_guard.add_component(
+            cube_entity,
+            MeshRenderer::new(box_handle.id, metal_material_handle.id, true, true),
+        );
         ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
 
@@ -255,7 +267,7 @@ fn main() {
                 scale: glam::Vec3::from_array([0.5; 3]),
             },
         );
-        ecs_guard.add_component(sphere_entity, MeshRenderer::new(1, 0, true));
+        ecs_guard.add_component(sphere_entity, MeshRenderer::new(11, 0, true, true));
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
@@ -270,7 +282,10 @@ fn main() {
         );
         ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
         ecs_guard.add_component(light_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity, MeshRenderer::new(box_handle.id, blue_light_material_handle.id, true));
+        ecs_guard.add_component(
+            light_entity,
+            MeshRenderer::new(box_handle.id, blue_light_material_handle.id, true, true),
+        );
         ecs_guard.add_component(light_entity, DynamicRigidBody { mass: 5.0 });
 
         let light_entity_2 = ecs_guard.create_entity();
@@ -286,16 +301,26 @@ fn main() {
             light_entity_2,
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
-        ecs_guard.add_component(light_entity_2, MeshRenderer::new(box_handle.id, red_light_material_handle.id, true));
+        ecs_guard.add_component(
+            light_entity_2,
+            MeshRenderer::new(box_handle.id, red_light_material_handle.id, true, true),
+        );
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
         ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
+
+        let sun_rotation = Quat::from_euler(
+            glam::EulerRot::YXZ,
+            80.0f32.to_radians(),  // Y rotation - very slight side angle
+            -80.0f32.to_radians(), // X rotation - steeper downward angle
+            50.0f32.to_radians(),  // Z rotation - no roll
+        );
 
         let light_entity_3: usize = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity_3,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, 0.0),
-                rotation: glam::Quat::from_array([0.0, 90.0, 90.0, 1.0]),
+                rotation: sun_rotation,
                 scale: glam::Vec3::ONE,
             },
         );
@@ -322,19 +347,27 @@ impl System for SpinnerSystem {
         let rotation_speed = 0.50 * dt;
         let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
-        let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed * 2.0);
+        let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);
 
         ecs.component_pool
-            .query_exact_mut_for_each::<(Transform, MeshRenderer), _>(
-                |(transform, mesh_renderer)| {
-                    if mesh_renderer.mesh_id == 2 {
-                        return;
-                    }
-                    transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
-                    // Re-normalize the quaternion to prevent floating-point drift over time.
-                    transform.rotation = transform.rotation.normalize();
-                },
-            );
+            .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, _)| {
+                // Apply Y and Z rotations
+                transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
+
+                // Extract euler angles to constrain X rotation
+                let (y, x, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+
+                // Clamp X rotation to stay around 90 degrees (with some wiggle room)
+                let target_x = -90.0f32.to_radians(); // 90 degrees down
+                let max_deviation = 20.0f32.to_radians(); // Allow ±15 degrees variation
+                let clamped_x = (x).clamp(target_x - max_deviation, target_x + max_deviation);
+
+                // Reconstruct quaternion with clamped X rotation
+                transform.rotation = Quat::from_euler(glam::EulerRot::YXZ, y, clamped_x, z);
+
+                // Re-normalize the quaternion to prevent floating-point drift over time.
+                transform.rotation = transform.rotation.normalize();
+            });
     }
 }
 
@@ -781,7 +814,10 @@ impl System for SpawnSystem {
                 _ => {}
             }
 
-            ecs.add_component(new_entity, MeshRenderer::new(mesh_id, material_id, true));
+            ecs.add_component(
+                new_entity,
+                MeshRenderer::new(mesh_id, material_id, true, true),
+            );
 
             match mesh_id {
                 0 => {

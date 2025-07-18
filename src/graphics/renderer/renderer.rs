@@ -319,9 +319,7 @@ struct ShadowUniforms {
 // Helper struct to group shadow resources
 struct ShadowPipeline {
     pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    light_vp_buffer: wgpu::Buffer,
-    light_vp_bind_group: wgpu::BindGroup,
+    bind_group: wgpu::BindGroup,
 }
 
 #[repr(C)]
@@ -401,6 +399,7 @@ pub struct Renderer {
     camera_buffers: Vec<wgpu::Buffer>,
     lights_buffers: Vec<wgpu::Buffer>,
     material_uniform_buffer: Option<wgpu::Buffer>,
+    shadow_light_vp_buffer: Option<wgpu::Buffer>,
 
     // Asset Storage
     meshes: HashMap<usize, Mesh>,
@@ -549,6 +548,7 @@ impl Renderer {
             camera_buffers: Vec::new(),
             lights_buffers: Vec::new(),
             material_uniform_buffer: None,
+            shadow_light_vp_buffer: None,
             meshes: HashMap::new(),
             materials: HashMap::new(),
             texture_manager: TextureManager::default(),
@@ -850,13 +850,19 @@ impl Renderer {
         let device = &self.device;
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"));
 
-        let light_vp_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Shadow Light VP Buffer"),
-            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+        // --- NEW: Calculate aligned buffer size for multiple matrices ---
+        let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
+        let alignment = device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
+        let aligned_mat4_size = wgpu::util::align_to(mat4_size, alignment);
+
+        self.shadow_light_vp_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Light VP (Dynamic Uniform)"),
+            size: NUM_CASCADES as wgpu::BufferAddress * aligned_mat4_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
 
+        // --- NEW: The layout now specifies a DYNAMIC buffer ---
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow Bind Group Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -864,19 +870,27 @@ impl Renderer {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true, // <-- The key change
+                    min_binding_size: wgpu::BufferSize::new(mat4_size),
                 },
                 count: None,
             }],
         });
 
-        let light_vp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>();
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow Light VP Bind Group"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: light_vp_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: self.shadow_light_vp_buffer.as_ref().unwrap(),
+                    offset: 0,
+                    // Explicitly tell the binding its size is one matrix.
+                    // This is the key to making dynamic offsets work.
+                    size: wgpu::BufferSize::new(mat4_size as u64),
+                }),
             }],
         });
 
@@ -909,7 +923,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Front), // Use front-face culling for Peter-Panning
+                cull_mode: Some(wgpu::Face::Back), // Use front-face culling for Peter-Panning
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -930,9 +944,7 @@ impl Renderer {
 
         self.shadow_pipeline = Some(ShadowPipeline {
             pipeline,
-            bind_group_layout,
-            light_vp_buffer,
-            light_vp_bind_group,
+            bind_group,
         });
     }
 
@@ -2114,6 +2126,8 @@ impl Renderer {
         render_data: &RenderData,
         static_camera_view: &Mat4,
     ) {
+        const MAX_REASONABLE_DISTANCE: f32 = 5000.0;
+
         let shadow_light = render_data
             .lights
             .iter()
@@ -2130,6 +2144,9 @@ impl Renderer {
             let mut scene_bounds_max = Vec3::splat(f32::MIN);
             for object in &render_data.objects {
                 if object.casts_shadow {
+                    if object.current_transform.position.length() > MAX_REASONABLE_DISTANCE {
+                        continue;
+                    }
                     if let Some(mesh) = self.meshes.get(&object.mesh_id) {
                         let model_matrix = Mat4::from_scale_rotation_translation(
                             object.current_transform.scale,
@@ -2174,13 +2191,22 @@ impl Renderer {
                 bytemuck::bytes_of(&shadow_uniforms),
             );
 
+            // --- NEW: Write all matrix data to the buffer once before the loop ---
+            let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
+            let alignment =
+                self.device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
+            let aligned_mat4_size = wgpu::util::align_to(mat4_size, alignment);
+
             for i in 0..NUM_CASCADES {
                 self.queue.write_buffer(
-                    &shadow_pipeline.light_vp_buffer,
-                    0,
+                    self.shadow_light_vp_buffer.as_ref().unwrap(),
+                    (i as wgpu::BufferAddress) * aligned_mat4_size,
                     bytemuck::bytes_of(&shadow_uniforms.cascades[i].light_view_proj),
                 );
+            }
 
+            for i in 0..NUM_CASCADES {
+                let offset = (i as u32) * (aligned_mat4_size as u32);
                 let cascade_view = &self.cascade_views.as_ref().unwrap()[i];
 
                 let depth_ops = wgpu::Operations {
@@ -2212,10 +2238,14 @@ impl Renderer {
                 });
 
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
-                shadow_pass.set_bind_group(0, &shadow_pipeline.light_vp_bind_group, &[]);
+                shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
 
                 for object in &render_data.objects {
                     if object.casts_shadow {
+                        if object.current_transform.position.length() > MAX_REASONABLE_DISTANCE {
+                            continue;
+                        }
+
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
                             let model_matrix = Mat4::from_scale_rotation_translation(
                                 object.current_transform.scale,
@@ -2392,21 +2422,16 @@ impl Renderer {
         let light_dir = (light_rotation * -Vec3::Z).normalize();
         let inv_camera_view = camera_view.inverse();
         let tan_half_fovy = (camera.fov_y_rad / 2.0).tan();
-
-        //  println!("Light direction: {:?}", light_dir);
+        let scene_corners = scene_bounds.get_corners();
 
         let mut uniforms = ShadowUniforms {
             cascades: [CascadeUniform::default(); NUM_CASCADES],
         };
 
         for i in 0..NUM_CASCADES {
-            //  println!("\n=== CASCADE {} ===", i);
-
-            // --- 1. Get the world-space corners of the cascade's frustum slice ---
+            // 1. Get the world-space corners of this cascade's frustum slice
             let z_near = CASCADE_SPLITS[i];
             let z_far = CASCADE_SPLITS[i + 1];
-
-            // println!("z_near: {}, z_far: {}", z_near, z_far);
 
             let h_near = 2.0 * tan_half_fovy * z_near;
             let w_near = h_near * camera.aspect_ratio;
@@ -2427,102 +2452,42 @@ impl Renderer {
             let frustum_corners_world: [Vec3; 8] =
                 std::array::from_fn(|i| (inv_camera_view * corners_view[i].extend(1.0)).xyz());
 
-            // --- 2. Find the bounds of this frustum slice in world space ---
-            let mut world_min = Vec3::splat(f32::MAX);
-            let mut world_max = Vec3::splat(f32::MIN);
+            // 2. Center the light on the cascade's frustum slice
+            let world_center = frustum_corners_world.iter().sum::<Vec3>() / 8.0;
 
+            let light_view = Mat4::look_at_rh(world_center - light_dir, world_center, Vec3::Y);
+
+            // 3. Calculate the tightest possible orthographic projection around the cascade
+            let mut cascade_min = Vec3::splat(f32::MAX);
+            let mut cascade_max = Vec3::splat(f32::MIN);
             for corner in frustum_corners_world {
-                world_min = world_min.min(corner);
-                world_max = world_max.max(corner);
+                let trf = light_view * corner.extend(1.0);
+                cascade_min = cascade_min.min(trf.xyz());
+                cascade_max = cascade_max.max(trf.xyz());
             }
 
-            let world_center = (world_min + world_max) * 0.5;
-            let world_size = world_max - world_min;
-
-            //println!("World bounds: {:?} to {:?}", world_min, world_max);
-            // println!("World center: {:?}, size: {:?}", world_center, world_size);
-
-            // --- 3. Create light view matrix ---
-            // Position light far enough back to see the entire frustum
-            let light_distance = world_size.length() * 2.0;
-            let light_position = world_center - light_dir * light_distance;
-
-            //println!("Light position: {:?} (distance: {})", light_position, light_distance);
-
-            let light_view = Mat4::look_at_rh(light_position, world_center, Vec3::Y);
-
-            // --- 4. Find the frustum bounds in light space ---
-            let mut light_space_min = Vec3::splat(f32::MAX);
-            let mut light_space_max = Vec3::splat(f32::MIN);
-
-            for corner in frustum_corners_world {
-                let ls_point = (light_view * corner.extend(1.0)).xyz();
-                light_space_min = light_space_min.min(ls_point);
-                light_space_max = light_space_max.max(ls_point);
+            // 4. Expand the tight projection to include the entire scene's depth
+            let mut scene_min_z = f32::MAX;
+            let mut scene_max_z = f32::MIN;
+            for corner in &scene_corners {
+                let trf = light_view * corner.extend(1.0);
+                scene_min_z = scene_min_z.min(trf.z);
+                scene_max_z = scene_max_z.max(trf.z);
             }
 
-            //println!("Light space bounds: {:?} to {:?}", light_space_min, light_space_max);
-
-            // --- 5. Create orthographic projection ---
-            // CRITICAL: For RH coordinate system, near > far in Z
-            // The Z values are negative, so we need to swap and negate them
-            let z_near = -light_space_max.z - 5.0; // Add padding
-            let z_far = -light_space_min.z + 5.0; // Add padding
-
-            //println!("Orthographic params: x({} to {}), y({} to {}), z({} to {})",
-            //   light_space_min.x - 5.0, light_space_max.x + 5.0,
-            //  light_space_min.y - 5.0, light_space_max.y + 5.0,
-            //   z_near, z_far);
-
+            // 5. Create the final projection matrix
             let light_proj = Mat4::orthographic_rh(
-                light_space_min.x - 5.0,
-                light_space_max.x + 5.0,
-                light_space_min.y - 5.0,
-                light_space_max.y + 5.0,
-                z_near,
-                z_far,
+                cascade_min.x,
+                cascade_max.x,
+                cascade_min.y,
+                cascade_max.y,
+                // THE FIX: Convert negative Z coordinates into positive distances
+                -scene_max_z,
+                -scene_min_z,
             );
 
-            // --- 3. Use scene bounds but clamp to reasonable size ---
-            let scene_size = scene_bounds.max - scene_bounds.min;
-            let scene_radius = scene_size.length() * 0.5;
-
-            // CRITICAL: Clamp scene radius to avoid precision issues
-            let clamped_radius = scene_radius.min(200.0); // Max 200 units radius
-
-            // Scale the orthographic projection based on CLAMPED scene size
-            let ortho_size = (clamped_radius * 1.2).max(20.0); // At least 20 units, with 20% padding
-            let ortho_depth = (clamped_radius * 2.5).max(50.0); // At least 50 units depth
-
-            // Scale the light distance based on CLAMPED scene size
-            let light_distance = (clamped_radius * 1.5).max(30.0); // At least 30 units back
-
-            let light_position = -light_dir * light_distance;
-            let target = Vec3::ZERO;
-
-            //println!("Scene radius: {} -> clamped: {}, ortho_size: {}, ortho_depth: {}, light_distance: {}",
-            //   scene_radius, clamped_radius, ortho_size, ortho_depth, light_distance);
-            //println!("Light position: {:?}, Target: {:?}", light_position, target);
-
-            let light_view = Mat4::look_at_rh(light_position, target, Vec3::Y);
-            let light_proj = Mat4::orthographic_rh(
-                -ortho_size,
-                ortho_size,
-                -ortho_size,
-                ortho_size,
-                0.1,
-                ortho_depth,
-            );
-
-            let final_light_vp = WGPU_CLIP_SPACE_CORRECTION * light_proj * light_view;
-
-            //println!("Final light VP matrix: {:?}", final_light_vp);
-
-            // Test that the world center projects to roughly (0,0,0) in NDC
-            let projected = final_light_vp * world_center.extend(1.0);
-            let ndc = projected.xyz() / projected.w;
-            //println!("World center NDC: {:?}", ndc);
-
+            // 6. Finalize and store
+            let final_light_vp = light_proj * light_view;
             uniforms.cascades[i] = CascadeUniform {
                 light_view_proj: final_light_vp.to_cols_array_2d(),
                 split_depth: -z_far,

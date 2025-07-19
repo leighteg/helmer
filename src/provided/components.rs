@@ -1,6 +1,6 @@
 use crate::{ecs::component::Component, graphics::renderer::renderer::Vertex};
-use proc::Component;
-use glam::{Quat, Vec2, Vec3}; // Using glam for mathematical types
+use glam::{Quat, Vec2, Vec3};
+use proc::Component; // Using glam for mathematical types
 
 // --- Core Transform Component ---
 // This is fundamental for any spatial entity.
@@ -23,7 +23,11 @@ impl Default for Transform {
 
 impl Transform {
     pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        Self { position, rotation, scale }
+        Self {
+            position,
+            rotation,
+            scale,
+        }
     }
 
     pub fn forward(&self) -> Vec3 {
@@ -39,7 +43,6 @@ impl Transform {
     }
 }
 
-
 // --- Mesh Rendering Component ---
 // This component links an entity to a specific mesh asset.
 // The `u32` ID would refer to an ID managed by your asset system,
@@ -54,7 +57,12 @@ pub struct MeshRenderer {
 
 impl MeshRenderer {
     pub fn new(mesh_id: usize, material_id: usize, casts_shadow: bool, visible: bool) -> Self {
-        Self { mesh_id, material_id, casts_shadow, visible }
+        Self {
+            mesh_id,
+            material_id,
+            casts_shadow,
+            visible,
+        }
     }
 }
 
@@ -72,8 +80,8 @@ pub enum LightType {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Light {
     pub light_type: LightType,
-    pub color: Vec3,      // RGB color of the light
-    pub intensity: f32,   // Brightness of the light
+    pub color: Vec3,    // RGB color of the light
+    pub intensity: f32, // Brightness of the light
 }
 
 impl Light {
@@ -102,14 +110,13 @@ impl Light {
     }
 }
 
-
 // --- Camera Component ---
 // Defines a camera in your world. The ECS system would select one active camera
 // to provide data for the renderer's camera uniforms.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Camera {
-    pub fov_y_rad: f32,      // Vertical field of view in radians
-    pub aspect_ratio: f32,   // Width / Height
+    pub fov_y_rad: f32,    // Vertical field of view in radians
+    pub aspect_ratio: f32, // Width / Height
     pub near_plane: f32,
     pub far_plane: f32,
     // Add other camera properties if needed, e.g., orthographic projection settings
@@ -117,13 +124,18 @@ pub struct Camera {
 
 impl Camera {
     pub fn new(fov_y_rad: f32, aspect_ratio: f32, near_plane: f32, far_plane: f32) -> Self {
-        Self { fov_y_rad, aspect_ratio, near_plane, far_plane }
+        Self {
+            fov_y_rad,
+            aspect_ratio,
+            near_plane,
+            far_plane,
+        }
     }
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        let fov_45_degrees = std::f32::consts::FRAC_PI_4; 
+        let fov_45_degrees = std::f32::consts::FRAC_PI_4;
         Camera::new(fov_45_degrees, 1.7, 0.1, 100.0)
     }
 }
@@ -212,59 +224,191 @@ impl MeshAsset {
 
     pub fn cube(name: String) -> Self {
         let vertices = vec![
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 0.0, 1.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 1.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 1.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [0.0, 0.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 0.0, -1.0], tex_coord: [1.0, 0.0], tangent: [-1.0, 0.0, 0.0, 1.0] },
-
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, -0.5, 0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-
-            Vertex { position: [0.5, -0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, -1.0, 1.0] },
-            Vertex { position: [0.5, -0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, -1.0, 1.0] },
-            Vertex { position: [0.5, 0.5, -0.5], normal: [1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, -1.0, 1.0] },
-            Vertex { position: [0.5, 0.5, 0.5], normal: [1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, -1.0, 1.0] },
-
-            Vertex { position: [-0.5, -0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 1.0], tangent: [0.0, 0.0, 1.0, 1.0] },
-            Vertex { position: [-0.5, -0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 1.0], tangent: [0.0, 0.0, 1.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, -0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [0.0, 0.0], tangent: [0.0, 0.0, 1.0, 1.0] },
-            Vertex { position: [-0.5, 0.5, 0.5], normal: [-1.0, 0.0, 0.0], tex_coord: [1.0, 0.0], tangent: [0.0, 0.0, 1.0, 1.0] },
+            Vertex {
+                position: [-0.5, -0.5, 0.5],
+                normal: [0.0, 0.0, 1.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, 0.5],
+                normal: [0.0, 0.0, 1.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, 0.5],
+                normal: [0.0, 0.0, 1.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, 0.5],
+                normal: [0.0, 0.0, 1.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, -0.5, -0.5],
+                normal: [0.0, 0.0, -1.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [-1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, -0.5],
+                normal: [0.0, 0.0, -1.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [-1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, -0.5],
+                normal: [0.0, 0.0, -1.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [-1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, -0.5],
+                normal: [0.0, 0.0, -1.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [-1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, 0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, 0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, -0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, -0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, -0.5, 0.5],
+                normal: [0.0, -1.0, 0.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, 0.5],
+                normal: [0.0, -1.0, 0.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, -0.5],
+                normal: [0.0, -1.0, 0.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, -0.5, -0.5],
+                normal: [0.0, -1.0, 0.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, 0.5],
+                normal: [1.0, 0.0, 0.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [0.0, 0.0, -1.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, -0.5, -0.5],
+                normal: [1.0, 0.0, 0.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [0.0, 0.0, -1.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, -0.5],
+                normal: [1.0, 0.0, 0.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [0.0, 0.0, -1.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.5, 0.5],
+                normal: [1.0, 0.0, 0.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [0.0, 0.0, -1.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, -0.5, 0.5],
+                normal: [-1.0, 0.0, 0.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [0.0, 0.0, 1.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, -0.5, -0.5],
+                normal: [-1.0, 0.0, 0.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [0.0, 0.0, 1.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, -0.5],
+                normal: [-1.0, 0.0, 0.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [0.0, 0.0, 1.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.5, 0.5],
+                normal: [-1.0, 0.0, 0.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [0.0, 0.0, 1.0, 1.0],
+            },
         ];
 
         let indices = vec![
-    0, 1, 2, 2, 3, 0,     // Front
-    4, 7, 6, 6, 5, 4,     // Back (was 4,6,5,6,4,7)
-    8, 9, 10, 10, 11, 8,  // Top
-    12, 15, 14, 14, 13, 12, // Bottom (was 12,14,13,14,12,15)
-    16, 17, 18, 18, 19, 16, // Right
-    20, 23, 22, 22, 21, 20, // Left (was 20,22,21,22,20,23)
-];
+            0, 1, 2, 2, 3, 0, // Front
+            4, 7, 6, 6, 5, 4, // Back (was 4,6,5,6,4,7)
+            8, 9, 10, 10, 11, 8, // Top
+            12, 15, 14, 14, 13, 12, // Bottom (was 12,14,13,14,12,15)
+            16, 17, 18, 18, 19, 16, // Right
+            20, 23, 22, 22, 21, 20, // Left (was 20,22,21,22,20,23)
+        ];
         Self::new_raw(name, vertices, indices)
     }
 
     pub fn plane(name: String) -> Self {
         let vertices = vec![
-            Vertex { position: [-0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.0, 0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 1.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
-            Vertex { position: [-0.5, 0.0, -0.5], normal: [0.0, 1.0, 0.0], tex_coord: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] },
+            Vertex {
+                position: [-0.5, 0.0, 0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.0, 0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [1.0, 1.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [0.5, 0.0, -0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [1.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
+            Vertex {
+                position: [-0.5, 0.0, -0.5],
+                normal: [0.0, 1.0, 0.0],
+                tex_coord: [0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            },
         ];
-        let indices = vec![
-            0, 1, 2,
-            2, 3, 0,
-        ];
+        let indices = vec![0, 1, 2, 2, 3, 0];
         Self::new_raw(name, vertices, indices)
     }
 
@@ -295,7 +439,7 @@ impl MeshAsset {
                     position: position.into(),
                     normal: normal.into(),
                     tex_coord: tex_coord.into(),
-                    tangent: tangent.extend(1.0).into(),
+                    tangent: tangent.extend(0.0).into(),
                 });
             }
         }
@@ -314,12 +458,14 @@ impl MeshAsset {
                 indices.push(p2);
         
                 indices.push(p2);
-                indices.push(p3);
                 indices.push(p1);
+                indices.push(p3);
             }
         }
         Self::new_raw(name, vertices, indices)
     }
+
+
 }
 
 // --- Asset ID Mapping Component ---
@@ -334,7 +480,6 @@ pub struct MaterialAssetId(pub u32);
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TextureAssetId(pub u32);
-
 
 // --- Example ECS System to Collect Render Data ---
 // This is a conceptual system that would run every frame to query your ECS

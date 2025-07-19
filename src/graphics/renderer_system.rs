@@ -83,6 +83,7 @@ impl System for RenderDataSystem {
                 // Find the previous transform for this entity. Default to the current one if it's a new entity.
                 let previous_transform = prev_state.objects.get(&entity).map_or(current_transform, |(prev_trans, _, _, _)| *prev_trans);
                 RenderObject {
+                    id: entity,
                     mesh_id,
                     material_id,
                     current_transform,

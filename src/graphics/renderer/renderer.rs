@@ -159,6 +159,7 @@ impl Material {
 
 #[derive(Debug, Clone)]
 pub struct RenderObject {
+    pub id: usize,
     pub previous_transform: Transform, // last logic tick
     pub current_transform: Transform,  // current logic tick
     pub mesh_id: usize,
@@ -2126,7 +2127,12 @@ impl Renderer {
         render_data: &RenderData,
         static_camera_view: &Mat4,
     ) {
-        const MAX_REASONABLE_DISTANCE: f32 = 5000.0;
+        // This should be greater than the farthest shadow cascade to allow objects
+        // just outside the view to cast shadows into it.
+        const FAR_CASCADE_DISTANCE: f32 = 500.0; // The distance of the farthest shadow cascade.
+        const MAX_SHADOW_CASTING_DISTANCE: f32 = FAR_CASCADE_DISTANCE * 1.5;
+        const MAX_SHADOW_CASTING_DISTANCE_SQ: f32 =
+            MAX_SHADOW_CASTING_DISTANCE * MAX_SHADOW_CASTING_DISTANCE;
 
         let shadow_light = render_data
             .lights
@@ -2140,13 +2146,30 @@ impl Renderer {
                 "Directional light rotation is not normalized!"
             );
 
+            let camera_pos = render_data.current_camera_transform.position;
+
+            // --- Step 1: Pre-calculate culling status for all objects ---
+            let mut culled_objects = HashMap::new();
+            for object in &render_data.objects {
+                if object.casts_shadow {
+                    let distance_sq = object
+                        .current_transform
+                        .position
+                        .distance_squared(camera_pos);
+                    let is_culled = distance_sq > MAX_SHADOW_CASTING_DISTANCE_SQ;
+                    culled_objects.insert(object.id, is_culled);
+                }
+            }
+
+            // --- Step 2: Calculate scene bounds using the pre-culled results ---
             let mut scene_bounds_min = Vec3::splat(f32::MAX);
             let mut scene_bounds_max = Vec3::splat(f32::MIN);
             for object in &render_data.objects {
                 if object.casts_shadow {
-                    if object.current_transform.position.length() > MAX_REASONABLE_DISTANCE {
+                    if *culled_objects.get(&object.id).unwrap_or(&true) {
                         continue;
                     }
+
                     if let Some(mesh) = self.meshes.get(&object.mesh_id) {
                         let model_matrix = Mat4::from_scale_rotation_translation(
                             object.current_transform.scale,
@@ -2161,37 +2184,27 @@ impl Renderer {
                     }
                 }
             }
+
             let dynamic_scene_bounds = Aabb {
                 min: scene_bounds_min,
                 max: scene_bounds_max,
             };
 
             let camera = &render_data.camera_component;
-            let camera_view = Mat4::look_at_rh(
-                render_data.current_camera_transform.position,
-                render_data.current_camera_transform.position
-                    + render_data.current_camera_transform.forward(),
-                render_data.current_camera_transform.up(),
-            );
-            let camera_proj = Mat4::perspective_infinite_reverse_rh(
-                camera.fov_y_rad,
-                camera.aspect_ratio,
-                camera.near_plane,
-            );
-
             let shadow_uniforms = self.calculate_cascades(
                 camera,
                 static_camera_view,
                 light.current_transform.rotation,
                 &dynamic_scene_bounds,
             );
+
             self.queue.write_buffer(
                 self.shadow_uniforms_buffer.as_ref().unwrap(),
                 0,
                 bytemuck::bytes_of(&shadow_uniforms),
             );
 
-            // --- NEW: Write all matrix data to the buffer once before the loop ---
+            // Calculate alignment for dynamic uniform buffer offsets.
             let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
             let alignment =
                 self.device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
@@ -2208,11 +2221,6 @@ impl Renderer {
             for i in 0..NUM_CASCADES {
                 let offset = (i as u32) * (aligned_mat4_size as u32);
                 let cascade_view = &self.cascade_views.as_ref().unwrap()[i];
-
-                let depth_ops = wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0), // Always clear to the furthest value
-                    store: wgpu::StoreOp::Store, // Store depth for the current pass to work correctly
-                };
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(&format!("Shadow Pass {}", i)),
@@ -2231,10 +2239,14 @@ impl Renderer {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: self.shadow_depth_view.as_ref().unwrap(),
-                        depth_ops: Some(depth_ops), // Use the new, corrected operations
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0), // Clear depth to max value.
+                            store: wgpu::StoreOp::Store,
+                        }),
                         stencil_ops: None,
                     }),
-                    ..Default::default()
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
                 });
 
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
@@ -2242,7 +2254,7 @@ impl Renderer {
 
                 for object in &render_data.objects {
                     if object.casts_shadow {
-                        if object.current_transform.position.length() > MAX_REASONABLE_DISTANCE {
+                        if *culled_objects.get(&object.id).unwrap_or(&true) {
                             continue;
                         }
 

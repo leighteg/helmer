@@ -57,14 +57,6 @@ pub enum RenderMessage {
     CreateMaterial(MaterialGpuData),
 }
 
-#[derive(Clone, Default)]
-struct ExtractedState {
-    objects: HashMap<usize, Transform>,
-    lights: HashMap<usize, Transform>,
-    camera_transform: Transform,
-    camera_component: Camera,
-}
-
 pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
@@ -333,7 +325,7 @@ impl Runtime {
         let scaled_height = (svg_height * scale) as u32;
 
         // Center the SVG
-        let offset_x = (window_size.width - scaled_width) / 2;
+        let offset_x = (window_size.width - scaled_width) / 2 - (window_size.width / 55);
         let offset_y = (window_size.height - scaled_height) / 2;
 
         // Create pixmap for rendering SVG
@@ -380,7 +372,13 @@ impl ApplicationHandler for Runtime {
                 self.shutdown_threads();
                 event_loop.exit();
             }
-            WindowEvent::RedrawRequested => {}
+            WindowEvent::RedrawRequested => {
+                if self.render_thread.is_none() {
+                    self.draw_splash();
+                    
+                    self.window.as_ref().unwrap().request_redraw();
+                }
+            }
             WindowEvent::Resized(new_size) => {
                 let _ = self
                     .render_thread_sender

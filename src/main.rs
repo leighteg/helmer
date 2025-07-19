@@ -72,14 +72,14 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        /*// Priority 25: General game logic that modifies transforms.
+        // Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
         /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
@@ -795,17 +795,17 @@ impl System for SpawnSystem {
                 },
             );
 
-            let mesh_id: usize = rng.random_range(0..2);
-            let material_id: usize = rng.random_range(0..3);
+            let mesh_id: usize = rng.random_range(0..1);
+            let material_id: usize = rng.random_range(3..6);
 
             match material_id {
-                1 => {
+                4 => {
                     ecs.add_component(
                         new_entity,
                         Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0 * scale),
                     );
                 }
-                2 => {
+                5 => {
                     ecs.add_component(
                         new_entity,
                         Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0 * scale),

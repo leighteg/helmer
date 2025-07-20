@@ -1,0 +1,7 @@
+[package]
+name = "helmer-editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helmer-engine = { path = "../helmer-engine" }

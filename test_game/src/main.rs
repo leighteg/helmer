@@ -1,7 +1,7 @@
-use std::{any::TypeId, collections::HashSet, f32::consts::FRAC_PI_2};
+use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
-use helmer_rs::{
+use helmer_engine::{
     ecs::{
         ecs_core::{ECSCore, Entity},
         system::System,
@@ -33,21 +33,14 @@ use rapier3d::{
     parry::query::ShapeCastOptions,
     prelude::{QueryFilter, RigidBodyType},
 };
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 fn main() {
-    #[cfg(windows)]
-    colored::control::set_virtual_terminal(true).ok();
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::new("helmer_rs"))
-        .try_init()
-        .unwrap();
-
-    tracing::info!("2025 leighton");
-
+    let current_path = env::current_dir().expect("Failed to find executable path");
+    if current_path.ends_with("helmer-rs") {
+        env::set_current_dir(current_path.join("test_game")).expect("Failed to change working directory");
+    }
+    
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
 
@@ -72,14 +65,14 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        /*// Priority 25: General game logic that modifies transforms.
+        // Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
         /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
@@ -139,21 +132,20 @@ fn main() {
         let asset_server = app.asset_server.lock();
 
         // Load meshes from .glb files
-        let box_handle = asset_server.load_mesh("src/assets/models/box.glb");
+        let box_handle = asset_server.load_mesh("assets/models/box.glb");
 
-        let sponza_handle = asset_server.load_mesh("src/assets/models/sponza.glb");
+        let sponza_handle = asset_server.load_mesh("assets/models/sponza.glb");
 
-        //let duck_handle = asset_server.load_mesh("src/assets/models/duck.glb");
+        //let duck_handle = asset_server.load_mesh("assets/models/duck.glb");
 
         // Load materials from .ron files
-        let basic_material_handle = asset_server.load_material("src/assets/materials/basic.ron");
-        let metal_material_handle =
-            asset_server.load_material("src/assets/materials/shiny_metal.ron");
+        let basic_material_handle = asset_server.load_material("assets/materials/basic.ron");
+        let metal_material_handle = asset_server.load_material("assets/materials/shiny_metal.ron");
         let red_light_material_handle =
-            asset_server.load_material("src/assets/materials/red_light.ron");
+            asset_server.load_material("assets/materials/red_light.ron");
         let blue_light_material_handle =
-            asset_server.load_material("src/assets/materials/blue_light.ron");
-        //let duck_material_handle = asset_server.load_material("src/assets/materials/duck.ron");
+            asset_server.load_material("assets/materials/blue_light.ron");
+        //let duck_material_handle = asset_server.load_material("assets/materials/duck.ron");
 
         // Note: You don't need to explicitly load "assets/pattern.ktx2".
         // The AssetServer will automatically find that path inside `blue_light_material.ron`
@@ -267,7 +259,10 @@ fn main() {
                 scale: glam::Vec3::from_array([0.5; 3]),
             },
         );
-        ecs_guard.add_component(sphere_entity, MeshRenderer::new(11, metal_material_handle.id, true, true));
+        ecs_guard.add_component(
+            sphere_entity,
+            MeshRenderer::new(11, metal_material_handle.id, true, true),
+        );
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
@@ -341,10 +336,10 @@ impl System for SpinnerSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        let rotation_speed = 0.50 * dt;
+        let rotation_speed = 0.30 * dt;
         let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
         let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);
@@ -404,7 +399,7 @@ impl System for FreecamSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
         if input_manager.is_mouse_button_active(&MouseButton::Right) {
@@ -727,7 +722,7 @@ impl System for SpawnSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_rs::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
         // CLEANUP

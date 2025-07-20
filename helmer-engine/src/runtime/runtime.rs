@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::{info, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -27,11 +28,16 @@ use winit::{
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::{
-        renderer::renderer::{Aabb, Material, RenderData, RenderLight, RenderObject, Renderer, Vertex},
+        renderer::renderer::{
+            Aabb, Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
+        },
         renderer_system::RenderPacket,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
-    runtime::{asset_server::{AssetKind, AssetServer, MaterialGpuData}, input_manager::{InputEvent, InputManager}},
+    runtime::{
+        asset_server::{AssetKind, AssetServer, MaterialGpuData},
+        input_manager::{InputEvent, InputManager},
+    },
 };
 
 pub enum RenderMessage {
@@ -40,7 +46,6 @@ pub enum RenderMessage {
     Shutdown,
 
     // --- Asset Pipeline Messages ---
-    
     CreateMesh {
         id: usize,
         vertices: Vec<Vertex>,
@@ -84,6 +89,21 @@ impl Runtime {
     pub fn new(init_callback: fn(&mut Runtime)) -> Self {
         let (render_sender, render_receiver) = mpsc::channel();
 
+        // -- TRACING SETUP
+
+        #[cfg(windows)]
+        colored::control::set_virtual_terminal(true).ok();
+
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::EnvFilter::new("helmer_engine"))
+            .try_init()
+            .unwrap();
+
+        tracing::info!("2025 leighton");
+
+        // -- END TRACING SETUP
+
         Self {
             ecs: Arc::new(RwLock::new(ECSCore::new())),
 
@@ -126,7 +146,7 @@ impl Runtime {
             while state.load(Ordering::Relaxed) {
                 let frame_start = Instant::now();
                 let dt = (frame_start - last_time).as_secs_f32();
-                
+
                 const MAX_DELTA_TIME: f32 = 1.0 / 30.0;
                 let dt = dt.min(MAX_DELTA_TIME);
 
@@ -214,11 +234,11 @@ impl Runtime {
             let mut last_render = Instant::now();
 
             while state.load(Ordering::Relaxed) {
-                let frame_start = Instant::now();                
+                let frame_start = Instant::now();
                 let mut should_render = false;
 
                 renderer.resolve_pending_materials();
-                
+
                 while let Ok(message) = render_receiver.try_recv() {
                     match message {
                         RenderMessage::RenderData(_) => {
@@ -297,7 +317,7 @@ impl Runtime {
             .unwrap();
 
         // Load and parse SVG
-        const BRAND_SVG_DATA: &[u8] = include_bytes!("../../brand/helmer.svg");
+        const BRAND_SVG_DATA: &[u8] = include_bytes!("../../../brand/helmer.svg");
         let svg_str = std::str::from_utf8(BRAND_SVG_DATA)
             .map_err(|_| "Failed to convert SVG bytes to string")
             .unwrap();
@@ -375,7 +395,7 @@ impl ApplicationHandler for Runtime {
             WindowEvent::RedrawRequested => {
                 if self.render_thread.is_none() {
                     self.draw_splash();
-                    
+
                     self.window.as_ref().unwrap().request_redraw();
                 }
             }
@@ -495,7 +515,9 @@ impl ApplicationHandler for Runtime {
             let (sender, receiver) = mpsc::channel();
             self.render_thread_sender = sender;
 
-            self.asset_server = Arc::new(Mutex::new(AssetServer::new(self.render_thread_sender.clone())));
+            self.asset_server = Arc::new(Mutex::new(AssetServer::new(
+                self.render_thread_sender.clone(),
+            )));
 
             self.start_render_thread(receiver);
             self.start_logic_thread();

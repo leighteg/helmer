@@ -58,6 +58,8 @@ pub enum RenderMessage {
         kind: AssetKind,
         data: Vec<u8>,
         format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
     },
     CreateMaterial(MaterialGpuData),
 }

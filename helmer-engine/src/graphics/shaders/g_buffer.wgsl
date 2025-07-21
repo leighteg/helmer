@@ -1,4 +1,5 @@
 //=============== CONSTANTS ===============//
+
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -33,18 +34,7 @@ struct CameraUniforms {
     inverse_projection_matrix: mat4x4<f32>,
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
-    // In WGSL uniform buffers, a vec3 is padded to 16 bytes.
-    // The following u32 will be correctly aligned.
     light_count: u32,
-};
-
-struct LightData {
-    position: vec3<f32>,
-    light_type: u32,
-    color: vec3<f32>,
-    intensity: f32,
-    direction: vec3<f32>,
-    _padding: f32,
 }
 
 struct MaterialData {
@@ -53,10 +43,10 @@ struct MaterialData {
     roughness: f32,
     ao: f32,
     emission_strength: f32,
-    albedo_texture_index: i32,
-    normal_texture_index: i32,
-    metallic_roughness_texture_index: i32,
-    emission_texture_index: i32,
+    albedo_idx: i32,
+    normal_idx: i32,
+    metallic_roughness_idx: i32,
+    emission_idx: i32,
     emission_color: vec3<f32>,
     _padding: f32,
 }
@@ -66,30 +56,23 @@ struct PbrConstants {
     material_id: u32,
 }
 
-//=============== BINDINGS ===============//
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-@group(0) @binding(1) var<storage, read> lights_buffer: array<LightData>;
 
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
-@group(1) @binding(1) var albedo_texture_array: texture_2d_array<f32>;
-@group(1) @binding(2) var normal_texture_array: texture_2d_array<f32>;
-@group(1) @binding(3) var metallic_roughness_texture_array: texture_2d_array<f32>;
-@group(1) @binding(4) var emission_texture_array: texture_2d_array<f32>;
-@group(1) @binding(5) var pbr_sampler: sampler;
+@group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
+@group(1) @binding(2) var pbr_sampler: sampler;
 
 @vertex
 var<push_constant> constants: PbrConstants;
 
-// --- STABILITY FIX: Added safe_normalize ---
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
     if (len < EPSILON) {
-        return vec3<f32>(0.0, 0.0, 1.0); // Return a default normal
+        return vec3<f32>(0.0, 0.0, 1.0);
     }
     return v / len;
 }
 
-// --- STABILITY FIX: Made matrix inversion safe by restoring manual implementation ---
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
               m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
@@ -149,23 +132,23 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var out: GBufferOutput;
     let material = materials_buffer[in.material_id];
 
-    let albedo_sample = textureSample(albedo_texture_array, pbr_sampler, in.tex_coord, material.albedo_texture_index);
+    let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
     let albedo_color = albedo_sample.rgb * material.albedo.rgb;
     let alpha = albedo_sample.a * material.albedo.a;
 
-    let mr_sample = textureSample(metallic_roughness_texture_array, pbr_sampler, in.tex_coord, material.metallic_roughness_texture_index);
+    let mr_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
     let ao = mr_sample.r * material.ao;
     let metallic = mr_sample.b * material.metallic;
     let roughness = mr_sample.g * material.roughness;
 
     var emission_color = material.emission_color * material.emission_strength;
-    if (material.emission_texture_index >= 0i) {
-        emission_color *= textureSample(emission_texture_array, pbr_sampler, in.tex_coord, material.emission_texture_index).rgb;
+    if (material.emission_idx >= 0i) {
+        emission_color *= textureSample(textures[material.emission_idx], pbr_sampler, in.tex_coord).rgb;
     }
 
     var N: vec3<f32>;
-    if (material.normal_texture_index >= 0i) {
-        let tangent_space_normal = textureSample(normal_texture_array, pbr_sampler, in.tex_coord, material.normal_texture_index).xyz * 2.0 - 1.0;
+    if (material.normal_idx >= 0i) {
+        let tangent_space_normal = textureSample(textures[material.normal_idx], pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
         let T = safe_normalize(in.world_tangent);
         let B = safe_normalize(in.world_bitangent);
         let N_geom = safe_normalize(in.world_normal);

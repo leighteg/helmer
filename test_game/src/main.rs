@@ -65,14 +65,14 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        // Priority 25: General game logic that modifies transforms.
+        /*// Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );
+        );*/
 
         /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),
@@ -339,7 +339,7 @@ impl System for SpinnerSystem {
         ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        let rotation_speed = 0.30 * dt;
+        let rotation_speed = 0.10 * dt;
         let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
         let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);
@@ -353,8 +353,8 @@ impl System for SpinnerSystem {
                 let (y, x, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
 
                 // Clamp X rotation to stay around 90 degrees (with some wiggle room)
-                let target_x = -90.0f32.to_radians(); // 90 degrees down
-                let max_deviation = 20.0f32.to_radians(); // Allow ±15 degrees variation
+                let target_x = -90.0f32.to_radians();
+                let max_deviation = 28.0f32.to_radians();
                 let clamped_x = (x).clamp(target_x - max_deviation, target_x + max_deviation);
 
                 // Reconstruct quaternion with clamped X rotation

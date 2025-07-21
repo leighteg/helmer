@@ -8,11 +8,11 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles, vec4};
-use std::sync::Arc;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
+use std::{num::NonZeroU32, sync::Arc};
 use tracing::{info, warn};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -63,8 +63,8 @@ impl Aabb {
 // --- CONSTANTS ---
 const FRAMES_IN_FLIGHT: usize = 3;
 const MAX_LIGHTS: usize = 2048;
-const MAX_TEXTURE_COUNT: u32 = 256;
-const TEXTURE_RESOLUTION: u32 = 1024;
+const MAX_TOTAL_TEXTURES: u32 = 4096;
+const DEFAULT_TEXTURE_RESOLUTION: u32 = 1024;
 const SHADOW_MAP_RESOLUTION: u32 = 2048;
 const NUM_CASCADES: usize = 4;
 const CASCADE_SPLITS: [f32; 5] = [0.1, 15.0, 40.0, 100.0, 300.0];
@@ -227,10 +227,10 @@ struct MaterialShaderData {
     roughness: f32,
     ao: f32,
     emission_strength: f32,
-    albedo_texture_index: i32,
-    normal_texture_index: i32,
-    metallic_roughness_texture_index: i32,
-    emission_texture_index: i32,
+    albedo_idx: i32,
+    normal_idx: i32,
+    metallic_roughness_idx: i32,
+    emission_idx: i32,
     emission_color: [f32; 3],
     _padding: f32,
 }
@@ -243,10 +243,10 @@ impl From<&Material> for MaterialShaderData {
             roughness: material.roughness,
             ao: material.ao,
             emission_strength: material.emission_strength,
-            albedo_texture_index: material.albedo_texture_index,
-            normal_texture_index: material.normal_texture_index,
-            metallic_roughness_texture_index: material.metallic_roughness_texture_index,
-            emission_texture_index: material.emission_texture_index,
+            albedo_idx: material.albedo_texture_index,
+            normal_idx: material.normal_texture_index,
+            metallic_roughness_idx: material.metallic_roughness_texture_index,
+            emission_idx: material.emission_texture_index,
             emission_color: material.emission_color,
             _padding: 0.0,
         }
@@ -407,11 +407,11 @@ pub struct Renderer {
     materials: HashMap<usize, Material>,
     texture_manager: TextureManager,
 
-    // Texture Arrays
-    albedo_texture_array: Option<wgpu::Texture>,
-    normal_texture_array: Option<wgpu::Texture>,
-    metallic_roughness_texture_array: Option<wgpu::Texture>,
-    emission_texture_array: Option<wgpu::Texture>,
+    // Texture Collections
+    albedo_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    normal_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    mr_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    emission_textures: Vec<(wgpu::Texture, wgpu::TextureView)>,
 
     // Samplers
     pbr_sampler: Option<wgpu::Sampler>,
@@ -467,10 +467,13 @@ impl Renderer {
                 label: Some("Primary Device"),
                 required_features: wgpu::Features::PUSH_CONSTANTS
                     | wgpu::Features::FLOAT32_FILTERABLE
-                    | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
+                    | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
+                    | wgpu::Features::TEXTURE_BINDING_ARRAY
+                    | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
                 required_limits: wgpu::Limits {
                     // Add push constant limit
                     max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
+                    max_binding_array_elements_per_shader_stage: MAX_TOTAL_TEXTURES,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -553,10 +556,10 @@ impl Renderer {
             meshes: HashMap::new(),
             materials: HashMap::new(),
             texture_manager: TextureManager::default(),
-            albedo_texture_array: None,
-            normal_texture_array: None,
-            metallic_roughness_texture_array: None,
-            emission_texture_array: None,
+            albedo_textures: Vec::new(),
+            normal_textures: Vec::new(),
+            mr_textures: Vec::new(),
+            emission_textures: Vec::new(),
             pbr_sampler: None,
             gbuffer_sampler: None,
             scene_sampler: None,
@@ -612,47 +615,7 @@ impl Renderer {
             mapped_at_creation: false,
         }));
 
-        // --- Create Textures and Sampler ---
-        let texture_desc = wgpu::TextureDescriptor {
-            label: Some("Texture Array"),
-            size: wgpu::Extent3d {
-                width: TEXTURE_RESOLUTION,
-                height: TEXTURE_RESOLUTION,
-                depth_or_array_layers: MAX_TEXTURE_COUNT,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        };
-
-        self.albedo_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("albedo-texture-array"),
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            ..texture_desc
-        }));
-
-        self.normal_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("normal-texture-array"),
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            ..texture_desc
-        }));
-
-        self.metallic_roughness_texture_array =
-            Some(device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("metallic-roughness-texture-array"),
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                ..texture_desc
-            }));
-
-        self.emission_texture_array = Some(device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("emission-texture-array"),
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            ..texture_desc
-        }));
-
+        // --- Create Samplers ---
         self.pbr_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PBR Filtering Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -699,6 +662,7 @@ impl Renderer {
         self.create_render_target_textures();
         self.create_shadow_resources();
         self.create_pipelines_and_bind_groups();
+        self.create_object_data_bind_group();
 
         self.resize(self.window_size);
 
@@ -706,62 +670,91 @@ impl Renderer {
         Ok(())
     }
 
-    fn upload_default_textures(&self) {
-        let resolution_area = (TEXTURE_RESOLUTION * TEXTURE_RESOLUTION) as usize;
-
-        // Albedo (White)
+    fn upload_default_textures(&mut self) {
+        // --- Albedo (White) ---
         let white_pixel = [255u8, 255, 255, 255];
-        let default_albedo_data: Vec<u8> = white_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        self.upload_texture_slice(
-            &default_albedo_data,
-            self.albedo_texture_array.as_ref().unwrap(),
-            0,
+        let (tex, view) = self.create_and_upload_texture(
+            "Default Albedo",
+            &white_pixel,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            1, // 1x1 dimension
+        );
+        self.albedo_textures.push((tex, view));
+
+        // --- Normal (Flat) ---
+        // Represents a normal of (0, 0, 1). Packed as (0.5, 0.5, 1.0) -> [128, 128, 255]
+        let flat_normal_pixel = [128u8, 128, 255, 255];
+        let (tex, view) = self.create_and_upload_texture(
+            "Default Normal",
+            &flat_normal_pixel,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            1,
+        );
+        self.normal_textures.push((tex, view));
+
+        // --- Metallic/Roughness/AO (Default PBR values) ---
+        // AO=1.0 (red=255), Roughness=0.8 (green=204), Metallic=0.0 (blue=0)
+        let default_mr_pixel = [255u8, 204, 0, 255];
+        let (tex, view) = self.create_and_upload_texture(
+            "Default MR",
+            &default_mr_pixel,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            1,
+        );
+        self.mr_textures.push((tex, view));
+
+        let (tex, view) = self.create_and_upload_texture(
+            "Default Emission",
+            &white_pixel,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            1,
+            1,
+        );
+        self.emission_textures.push((tex, view));
+    }
+
+    fn create_and_upload_texture(
+        &self,
+        label: &str,
+        data: &[u8],
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // For a 1x1 texture, bytes_per_row is just the size of the pixel data (4 bytes for RGBA8)
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            texture_size,
         );
 
-        // Normal (Flat)
-        let flat_normal_pixel = [128u8, 128, 255, 255]; // Represents (0, 0, 1)
-        let default_normal_data: Vec<u8> = flat_normal_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        self.upload_texture_slice(
-            &default_normal_data,
-            self.normal_texture_array.as_ref().unwrap(),
-            0,
-        );
-
-        // Metallic/Roughness (Black/Grey)
-        let default_mr_pixel = [255u8, 204, 0, 255]; // R=AO, G=Roughness, B=Metallic
-        let default_mr_data: Vec<u8> = default_mr_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        self.upload_texture_slice(
-            &default_mr_data,
-            self.metallic_roughness_texture_array.as_ref().unwrap(),
-            0,
-        );
-
-        let default_emission_data: Vec<u8> = white_pixel
-            .iter()
-            .cycle()
-            .take(resolution_area * 4)
-            .copied()
-            .collect();
-        self.upload_texture_slice(
-            &default_emission_data,
-            self.emission_texture_array.as_ref().unwrap(),
-            0,
-        );
+        let view = texture.create_view(&Default::default());
+        (texture, view)
     }
 
     fn create_shadow_resources(&mut self) {
@@ -951,7 +944,7 @@ impl Renderer {
 
     fn upload_texture_slice(&self, data: &[u8], target_array: &wgpu::Texture, layer_index: u32) {
         let bytes_per_pixel = 4u32;
-        let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
+        let bytes_per_row = bytes_per_pixel * DEFAULT_TEXTURE_RESOLUTION;
 
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -968,11 +961,11 @@ impl Renderer {
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(TEXTURE_RESOLUTION),
+                rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION),
             },
             wgpu::Extent3d {
-                width: TEXTURE_RESOLUTION,
-                height: TEXTURE_RESOLUTION,
+                width: DEFAULT_TEXTURE_RESOLUTION,
+                height: DEFAULT_TEXTURE_RESOLUTION,
                 depth_or_array_layers: 1,
             },
         );
@@ -986,7 +979,7 @@ impl Renderer {
         bytes_per_pixel: u32,
     ) {
         // This helper now takes bytes_per_pixel to be more generic.
-        let bytes_per_row = bytes_per_pixel * TEXTURE_RESOLUTION;
+        let bytes_per_row = bytes_per_pixel * DEFAULT_TEXTURE_RESOLUTION;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: target_array,
@@ -1002,11 +995,11 @@ impl Renderer {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(TEXTURE_RESOLUTION),
+                rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION),
             },
             wgpu::Extent3d {
-                width: TEXTURE_RESOLUTION,
-                height: TEXTURE_RESOLUTION,
+                width: DEFAULT_TEXTURE_RESOLUTION,
+                height: DEFAULT_TEXTURE_RESOLUTION,
                 depth_or_array_layers: 1,
             },
         );
@@ -1021,7 +1014,7 @@ impl Renderer {
     ) {
         let block_dimensions = format.block_dimensions();
         let block_size_bytes = format.block_size(None).unwrap();
-        let width_in_blocks = TEXTURE_RESOLUTION / block_dimensions.0;
+        let width_in_blocks = DEFAULT_TEXTURE_RESOLUTION / block_dimensions.0;
         let bytes_per_row = width_in_blocks * block_size_bytes as u32;
 
         self.queue.write_texture(
@@ -1039,11 +1032,11 @@ impl Renderer {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(TEXTURE_RESOLUTION / block_dimensions.1),
+                rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION / block_dimensions.1),
             },
             wgpu::Extent3d {
-                width: TEXTURE_RESOLUTION,
-                height: TEXTURE_RESOLUTION,
+                width: DEFAULT_TEXTURE_RESOLUTION,
+                height: DEFAULT_TEXTURE_RESOLUTION,
                 depth_or_array_layers: 1,
             },
         );
@@ -1051,54 +1044,65 @@ impl Renderer {
 
     pub fn add_texture(
         &mut self,
-        name: &str,
         data: &[u8],
         kind: AssetKind,
         format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
     ) -> Result<usize, RendererError> {
-        // 1. Check for duplicates first.
-        if let Some(index) = self.texture_manager.textures.get(name) {
-            return Ok(*index);
-        }
-
-        // 2. Check if we have space for a new texture.
-        if self.texture_manager.next_texture_index >= MAX_TEXTURE_COUNT as usize {
-            return Err(RendererError::ResourceCreation(
-                "Texture array is full".to_string(),
-            ));
-        }
-
-        // 4. Get the target array, which is now guaranteed to exist.
-        let target_array = match kind {
-            AssetKind::Albedo => self.albedo_texture_array.as_ref().unwrap(),
-            AssetKind::Normal => self.normal_texture_array.as_ref().unwrap(),
-            AssetKind::MetallicRoughness => self.metallic_roughness_texture_array.as_ref().unwrap(),
-            AssetKind::Emission => self.emission_texture_array.as_ref().unwrap(),
+        // Determine which texture list to add to
+        let target_list = match kind {
+            AssetKind::Albedo => &mut self.albedo_textures,
+            AssetKind::Normal => &mut self.normal_textures,
+            AssetKind::MetallicRoughness => &mut self.mr_textures,
+            AssetKind::Emission => &mut self.emission_textures,
         };
 
-        // 5. Get the next available index and increment the manager.
-        let index = self.texture_manager.next_texture_index;
-        self.texture_manager.next_texture_index += 1;
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
 
-        // 6. Upload the new texture data to its assigned slice in the array.
-        let block_size = format.block_size(None).unwrap_or(1);
-        if block_size > 1 {
-            self.upload_compressed_texture_slice(data, target_array, index as u32, format);
-        } else {
-            let bytes_per_pixel = format.block_size(None).unwrap_or(4);
-            self.upload_uncompressed_texture_slice(
-                data,
-                target_array,
-                index as u32,
-                bytes_per_pixel,
-            );
-        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: Some("Bindless Texture"),
+            view_formats: &[],
+        });
 
-        // 7. Store the name-to-index mapping for future deduplication.
-        self.texture_manager
-            .textures
-            .insert(name.to_string(), index);
-        Ok(index)
+        let block_dimensions = format.block_dimensions();
+        let block_size_bytes = format.block_size(None).unwrap_or(4); // Default to 4 for uncompressed
+        let width_in_blocks = width / block_dimensions.0;
+        let height_in_blocks = height / block_dimensions.1;
+        let bytes_per_row = width_in_blocks * block_size_bytes;
+
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height_in_blocks),
+            },
+            texture_size,
+        );
+
+        let view = texture.create_view(&Default::default());
+        target_list.push((texture, view));
+
+        // The new index is simply the last position in the list.
+        let new_index = target_list.len() - 1;
+
+        // CRITICAL: We need to rebuild the object data bind group now that
+        // a new texture has been added to the list.
+        self.create_object_data_bind_group();
+
+        Ok(new_index)
     }
 
     pub fn add_mesh(
@@ -1531,16 +1535,25 @@ impl Renderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Object Data Bind Group Layout"),
                 entries: &[
+                    // Material buffer
                     buffer_binding(
                         0,
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BufferBindingType::Storage { read_only: true },
                     ),
-                    texture_binding(1, true, wgpu::TextureViewDimension::D2Array, false),
-                    texture_binding(2, true, wgpu::TextureViewDimension::D2Array, false),
-                    texture_binding(3, true, wgpu::TextureViewDimension::D2Array, false),
-                    texture_binding(4, true, wgpu::TextureViewDimension::D2Array, false),
-                    sampler_binding(5, true, wgpu::SamplerBindingType::Filtering),
+                    // Sampler
+                    sampler_binding(2, true, wgpu::SamplerBindingType::Filtering),
+                    // A SINGLE entry for ALL textures
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, // The master texture array
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: Some(std::num::NonZeroU32::new(MAX_TOTAL_TEXTURES).unwrap()),
+                    },
                 ],
             });
 
@@ -1604,6 +1617,55 @@ impl Renderer {
         )
     }
 
+    fn create_object_data_bind_group(&mut self) {
+        // 1. Get a reference to a default texture view to use for padding.
+        //    The default albedo (a 1x1 white pixel) at index 0 is perfect for this.
+        let default_view = &self.albedo_textures[0].1;
+
+        // 2. Flatten all the *currently loaded* texture views into one list, just like before.
+        let mut all_views: Vec<&wgpu::TextureView> = Vec::new();
+        all_views.extend(self.albedo_textures.iter().map(|(_, view)| view));
+        all_views.extend(self.normal_textures.iter().map(|(_, view)| view));
+        all_views.extend(self.mr_textures.iter().map(|(_, view)| view));
+        all_views.extend(self.emission_textures.iter().map(|(_, view)| view));
+
+        // 3. Pad the list to the required size.
+        //    `MAX_TOTAL_TEXTURES` should be the same constant used in your layout (e.g., 4096).
+        let current_len = all_views.len();
+        if current_len < MAX_TOTAL_TEXTURES as usize {
+            // Add the default view to the list until it reaches the required length.
+            all_views.resize(MAX_TOTAL_TEXTURES as usize, default_view);
+        }
+
+        // 4. Create the bind group. `all_views` now has the exact length required by the layout.
+        self.object_data_bind_group = Some(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: self.object_data_bind_group_layout.as_ref().unwrap(),
+                label: Some("Object Data Bind Group (Bindless)"),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self
+                            .material_uniform_buffer
+                            .as_ref()
+                            .unwrap()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1, // The single texture array binding
+                        resource: wgpu::BindingResource::TextureViewArray(&all_views),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.pbr_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            }),
+        );
+    }
+
     fn create_bind_groups(&mut self) {
         let device = &self.device;
 
@@ -1660,70 +1722,6 @@ impl Renderer {
                 })
             })
             .collect();
-
-        // Bind group for object data
-        self.object_data_bind_group = Some(
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: self.object_data_bind_group_layout.as_ref().unwrap(),
-                label: Some("Object Data Bind Group"),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self
-                            .material_uniform_buffer
-                            .as_ref()
-                            .unwrap()
-                            .as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self
-                                .albedo_texture_array
-                                .as_ref()
-                                .unwrap()
-                                .create_view(&Default::default()),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self
-                                .normal_texture_array
-                                .as_ref()
-                                .unwrap()
-                                .create_view(&Default::default()),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self
-                                .metallic_roughness_texture_array
-                                .as_ref()
-                                .unwrap()
-                                .create_view(&Default::default()),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(
-                            &self
-                                .emission_texture_array
-                                .as_ref()
-                                .unwrap()
-                                .create_view(&Default::default()),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(
-                            self.pbr_sampler.as_ref().unwrap(),
-                        ),
-                    },
-                ],
-            }),
-        );
 
         // Bind group for SSR inputs
         self.ssr_inputs_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1888,8 +1886,10 @@ impl Renderer {
                 kind,
                 data,
                 format,
+                width,
+                height,
             } => {
-                if let Ok(gpu_index) = self.add_texture(&name, &data, kind, format) {
+                if let Ok(gpu_index) = self.add_texture(&data, kind, format, width, height) {
                     self.handle_id_to_texture_index.insert(id, gpu_index);
                 }
             }
@@ -1902,7 +1902,6 @@ impl Renderer {
         }
     }
 
-    /// Call this every frame before your `render()` call.
     pub fn resolve_pending_materials(&mut self) {
         if self.pending_materials.is_empty() {
             return;
@@ -1932,7 +1931,30 @@ impl Renderer {
 
             // If all textures this material needs are ready...
             if albedo_ready && normal_ready && mr_ready && emission_ready {
-                // ...build the final material struct for the renderer...
+                // Get the local indices first (e.g., albedo_idx might be 5, meaning the 5th albedo texture)
+                let albedo_local_idx = albedo_idx.unwrap();
+                let normal_local_idx = normal_idx.unwrap();
+                let mr_local_idx = mr_idx.unwrap();
+                let emission_local_idx = emission_idx.unwrap();
+
+                // --- Calculate Final, Global Indices ---
+                // The albedo textures are first, so their offset is 0.
+                let albedo_final_idx = albedo_local_idx;
+
+                // The normal textures come after all albedo textures.
+                let normal_final_idx = self.albedo_textures.len() as i32 + normal_local_idx;
+
+                // The MR textures come after all albedo and normal textures.
+                let mr_final_idx =
+                    (self.albedo_textures.len() + self.normal_textures.len()) as i32 + mr_local_idx;
+
+                // The emission textures are last.
+                let emission_final_idx = (self.albedo_textures.len()
+                    + self.normal_textures.len()
+                    + self.mr_textures.len()) as i32
+                    + emission_local_idx;
+
+                // Create the final material struct using these new indices
                 let final_material = crate::graphics::renderer::renderer::Material {
                     // Use the full path
                     albedo: mat_data.albedo,
@@ -1941,10 +1963,10 @@ impl Renderer {
                     ao: mat_data.ao,
                     emission_strength: mat_data.emission_strength,
                     emission_color: mat_data.emission_color,
-                    albedo_texture_index: albedo_idx.unwrap(),
-                    normal_texture_index: normal_idx.unwrap(),
-                    metallic_roughness_texture_index: mr_idx.unwrap(),
-                    emission_texture_index: emission_idx.unwrap(),
+                    albedo_texture_index: albedo_final_idx,
+                    normal_texture_index: normal_final_idx,
+                    metallic_roughness_texture_index: mr_final_idx,
+                    emission_texture_index: emission_final_idx,
                 };
 
                 newly_completed.push((mat_data.id, final_material));

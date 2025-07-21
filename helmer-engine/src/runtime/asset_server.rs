@@ -120,7 +120,7 @@ enum AssetLoadResult {
         id: usize,
         name: String,
         kind: AssetKind,
-        data: (Vec<u8>, wgpu::TextureFormat),
+        data: (Vec<u8>, wgpu::TextureFormat, (u32, u32)),
     },
     Material {
         id: usize,
@@ -258,7 +258,7 @@ impl AssetServer {
                     kind,
                     data,
                 } => {
-                    let (texture_data, format) = data;
+                    let (texture_data, format, (width, height)) = data;
                     self.render_sender
                         .send(RenderMessage::CreateTexture {
                             id,
@@ -266,6 +266,8 @@ impl AssetServer {
                             kind,
                             data: texture_data,
                             format,
+                            width,
+                            height
                         })
                         .unwrap();
                 }
@@ -340,9 +342,11 @@ where
 }
 
 /// A robust KTX2 decoder that handles both uncompressed and supercompressed (Basis) files.
-fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat), String> {
+fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
     let reader = Reader::new(bytes).map_err(|e| e.to_string())?;
     let header = reader.header();
+
+    let dimensions = (header.pixel_width, header.pixel_height);
 
     // Case 1: The KTX2 file contains uncompressed data in a known format.
     if let Some(format) = header.format {
@@ -357,7 +361,7 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat), String> {
             .levels()
             .next()
             .ok_or("No image levels found in uncompressed KTX2 file.")?;
-        return Ok((level_data.data.to_vec(), wgpu_format));
+        return Ok((level_data.data.to_vec(), wgpu_format, dimensions));
     }
 
     // Case 2: The KTX2 file is supercompressed with Basis Universal.
@@ -380,7 +384,7 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat), String> {
     match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
         Ok(transcoded_data) => {
             info!("Successfully transcoded KTX2 to {:?}.", target_wgpu_format);
-            Ok((transcoded_data, target_wgpu_format))
+            Ok((transcoded_data, target_wgpu_format, dimensions))
         }
         Err(e) => Err(format!(
             "Failed to transcode KTX2 image level: {:?}. Is it a valid Basis Universal file?",

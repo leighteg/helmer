@@ -129,7 +129,7 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        let asset_server = app.asset_server.lock();
+        let asset_server = app.asset_server.as_ref().unwrap().lock();
 
         // Load meshes from .glb files
         let box_handle = asset_server.load_mesh("assets/models/box.glb");

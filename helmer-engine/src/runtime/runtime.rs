@@ -68,7 +68,7 @@ pub struct Runtime {
     pub ecs: Arc<RwLock<ECSCore>>,
     //scene_root: Arc<RwLock<SceneNode>>,
     input_manager: Arc<RwLock<InputManager>>,
-    pub asset_server: Arc<Mutex<AssetServer>>,
+    pub asset_server: Option<Arc<Mutex<AssetServer>>>,
 
     // logic thread
     logic_thread: Option<JoinHandle<()>>,
@@ -89,8 +89,6 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(init_callback: fn(&mut Runtime)) -> Self {
-        let (render_sender, render_receiver) = mpsc::channel();
-
         // -- TRACING SETUP
 
         #[cfg(windows)]
@@ -106,11 +104,13 @@ impl Runtime {
 
         // -- END TRACING SETUP
 
+        let (render_sender, _) = mpsc::channel();
+
         Self {
             ecs: Arc::new(RwLock::new(ECSCore::new())),
 
             input_manager: Arc::new(RwLock::new(InputManager::new())),
-            asset_server: Arc::new(Mutex::new(AssetServer::new(render_sender.clone()))),
+            asset_server: None,
 
             logic_thread: None,
             logic_thread_state: Arc::new(AtomicBool::new(true)),
@@ -135,7 +135,7 @@ impl Runtime {
     fn start_logic_thread(&mut self) {
         let ecs = Arc::clone(&self.ecs);
         let input_manager = Arc::clone(&self.input_manager);
-        let asset_server = Arc::clone(&self.asset_server);
+        let asset_server = Arc::clone(&self.asset_server.as_ref().unwrap());
         let state = Arc::clone(&self.logic_thread_state);
         let target_tickrate = self.target_tickrate;
 
@@ -517,9 +517,9 @@ impl ApplicationHandler for Runtime {
             let (sender, receiver) = mpsc::channel();
             self.render_thread_sender = sender;
 
-            self.asset_server = Arc::new(Mutex::new(AssetServer::new(
+            self.asset_server = Some(Arc::new(Mutex::new(AssetServer::new(
                 self.render_thread_sender.clone(),
-            )));
+            ))));
 
             self.start_render_thread(receiver);
             self.start_logic_thread();

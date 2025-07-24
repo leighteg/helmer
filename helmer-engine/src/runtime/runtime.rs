@@ -28,8 +28,12 @@ use winit::{
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::{
-        renderer::renderer::{
-            Aabb, Material, RenderData, RenderLight, RenderObject, Renderer, Vertex,
+        renderer::{
+            deferred::DeferredRenderer,
+            forward::ForwardRenderer,
+            renderer::{
+                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
+            },
         },
         renderer_system::RenderPacket,
     },
@@ -224,13 +228,9 @@ impl Runtime {
         let surface = instance.create_surface(window).unwrap();
 
         let render_thread_handle = thread::spawn(move || {
-            let mut renderer = pollster::block_on(Renderer::new(
-                instance,
-                surface,
-                window_size,
-                target_tickrate,
-            ))
-            .unwrap();
+            let mut renderer = pollster::block_on(async {
+                initialize_renderer(instance, surface, window_size, target_tickrate).await.unwrap()
+            });
 
             let frame_duration = Duration::from_secs_f32(1.0 / target_fps.unwrap_or(60.0));
             let mut last_render = Instant::now();

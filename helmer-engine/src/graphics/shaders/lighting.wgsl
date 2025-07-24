@@ -26,7 +26,7 @@ struct LightData {
 }
 struct CascadeData {
     light_view_proj: mat4x4<f32>,
-    split_depth: f32, // Should be the view-space Z value of the cascade's far plane
+    split_depth: vec4<f32>,
 }
 
 //=============== BINDINGS (Unchanged) ===============//
@@ -80,7 +80,7 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         // Since view_z is negative, a "larger" z is closer to the camera.
-        if view_z > shadow_uniforms[i].split_depth { 
+        if view_z > shadow_uniforms[i].split_depth.x {
             cascade_index = i;
             break;
         }

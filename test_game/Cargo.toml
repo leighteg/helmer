@@ -9,4 +9,3 @@ glam = "0.30.4"
 rand = "0.9.1"
 rapier3d = "0.26.1"
 winit = "0.30.11"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

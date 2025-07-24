@@ -5,6 +5,7 @@ const NUM_CASCADES: u32 = 4u;
 const VSM_MIN_VARIANCE: f32 = 0.00002;
 const SHADOW_BLEEDING_REDUCTION: f32 = 0.4;
 const EPSILON: f32 = 0.0001;
+const MAX_REFLECTION_LOD: f32 = 4.0;
 
 //=============== STRUCTS ===============//
 
@@ -33,6 +34,16 @@ struct CameraUniforms {
     view_position: vec3<f32>,
     light_count: u32,
 }
+
+struct MaterialUniforms {
+    albedo: vec4<f32>,
+    emission_color: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    ao: f32,
+    emission_strength: f32,
+    // No padding needed here, WGSL handles it
+};
 
 struct LightData {
     position: vec3<f32>,
@@ -69,16 +80,23 @@ struct PbrConstants {
 @group(1) @binding(2) var normal_texture: texture_2d<f32>;
 @group(1) @binding(3) var mr_texture: texture_2d<f32>;
 @group(1) @binding(4) var emission_texture: texture_2d<f32>;
+@group(1) @binding(5) var<uniform> material: MaterialUniforms;
+
+// GROUP 2 for Image-Based Lighting
+@group(2) @binding(0) var brdf_lut: texture_2d<f32>;
+@group(2) @binding(1) var irradiance_map: texture_cube<f32>;
+@group(2) @binding(2) var prefiltered_env_map: texture_cube<f32>;
+@group(2) @binding(3) var env_map_sampler: sampler; 
+@group(2) @binding(4) var brdf_lut_sampler: sampler;
 
 @vertex
 var<push_constant> constants: PbrConstants;
 
 //=============== UTILITY FUNCTIONS ===============//
 
-// --- FIX: Reverted to manual matrix inversion ---
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     let det = determinant(m);
-    if (abs(det) < EPSILON) {
+    if abs(det) < EPSILON {
         return mat3x3<f32>(
             1.0, 0.0, 0.0,
             0.0, 1.0, 0.0,
@@ -124,9 +142,13 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    return F0 + (max(vec3<f32>(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
     let bias = 0.005;
-    if (depth - bias <= moments.x) { return 1.0; }
+    if depth - bias <= moments.x { return 1.0; }
     var variance = moments.y - (moments.x * moments.x);
     variance = max(variance, VSM_MIN_VARIANCE);
     let d = depth - moments.x;
@@ -144,10 +166,10 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     }
     let cascade = shadow_uniforms[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
-    if (shadow_pos_clip.w < EPSILON) { return 1.0; }
+    if shadow_pos_clip.w < EPSILON { return 1.0; }
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
-    if (any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0) {
+    if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
         return 1.0;
     }
     let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
@@ -176,18 +198,17 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 //=============== FRAGMENT SHADER ===============//
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Material properties are sampled from textures.
-    // Base factors would come from a uniform buffer in a full implementation.
     let albedo_sample = textureSample(albedo_texture, pbr_sampler, in.tex_coord);
-    let albedo = albedo_sample.rgb;
-    let alpha = albedo_sample.a;
+    let albedo = albedo_sample.rgb * material.albedo.rgb;
+    let alpha = albedo_sample.a * material.albedo.a;
 
     let mr_sample = textureSample(mr_texture, pbr_sampler, in.tex_coord);
-    let metallic = mr_sample.b; // Blue channel
-    let roughness = max(mr_sample.g, MIN_ROUGHNESS); // Green channel
-    let ao = mr_sample.r; // Red channel
-    
-    let emission = textureSample(emission_texture, pbr_sampler, in.tex_coord).rgb;
+    let metallic = mr_sample.b * material.metallic;
+    let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
+    let ao = mr_sample.r * material.ao;
+
+    var emission = material.emission_color * material.emission_strength;
+    emission *= textureSample(emission_texture, pbr_sampler, in.tex_coord).rgb;
 
     let tangent_space_normal = textureSample(normal_texture, pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
     let N_geom = normalize(in.world_normal);
@@ -197,10 +218,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let N = normalize(tbn * tangent_space_normal);
 
     let V = normalize(camera.view_position - in.world_position);
+    let R = reflect(-V, N);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
-    let shadow_factor = calculate_shadow_factor(in.world_position, in.view_space_depth);
     
+    // --- 1. DIRECT LIGHTING ---
     var Lo = vec3<f32>(0.0);
+    let shadow_factor = calculate_shadow_factor(in.world_position, in.view_space_depth);
+
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
         var L: vec3<f32>;
@@ -214,7 +238,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         } else { // Point
             let to_light = light.position - in.world_position;
             let dist_sq = dot(to_light, to_light);
-            if (dist_sq < EPSILON) { continue; }
+            if dist_sq < EPSILON { continue; }
             L = to_light / sqrt(dist_sq);
             radiance = light.color * light.intensity / (dist_sq + 1.0);
         }
@@ -235,10 +259,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     
-    let ambient = vec3<f32>(0.03) * albedo * ao;
-    var final_color = ambient + Lo + emission;
-    final_color = final_color / (final_color + vec3<f32>(1.0));
-    final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
+    // --- 2. INDIRECT (IMAGE-BASED) LIGHTING ---
+    let F_ibl = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
+    let kS_ibl = F_ibl;
+    var kD_ibl = vec3(1.0) - kS_ibl;
+    kD_ibl *= (1.0 - metallic);
 
-    return vec4<f32>(final_color, alpha);
+    let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
+    let diffuse_indirect = irradiance * albedo;
+
+    let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
+    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+    let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
+
+    let ambient = kD_ibl * diffuse_indirect * ao;
+    
+    // --- 3. FINAL COMPOSITION ---
+    var final_color = ambient + Lo + specular_indirect + emission;
+
+    // tonemapping
+    //final_color = final_color / (final_color + vec3<f32>(1.0));
+
+    // gamma correction
+    //final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
+
+    return vec4<f32>(final_color, albedo_sample.a);
 }

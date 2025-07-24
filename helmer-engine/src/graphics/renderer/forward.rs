@@ -5,9 +5,8 @@ use crate::graphics::renderer::renderer::{
     SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex,
 };
 use crate::provided::components::{Camera, LightType};
-use crate::runtime::asset_server::{AssetKind, MaterialGpuData};
+use crate::runtime::asset_server::MaterialGpuData;
 use crate::runtime::runtime::RenderMessage;
-use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use std::{
     collections::HashMap,
@@ -25,9 +24,24 @@ const WGPU_CLIP_SPACE_CORRECTION: Mat4 = Mat4::from_cols(
     Vec4::new(0.0, 0.0, 0.5, 1.0),
 );
 
+// --- Structs for Shader Data ---
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialUniforms {
+    albedo: [f32; 4],
+    emission_color: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+    ao: f32,
+    emission_strength: f32,
+    _padding: f32,
+}
+
 // --- Low-End Path Specific Structs ---
 pub struct MaterialLowEnd {
     pub bind_group: wgpu::BindGroup,
+    pub uniform_buffer: wgpu::Buffer,
 }
 
 /// The low-end renderer using a single forward pass and per-material bind groups.
@@ -58,11 +72,20 @@ pub struct ForwardRenderer {
     shadow_sampler: Option<wgpu::Sampler>,
 
     // Forward-Specific Resources
-    materials: HashMap<usize, MaterialLowEnd>,
     forward_pipeline: Option<wgpu::RenderPipeline>,
     scene_data_bind_group_layout: Option<wgpu::BindGroupLayout>,
     material_bind_group_layout: Option<wgpu::BindGroupLayout>,
     scene_data_bind_groups: Vec<wgpu::BindGroup>,
+    materials: HashMap<usize, MaterialLowEnd>,
+
+    // IBL Resources
+    ibl_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    ibl_bind_group: Option<wgpu::BindGroup>,
+    ibl_sampler: Option<wgpu::Sampler>,
+    brdf_lut_sampler: Option<wgpu::Sampler>,
+    brdf_lut_view: Option<wgpu::TextureView>,
+    irradiance_map_view: Option<wgpu::TextureView>,
+    prefiltered_env_map_view: Option<wgpu::TextureView>,
 
     // Texture Management
     loaded_texture_views: HashMap<usize, Arc<wgpu::TextureView>>,
@@ -111,7 +134,7 @@ impl ForwardRenderer {
             .formats
             .iter()
             .copied()
-            .find(|f| !f.is_srgb())
+            .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
         let surface_config = wgpu::SurfaceConfiguration {
@@ -152,6 +175,13 @@ impl ForwardRenderer {
             scene_data_bind_group_layout: None,
             material_bind_group_layout: None,
             scene_data_bind_groups: Vec::new(),
+            ibl_bind_group_layout: None,
+            ibl_bind_group: None,
+            ibl_sampler: None,
+            brdf_lut_sampler: None,
+            brdf_lut_view: None,
+            irradiance_map_view: None,
+            prefiltered_env_map_view: None,
             loaded_texture_views: HashMap::new(),
             default_albedo_view: None,
             default_normal_view: None,
@@ -171,6 +201,19 @@ impl ForwardRenderer {
     }
 
     fn initialize_resources(&mut self) -> Result<(), RendererError> {
+        self.create_samplers();
+        self.create_default_textures();
+        self.create_ibl_resources();
+        self.create_layouts();
+        self.create_pipelines();
+        self.create_shared_buffers();
+        self.create_shadow_resources();
+        self.create_bind_groups();
+        self.resize(self.window_size);
+        Ok(())
+    }
+
+    fn create_samplers(&mut self) {
         self.pbr_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PBR Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -179,15 +222,21 @@ impl ForwardRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
-
-        self.create_default_textures();
-        self.create_layouts();
-        self.create_pipelines();
-        self.create_shared_buffers();
-        self.create_shadow_resources();
-        self.create_scene_bind_groups();
-        self.resize(self.window_size);
-        Ok(())
+        self.ibl_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("IBL Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+        self.brdf_lut_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("BRDF LUT Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
     }
 
     fn create_default_textures(&mut self) {
@@ -229,10 +278,70 @@ impl ForwardRenderer {
             &[255, 204, 0, 255],
             wgpu::TextureFormat::Rgba8Unorm,
         ));
+
+        // --- FIX: Default emission texture must be WHITE, not black ---
         self.default_emission_view = Some(create_default(
             "Default Emission",
-            &[0, 0, 0, 255],
+            &[255, 255, 255, 255],
             wgpu::TextureFormat::Rgba8UnormSrgb,
+        ));
+    }
+
+    fn create_ibl_resources(&mut self) {
+        let brdf_lut = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("BRDF LUT"),
+            size: wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.brdf_lut_view = Some(brdf_lut.create_view(&Default::default()));
+
+        let irradiance_map = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Irradiance Map"),
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 32,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.irradiance_map_view = Some(irradiance_map.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        }));
+
+        let prefiltered_env_map = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Prefiltered Env Map"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 5,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.prefiltered_env_map_view = Some(prefiltered_env_map.create_view(
+            &wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            },
         ));
     }
 
@@ -340,6 +449,65 @@ impl ForwardRenderer {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        ));
+        self.ibl_bind_group_layout = Some(self.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("IBL Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             },
         ));
@@ -356,6 +524,7 @@ impl ForwardRenderer {
                 bind_group_layouts: &[
                     self.scene_data_bind_group_layout.as_ref().unwrap(),
                     self.material_bind_group_layout.as_ref().unwrap(),
+                    self.ibl_bind_group_layout.as_ref().unwrap(),
                 ],
                 push_constant_ranges: &[wgpu::PushConstantRange {
                     stages: wgpu::ShaderStages::VERTEX,
@@ -394,6 +563,45 @@ impl ForwardRenderer {
                 cache: None,
             },
         ));
+        self.create_shadow_pipeline();
+    }
+
+    fn create_bind_groups(&mut self) {
+        self.create_scene_bind_groups();
+        self.ibl_bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("IBL Bind Group"),
+            layout: self.ibl_bind_group_layout.as_ref().unwrap(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.brdf_lut_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.irradiance_map_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.prefiltered_env_map_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(self.ibl_sampler.as_ref().unwrap()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(
+                        self.brdf_lut_sampler.as_ref().unwrap(),
+                    ),
+                },
+            ],
+        }));
     }
 
     fn create_depth_texture(
@@ -560,8 +768,6 @@ impl ForwardRenderer {
                 })
                 .collect(),
         );
-
-        self.create_shadow_pipeline();
     }
 
     fn create_shadow_pipeline(&mut self) {
@@ -664,6 +870,7 @@ impl ForwardRenderer {
         encoder: &mut wgpu::CommandEncoder,
         render_data: &RenderData,
         static_camera_view: &Mat4,
+        alpha: f32,
     ) {
         const FAR_CASCADE_DISTANCE: f32 = 500.0;
         const MAX_SHADOW_CASTING_DISTANCE: f32 = FAR_CASCADE_DISTANCE * 1.5;
@@ -772,11 +979,18 @@ impl ForwardRenderer {
                 for object in &render_data.objects {
                     if object.casts_shadow && !*culled_objects.get(&object.id).unwrap_or(&true) {
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            let model_matrix = Mat4::from_scale_rotation_translation(
-                                object.current_transform.scale,
-                                object.current_transform.rotation,
-                                object.current_transform.position,
-                            );
+                            let position = object
+                                .previous_transform
+                                .position
+                                .lerp(object.current_transform.position, alpha);
+                            let rotation = Quat::from(object.previous_transform.rotation)
+                                .slerp(object.current_transform.rotation, alpha);
+                            let scale = object
+                                .previous_transform
+                                .scale
+                                .lerp(object.current_transform.scale, alpha);
+                            let model_matrix =
+                                Mat4::from_scale_rotation_translation(scale, rotation, position);
                             let push_constants = ModelPushConstant {
                                 model_matrix: model_matrix.to_cols_array_2d(),
                             };
@@ -858,7 +1072,6 @@ impl ForwardRenderer {
             let final_light_vp = light_proj * light_view;
             uniforms.cascades[i] = CascadeUniform {
                 light_view_proj: final_light_vp.to_cols_array_2d(),
-                // Store the depth value in the first component of the array.
                 split_depth: [-z_far, 0.0, 0.0, 0.0],
             };
         }
@@ -960,8 +1173,22 @@ impl RenderTrait for ForwardRenderer {
         };
         let output_view = output_frame.texture.create_view(&Default::default());
 
-        // Interpolation alpha can be calculated here if needed
-        let alpha = 0.0; // Simplified for now
+        let now = Instant::now();
+        let actual_logic_duration =
+            self.last_timestamp
+                .map_or(self.logic_frame_duration, |last_ts| {
+                    let duration = render_data.timestamp.saturating_duration_since(last_ts);
+                    if duration > Duration::from_millis(200) {
+                        self.logic_frame_duration
+                    } else {
+                        duration
+                    }
+                });
+        let time_since_current = now.saturating_duration_since(render_data.timestamp);
+        let alpha = (time_since_current.as_secs_f32() / actual_logic_duration.as_secs_f32())
+            .clamp(0.0, 1.0);
+        self.last_timestamp = Some(render_data.timestamp);
+
         self.update_uniforms(render_data, alpha);
 
         let mut encoder = self
@@ -970,15 +1197,13 @@ impl RenderTrait for ForwardRenderer {
                 label: Some("Forward Command Encoder"),
             });
 
-        // --- Shadow Pass ---
         let camera_transform = &render_data.current_camera_transform;
         let eye = camera_transform.position;
         let forward = camera_transform.forward();
         let up = camera_transform.up();
         let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
-        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view);
+        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
 
-        // --- Forward Pass ---
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Forward Pass"),
@@ -1004,6 +1229,7 @@ impl RenderTrait for ForwardRenderer {
 
             pass.set_pipeline(self.forward_pipeline.as_ref().unwrap());
             pass.set_bind_group(0, &self.scene_data_bind_groups[self.frame_index], &[]);
+            pass.set_bind_group(2, self.ibl_bind_group.as_ref().unwrap(), &[]);
 
             let mut batched_objects: HashMap<usize, Vec<&RenderObject>> = HashMap::new();
             for object in &render_data.objects {
@@ -1018,11 +1244,18 @@ impl RenderTrait for ForwardRenderer {
                     pass.set_bind_group(1, &material.bind_group, &[]);
                     for object in objects {
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            let model_matrix = Mat4::from_scale_rotation_translation(
-                                object.current_transform.scale,
-                                object.current_transform.rotation,
-                                object.current_transform.position,
-                            );
+                            let position = object
+                                .previous_transform
+                                .position
+                                .lerp(object.current_transform.position, alpha);
+                            let rotation = Quat::from(object.previous_transform.rotation)
+                                .slerp(object.current_transform.rotation, alpha);
+                            let scale = object
+                                .previous_transform
+                                .scale
+                                .lerp(object.current_transform.scale, alpha);
+                            let model_matrix =
+                                Mat4::from_scale_rotation_translation(scale, rotation, position);
                             let push_constants = PbrConstants {
                                 model_matrix: model_matrix.to_cols_array_2d(),
                                 material_id: *material_id as u32,
@@ -1178,6 +1411,24 @@ impl RenderTrait for ForwardRenderer {
                 self.default_emission_view.as_ref().unwrap(),
             );
 
+            let material_uniforms = MaterialUniforms {
+                albedo: mat_data.albedo,
+                emission_color: mat_data.emission_color,
+                metallic: mat_data.metallic,
+                roughness: mat_data.roughness,
+                ao: mat_data.ao,
+                emission_strength: mat_data.emission_strength,
+                _padding: 0.0,
+            };
+
+            let uniform_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Material Uniform Buffer"),
+                        contents: bytemuck::bytes_of(&material_uniforms),
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    });
+
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 layout: &self.material_bind_group_layout.as_ref().unwrap(),
                 label: Some("Forward Material Bind Group"),
@@ -1204,10 +1455,19 @@ impl RenderTrait for ForwardRenderer {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&emission_view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
                 ],
             });
-            self.materials
-                .insert(mat_data.id, MaterialLowEnd { bind_group });
+            self.materials.insert(
+                mat_data.id,
+                MaterialLowEnd {
+                    bind_group,
+                    uniform_buffer,
+                },
+            );
         }
     }
 }

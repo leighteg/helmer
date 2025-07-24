@@ -4,6 +4,7 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use resvg::{tiny_skia, usvg::Tree};
 use std::{
+    env,
     num::NonZeroU32,
     sync::{
         Arc, Barrier,
@@ -32,7 +33,8 @@ use crate::{
             deferred::DeferredRenderer,
             forward::ForwardRenderer,
             renderer::{
-                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
+                Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
+                initialize_renderer,
             },
         },
         renderer_system::RenderPacket,
@@ -220,8 +222,20 @@ impl Runtime {
         let window = Arc::clone(self.window.as_ref().unwrap());
         let window_size = window.inner_size();
 
+        let backend_str = env::var("HELMER_BACKEND").unwrap_or_else(|_| "all".to_string());
+
+        let backends = match backend_str.to_lowercase().as_str() {
+            "vulkan" => wgpu::Backends::VULKAN,
+            "gl" => wgpu::Backends::GL,
+            "dx12" => wgpu::Backends::DX12,
+            "metal" => wgpu::Backends::METAL,
+            _ => wgpu::Backends::all(),
+        };
+
+        info!("selected renderer backend: {}", backend_str);
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends,
             ..Default::default()
         });
 
@@ -229,7 +243,9 @@ impl Runtime {
 
         let render_thread_handle = thread::spawn(move || {
             let mut renderer = pollster::block_on(async {
-                initialize_renderer(instance, surface, window_size, target_tickrate).await.unwrap()
+                initialize_renderer(instance, surface, window_size, target_tickrate)
+                    .await
+                    .unwrap()
             });
 
             let frame_duration = Duration::from_secs_f32(1.0 / target_fps.unwrap_or(60.0));

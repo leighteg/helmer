@@ -1613,6 +1613,7 @@ impl DeferredRenderer {
         encoder: &mut wgpu::CommandEncoder,
         render_data: &RenderData,
         static_camera_view: &Mat4,
+        alpha: f32,
     ) {
         // This should be greater than the farthest shadow cascade to allow objects
         // just outside the view to cast shadows into it.
@@ -1746,11 +1747,19 @@ impl DeferredRenderer {
                         }
 
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            let model_matrix = Mat4::from_scale_rotation_translation(
-                                object.current_transform.scale,
-                                object.current_transform.rotation,
-                                object.current_transform.position,
-                            );
+                            let position = object
+                                .previous_transform
+                                .position
+                                .lerp(object.current_transform.position, alpha);
+                            let rotation = Quat::from(object.previous_transform.rotation)
+                                .slerp(object.current_transform.rotation, alpha);
+                            let scale = object
+                                .previous_transform
+                                .scale
+                                .lerp(object.current_transform.scale, alpha);
+
+                            let model_matrix =
+                                Mat4::from_scale_rotation_translation(scale, rotation, position);
                             let push_constants = ModelPushConstant {
                                 model_matrix: model_matrix.to_cols_array_2d(),
                             };
@@ -2065,7 +2074,7 @@ impl RenderTrait for DeferredRenderer {
         let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
 
         // --- 1. Shadow Pass ---
-        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view);
+        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
 
         // --- 2. Geometry Pass ---
         self.run_geometry_pass(&mut encoder, render_data, alpha);

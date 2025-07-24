@@ -232,7 +232,9 @@ impl Runtime {
             _ => wgpu::Backends::all(),
         };
 
-        info!("selected renderer backend: {}", backend_str);
+        if backends != wgpu::Backends::all() {
+            info!("selected renderer backend: {:?}", backends);
+        }
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,

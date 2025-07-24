@@ -2,7 +2,9 @@
 
 // --- Standard library and crate imports ---
 use crate::{
-    graphics::renderer::{deferred::DeferredRenderer, error::RendererError, forward::ForwardRenderer},
+    graphics::renderer::{
+        deferred::DeferredRenderer, error::RendererError, forward::ForwardRenderer,
+    },
     provided::components::{Camera, LightType, Transform},
     runtime::{
         asset_server::{AssetKind, MaterialGpuData},
@@ -11,7 +13,12 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
-use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    env,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::info;
 use winit::dpi::PhysicalSize;
 
@@ -52,35 +59,55 @@ pub async fn initialize_renderer(
     target_tickrate: f32,
 ) -> Result<Box<dyn RenderTrait>, RendererError> {
     let adapter: wgpu::Adapter;
-        match instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-        {
-            Ok(new_adapter) => adapter = new_adapter,
-            Err(err) => {
-                return Err(RendererError::ResourceCreation(format!(
-                    "Failed to find a suitable GPU adapter: {}",
-                    err
-                )));
-            }
-        };
+    match instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        })
+        .await
+    {
+        Ok(new_adapter) => adapter = new_adapter,
+        Err(err) => {
+            return Err(RendererError::ResourceCreation(format!(
+                "Failed to find a suitable GPU adapter: {}",
+                err
+            )));
+        }
+    };
 
     let supported_features = adapter.features();
-    
+
     // Check for the features required for the high-end "bindless" deferred renderer.
-    let renderer: Box<dyn RenderTrait> = if supported_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY)
-        && supported_features.contains(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING)
+    let supports_high_end = if supported_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY)
+        && supported_features
+            .contains(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING)
     {
-        info!("Adapter supports bindless texturing. Initializing High-End Deferred Renderer.");
-        let renderer = DeferredRenderer::new(instance, surface, adapter, size, target_tickrate).await?;
+        info!("Adapter supports bindless texturing.");
+        true
+    } else {
+        info!("Adapter does not support bindless texturing.");
+        false
+    };
+
+    let path_str = env::var("HELMER_PATH").unwrap_or_else(|_| "auto".to_string());
+
+    let prefers_high_end = match path_str.as_str() {
+        "forward" => false,
+        _ => true,
+    };
+
+    let renderer: Box<dyn RenderTrait> = if supports_high_end && prefers_high_end {
+        info!("Initializing High-End Deferred Renderer.");
+
+        let renderer =
+            DeferredRenderer::new(instance, surface, adapter, size, target_tickrate).await?;
         Box::new(renderer)
     } else {
-        info!("Adapter does not support bindless texturing. Initializing Low-End Forward Renderer.");
-        let renderer = ForwardRenderer::new(instance, surface, &adapter, size, target_tickrate).await?;
+        info!("Initializing Low-End Forward Renderer.");
+
+        let renderer =
+            ForwardRenderer::new(instance, surface, &adapter, size, target_tickrate).await?;
         Box::new(renderer)
     };
 
@@ -229,7 +256,6 @@ pub struct RenderData {
     pub camera_component: Camera,
     pub timestamp: Instant,
 }
-
 
 // --- SHARED SHADER DATA STRUCTS ---
 

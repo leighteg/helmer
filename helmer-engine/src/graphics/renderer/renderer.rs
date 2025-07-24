@@ -3,7 +3,7 @@
 // --- Standard library and crate imports ---
 use crate::{
     graphics::renderer::{
-        deferred::DeferredRenderer, error::RendererError, forward::ForwardRenderer,
+        deferred::DeferredRenderer, error::RendererError, forward_pmu::ForwardRendererPMU, forward_ta::ForwardRendererTA,
     },
     provided::components::{Camera, LightType, Transform},
     runtime::{
@@ -92,10 +92,7 @@ pub async fn initialize_renderer(
 
     let path_str = env::var("HELMER_PATH").unwrap_or_else(|_| "auto".to_string());
 
-    let prefers_high_end = match path_str.as_str() {
-        "forward" => false,
-        _ => true,
-    };
+    let prefers_high_end = !path_str.as_str().starts_with("forward");
 
     let renderer: Box<dyn RenderTrait> = if supports_high_end && prefers_high_end {
         info!("Initializing High-End Deferred Renderer.");
@@ -106,9 +103,11 @@ pub async fn initialize_renderer(
     } else {
         info!("Initializing Low-End Forward Renderer.");
 
-        let renderer =
-            ForwardRenderer::new(instance, surface, &adapter, size, target_tickrate).await?;
-        Box::new(renderer)
+        if path_str.as_str().ends_with("PMU") {
+            Box::new(ForwardRendererPMU::new(instance, surface, &adapter, size, target_tickrate).await?)
+        } else {
+            Box::new(ForwardRendererTA::new(instance, surface, adapter, size, target_tickrate).await?)
+        }
     };
 
     Ok(renderer)

@@ -45,7 +45,7 @@ pub struct MaterialLowEnd {
 }
 
 /// The low-end renderer using a single forward pass and per-material bind groups.
-pub struct ForwardRenderer {
+pub struct ForwardRendererPMU {
     // WGPU Core
     device: Arc<wgpu::Device>,
     queue: wgpu::Queue,
@@ -103,7 +103,7 @@ pub struct ForwardRenderer {
     last_timestamp: Option<Instant>,
 }
 
-impl ForwardRenderer {
+impl ForwardRendererPMU {
     pub async fn new(
         _instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
@@ -516,7 +516,7 @@ impl ForwardRenderer {
     fn create_pipelines(&mut self) {
         let shader = self
             .device
-            .create_shader_module(wgpu::include_wgsl!("../shaders/forward_low_end.wgsl"));
+            .create_shader_module(wgpu::include_wgsl!("../shaders/forward_pmu.wgsl"));
         let layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1145,7 +1145,7 @@ impl ForwardRenderer {
     }
 }
 
-impl RenderTrait for ForwardRenderer {
+impl RenderTrait for ForwardRendererPMU {
     fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.window_size = new_size;

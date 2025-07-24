@@ -31,7 +31,6 @@ use crate::{
     graphics::{
         renderer::{
             deferred::DeferredRenderer,
-            forward::ForwardRenderer,
             renderer::{
                 Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
                 initialize_renderer,

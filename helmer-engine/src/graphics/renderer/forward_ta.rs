@@ -132,8 +132,7 @@ impl ForwardRendererTA {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
-                required_features: wgpu::Features::PUSH_CONSTANTS
-                    | wgpu::Features::FLOAT32_FILTERABLE,
+                required_features: wgpu::Features::PUSH_CONSTANTS,
                 required_limits: wgpu::Limits {
                     max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
                     max_texture_array_layers: MAX_TEXTURES_PER_TYPE,

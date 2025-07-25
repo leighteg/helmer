@@ -111,7 +111,7 @@ impl ForwardRendererPMU {
         size: PhysicalSize<u32>,
         target_tickrate: f32,
     ) -> Result<Self, RendererError> {
-        let required_features = wgpu::Features::PUSH_CONSTANTS | wgpu::Features::FLOAT32_FILTERABLE;
+        let required_features = wgpu::Features::PUSH_CONSTANTS;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {

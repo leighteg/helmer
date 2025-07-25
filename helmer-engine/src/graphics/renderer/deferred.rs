@@ -351,7 +351,7 @@ impl DeferredRenderer {
 
         self.resize(self.window_size);
 
-        info!("initialized renderer");
+        info!("initialized deferred (bindless) renderer");
         Ok(())
     }
 

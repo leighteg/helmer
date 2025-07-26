@@ -24,7 +24,6 @@ use winit::dpi::PhysicalSize;
 
 // --- CONSTANTS (Shared across renderers) ---
 pub const FRAMES_IN_FLIGHT: usize = 3;
-pub const MAX_LIGHTS: usize = 2048;
 pub const SHADOW_MAP_RESOLUTION: u32 = 2048;
 pub const NUM_CASCADES: usize = 4;
 pub const CASCADE_SPLITS: [f32; 5] = [0.1, 15.0, 40.0, 100.0, 300.0];

@@ -1,6 +1,6 @@
 use crate::graphics::renderer::error::RendererError;
 use crate::graphics::renderer::renderer::{
-    Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData, MAX_LIGHTS,
+    Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
     Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderObject, RenderTrait,
     SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex,
 };
@@ -23,6 +23,9 @@ const WGPU_CLIP_SPACE_CORRECTION: Mat4 = Mat4::from_cols(
     Vec4::new(0.0, 0.0, 0.5, 0.0),
     Vec4::new(0.0, 0.0, 0.5, 1.0),
 );
+
+// --- CONSTANTS ---
+pub const MAX_LIGHTS: usize = 248;
 
 // --- Structs for Shader Data ---
 

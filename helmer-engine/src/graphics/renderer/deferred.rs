@@ -5,7 +5,7 @@ use crate::{
         error::RendererError,
         renderer::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
-            MAX_LIGHTS, Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES,
+            Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES,
             PbrConstants, RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShadowPipeline,
             ShadowUniforms, TextureManager, Vertex, WGPU_CLIP_SPACE_CORRECTION,
         },
@@ -29,6 +29,7 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
 // --- CONSTANTS ---
+pub const MAX_LIGHTS: usize = 2048;
 const MAX_TOTAL_TEXTURES: u32 = 4096;
 const DEFAULT_TEXTURE_RESOLUTION: u32 = 1024;
 

@@ -82,6 +82,7 @@ impl System for SyncEntitiesToPhysicsSystem {
                     let rigid_body = RigidBodyBuilder::dynamic()
                         .position(iso)
                         .additional_mass(dynamic_body.mass)
+                        .ccd_enabled(true)
                         .build();
 
                     // Build the collider based on the specified shape
@@ -203,7 +204,10 @@ impl System for PhysicsStepSystem {
         let Some(phys) = ecs.get_resource_mut::<PhysicsResource>() else {
             return;
         };
+
         phys.integration_parameters.dt = dt;
+        phys.integration_parameters.max_ccd_substeps = 4;
+        phys.integration_parameters.num_internal_stabilization_iterations = 4; // Optional: helps with stability
 
         let gravity_vector = nalgebra::Vector3::new(phys.gravity.x, phys.gravity.y, phys.gravity.z);
 

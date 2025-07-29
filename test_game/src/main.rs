@@ -65,14 +65,14 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        /*// Priority 25: General game logic that modifies transforms.
+        // Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
             SpinnerSystem {},
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
         /*ecs_guard.system_scheduler.register_system(
             SpawnSystem::new(),

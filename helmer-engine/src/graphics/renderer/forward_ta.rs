@@ -1523,7 +1523,8 @@ impl RenderTrait for ForwardRendererTA {
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
             RenderMessage::Resize(size) => self.resize(size),
-            RenderMessage::Shutdown => {}
+            RenderMessage::Shutdown => {},
+            _ => {}
         }
     }
 

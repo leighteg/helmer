@@ -29,25 +29,23 @@ use winit::{
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::{
-        renderer::{
+        config::RenderConfig, renderer::{
             deferred::DeferredRenderer,
             renderer::{
-                Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
-                initialize_renderer,
+                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
             },
-        },
-        renderer_system::RenderPacket,
+        }, renderer_system::RenderPacket
     },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::{
-        asset_server::{AssetKind, AssetServer, MaterialGpuData},
-        input_manager::{InputEvent, InputManager},
+        asset_server::{AssetKind, AssetServer, MaterialGpuData}, config::RuntimeConfig, input_manager::{InputEvent, InputManager}
     },
 };
 
 pub enum RenderMessage {
     RenderData(RenderData),
     Resize(PhysicalSize<u32>),
+    RenderConfig(RenderConfig),
     Shutdown,
 
     // --- Asset Pipeline Messages ---
@@ -90,6 +88,8 @@ pub struct Runtime {
     window: Option<Arc<Window>>,
 
     init_callback: fn(&mut Runtime),
+
+    config: RuntimeConfig,
 }
 
 impl Runtime {
@@ -129,6 +129,8 @@ impl Runtime {
             window: None,
 
             init_callback,
+
+            config: RuntimeConfig::default(),
         }
     }
 
@@ -464,12 +466,39 @@ impl ApplicationHandler for Runtime {
                                 }
                             }
                         }
+                        
+                        // debug toggles
+                        KeyCode::KeyZ => {
+                            if event.state.is_pressed() {
+                                self.config.render_config.shadow_pass = !self.config.render_config.shadow_pass;
+                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                            }
+                        }
+                        KeyCode::KeyG => {
+                            if event.state.is_pressed() {
+                                self.config.render_config.ssgi_pass = !self.config.render_config.ssgi_pass;
+                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                            }
+                        }
+                        KeyCode::Numpad0 => {
+                            if event.state.is_pressed() {
+                                self.config.render_config.direct_lighting_pass = !self.config.render_config.direct_lighting_pass;
+                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                            }
+                        }
+                        KeyCode::KeyR => {
+                            if event.state.is_pressed() {
+                                self.config.render_config.ssr_pass = !self.config.render_config.ssr_pass;
+                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                            }
+                        }
+
                         key_code => {
                             self.input_manager.read().push_event(InputEvent::Keyboard {
                                 key: key_code,
                                 pressed: event.state.is_pressed(),
                             });
-                        }
+                        } 
                     }
                 }
             }

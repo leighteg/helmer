@@ -18,6 +18,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
+use image::{GenericImageView, ImageFormat};
 use std::{
     collections::HashMap,
     num::NonZeroU32,
@@ -55,24 +56,32 @@ pub struct DeferredRenderer {
     shadow_pipeline: Option<ShadowPipeline>,
     ssr_pipeline: Option<wgpu::RenderPipeline>,
     ssgi_pipeline: Option<wgpu::RenderPipeline>,
+    ssgi_denoise_pipeline: Option<wgpu::RenderPipeline>,
+    composite_pipeline: Option<wgpu::RenderPipeline>,
 
     // Bind Group Layouts
     scene_data_bind_group_layout: Option<wgpu::BindGroupLayout>,
     object_data_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssr_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssgi_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    ssgi_blue_noise_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    ssgi_denoise_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssr_camera_bind_group_layout: Option<wgpu::BindGroupLayout>,
     lighting_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ibl_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    composite_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
 
     // Bind Groups
     scene_data_bind_groups: Vec<wgpu::BindGroup>,
     object_data_bind_group: Option<wgpu::BindGroup>,
     ssr_inputs_bind_group: Option<wgpu::BindGroup>,
     ssgi_inputs_bind_group: Option<wgpu::BindGroup>,
+    ssgi_blue_noise_bind_group: Option<wgpu::BindGroup>,
+    ssgi_denoise_inputs_bind_group: Option<wgpu::BindGroup>,
     ssr_camera_bind_groups: Vec<wgpu::BindGroup>,
     lighting_inputs_bind_group: Option<wgpu::BindGroup>,
     ibl_bind_group: Option<wgpu::BindGroup>,
+    composite_inputs_bind_group: Option<wgpu::BindGroup>,
 
     // Main Render Targets & Depth
     main_depth_texture: Option<wgpu::Texture>,
@@ -89,12 +98,21 @@ pub struct DeferredRenderer {
     gbuf_emission_texture_view: Option<wgpu::TextureView>,
 
     // Reflection & Lighting Textures
+    direct_lighting_texture: Option<wgpu::Texture>,
+    direct_lighting_texture_view: Option<wgpu::TextureView>,
     ssr_texture: Option<wgpu::Texture>,
     ssr_texture_view: Option<wgpu::TextureView>,
-    ssgi_texture: Option<wgpu::Texture>,
-    ssgi_texture_view: Option<wgpu::TextureView>,
+    ssgi_temporal_texture: Option<wgpu::Texture>,
+    ssgi_temporal_texture_view: Option<wgpu::TextureView>,
+    ssgi_denoised_texture: Option<wgpu::Texture>,
+    ssgi_denoised_texture_view: Option<wgpu::TextureView>,
+    ssgi_history_texture: Option<wgpu::Texture>,
+    ssgi_history_texture_view: Option<wgpu::TextureView>,
     history_texture: Option<wgpu::Texture>,
     history_texture_view: Option<wgpu::TextureView>,
+    blue_noise_texture: Option<wgpu::Texture>,
+    blue_noise_texture_view: Option<wgpu::TextureView>,
+    blue_noise_sampler: Option<wgpu::Sampler>,
 
     // IBL Textures
     brdf_lut_texture: Option<wgpu::Texture>,
@@ -142,6 +160,7 @@ pub struct DeferredRenderer {
     current_render_data: Option<RenderData>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
+    prev_view_proj: Mat4,
 }
 
 impl DeferredRenderer {
@@ -152,7 +171,6 @@ impl DeferredRenderer {
         size: PhysicalSize<u32>,
         target_tickrate: f32,
     ) -> Result<Self, RendererError> {
-        // --- Device, Queue ---
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
@@ -162,7 +180,6 @@ impl DeferredRenderer {
                     | wgpu::Features::TEXTURE_BINDING_ARRAY
                     | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
                 required_limits: wgpu::Limits {
-                    // Add push constant limit
                     max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
                     max_binding_array_elements_per_shader_stage: MAX_TOTAL_TEXTURES,
                     ..Default::default()
@@ -209,20 +226,28 @@ impl DeferredRenderer {
             shadow_pipeline: None,
             ssr_pipeline: None,
             ssgi_pipeline: None,
+            ssgi_denoise_pipeline: None,
+            composite_pipeline: None,
             scene_data_bind_group_layout: None,
             object_data_bind_group_layout: None,
             ssr_inputs_bind_group_layout: None,
             ssgi_inputs_bind_group_layout: None,
+            ssgi_blue_noise_bind_group_layout: None,
+            ssgi_denoise_inputs_bind_group_layout: None,
             ssr_camera_bind_group_layout: None,
             lighting_inputs_bind_group_layout: None,
             ibl_bind_group_layout: None,
+            composite_inputs_bind_group_layout: None,
             scene_data_bind_groups: Vec::new(),
             object_data_bind_group: None,
             ssr_inputs_bind_group: None,
             ssgi_inputs_bind_group: None,
+            ssgi_blue_noise_bind_group: None,
+            ssgi_denoise_inputs_bind_group: None,
             ssr_camera_bind_groups: Vec::new(),
             lighting_inputs_bind_group: None,
             ibl_bind_group: None,
+            composite_inputs_bind_group: None,
             main_depth_texture: None,
             main_depth_texture_view: None,
             gbuf_normal_texture: None,
@@ -233,12 +258,21 @@ impl DeferredRenderer {
             gbuf_albedo_texture_view: None,
             gbuf_mra_texture_view: None,
             gbuf_emission_texture_view: None,
+            direct_lighting_texture: None,
+            direct_lighting_texture_view: None,
             ssr_texture: None,
             ssr_texture_view: None,
-            ssgi_texture: None,
-            ssgi_texture_view: None,
+            ssgi_temporal_texture: None,
+            ssgi_temporal_texture_view: None,
+            ssgi_denoised_texture: None,
+            ssgi_denoised_texture_view: None,
+            ssgi_history_texture: None,
+            ssgi_history_texture_view: None,
             history_texture: None,
             history_texture_view: None,
+            blue_noise_texture: None,
+            blue_noise_texture_view: None,
+            blue_noise_sampler: None,
             brdf_lut_texture: None,
             brdf_lut_view: None,
             irradiance_map_texture: None,
@@ -272,6 +306,7 @@ impl DeferredRenderer {
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
+            prev_view_proj: Mat4::IDENTITY,
         };
 
         renderer.initialize_resources()?;
@@ -281,7 +316,6 @@ impl DeferredRenderer {
     fn initialize_resources(&mut self) -> Result<(), RendererError> {
         let device = &self.device;
 
-        // --- Create Buffers ---
         self.camera_buffers = (0..FRAMES_IN_FLIGHT)
             .map(|i| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -311,7 +345,6 @@ impl DeferredRenderer {
             mapped_at_creation: false,
         }));
 
-        // --- Create Samplers ---
         self.pbr_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PBR Filtering Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -349,11 +382,11 @@ impl DeferredRenderer {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest, // No mipmapping
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         }));
 
+        self.create_blue_noise_texture();
         self.upload_default_textures();
         self.create_render_target_textures();
         self.create_shadow_resources();
@@ -366,20 +399,69 @@ impl DeferredRenderer {
         Ok(())
     }
 
+    fn create_blue_noise_texture(&mut self) {
+        let device = &self.device;
+
+        let blue_noise_bytes = include_bytes!("assets/LDR_LLL1_0.png");
+        let blue_noise_image =
+            image::load_from_memory_with_format(blue_noise_bytes, ImageFormat::Png)
+                .expect("Failed to load blue noise texture");
+        let blue_noise_rgba = blue_noise_image.to_rgba8();
+        let dimensions = blue_noise_image.dimensions();
+
+        let texture_size = wgpu::Extent3d {
+            width: dimensions.0,
+            height: dimensions.1,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blue Noise Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &blue_noise_rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * dimensions.0),
+                rows_per_image: Some(dimensions.1),
+            },
+            texture_size,
+        );
+
+        self.blue_noise_texture_view = Some(texture.create_view(&Default::default()));
+        self.blue_noise_texture = Some(texture);
+
+        self.blue_noise_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Blue Noise Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        }));
+    }
+
     fn upload_default_textures(&mut self) {
-        // --- Albedo (White) ---
         let white_pixel = [255u8, 255, 255, 255];
         let (tex, view) = self.create_and_upload_texture(
             "Default Albedo",
             &white_pixel,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             1,
-            1, // 1x1 dimension
+            1,
         );
         self.albedo_textures.push((tex, view));
 
-        // --- Normal (Flat) ---
-        // Represents a normal of (0, 0, 1). Packed as (0.5, 0.5, 1.0) -> [128, 128, 255]
         let flat_normal_pixel = [128u8, 128, 255, 255];
         let (tex, view) = self.create_and_upload_texture(
             "Default Normal",
@@ -390,8 +472,6 @@ impl DeferredRenderer {
         );
         self.normal_textures.push((tex, view));
 
-        // --- Metallic/Roughness/AO (Default PBR values) ---
-        // AO=1.0 (red=255), Roughness=0.8 (green=204), Metallic=0.0 (blue=0)
         let default_mr_pixel = [255u8, 204, 0, 255];
         let (tex, view) = self.create_and_upload_texture(
             "Default MR",
@@ -437,7 +517,6 @@ impl DeferredRenderer {
             view_formats: &[],
         });
 
-        // For a 1x1 texture, bytes_per_row is just the size of the pixel data (4 bytes for RGBA8)
         self.queue.write_texture(
             texture.as_image_copy(),
             data,
@@ -540,7 +619,6 @@ impl DeferredRenderer {
         let device = &self.device;
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"));
 
-        // --- NEW: Calculate aligned buffer size for multiple matrices ---
         let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
         let alignment = device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
         let aligned_mat4_size = wgpu::util::align_to(mat4_size, alignment);
@@ -552,7 +630,6 @@ impl DeferredRenderer {
             mapped_at_creation: false,
         }));
 
-        // --- NEW: The layout now specifies a DYNAMIC buffer ---
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow Bind Group Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -560,14 +637,14 @@ impl DeferredRenderer {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true, // <-- The key change
+                    has_dynamic_offset: true,
                     min_binding_size: wgpu::BufferSize::new(mat4_size),
                 },
                 count: None,
             }],
         });
 
-        let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>();
+        let mat4_size_val = std::mem::size_of::<[[f32; 4]; 4]>();
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow Light VP Bind Group"),
@@ -577,9 +654,7 @@ impl DeferredRenderer {
                 resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: self.shadow_light_vp_buffer.as_ref().unwrap(),
                     offset: 0,
-                    // Explicitly tell the binding its size is one matrix.
-                    // This is the key to making dynamic offsets work.
-                    size: wgpu::BufferSize::new(mat4_size as u64),
+                    size: wgpu::BufferSize::new(mat4_size_val as u64),
                 }),
             }],
         });
@@ -613,13 +688,13 @@ impl DeferredRenderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back), // Use front-face culling for Peter-Panning
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less, // Use Less for standard 0-1 depth
+                depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
                     constant: 2,
@@ -674,10 +749,9 @@ impl DeferredRenderer {
         layer_index: u32,
         bytes_per_pixel: u32,
     ) {
-        // This helper now takes bytes_per_pixel to be more generic.
         let bytes_per_row = bytes_per_pixel * DEFAULT_TEXTURE_RESOLUTION;
         self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
+            wgpu::ImageCopyTexture {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -688,7 +762,7 @@ impl DeferredRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::TexelCopyBufferLayout {
+            wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION),
@@ -714,7 +788,7 @@ impl DeferredRenderer {
         let bytes_per_row = width_in_blocks * block_size_bytes as u32;
 
         self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
+            wgpu::ImageCopyTexture {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -725,7 +799,7 @@ impl DeferredRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::TexelCopyBufferLayout {
+            wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION / block_dimensions.1),
@@ -746,7 +820,6 @@ impl DeferredRenderer {
         width: u32,
         height: u32,
     ) -> Result<usize, RendererError> {
-        // Determine which texture list to add to
         let target_list = match kind {
             AssetKind::Albedo => &mut self.albedo_textures,
             AssetKind::Normal => &mut self.normal_textures,
@@ -772,7 +845,7 @@ impl DeferredRenderer {
         });
 
         let block_dimensions = format.block_dimensions();
-        let block_size_bytes = format.block_size(None).unwrap_or(4); // Default to 4 for uncompressed
+        let block_size_bytes = format.block_size(None).unwrap_or(4);
         let width_in_blocks = width / block_dimensions.0;
         let height_in_blocks = height / block_dimensions.1;
         let bytes_per_row = width_in_blocks * block_size_bytes;
@@ -791,13 +864,8 @@ impl DeferredRenderer {
         let view = texture.create_view(&Default::default());
         target_list.push((texture, view));
 
-        // The new index is simply the last position in the list.
         let new_index = target_list.len() - 1;
-
-        // CRITICAL: We need to rebuild the object data bind group now that
-        // a new texture has been added to the list.
         self.create_object_data_bind_group();
-
         Ok(new_index)
     }
 
@@ -866,7 +934,6 @@ impl DeferredRenderer {
             depth_or_array_layers: 1,
         };
 
-        // Main Depth Texture
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Main Depth Texture"),
             size,
@@ -880,7 +947,6 @@ impl DeferredRenderer {
         self.main_depth_texture_view = Some(depth_texture.create_view(&Default::default()));
         self.main_depth_texture = Some(depth_texture);
 
-        // G-Buffer Textures
         let gbuffer_usage =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
 
@@ -937,12 +1003,24 @@ impl DeferredRenderer {
             Some(gbuf_emission_texture.create_view(&Default::default()));
         self.gbuf_emission_texture = Some(gbuf_emission_texture);
 
-        // --- NEW Reflection/Lighting Textures ---
         let hdr_texture_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC;
 
-        // This texture will hold the result of the SSR pass
+        let direct_lighting_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Direct Lighting Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: hdr_texture_usage,
+            view_formats: &[],
+        });
+        self.direct_lighting_texture_view =
+            Some(direct_lighting_texture.create_view(&Default::default()));
+        self.direct_lighting_texture = Some(direct_lighting_texture);
+
         let ssr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SSR Result Texture"),
             size,
@@ -956,19 +1034,47 @@ impl DeferredRenderer {
         self.ssr_texture_view = Some(ssr_texture.create_view(&Default::default()));
         self.ssr_texture = Some(ssr_texture);
 
-        // This texture will hold the result of the SSGI pass
-        let ssgi_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SSGI Result Texture"),
+        let ssgi_temporal_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SSGI Temporal Texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float, // HDR for lighting
-            usage: hdr_texture_usage,                 // Same usage as SSR
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: hdr_texture_usage,
             view_formats: &[],
         });
-        self.ssgi_texture_view = Some(ssgi_texture.create_view(&Default::default()));
-        self.ssgi_texture = Some(ssgi_texture);
+        self.ssgi_temporal_texture_view =
+            Some(ssgi_temporal_texture.create_view(&Default::default()));
+        self.ssgi_temporal_texture = Some(ssgi_temporal_texture);
+
+        let ssgi_denoised_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SSGI Denoised Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: hdr_texture_usage,
+            view_formats: &[],
+        });
+        self.ssgi_denoised_texture_view =
+            Some(ssgi_denoised_texture.create_view(&Default::default()));
+        self.ssgi_denoised_texture = Some(ssgi_denoised_texture);
+
+        let ssgi_history_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SSGI History Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.ssgi_history_texture_view =
+            Some(ssgi_history_texture.create_view(&Default::default()));
+        self.ssgi_history_texture = Some(ssgi_history_texture);
 
         let surface_caps = self.surface.get_capabilities(&self.adapter);
         let surface_format = surface_caps.formats[0];
@@ -986,7 +1092,6 @@ impl DeferredRenderer {
         self.history_texture_view = Some(history_texture.create_view(&Default::default()));
         self.history_texture = Some(history_texture);
 
-        // --- NEW IBL Textures (Dummy Placeholders) ---
         let brdf_lut = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("BRDF LUT"),
             size: wgpu::Extent3d {
@@ -1031,7 +1136,7 @@ impl DeferredRenderer {
                 height: 256,
                 depth_or_array_layers: 6,
             },
-            mip_level_count: 5, // For roughness levels
+            mip_level_count: 5,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
@@ -1050,26 +1155,30 @@ impl DeferredRenderer {
     fn create_pipelines_and_bind_groups(&mut self) {
         let device = &self.device;
 
-        // --- Load Shaders ---
         let g_buffer_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/g_buffer.wgsl"));
         let ssr_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/ssr.wgsl"));
         let ssgi_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/ssgi.wgsl"));
+        let ssgi_denoise_shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/ssgi_denoise.wgsl"));
         let lighting_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/lighting.wgsl"));
+        let composite_shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/composite.wgsl"));
 
-        // --- Create Layouts ---
         let (
             scene_data_bind_group_layout,
             object_data_bind_group_layout,
             ssr_inputs_bind_group_layout,
             ssgi_inputs_bind_group_layout,
+            ssgi_blue_noise_bind_group_layout,
+            ssgi_denoise_inputs_bind_group_layout,
             ssr_camera_bind_group_layout,
             lighting_inputs_bind_group_layout,
             ibl_bind_group_layout,
+            composite_inputs_bind_group_layout,
         ) = self.create_bind_group_layouts();
 
-        // --- Create Pipeline Layouts ---
         let geometry_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Geometry Pipeline Layout"),
@@ -1091,13 +1200,20 @@ impl DeferredRenderer {
 
         let ssgi_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSGI Pipeline Layout"),
-            // same inputs as SSR (G-buffer + Camera)
             bind_group_layouts: &[
                 &ssgi_inputs_bind_group_layout,
                 &ssr_camera_bind_group_layout,
+                &ssgi_blue_noise_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
+
+        let ssgi_denoise_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("SSGI Denoise Pipeline Layout"),
+                bind_group_layouts: &[&ssgi_denoise_inputs_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let lighting_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1105,12 +1221,21 @@ impl DeferredRenderer {
                 bind_group_layouts: &[
                     &lighting_inputs_bind_group_layout,
                     &scene_data_bind_group_layout,
-                    &ibl_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
 
-        // --- Create Pipelines ---
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Composite Pipeline Layout"),
+                bind_group_layouts: &[
+                    &composite_inputs_bind_group_layout,
+                    &ibl_bind_group_layout,
+                    &scene_data_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+
         self.geometry_pipeline = Some(device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
                 label: Some("Geometry Pipeline"),
@@ -1125,10 +1250,10 @@ impl DeferredRenderer {
                     module: &g_buffer_shader,
                     entry_point: Some("fs_main"),
                     targets: &[
-                        Some(wgpu::TextureFormat::Rgba16Float.into()), // Normal
-                        Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()), // Albedo
-                        Some(wgpu::TextureFormat::Rgba8Unorm.into()),  // MRA
-                        Some(wgpu::TextureFormat::Rgba16Float.into()), // Emission
+                        Some(wgpu::TextureFormat::Rgba16Float.into()),
+                        Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()),
+                        Some(wgpu::TextureFormat::Rgba8Unorm.into()),
+                        Some(wgpu::TextureFormat::Rgba16Float.into()),
                     ],
                     compilation_options: Default::default(),
                 }),
@@ -1163,7 +1288,7 @@ impl DeferredRenderer {
                     module: &ssr_shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float, // SSR result
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -1191,7 +1316,7 @@ impl DeferredRenderer {
                     module: &ssgi_shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float, // SSGI result
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -1204,6 +1329,34 @@ impl DeferredRenderer {
                 cache: None,
             }),
         );
+
+        self.ssgi_denoise_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("SSGI Denoise Pipeline"),
+                layout: Some(&ssgi_denoise_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &ssgi_denoise_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &ssgi_denoise_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
 
         self.lighting_pipeline = Some(device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
@@ -1219,7 +1372,7 @@ impl DeferredRenderer {
                     module: &lighting_shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: self.surface_config.format, // Final output
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -1233,22 +1386,54 @@ impl DeferredRenderer {
             },
         ));
 
-        // --- Store Layouts on Self ---
+        self.composite_pipeline = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("Composite Pipeline"),
+                layout: Some(&composite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
+
         self.scene_data_bind_group_layout = Some(scene_data_bind_group_layout);
         self.object_data_bind_group_layout = Some(object_data_bind_group_layout);
         self.ssr_inputs_bind_group_layout = Some(ssr_inputs_bind_group_layout);
         self.ssgi_inputs_bind_group_layout = Some(ssgi_inputs_bind_group_layout);
+        self.ssgi_blue_noise_bind_group_layout = Some(ssgi_blue_noise_bind_group_layout);
+        self.ssgi_denoise_inputs_bind_group_layout = Some(ssgi_denoise_inputs_bind_group_layout);
         self.ssr_camera_bind_group_layout = Some(ssr_camera_bind_group_layout);
         self.lighting_inputs_bind_group_layout = Some(lighting_inputs_bind_group_layout);
         self.ibl_bind_group_layout = Some(ibl_bind_group_layout);
+        self.composite_inputs_bind_group_layout = Some(composite_inputs_bind_group_layout);
 
-        // --- Create Bind Groups ---
         self.create_bind_groups();
     }
 
     fn create_bind_group_layouts(
         &self,
     ) -> (
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
@@ -1287,17 +1472,14 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Object Data Bind Group Layout"),
                 entries: &[
-                    // Material buffer
                     buffer_binding(
                         0,
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BufferBindingType::Storage { read_only: true },
                     ),
-                    // Sampler
                     sampler_binding(2, true, wgpu::SamplerBindingType::Filtering),
-                    // A SINGLE entry for ALL textures
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1, // The master texture array
+                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -1313,13 +1495,12 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("SSR Inputs Bind Group Layout"),
                 entries: &[
-                    // MODIFIED: Now takes gbuf_albedo instead of a separate scene_texture
-                    texture_binding(0, false, wgpu::TextureViewDimension::D2, false), // gbuf_normal
-                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // gbuf_mra
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, true),  // depth
-                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),  // history
-                    sampler_binding(4, false, wgpu::SamplerBindingType::NonFiltering), // gbuf_sampler
-                    sampler_binding(5, true, wgpu::SamplerBindingType::Filtering), // scene_sampler
+                    texture_binding(0, false, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(2, false, wgpu::TextureViewDimension::D2, true),
+                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(4, false, wgpu::SamplerBindingType::NonFiltering),
+                    sampler_binding(5, true, wgpu::SamplerBindingType::Filtering),
                 ],
             });
 
@@ -1327,12 +1508,33 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("SSGI Inputs Bind Group Layout"),
                 entries: &[
-                    texture_binding(0, false, wgpu::TextureViewDimension::D2, false), // gbuf_normal
-                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // gbuf_albedo
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, true),  // depth
-                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),  // history
-                    sampler_binding(4, false, wgpu::SamplerBindingType::NonFiltering), // gbuf_sampler
-                    sampler_binding(5, true, wgpu::SamplerBindingType::Filtering), // scene_sampler
+                    texture_binding(0, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(1, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(2, false, wgpu::TextureViewDimension::D2, true),
+                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering),
+                    sampler_binding(6, true, wgpu::SamplerBindingType::Filtering),
+                ],
+            });
+
+        let ssgi_blue_noise_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("SSGI Blue Noise Bind Group Layout"),
+                entries: &[
+                    texture_binding(0, false, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(1, false, wgpu::SamplerBindingType::NonFiltering),
+                ],
+            });
+
+        let ssgi_denoise_inputs_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("SSGI Denoise Inputs Bind Group Layout"),
+                entries: &[
+                    texture_binding(0, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(1, false, wgpu::TextureViewDimension::D2, true),
+                    texture_binding(2, true, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(3, true, wgpu::SamplerBindingType::Filtering),
                 ],
             });
 
@@ -1350,14 +1552,12 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Lighting Inputs Bind Group Layout"),
                 entries: &[
-                    texture_binding(0, false, wgpu::TextureViewDimension::D2, true), // Depth
-                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // Normal
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // Albedo
-                    texture_binding(3, false, wgpu::TextureViewDimension::D2, false), // MRA
-                    texture_binding(4, false, wgpu::TextureViewDimension::D2, false), // Emission
-                    sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering), // Sampler
-                    texture_binding(6, false, wgpu::TextureViewDimension::D2, false), // SSR Result
-                    texture_binding(7, false, wgpu::TextureViewDimension::D2, false), // SSGI Result
+                    texture_binding(0, false, wgpu::TextureViewDimension::D2, true),
+                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(3, false, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(4, false, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering),
                 ],
             });
 
@@ -1373,38 +1573,49 @@ impl DeferredRenderer {
                 ],
             });
 
+        let composite_inputs_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Composite Inputs Bind Group Layout"),
+                entries: &[
+                    texture_binding(0, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(1, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(2, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false),
+                    sampler_binding(5, true, wgpu::SamplerBindingType::Filtering),
+                    texture_binding(6, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(7, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(8, false, wgpu::TextureViewDimension::D2, true),
+                ],
+            });
+
         (
             scene_data_bind_group_layout,
             object_data_bind_group_layout,
             ssr_inputs_bind_group_layout,
             ssgi_inputs_bind_group_layout,
+            ssgi_blue_noise_bind_group_layout,
+            ssgi_denoise_inputs_bind_group_layout,
             ssr_camera_bind_group_layout,
             lighting_inputs_bind_group_layout,
             ibl_bind_group_layout,
+            composite_inputs_bind_group_layout,
         )
     }
 
     fn create_object_data_bind_group(&mut self) {
-        // 1. Get a reference to a default texture view to use for padding.
-        //    The default albedo (a 1x1 white pixel) at index 0 is perfect for this.
         let default_view = &self.albedo_textures[0].1;
-
-        // 2. Flatten all the *currently loaded* texture views into one list, just like before.
         let mut all_views: Vec<&wgpu::TextureView> = Vec::new();
         all_views.extend(self.albedo_textures.iter().map(|(_, view)| view));
         all_views.extend(self.normal_textures.iter().map(|(_, view)| view));
         all_views.extend(self.mr_textures.iter().map(|(_, view)| view));
         all_views.extend(self.emission_textures.iter().map(|(_, view)| view));
 
-        // 3. Pad the list to the required size.
-        //    `MAX_TOTAL_TEXTURES` should be the same constant used in your layout (e.g., 4096).
         let current_len = all_views.len();
         if current_len < MAX_TOTAL_TEXTURES as usize {
-            // Add the default view to the list until it reaches the required length.
             all_views.resize(MAX_TOTAL_TEXTURES as usize, default_view);
         }
 
-        // 4. Create the bind group. `all_views` now has the exact length required by the layout.
         self.object_data_bind_group = Some(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 layout: self.object_data_bind_group_layout.as_ref().unwrap(),
@@ -1419,7 +1630,7 @@ impl DeferredRenderer {
                             .as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 1, // The single texture array binding
+                        binding: 1,
                         resource: wgpu::BindingResource::TextureViewArray(&all_views),
                     },
                     wgpu::BindGroupEntry {
@@ -1436,7 +1647,6 @@ impl DeferredRenderer {
     fn create_bind_groups(&mut self) {
         let device = &self.device;
 
-        // Bind groups for scene data (one per frame in flight)
         self.scene_data_bind_groups = (0..FRAMES_IN_FLIGHT)
             .map(|i| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1476,7 +1686,6 @@ impl DeferredRenderer {
             })
             .collect();
 
-        // Bind groups for just the camera (for SSR pass)
         self.ssr_camera_bind_groups = (0..FRAMES_IN_FLIGHT)
             .map(|i| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1490,7 +1699,6 @@ impl DeferredRenderer {
             })
             .collect();
 
-        // Bind group for SSR inputs
         self.ssr_inputs_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SSR Inputs Bind Group"),
             layout: self.ssr_inputs_bind_group_layout.as_ref().unwrap(),
@@ -1516,7 +1724,7 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(
-                        self.history_texture_view.as_ref().unwrap(),
+                        self.direct_lighting_texture_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -1532,7 +1740,6 @@ impl DeferredRenderer {
             ],
         }));
 
-        // Bind group for SSGI inputs
         self.ssgi_inputs_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SSGI Inputs Bind Group"),
             layout: self.ssgi_inputs_bind_group_layout.as_ref().unwrap(),
@@ -1558,23 +1765,80 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(
-                        self.history_texture_view.as_ref().unwrap(),
+                        self.ssgi_history_texture_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.direct_lighting_texture_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
                     resource: wgpu::BindingResource::Sampler(
                         self.gbuffer_sampler.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 6,
                     resource: wgpu::BindingResource::Sampler(self.scene_sampler.as_ref().unwrap()),
                 },
             ],
         }));
 
-        // Bind group for final lighting inputs
+        self.ssgi_blue_noise_bind_group =
+            Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSGI Blue Noise Bind Group"),
+                layout: self.ssgi_blue_noise_bind_group_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.blue_noise_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.blue_noise_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            }));
+
+        self.ssgi_denoise_inputs_bind_group =
+            Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("SSGI Denoise Inputs Bind Group"),
+                layout: self.ssgi_denoise_inputs_bind_group_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.ssgi_temporal_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.main_depth_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.gbuf_normal_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.scene_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            }));
+
         self.lighting_inputs_bind_group =
             Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Lighting Inputs Bind Group"),
@@ -1616,22 +1880,9 @@ impl DeferredRenderer {
                             self.gbuffer_sampler.as_ref().unwrap(),
                         ),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::TextureView(
-                            self.ssr_texture_view.as_ref().unwrap(),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(
-                            self.ssgi_texture_view.as_ref().unwrap(),
-                        ),
-                    },
                 ],
             }));
 
-        // Bind group for IBL textures
         self.ibl_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("IBL Bind Group"),
             layout: self.ibl_bind_group_layout.as_ref().unwrap(),
@@ -1666,9 +1917,75 @@ impl DeferredRenderer {
                 },
             ],
         }));
+
+        self.composite_inputs_bind_group =
+            Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Composite Inputs Bind Group"),
+                layout: self.composite_inputs_bind_group_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.direct_lighting_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.ssgi_denoised_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.ssr_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.gbuf_albedo_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.gbuf_emission_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.scene_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.gbuf_normal_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.gbuf_mra_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.main_depth_texture_view.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            }));
     }
 
-    fn update_uniforms(&self, render_data: &RenderData, alpha: f32) {
+    fn calculate_uniforms(
+        &self,
+        render_data: &RenderData,
+        alpha: f32,
+    ) -> (CameraUniforms, Vec<LightData>, Mat4) {
         let camera = &render_data.camera_component;
         let eye = render_data
             .previous_camera_transform
@@ -1685,11 +2002,10 @@ impl DeferredRenderer {
             camera.near_plane,
         );
 
-        // Apply the correction here
         let corrected_proj = WGPU_CLIP_SPACE_CORRECTION * projection_matrix;
-
+        let current_view_proj = corrected_proj * view_matrix;
         let inv_proj = corrected_proj.inverse();
-        let inv_view_proj = (corrected_proj * view_matrix).inverse();
+        let inv_view_proj = current_view_proj.inverse();
 
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
@@ -1698,12 +2014,10 @@ impl DeferredRenderer {
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
+            prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
+            frame_index: self.frame_index as u32,
+            _padding: [0; 3],
         };
-        self.queue.write_buffer(
-            &self.camera_buffers[self.frame_index],
-            0,
-            bytemuck::bytes_of(&camera_uniforms),
-        );
 
         let light_data: Vec<LightData> = render_data
             .lights
@@ -1731,11 +2045,8 @@ impl DeferredRenderer {
                 }
             })
             .collect();
-        self.queue.write_buffer(
-            &self.lights_buffers[self.frame_index],
-            0,
-            bytemuck::cast_slice(&light_data),
-        );
+
+        (camera_uniforms, light_data, current_view_proj)
     }
 
     fn run_shadow_pass(
@@ -1745,9 +2056,7 @@ impl DeferredRenderer {
         static_camera_view: &Mat4,
         alpha: f32,
     ) {
-        // This should be greater than the farthest shadow cascade to allow objects
-        // just outside the view to cast shadows into it.
-        const FAR_CASCADE_DISTANCE: f32 = 500.0; // The distance of the farthest shadow cascade.
+        const FAR_CASCADE_DISTANCE: f32 = 500.0;
         const MAX_SHADOW_CASTING_DISTANCE: f32 = FAR_CASCADE_DISTANCE * 1.5;
         const MAX_SHADOW_CASTING_DISTANCE_SQ: f32 =
             MAX_SHADOW_CASTING_DISTANCE * MAX_SHADOW_CASTING_DISTANCE;
@@ -1759,14 +2068,7 @@ impl DeferredRenderer {
 
         if let (Some(light), Some(shadow_pipeline)) = (shadow_light, self.shadow_pipeline.as_ref())
         {
-            assert!(
-                light.current_transform.rotation.is_normalized(),
-                "Directional light rotation is not normalized!"
-            );
-
             let camera_pos = render_data.current_camera_transform.position;
-
-            // --- Step 1: Pre-calculate culling status for all objects ---
             let mut culled_objects = HashMap::new();
             for object in &render_data.objects {
                 if object.casts_shadow {
@@ -1779,7 +2081,6 @@ impl DeferredRenderer {
                 }
             }
 
-            // --- Step 2: Calculate scene bounds using the pre-culled results ---
             let mut scene_bounds_min = Vec3::splat(f32::MAX);
             let mut scene_bounds_max = Vec3::splat(f32::MIN);
             for object in &render_data.objects {
@@ -1822,7 +2123,6 @@ impl DeferredRenderer {
                 bytemuck::bytes_of(&shadow_uniforms),
             );
 
-            // Calculate alignment for dynamic uniform buffer offsets.
             let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
             let alignment =
                 self.device.limits().min_uniform_buffer_offset_alignment as wgpu::BufferAddress;
@@ -1858,7 +2158,7 @@ impl DeferredRenderer {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: self.shadow_depth_view.as_ref().unwrap(),
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0), // Clear depth to max value.
+                            load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -1965,7 +2265,8 @@ impl DeferredRenderer {
             ..Default::default()
         });
         geometry_pass.set_pipeline(self.geometry_pipeline.as_ref().unwrap());
-        geometry_pass.set_bind_group(0, &self.scene_data_bind_groups[self.frame_index], &[]);
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        geometry_pass.set_bind_group(0, &self.scene_data_bind_groups[buffer_index], &[]);
         geometry_pass.set_bind_group(1, self.object_data_bind_group.as_ref().unwrap(), &[]);
         for object in &render_data.objects {
             if let (Some(mesh), true) = (
@@ -2001,11 +2302,32 @@ impl DeferredRenderer {
         }
     }
 
+    fn run_lighting_pass(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Lighting Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: self.direct_lighting_texture_view.as_ref().unwrap(),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        pass.set_pipeline(self.lighting_pipeline.as_ref().unwrap());
+        pass.set_bind_group(0, self.lighting_inputs_bind_group.as_ref().unwrap(), &[]);
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        pass.set_bind_group(1, &self.scene_data_bind_groups[buffer_index], &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     fn run_ssgi_pass(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("SSGI Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: self.ssgi_texture_view.as_ref().unwrap(),
+                view: self.ssgi_temporal_texture_view.as_ref().unwrap(),
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2016,7 +2338,31 @@ impl DeferredRenderer {
         });
         pass.set_pipeline(self.ssgi_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.ssgi_inputs_bind_group.as_ref().unwrap(), &[]);
-        pass.set_bind_group(1, &self.ssr_camera_bind_groups[self.frame_index], &[]);
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        pass.set_bind_group(1, &self.ssr_camera_bind_groups[buffer_index], &[]);
+        pass.set_bind_group(2, self.ssgi_blue_noise_bind_group.as_ref().unwrap(), &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    fn run_ssgi_denoise_pass(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("SSGI Denoise Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: self.ssgi_denoised_texture_view.as_ref().unwrap(),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(self.ssgi_denoise_pipeline.as_ref().unwrap());
+        pass.set_bind_group(
+            0,
+            self.ssgi_denoise_inputs_bind_group.as_ref().unwrap(),
+            &[],
+        );
         pass.draw(0..3, 0..1);
     }
 
@@ -2035,17 +2381,18 @@ impl DeferredRenderer {
         });
         pass.set_pipeline(self.ssr_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.ssr_inputs_bind_group.as_ref().unwrap(), &[]);
-        pass.set_bind_group(1, &self.ssr_camera_bind_groups[self.frame_index], &[]);
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        pass.set_bind_group(1, &self.ssr_camera_bind_groups[buffer_index], &[]);
         pass.draw(0..3, 0..1);
     }
 
-    fn run_lighting_pass(
+    fn run_composite_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Lighting Pass"),
+            label: Some("Composite Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output_view,
                 resolve_target: None,
@@ -2062,10 +2409,11 @@ impl DeferredRenderer {
             depth_stencil_attachment: None,
             ..Default::default()
         });
-        pass.set_pipeline(self.lighting_pipeline.as_ref().unwrap());
-        pass.set_bind_group(0, self.lighting_inputs_bind_group.as_ref().unwrap(), &[]);
-        pass.set_bind_group(1, &self.scene_data_bind_groups[self.frame_index], &[]);
-        pass.set_bind_group(2, self.ibl_bind_group.as_ref().unwrap(), &[]);
+        pass.set_pipeline(self.composite_pipeline.as_ref().unwrap());
+        pass.set_bind_group(0, self.composite_inputs_bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(1, self.ibl_bind_group.as_ref().unwrap(), &[]);
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        pass.set_bind_group(2, &self.scene_data_bind_groups[buffer_index], &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2086,7 +2434,6 @@ impl DeferredRenderer {
         };
 
         for i in 0..NUM_CASCADES {
-            // 1. Get the world-space corners of this cascade's frustum slice
             let z_near = CASCADE_SPLITS[i];
             let z_far = CASCADE_SPLITS[i + 1];
 
@@ -2109,12 +2456,10 @@ impl DeferredRenderer {
             let frustum_corners_world: [Vec3; 8] =
                 std::array::from_fn(|i| (inv_camera_view * corners_view[i].extend(1.0)).xyz());
 
-            // 2. Center the light on the cascade's frustum slice
             let world_center = frustum_corners_world.iter().sum::<Vec3>() / 8.0;
 
             let light_view = Mat4::look_at_rh(world_center - light_dir, world_center, Vec3::Y);
 
-            // 3. Calculate the tightest possible orthographic projection around the cascade
             let mut cascade_min = Vec3::splat(f32::MAX);
             let mut cascade_max = Vec3::splat(f32::MIN);
             for corner in frustum_corners_world {
@@ -2123,7 +2468,6 @@ impl DeferredRenderer {
                 cascade_max = cascade_max.max(trf.xyz());
             }
 
-            // 4. Expand the tight projection to include the entire scene's depth
             let mut scene_min_z = f32::MAX;
             let mut scene_max_z = f32::MIN;
             for corner in &scene_corners {
@@ -2132,22 +2476,18 @@ impl DeferredRenderer {
                 scene_max_z = scene_max_z.max(trf.z);
             }
 
-            // 5. Create the final projection matrix
             let light_proj = Mat4::orthographic_rh(
                 cascade_min.x,
                 cascade_max.x,
                 cascade_min.y,
                 cascade_max.y,
-                // THE FIX: Convert negative Z coordinates into positive distances
                 -scene_max_z,
                 -scene_min_z,
             );
 
-            // 6. Finalize and store
             let final_light_vp = light_proj * light_view;
             uniforms.cascades[i] = CascadeUniform {
                 light_view_proj: final_light_vp.to_cols_array_2d(),
-                // Store the depth value in the first component of the array.
                 split_depth: [-z_far, 0.0, 0.0, 0.0],
             };
         }
@@ -2164,32 +2504,39 @@ impl RenderTrait for DeferredRenderer {
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
 
-            // Recreate all screen-size dependent textures and their bind groups
             self.create_render_target_textures();
             self.create_bind_groups();
         }
     }
 
     fn render(&mut self) -> Result<(), RendererError> {
-        let Some(ref render_data) = self.current_render_data.as_ref() else {
+        let Some(render_data) = &self.current_render_data else {
             return Ok(());
         };
 
         let now = Instant::now();
-        let actual_logic_duration =
-            self.last_timestamp
-                .map_or(self.logic_frame_duration, |last_ts| {
-                    let duration = render_data.timestamp.saturating_duration_since(last_ts);
-                    if duration > Duration::from_millis(200) {
-                        self.logic_frame_duration
-                    } else {
-                        duration
-                    }
-                });
-        let time_since_current = now.saturating_duration_since(render_data.timestamp);
-        let alpha = (time_since_current.as_secs_f32() / actual_logic_duration.as_secs_f32())
-            .clamp(0.0, 1.0);
+        let time_since_last_update = now.saturating_duration_since(render_data.timestamp);
+        let alpha = (time_since_last_update.as_secs_f32()
+            / self.logic_frame_duration.as_secs_f32())
+        .clamp(0.0, 1.0);
         self.last_timestamp = Some(render_data.timestamp);
+
+        let (camera_uniforms, light_data, new_view_proj) =
+            self.calculate_uniforms(render_data, alpha);
+
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        self.queue.write_buffer(
+            &self.camera_buffers[buffer_index],
+            0,
+            bytemuck::bytes_of(&camera_uniforms),
+        );
+        self.queue.write_buffer(
+            &self.lights_buffers[buffer_index],
+            0,
+            bytemuck::cast_slice(&light_data),
+        );
+
+        self.prev_view_proj = new_view_proj;
 
         let output_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -2207,9 +2554,6 @@ impl RenderTrait for DeferredRenderer {
 
         let output_view = output_frame.texture.create_view(&Default::default());
 
-        // --- Update Uniforms ---
-        self.update_uniforms(render_data, alpha);
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2222,35 +2566,29 @@ impl RenderTrait for DeferredRenderer {
         let up = camera_transform.up();
         let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
 
-        // --- 1. Shadow Pass ---
         self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
-
-        // --- 2. Geometry Pass ---
         self.run_geometry_pass(&mut encoder, render_data, alpha);
+        self.run_lighting_pass(&mut encoder);
 
-        // --- 3. SSGI Pass ---
+        // --- SSGI PASSES ---
         self.run_ssgi_pass(&mut encoder);
-
-        // --- 4. SSR Pass ---
-        self.run_ssr_pass(&mut encoder);
-
-        // --- 5. Lighting/Composite Pass ---
-        self.run_lighting_pass(&mut encoder, &output_view);
-
-        // --- 6. Copy to History Buffer ---
+        self.run_ssgi_denoise_pass(&mut encoder);
         encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &output_frame.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+            self.ssgi_denoised_texture.as_ref().unwrap().as_image_copy(),
+            self.ssgi_history_texture.as_ref().unwrap().as_image_copy(),
+            wgpu::Extent3d {
+                width: self.surface_config.width,
+                height: self.surface_config.height,
+                depth_or_array_layers: 1,
             },
-            wgpu::TexelCopyTextureInfo {
-                texture: self.history_texture.as_ref().unwrap(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+        );
+
+        self.run_ssr_pass(&mut encoder);
+        self.run_composite_pass(&mut encoder, &output_view);
+
+        encoder.copy_texture_to_texture(
+            output_frame.texture.as_image_copy(),
+            self.history_texture.as_ref().unwrap().as_image_copy(),
             wgpu::Extent3d {
                 width: self.surface_config.width,
                 height: self.surface_config.height,
@@ -2261,7 +2599,7 @@ impl RenderTrait for DeferredRenderer {
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();
 
-        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+        self.frame_index = self.frame_index.wrapping_add(1);
 
         Ok(())
     }
@@ -2278,7 +2616,7 @@ impl RenderTrait for DeferredRenderer {
             }
             RenderMessage::CreateTexture {
                 id,
-                name,
+                name: _,
                 kind,
                 data,
                 format,
@@ -2294,7 +2632,7 @@ impl RenderTrait for DeferredRenderer {
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
             RenderMessage::Resize(size) => self.resize(size),
-            RenderMessage::Shutdown => { /* Handle shutdown */ }
+            RenderMessage::Shutdown => {}
         }
     }
 
@@ -2310,15 +2648,14 @@ impl RenderTrait for DeferredRenderer {
         let mut newly_completed = Vec::new();
 
         self.pending_materials.retain(|mat_data| {
-            // Helper to resolve a handle ID to a final GPU index
             let resolve = |id: Option<usize>| -> (bool, Option<i32>) {
                 match id {
-                    None => (true, Some(0)), // No texture needed, so it's "ready"
+                    None => (true, Some(0)),
                     Some(handle_id) => {
                         if let Some(&gpu_index) = self.handle_id_to_texture_index.get(&handle_id) {
-                            (true, Some(gpu_index as i32)) // Found it! It's ready.
+                            (true, Some(gpu_index as i32))
                         } else {
-                            (false, None) // Not found yet. Not ready.
+                            (false, None)
                         }
                     }
                 }
@@ -2329,34 +2666,22 @@ impl RenderTrait for DeferredRenderer {
             let (mr_ready, mr_idx) = resolve(mat_data.metallic_roughness_texture_id);
             let (emission_ready, emission_idx) = resolve(mat_data.emission_texture_id);
 
-            // If all textures this material needs are ready...
             if albedo_ready && normal_ready && mr_ready && emission_ready {
-                // Get the local indices first (e.g., albedo_idx might be 5, meaning the 5th albedo texture)
                 let albedo_local_idx = albedo_idx.unwrap();
                 let normal_local_idx = normal_idx.unwrap();
                 let mr_local_idx = mr_idx.unwrap();
                 let emission_local_idx = emission_idx.unwrap();
 
-                // --- Calculate Final, Global Indices ---
-                // The albedo textures are first, so their offset is 0.
                 let albedo_final_idx = albedo_local_idx;
-
-                // The normal textures come after all albedo textures.
                 let normal_final_idx = self.albedo_textures.len() as i32 + normal_local_idx;
-
-                // The MR textures come after all albedo and normal textures.
                 let mr_final_idx =
                     (self.albedo_textures.len() + self.normal_textures.len()) as i32 + mr_local_idx;
-
-                // The emission textures are last.
                 let emission_final_idx = (self.albedo_textures.len()
                     + self.normal_textures.len()
                     + self.mr_textures.len()) as i32
                     + emission_local_idx;
 
-                // Create the final material struct using these new indices
                 let final_material = Material {
-                    // Use the full path
                     albedo: mat_data.albedo,
                     metallic: mat_data.metallic,
                     roughness: mat_data.roughness,
@@ -2370,13 +2695,12 @@ impl RenderTrait for DeferredRenderer {
                 };
 
                 newly_completed.push((mat_data.id, final_material));
-                return false; // Remove from pending list
+                return false;
             }
 
-            true // Keep in pending list
+            true
         });
 
-        // Add all newly completed materials to the renderer's main storage
         for (id, material) in newly_completed {
             if let Err(e) = self.add_material(id, material) {
                 warn!("Failed to add material {}: {}", id, e);

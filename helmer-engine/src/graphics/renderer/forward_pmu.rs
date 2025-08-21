@@ -1107,6 +1107,9 @@ impl ForwardRendererPMU {
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
+            prev_view_proj: [[0.0; 4]; 4], // PLACEHOLDER
+            frame_index: 0, // PLACEHOLDER,
+            _padding: [0; 3],
         };
         self.queue.write_buffer(
             &self.camera_buffers[self.frame_index],

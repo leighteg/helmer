@@ -258,7 +258,7 @@ pub struct RenderData {
 // --- SHARED SHADER DATA STRUCTS ---
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct CameraUniforms {
     pub view_matrix: [[f32; 4]; 4],
     pub projection_matrix: [[f32; 4]; 4],
@@ -266,6 +266,9 @@ pub struct CameraUniforms {
     pub inverse_view_projection_matrix: [[f32; 4]; 4],
     pub view_position: [f32; 3],
     pub light_count: u32,
+    pub prev_view_proj: [[f32; 4]; 4],
+    pub frame_index: u32,
+    pub _padding: [u32; 3],
 }
 
 #[repr(C)]

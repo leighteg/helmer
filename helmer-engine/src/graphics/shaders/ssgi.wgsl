@@ -19,14 +19,18 @@ struct Camera {
     prev_view_proj: mat4x4<f32>, 
     frame_index: u32,
 };
+
+// These are now half-resolution inputs
 @group(0) @binding(0) var t_normal: texture_2d<f32>;
-@group(0) @binding(1) var t_albedo: texture_2d<f32>;
-@group(0) @binding(2) var t_depth: texture_depth_2d;
+@group(0) @binding(1) var t_albedo: texture_2d<f32>; // Not used directly, but kept for layout consistency
+@group(0) @binding(2) var t_depth: texture_2d<f32>; // Now R32Float, not texture_depth_2d
 @group(0) @binding(3) var t_history: texture_2d<f32>;
 @group(0) @binding(4) var t_direct_lighting : texture_2d<f32>;
 @group(0) @binding(5) var s_gbuffer: sampler;
-@group(0) @binding(6) var s_history: sampler;
+@group(0) @binding(6) var s_scene: sampler;
+
 @group(1) @binding(0) var<uniform> camera: Camera;
+
 @group(2) @binding(0) var t_blue_noise: texture_2d<f32>;
 @group(2) @binding(1) var s_blue_noise: sampler;
 
@@ -46,9 +50,9 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-fn world_from_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+fn world_from_depth(uv: vec2<f32>, depth: f32, inv_vp: mat4x4<f32>) -> vec3<f32> {
     let ndc = vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
-    let world = camera.inverse_view_projection_matrix * ndc;
+    let world = inv_vp * ndc;
     return world.xyz / world.w;
 }
 
@@ -78,13 +82,14 @@ fn cosine_sample_hemisphere(r: vec2<f32>) -> vec3<f32> {
 // --- MAIN SHADER ---
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let frag_coord = vec2<u32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth))));
-    let depth = textureLoad(t_depth, frag_coord, 0);
+    let frag_coord = vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth))));
+    let depth = textureLoad(t_depth, frag_coord, 0).r;
     if (depth >= 1.0) { discard; }
 
     let origin_vs = view_pos_from_uv_depth(in.uv, depth);
+    let normal_packed = textureLoad(t_normal, frag_coord, 0).xyz;
+    let world_normal = normalize(normal_packed * 2.0 - 1.0);
 
-    let world_normal = normalize(textureLoad(t_normal, frag_coord, 0).xyz * 2.0 - 1.0);
     let normal_matrix = mat3x3<f32>(camera.view_matrix[0].xyz, camera.view_matrix[1].xyz, camera.view_matrix[2].xyz);
     let normal_vs = normalize(normal_matrix * world_normal);
     
@@ -110,16 +115,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             if (any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0))) { break; }
 
-            let non_linear_depth_at_sample = textureSample(t_depth, s_history, sample_uv);
-            let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, non_linear_depth_at_sample);
+            // *** FIX: Use the non-filtering sampler (s_gbuffer) for the non-filterable depth texture ***
+            let depth_at_sample = textureSample(t_depth, s_gbuffer, sample_uv).r;
+            let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, depth_at_sample);
 
             let ray_depth = -sample_pos_vs.z;
             let scene_depth = -scene_vs_at_sample.z;
 
             if (ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS) {
-                let hit_light = textureSample(t_direct_lighting, s_history, sample_uv).rgb;
-                let hit_albedo = textureSample(t_albedo, s_history, sample_uv).rgb;
-                indirect_light += hit_light * hit_albedo;
+                let hit_light = textureSample(t_direct_lighting, s_scene, sample_uv).rgb;
+                indirect_light += hit_light;
                 break;
             }
         }
@@ -127,28 +132,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let ssgi_result = indirect_light / f32(NUM_RAYS);
     
-    // --- Temporal Blending with History Rejection ---
-    let world_pos = world_from_depth(in.uv, depth);
+    // --- Temporal Blending ---
+    let world_pos = world_from_depth(in.uv, depth, camera.inverse_view_projection_matrix);
     var prev_clip = camera.prev_view_proj * vec4(world_pos, 1.0);
     prev_clip /= prev_clip.w;
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
     
-    let prev_result = textureSample(t_history, s_history, prev_uv).rgb;
-
-    let prev_normal_packed = textureSample(t_normal, s_history, prev_uv).xyz;
-    let prev_normal = normalize(prev_normal_packed * 2.0 - 1.0);
-    let normal_similarity = dot(world_normal, prev_normal);
-
-    let prev_depth = textureSample(t_depth, s_history, prev_uv);
-    let prev_world_pos = world_from_depth(prev_uv, prev_depth);
-    let world_dist = distance(world_pos, prev_world_pos);
+    let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
     
-    var adaptive_blend_factor = BLEND_FACTOR;
-    if (normal_similarity < 0.9 || world_dist > 0.75) {
-        adaptive_blend_factor = 1.0;
-    }
-    
-    let blended_light = mix(prev_result, ssgi_result, adaptive_blend_factor); 
+    let blended_light = mix(prev_result, ssgi_result, BLEND_FACTOR); 
     
     return vec4<f32>(blended_light, 1.0);
 }

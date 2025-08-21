@@ -22,7 +22,7 @@ struct VertexOutput {
 //=============== BINDINGS ===============//
 // --- Pass Inputs ---
 @group(0) @binding(0) var direct_lighting_tex: texture_2d<f32>;
-@group(0) @binding(1) var ssgi_tex: texture_2d<f32>;
+@group(0) @binding(1) var ssgi_tex: texture_2d<f32>; // Now receives the upsampled result
 @group(0) @binding(2) var ssr_tex: texture_2d<f32>;
 @group(0) @binding(3) var albedo_tex: texture_2d<f32>;
 @group(0) @binding(4) var emission_tex: texture_2d<f32>;
@@ -51,9 +51,11 @@ fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> ve
 @vertex
 fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
-    let x = f32(i32(in_vertex_index) / 2);
-    let y = f32(i32(in_vertex_index) & 1);
-    out.tex_coords = vec2<f32>(x * 2.0, y * 2.0);
+    // Generate a fullscreen triangle from vertex indices
+    out.tex_coords = vec2<f32>(
+        f32((in_vertex_index << 1u) & 2u),
+        f32(in_vertex_index & 2u)
+    );
     out.clip_position = vec4<f32>(
         out.tex_coords.x * 2.0 - 1.0,
         1.0 - out.tex_coords.y * 2.0,
@@ -70,10 +72,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = albedo_sample.a;
     let emission = textureSample(emission_tex, scene_sampler, in.tex_coords).rgb;
 
-    // **FIX**: Check for emissive surfaces. If emissive, return early.
     let emission_strength = length(emission);
     if (emission_strength > EMISSIVE_THRESHOLD) {
-        // Apply tonemapping and gamma correction to emission.
         let tonemapped = emission / (emission + vec3<f32>(1.0));
         let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
         return vec4<f32>(gamma_corrected, alpha);
@@ -86,7 +86,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ssr_confidence = ssr_sample.a;
 
     // --- IBL Fallback Calculation ---
-    // We need to recalculate some PBR variables for the IBL fallback
     let mra = textureSample(mra_tex, scene_sampler, in.tex_coords);
     let metallic = mra.r;
     let roughness = mra.g;
@@ -118,13 +117,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     // --- Final Combination ---
-    // Combine local indirect (SSGI) with global indirect (IBL)
     let total_indirect_diffuse = (indirect_diffuse_ssgi + diffuse_ibl) * kD_ibl;
-    
-    // Use SSR where confident, otherwise fall back to IBL specular
     let total_indirect_specular = mix(specular_ibl, indirect_specular_ssr, ssr_confidence);
-    
-    // Final color is direct + indirect diffuse + indirect specular, all affected by AO
     let final_hdr_color = (direct_light + total_indirect_diffuse + total_indirect_specular) * ao;
 
     // Tonemapping and Gamma Correction

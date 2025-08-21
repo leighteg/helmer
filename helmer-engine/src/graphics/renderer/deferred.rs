@@ -1,5 +1,3 @@
-//! src/graphics/renderer/deferred_renderer.rs
-
 use crate::{
     graphics::renderer::{
         error::RendererError,

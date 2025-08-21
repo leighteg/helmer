@@ -16,7 +16,7 @@ struct Camera {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
-    prev_view_proj: mat4x4<f32>,
+    prev_view_proj: mat4x4<f32>, 
     frame_index: u32,
 };
 @group(0) @binding(0) var t_normal: texture_2d<f32>;
@@ -80,17 +80,17 @@ fn cosine_sample_hemisphere(r: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let frag_coord = vec2<u32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth))));
     let depth = textureLoad(t_depth, frag_coord, 0);
-    if depth >= 1.0 { discard; }
+    if (depth >= 1.0) { discard; }
 
     let origin_vs = view_pos_from_uv_depth(in.uv, depth);
 
     let world_normal = normalize(textureLoad(t_normal, frag_coord, 0).xyz * 2.0 - 1.0);
     let normal_matrix = mat3x3<f32>(camera.view_matrix[0].xyz, camera.view_matrix[1].xyz, camera.view_matrix[2].xyz);
     let normal_vs = normalize(normal_matrix * world_normal);
-
+    
     let tangent_to_view = create_onb(normal_vs);
     var indirect_light = vec3<f32>(0.0);
-
+    
     let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise));
     let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting)) / blue_noise_dims;
     let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
@@ -99,16 +99,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let r = fract(blue_noise + vec2<f32>(f32(i) * 0.137, f32(camera.frame_index) * 0.379));
         let ray_dir_tangent = cosine_sample_hemisphere(r);
         let ray_dir_vs = tangent_to_view * ray_dir_tangent;
-
+        
         for (var j = 1; j <= NUM_STEPS; j += 1) {
             let sample_pos_vs = origin_vs + ray_dir_vs * RAY_STEP_SIZE * f32(j);
-
+            
             var sample_pos_clip = camera.projection_matrix * vec4(sample_pos_vs, 1.0);
-            if sample_pos_clip.w <= EPSILON { break; }
+            if (sample_pos_clip.w <= EPSILON) { break; }
             sample_pos_clip /= sample_pos_clip.w;
             let sample_uv = sample_pos_clip.xy * vec2(0.5, -0.5) + 0.5;
 
-            if any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0)) { break; }
+            if (any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0))) { break; }
 
             let non_linear_depth_at_sample = textureSample(t_depth, s_history, sample_uv);
             let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, non_linear_depth_at_sample);
@@ -116,7 +116,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let ray_depth = -sample_pos_vs.z;
             let scene_depth = -scene_vs_at_sample.z;
 
-            if ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS {
+            if (ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS) {
                 let hit_light = textureSample(t_direct_lighting, s_history, sample_uv).rgb;
                 let hit_albedo = textureSample(t_albedo, s_history, sample_uv).rgb;
                 indirect_light += hit_light * hit_albedo;
@@ -130,37 +130,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Temporal Blending with History Rejection ---
     let world_pos = world_from_depth(in.uv, depth);
     var prev_clip = camera.prev_view_proj * vec4(world_pos, 1.0);
-    prev_clip /= (prev_clip.w + EPSILON);
+    prev_clip /= prev_clip.w;
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
-
+    
     let prev_result = textureSample(t_history, s_history, prev_uv).rgb;
 
-// --- History Rejection based on velocity and geometry ---
+    let prev_normal_packed = textureSample(t_normal, s_history, prev_uv).xyz;
+    let prev_normal = normalize(prev_normal_packed * 2.0 - 1.0);
+    let normal_similarity = dot(world_normal, prev_normal);
+
     let prev_depth = textureSample(t_depth, s_history, prev_uv);
     let prev_world_pos = world_from_depth(prev_uv, prev_depth);
     let world_dist = distance(world_pos, prev_world_pos);
-
-// A smaller blend factor stabilizes the image faster, but causes more ghosting.
-// We increase the blend factor (i.e., use more of the current frame's noisy result) 
-// if the reprojected sample is likely invalid.
-    let history_validity = 1.0 - saturate(world_dist / 0.75); // As distance increases, validity decreases
-    let adaptive_blend_factor = mix(1.0, BLEND_FACTOR, history_validity);
-
-// Clamp the history sample to the neighborhood of the current pixel to prevent ghosting
-// from disoccluded bright spots. This is a form of color box filtering.
-    var aabb_max = vec3<f32>(-1.0);
-    var aabb_min = vec3<f32>(1.0);
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            let offset_uv = in.uv + vec2<f32>(f32(x), f32(y)) / vec2<f32>(textureDimensions(t_direct_lighting));
-            let neighbor_color = textureSample(t_direct_lighting, s_history, offset_uv).rgb;
-            aabb_max = max(aabb_max, neighbor_color);
-            aabb_min = min(aabb_min, neighbor_color);
-        }
+    
+    var adaptive_blend_factor = BLEND_FACTOR;
+    if (normal_similarity < 0.9 || world_dist > 0.75) {
+        adaptive_blend_factor = 1.0;
     }
-    let clamped_prev_result = clamp(prev_result, aabb_min, aabb_max);
-
-    let blended_light = mix(clamped_prev_result, ssgi_result, adaptive_blend_factor);
-
+    
+    let blended_light = mix(prev_result, ssgi_result, adaptive_blend_factor); 
+    
     return vec4<f32>(blended_light, 1.0);
 }

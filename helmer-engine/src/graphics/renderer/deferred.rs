@@ -1722,7 +1722,7 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(
-                        self.direct_lighting_texture_view.as_ref().unwrap(),
+                        self.history_texture_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {

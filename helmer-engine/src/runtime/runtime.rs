@@ -205,7 +205,7 @@ impl Runtime {
                 );
 
                 ecs_guard.system_scheduler.register_system(
-                    CleanupPhysicsSystem {},
+                    CleanupPhysicsSystem::default(),
                     4,
                     vec![],
                     HashSet::from([TypeId::of::<Transform>()]),

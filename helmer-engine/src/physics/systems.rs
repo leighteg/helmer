@@ -5,6 +5,7 @@ use rapier3d::{
     math::Isometry,
     prelude::{ColliderBuilder, RigidBodyBuilder},
 };
+use tracing::warn;
 use std::any::TypeId;
 
 use crate::{
@@ -276,7 +277,40 @@ impl System for SyncPhysicsToEntitiesSystem {
 // This system removes physics bodies from Rapier when their corresponding
 // ECS entity has been destroyed.
 //=====================================================================
-pub struct CleanupPhysicsSystem {}
+pub struct CleanupPhysicsSystem {
+    /// Maximum safe coordinate value before Rapier starts having issues
+    /// Based on f32 precision and typical broad-phase limits
+    pub max_coordinate: f32,
+}
+
+impl Default for CleanupPhysicsSystem {
+    fn default() -> Self {
+        Self {
+            // rapier panics around -339 million
+            max_coordinate: 100_000_000.0,
+        }
+    }
+}
+
+impl CleanupPhysicsSystem {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_bounds(max_coordinate: f32) -> Self {
+        Self { max_coordinate }
+    }
+
+    /// Check if a position is within safe Rapier bounds
+    fn is_position_safe(&self, pos: &nalgebra::Vector3<f32>) -> bool {
+        pos.x.abs() < self.max_coordinate 
+            && pos.y.abs() < self.max_coordinate 
+            && pos.z.abs() < self.max_coordinate
+            && pos.x.is_finite() 
+            && pos.y.is_finite() 
+            && pos.z.is_finite()
+    }
+}
 
 impl System for CleanupPhysicsSystem {
     fn name(&self) -> &str {
@@ -285,30 +319,55 @@ impl System for CleanupPhysicsSystem {
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
         let mut dead_entities: Vec<Entity> = Vec::new();
+        let mut out_of_bounds_entities: Vec<Entity> = Vec::new();
         
-        // Pass 1: Collect IDs of destroyed entities from the persistent map.
-        if let Some(physics_resource) = ecs.get_resource::<PhysicsResource>() {
-            for &entity_id in physics_resource.physics_entities.keys() {
-                if !ecs.entity_exists(entity_id) {
-                    dead_entities.push(entity_id);
+        // Pass 1: Collect entities that need to be destroyed (separate scope to avoid borrow conflicts)
+        {
+            if let Some(physics_resource) = ecs.get_resource::<PhysicsResource>() {
+                for (&entity_id, &handle) in physics_resource.physics_entities.iter() {
+                    // Check if entity was destroyed
+                    if !ecs.entity_exists(entity_id) {
+                        dead_entities.push(entity_id);
+                        continue;
+                    }
+
+                    // Check if physics body is out of bounds
+                    if let Some(rigid_body) = physics_resource.rigid_body_set.get(handle.rigid_body) {
+                        let position = rigid_body.translation();
+                        
+                        if !self.is_position_safe(position) {
+                            warn!(
+                                "Entity {} is out of bounds at [{:.2}, {:.2}, {:.2}], destroying to prevent Rapier panic",
+                                entity_id, position.x, position.y, position.z
+                            );
+                            out_of_bounds_entities.push(entity_id);
+                        }
+                    }
                 }
             }
+        } // End borrow scope
+
+        // Pass 2: Destroy out-of-bounds ECS entities
+        for entity_id in &out_of_bounds_entities {
+            ecs.destroy_entity(*entity_id);
         }
 
-        // Pass 2: Remove the bodies and clean up the map.
-        if !dead_entities.is_empty() {
+        // Pass 3: Remove physics bodies and clean up
+        let mut all_entities_to_cleanup = dead_entities;
+        all_entities_to_cleanup.extend(out_of_bounds_entities);
+
+        if !all_entities_to_cleanup.is_empty() {
             if let Some(physics_resource) = ecs.get_resource_mut::<PhysicsResource>() {
-                for entity_id in dead_entities {
-                    // Remove the entity from our map and get its handle.
+                for entity_id in all_entities_to_cleanup {
                     if let Some(handle) = physics_resource.physics_entities.remove(&entity_id) {
-                        // Use the handle to remove the body from the simulation.
+                        // Remove the rigid body and its associated colliders
                         physics_resource.rigid_body_set.remove(
                             handle.rigid_body,
                             &mut physics_resource.island_manager,
                             &mut physics_resource.collider_set,
                             &mut physics_resource.impulse_joint_set,
                             &mut physics_resource.multibody_joint_set,
-                            true, // Also remove colliders
+                            true, // Remove associated colliders
                         );
                     }
                 }

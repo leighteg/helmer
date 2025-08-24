@@ -2997,14 +2997,17 @@ impl RenderTrait for DeferredRenderer {
         let mut newly_completed = Vec::new();
 
         self.pending_materials.retain(|mat_data| {
-            let resolve = |id: Option<usize>| -> (bool, Option<i32>) {
+            let resolve = |id: Option<usize>| -> (bool, i32) {
+                // Return i32
                 match id {
-                    None => (true, Some(0)),
+                    // No texture for this slot. It's "ready" with a sentinel index.
+                    None => (true, -1),
                     Some(handle_id) => {
                         if let Some(&gpu_index) = self.handle_id_to_texture_index.get(&handle_id) {
-                            (true, Some(gpu_index as i32))
+                            (true, gpu_index as i32)
                         } else {
-                            (false, None)
+                            // Texture asset is not loaded on GPU yet.
+                            (false, -1)
                         }
                     }
                 }
@@ -3016,19 +3019,28 @@ impl RenderTrait for DeferredRenderer {
             let (emission_ready, emission_idx) = resolve(mat_data.emission_texture_id);
 
             if albedo_ready && normal_ready && mr_ready && emission_ready {
-                let albedo_local_idx = albedo_idx.unwrap();
-                let normal_local_idx = normal_idx.unwrap();
-                let mr_local_idx = mr_idx.unwrap();
-                let emission_local_idx = emission_idx.unwrap();
+                let albedo_final_idx = albedo_idx;
 
-                let albedo_final_idx = albedo_local_idx;
-                let normal_final_idx = self.albedo_textures.len() as i32 + normal_local_idx;
-                let mr_final_idx =
-                    (self.albedo_textures.len() + self.normal_textures.len()) as i32 + mr_local_idx;
-                let emission_final_idx = (self.albedo_textures.len()
-                    + self.normal_textures.len()
-                    + self.mr_textures.len()) as i32
-                    + emission_local_idx;
+                let normal_final_idx = if normal_idx == -1 {
+                    -1
+                } else {
+                    self.albedo_textures.len() as i32 + normal_idx
+                };
+
+                let mr_final_idx = if mr_idx == -1 {
+                    -1
+                } else {
+                    (self.albedo_textures.len() + self.normal_textures.len()) as i32 + mr_idx
+                };
+
+                let emission_final_idx = if emission_idx == -1 {
+                    -1
+                } else {
+                    (self.albedo_textures.len()
+                        + self.normal_textures.len()
+                        + self.mr_textures.len()) as i32
+                        + emission_idx
+                };
 
                 let final_material = Material {
                     albedo: mat_data.albedo,

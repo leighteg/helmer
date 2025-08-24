@@ -119,7 +119,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Final Combination ---
     let total_indirect_diffuse = (indirect_diffuse_ssgi + diffuse_ibl) * kD_ibl;
     let total_indirect_specular = mix(specular_ibl, indirect_specular_ssr, ssr_confidence);
-    let final_hdr_color = (direct_light + total_indirect_diffuse + total_indirect_specular) * ao;
+    let final_hdr_color = direct_light + (total_indirect_diffuse + total_indirect_specular) * ao;
 
     // Tonemapping and Gamma Correction
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));

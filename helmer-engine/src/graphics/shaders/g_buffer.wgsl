@@ -132,20 +132,33 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var out: GBufferOutput;
     let material = materials_buffer[in.material_id];
 
-    let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
+    // --- Albedo Calculation (with fallback) ---
+    var albedo_sample = material.albedo;
+    if (material.albedo_idx >= 0i) {
+        albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
+    }
     let albedo_color = albedo_sample.rgb * material.albedo.rgb;
     let alpha = albedo_sample.a * material.albedo.a;
 
-    let mr_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
-    let ao = mr_sample.r * material.ao;
-    let metallic = mr_sample.b * material.metallic;
-    let roughness = mr_sample.g * material.roughness;
+    // --- MRA Calculation (with fallback) ---
+    var metallic = material.metallic;
+    var roughness = material.roughness;
+    var ao = material.ao;
+    if (material.metallic_roughness_idx >= 0i) {
+        // Standard GLTF ORM (Occlusion, Roughness, Metallic) texture packing
+        let mr_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
+        ao *= mr_sample.r;
+        roughness *= mr_sample.g;
+        metallic *= mr_sample.b;
+    }
 
+    // --- Emission Calculation ---
     var emission_color = material.emission_color * material.emission_strength;
     if (material.emission_idx >= 0i) {
         emission_color *= textureSample(textures[material.emission_idx], pbr_sampler, in.tex_coord).rgb;
     }
 
+    // --- Normal Mapping ---
     var N: vec3<f32>;
     if (material.normal_idx >= 0i) {
         let tangent_space_normal = textureSample(textures[material.normal_idx], pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;

@@ -1,5 +1,5 @@
 use crate::{ecs::component::Component, graphics::renderer::renderer::Vertex};
-use glam::{Quat, Vec2, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use proc::Component; // Using glam for mathematical types
 
 // --- Core Transform Component ---
@@ -40,6 +40,19 @@ impl Transform {
 
     pub fn up(&self) -> Vec3 {
         self.rotation * Vec3::Y // Assuming Y is up in local space
+    }
+
+    pub fn from_matrix(matrix: Mat4) -> Self {
+        let transformed = matrix.to_scale_rotation_translation();
+        Self {
+            position: transformed.2,
+            rotation: transformed.1,
+            scale: transformed.0,
+        }
+    }
+
+    pub fn to_matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 }
 

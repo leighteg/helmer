@@ -4,6 +4,8 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use resvg::{tiny_skia, usvg::Tree};
 use std::{
+    any::TypeId,
+    collections::HashSet,
     env,
     num::NonZeroU32,
     sync::{
@@ -29,16 +31,24 @@ use winit::{
 use crate::{
     ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler},
     graphics::{
-        config::RenderConfig, renderer::{
+        config::RenderConfig,
+        renderer::{
             deferred::DeferredRenderer,
             renderer::{
                 initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
             },
-        }, renderer_system::RenderPacket
+        },
+        renderer_system::{RenderDataSystem, RenderPacket},
     },
+    physics::{physics_resource::PhysicsResource, systems::{
+        CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem,
+        SyncPhysicsToEntitiesSystem,
+    }},
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::{
-        asset_server::{AssetKind, AssetServer, MaterialGpuData}, config::RuntimeConfig, input_manager::{InputEvent, InputManager}
+        asset_server::{AssetKind, AssetServer, MaterialGpuData},
+        config::RuntimeConfig,
+        input_manager::{InputEvent, InputManager}, scene_system::SceneSpawningSystem,
     },
 };
 
@@ -149,6 +159,68 @@ impl Runtime {
         let sender = self.render_thread_sender.clone();
 
         self.logic_thread = Some(thread::spawn(move || {
+            { // CORE ENGINE ECS BOOTSTRAP
+                let mut ecs_guard = ecs.write();
+
+                ecs_guard.add_resource(asset_server.clone());
+                ecs_guard.add_resource(RenderPacket::default());
+                ecs_guard.add_resource(PhysicsResource::new());
+
+                ecs_guard.system_scheduler.register_system(
+                    SceneSpawningSystem {},
+                    25,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+
+                // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
+                // Must run *after* game logic and *before* the physics step.
+                ecs_guard.system_scheduler.register_system(
+                    SyncEntitiesToPhysicsSystem {},
+                    20,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+
+                // Priority 10: The Physics Step. The core simulation tick.
+                // Must run *after* entities are synced to physics.
+                ecs_guard.system_scheduler.register_system(
+                    PhysicsStepSystem {},
+                    10,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+
+                // Priority 5: Post-Physics Sync. Applies simulation results back to ECS transforms.
+                // Must run *after* the physics step and *before* rendering.
+                ecs_guard.system_scheduler.register_system(
+                    SyncPhysicsToEntitiesSystem {},
+                    5,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+
+                ecs_guard.system_scheduler.register_system(
+                    CleanupPhysicsSystem {},
+                    4,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+
+                // Priority 0: Rendering. Runs last to ensure it uses the final state of all transforms.
+                ecs_guard.system_scheduler.register_system(
+                    RenderDataSystem::new(),
+                    0,
+                    vec![],
+                    HashSet::from([TypeId::of::<Transform>()]),
+                    HashSet::from([TypeId::of::<Transform>()]),
+                );
+            }
             let mut last_time = Instant::now();
             let frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
 
@@ -466,30 +538,42 @@ impl ApplicationHandler for Runtime {
                                 }
                             }
                         }
-                        
+
                         // debug toggles
                         KeyCode::KeyZ => {
                             if event.state.is_pressed() {
-                                self.config.render_config.shadow_pass = !self.config.render_config.shadow_pass;
-                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                                self.config.render_config.shadow_pass =
+                                    !self.config.render_config.shadow_pass;
+                                let _ = self
+                                    .render_thread_sender
+                                    .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
                         KeyCode::KeyG => {
                             if event.state.is_pressed() {
-                                self.config.render_config.ssgi_pass = !self.config.render_config.ssgi_pass;
-                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                                self.config.render_config.ssgi_pass =
+                                    !self.config.render_config.ssgi_pass;
+                                let _ = self
+                                    .render_thread_sender
+                                    .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
                         KeyCode::Numpad0 => {
                             if event.state.is_pressed() {
-                                self.config.render_config.direct_lighting_pass = !self.config.render_config.direct_lighting_pass;
-                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                                self.config.render_config.direct_lighting_pass =
+                                    !self.config.render_config.direct_lighting_pass;
+                                let _ = self
+                                    .render_thread_sender
+                                    .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
                         KeyCode::KeyR => {
                             if event.state.is_pressed() {
-                                self.config.render_config.ssr_pass = !self.config.render_config.ssr_pass;
-                                let _ = self.render_thread_sender.send(RenderMessage::RenderConfig(self.config.render_config));
+                                self.config.render_config.ssr_pass =
+                                    !self.config.render_config.ssr_pass;
+                                let _ = self
+                                    .render_thread_sender
+                                    .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
 
@@ -498,7 +582,7 @@ impl ApplicationHandler for Runtime {
                                 key: key_code,
                                 pressed: event.state.is_pressed(),
                             });
-                        } 
+                        }
                     }
                 }
             }

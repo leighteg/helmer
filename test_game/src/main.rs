@@ -23,7 +23,7 @@ use helmer_engine::{
     },
     runtime::{
         input_manager::{self, InputManager},
-        runtime::{RenderMessage, Runtime},
+        runtime::{RenderMessage, Runtime}, scene_system::SceneRoot,
     },
 };
 use rand::Rng;
@@ -43,9 +43,6 @@ fn main() {
     
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
-
-        ecs_guard.add_resource(RenderPacket::default());
-        ecs_guard.add_resource(PhysicsResource::new());
 
         // Priority 30: Input and high-level camera control. Runs first.
         ecs_guard.system_scheduler.register_system(
@@ -82,59 +79,12 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );*/
 
-        // Priority 20: Pre-Physics Sync. Creates physics bodies from ECS components.
-        // Must run *after* game logic and *before* the physics step.
-        ecs_guard.system_scheduler.register_system(
-            SyncEntitiesToPhysicsSystem {},
-            20,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
-        // Priority 10: The Physics Step. The core simulation tick.
-        // Must run *after* entities are synced to physics.
-        ecs_guard.system_scheduler.register_system(
-            PhysicsStepSystem {},
-            10,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
-        // Priority 5: Post-Physics Sync. Applies simulation results back to ECS transforms.
-        // Must run *after* the physics step and *before* rendering.
-        ecs_guard.system_scheduler.register_system(
-            SyncPhysicsToEntitiesSystem {},
-            5,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
-        ecs_guard.system_scheduler.register_system(
-            CleanupPhysicsSystem {},
-            4,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
-        // Priority 0: Rendering. Runs last to ensure it uses the final state of all transforms.
-        ecs_guard.system_scheduler.register_system(
-            RenderDataSystem::new(),
-            0,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
         let asset_server = app.asset_server.as_ref().unwrap().lock();
 
         // Load meshes from .glb files
         let box_handle = asset_server.load_mesh("assets/models/box.glb");
 
-        let sponza_handle = asset_server.load_mesh("assets/models/sponza.glb");
+        let sponza_handle = asset_server.load_scene("assets/models/sponza.glb");
 
         //let duck_handle = asset_server.load_mesh("assets/models/duck.glb");
 
@@ -156,24 +106,10 @@ fn main() {
         // directly to the renderer via a RenderMessage.
 
         let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
-        app.render_thread_sender
-            .send(RenderMessage::CreateMesh {
-                id: 11, // Assign a unique ID
-                vertices: uv_sphere_mesh.vertices.as_ref().unwrap().to_vec(),
-                indices: uv_sphere_mesh.indices,
-                bounds: Aabb::calculate(&uv_sphere_mesh.vertices.unwrap()),
-            })
-            .unwrap();
+        let uv_sphere_mesh_handle = asset_server.add_mesh(uv_sphere_mesh.vertices.unwrap(), uv_sphere_mesh.indices);
 
         let plane_mesh = MeshAsset::plane("plane".into());
-        app.render_thread_sender
-            .send(RenderMessage::CreateMesh {
-                id: 10, // Assign a unique ID
-                vertices: plane_mesh.vertices.as_ref().unwrap().to_vec(),
-                indices: plane_mesh.indices,
-                bounds: Aabb::calculate(&plane_mesh.vertices.unwrap()),
-            })
-            .unwrap();
+        let plane_mesh_handle = asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
         let camera_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -213,7 +149,7 @@ fn main() {
         );
         ecs_guard.add_component(
             ground_entity,
-            MeshRenderer::new(10, metal_material_handle.id, false, true),
+            MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, true),
         );
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
@@ -224,12 +160,12 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([0.02; 3]),
+                scale: glam::Vec3::ONE,
             },
         );
         ecs_guard.add_component(
             sponza_entity,
-            MeshRenderer::new(sponza_handle.id, basic_material_handle.id, true, true),
+            SceneRoot(sponza_handle),
         );
         ecs_guard.add_component(sponza_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(sponza_entity, FixedCollider {});
@@ -261,7 +197,7 @@ fn main() {
         );
         ecs_guard.add_component(
             sphere_entity,
-            MeshRenderer::new(11, metal_material_handle.id, true, true),
+            MeshRenderer::new(uv_sphere_mesh_handle.id, metal_material_handle.id, true, true),
         );
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });

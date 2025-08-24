@@ -1,7 +1,12 @@
+use crate::{
+    graphics::renderer::renderer::{Aabb, Vertex},
+    runtime::runtime::RenderMessage,
+};
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
-use glam::Vec3;
-use gltf::import_slice;
+use glam::{Mat4, Vec3};
+use gltf::{Material as GltfMaterial, Texture as GltfTexture, texture::Info};
 use hashbrown::HashMap;
+use image::GenericImageView;
 use ktx2::Reader;
 use mikktspace::Geometry;
 use parking_lot::RwLock;
@@ -10,7 +15,7 @@ use std::{
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
         mpsc,
     },
@@ -18,9 +23,6 @@ use std::{
 };
 use tracing::{info, warn};
 
-use crate::{graphics::renderer::renderer::{Aabb, Vertex}, runtime::runtime::RenderMessage};
-
-// FIX: Define AssetKind here so it's in scope.
 #[derive(Debug, Clone, Copy)]
 pub enum AssetKind {
     Albedo,
@@ -37,27 +39,99 @@ pub struct Handle<T> {
     _phantom: PhantomData<T>,
 }
 
+impl<T> Handle<T> {
+    pub fn new(id: usize) -> Self {
+        Self {
+            id,
+            _phantom: PhantomData::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Texture {
     pub dimensions: (u32, u32),
     pub data: Vec<u8>,
     pub format: wgpu::TextureFormat,
 }
 
-pub struct MaterialGpuData {
-    pub id: usize, // The Handle ID for this material
+#[derive(Debug, Clone)]
+pub struct Material {
+    pub id: usize,
     pub albedo: [f32; 4],
     pub metallic: f32,
     pub roughness: f32,
     pub ao: f32,
     pub emission_strength: f32,
     pub emission_color: [f32; 3],
-    // We send the Handle IDs of the textures, not the final indices
+    pub albedo_texture: Option<Handle<Texture>>,
+    pub normal_texture: Option<Handle<Texture>>,
+    pub metallic_roughness_texture: Option<Handle<Texture>>,
+    pub emission_texture: Option<Handle<Texture>>,
+}
+
+/// Represents a single drawable element in a scene graph, corresponding to a glTF primitive.
+#[derive(Debug, Clone)]
+pub struct SceneNode {
+    pub mesh: Handle<Mesh>,
+    pub material: Handle<Material>,
+    pub transform: glam::Mat4,
+}
+
+/// The final representation of a scene, stored in the AssetServer.
+#[derive(Debug, Clone)]
+pub struct Scene {
+    pub nodes: Vec<SceneNode>,
+}
+
+/// Temporary data returned by a worker thread after parsing a glTF file.
+/// All indices here are local to this structure's vectors.
+#[derive(Debug)]
+struct ParsedGltfScene {
+    nodes: Vec<GltfNode>,
+    meshes: Vec<(Vec<Vertex>, Vec<u32>, Aabb)>,
+    materials: Vec<IntermediateMaterial>,
+    textures: Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
+}
+
+#[derive(Debug)]
+struct GltfNode {
+    mesh_index: usize,
+    material_index: usize,
+    transform: glam::Mat4,
+}
+
+/// An intermediate material representation that uses texture indices
+/// instead of string paths, suitable for parsed scene data.
+#[derive(Debug)]
+struct IntermediateMaterial {
+    albedo: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    ao: f32,
+    emission_strength: f32,
+    emission_color: [f32; 3],
+    albedo_texture_index: Option<usize>,
+    normal_texture_index: Option<usize>,
+    metallic_roughness_texture_index: Option<usize>,
+    emission_texture_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterialGpuData {
+    pub id: usize,
+    pub albedo: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub ao: f32,
+    pub emission_strength: f32,
+    pub emission_color: [f32; 3],
     pub albedo_texture_id: Option<usize>,
     pub normal_texture_id: Option<usize>,
     pub metallic_roughness_texture_id: Option<usize>,
@@ -78,21 +152,6 @@ pub struct MaterialFile {
     pub emission_texture: Option<String>,
 }
 
-#[derive(Debug)]
-pub struct Material {
-    pub id: usize,
-    pub albedo: [f32; 4],
-    pub metallic: f32,
-    pub roughness: f32,
-    pub ao: f32,
-    pub emission_strength: f32,
-    pub emission_color: [f32; 3],
-    pub albedo_texture: Option<Handle<Texture>>,
-    pub normal_texture: Option<Handle<Texture>>,
-    pub metallic_roughness_texture: Option<Handle<Texture>>,
-    pub emission_texture: Option<Handle<Texture>>,
-}
-
 // --- WORKER THREAD COMMUNICATION ---
 
 enum AssetLoadRequest {
@@ -106,6 +165,10 @@ enum AssetLoadRequest {
         kind: AssetKind,
     },
     Material {
+        id: usize,
+        path: PathBuf,
+    },
+    Scene {
         id: usize,
         path: PathBuf,
     },
@@ -126,14 +189,17 @@ enum AssetLoadResult {
         id: usize,
         data: MaterialFile,
     },
+    Scene {
+        id: usize,
+        data: ParsedGltfScene,
+    },
 }
 
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
-    // We only store materials loaded from .ron files here for now.
-    // glTF materials are handled internally by the renderer.
     materials: Arc<RwLock<HashMap<usize, Arc<Material>>>>,
+    scenes: Arc<RwLock<HashMap<usize, Arc<Scene>>>>,
     next_id: AtomicUsize,
     request_sender: crossbeam_channel::Sender<AssetLoadRequest>,
     result_receiver: crossbeam_channel::Receiver<AssetLoadResult>,
@@ -175,6 +241,11 @@ impl AssetServer {
                                 AssetLoadResult::Material { id, data }
                             })
                         }
+                        AssetLoadRequest::Scene { id, path } => {
+                            load_and_parse(id, &path, parse_scene_glb, |id, data| {
+                                AssetLoadResult::Scene { id, data }
+                            })
+                        }
                     };
                     if let Some(result) = result {
                         if res_sender.send(result).is_err() {
@@ -190,12 +261,31 @@ impl AssetServer {
 
         Self {
             materials: Arc::new(RwLock::new(HashMap::new())),
+            scenes: Arc::new(RwLock::new(HashMap::new())),
             next_id: AtomicUsize::new(0),
             request_sender,
             result_receiver,
             render_sender,
             worker_handles,
         }
+    }
+
+    pub fn add_mesh(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Handle<Mesh> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.render_sender
+            .send(RenderMessage::CreateMesh {
+                id,
+                vertices: vertices.clone(),
+                indices,
+                bounds: Aabb::calculate(&vertices),
+            })
+            .unwrap_or_else(|e| {
+                warn!(
+                    "Failed to send procedural mesh '{}' to render thread: {}",
+                    id, e
+                );
+            });
+        Handle::new(id)
     }
 
     pub fn load_mesh<P: AsRef<Path>>(&self, path: P) -> Handle<Mesh> {
@@ -238,6 +328,23 @@ impl AssetServer {
         }
     }
 
+    pub fn load_scene<P: AsRef<Path>>(&self, path: P) -> Handle<Scene> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = AssetLoadRequest::Scene {
+            id,
+            path: path.as_ref().to_path_buf(),
+        };
+        self.request_sender.send(request).unwrap();
+        Handle {
+            id,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn get_scene(&self, handle: &Handle<Scene>) -> Option<Arc<Scene>> {
+        self.scenes.read().get(&handle.id).cloned()
+    }
+
     pub fn update(&self) {
         while let Ok(result) = self.result_receiver.try_recv() {
             match result {
@@ -267,7 +374,7 @@ impl AssetServer {
                             data: texture_data,
                             format,
                             width,
-                            height
+                            height,
                         })
                         .unwrap();
                 }
@@ -276,6 +383,88 @@ impl AssetServer {
                     self.render_sender
                         .send(RenderMessage::CreateMaterial(material_gpu_data))
                         .unwrap();
+                }
+                AssetLoadResult::Scene { id: scene_id, data } => {
+                    let mut texture_map: HashMap<usize, usize> = HashMap::new(); // local_index -> global_handle_id
+                    for (i, (name, kind, tex_data, format, (width, height))) in
+                        data.textures.into_iter().enumerate()
+                    {
+                        let tex_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                        self.render_sender
+                            .send(RenderMessage::CreateTexture {
+                                id: tex_id,
+                                name,
+                                kind,
+                                data: tex_data,
+                                format,
+                                width,
+                                height,
+                            })
+                            .unwrap();
+                        texture_map.insert(i, tex_id);
+                    }
+
+                    let mut material_map: HashMap<usize, usize> = HashMap::new();
+                    for (i, mat) in data.materials.into_iter().enumerate() {
+                        let mat_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+
+                        let resolve_tex = |local_idx_opt: Option<usize>| -> Option<usize> {
+                            local_idx_opt.and_then(|local_idx| texture_map.get(&local_idx).copied())
+                        };
+
+                        let gpu_data = MaterialGpuData {
+                            id: mat_id,
+                            albedo: mat.albedo,
+                            metallic: mat.metallic,
+                            roughness: mat.roughness,
+                            ao: mat.ao,
+                            emission_strength: mat.emission_strength,
+                            emission_color: mat.emission_color,
+                            albedo_texture_id: resolve_tex(mat.albedo_texture_index),
+                            normal_texture_id: resolve_tex(mat.normal_texture_index),
+                            metallic_roughness_texture_id: resolve_tex(
+                                mat.metallic_roughness_texture_index,
+                            ),
+                            emission_texture_id: resolve_tex(mat.emission_texture_index),
+                        };
+
+                        self.render_sender
+                            .send(RenderMessage::CreateMaterial(gpu_data))
+                            .unwrap();
+                        material_map.insert(i, mat_id);
+                    }
+
+                    let mut mesh_map: HashMap<usize, usize> = HashMap::new();
+                    for (i, (vertices, indices, bounds)) in data.meshes.into_iter().enumerate() {
+                        let mesh_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                        self.render_sender
+                            .send(RenderMessage::CreateMesh {
+                                id: mesh_id,
+                                vertices,
+                                indices,
+                                bounds,
+                            })
+                            .unwrap();
+                        mesh_map.insert(i, mesh_id);
+                    }
+
+                    let scene_nodes = data
+                        .nodes
+                        .into_iter()
+                        .filter_map(|node| {
+                            let mesh_id = mesh_map.get(&node.mesh_index)?;
+                            let material_id = material_map.get(&node.material_index)?;
+                            Some(SceneNode {
+                                mesh: Handle::new(*mesh_id),
+                                material: Handle::new(*material_id),
+                                transform: node.transform,
+                            })
+                        })
+                        .collect();
+
+                    let scene = Arc::new(Scene { nodes: scene_nodes });
+                    self.scenes.write().insert(scene_id, scene);
+                    info!("Successfully loaded scene with handle {}", scene_id);
                 }
             }
         }
@@ -313,6 +502,7 @@ fn request_path(req: &AssetLoadRequest) -> &Path {
         AssetLoadRequest::Mesh { path, .. } => path,
         AssetLoadRequest::Texture { path, .. } => path,
         AssetLoadRequest::Material { path, .. } => path,
+        AssetLoadRequest::Scene { path, .. } => path,
     }
 }
 
@@ -341,55 +531,35 @@ where
     }
 }
 
-/// A robust KTX2 decoder that handles both uncompressed and supercompressed (Basis) files.
 fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
     let reader = Reader::new(bytes).map_err(|e| e.to_string())?;
     let header = reader.header();
-
     let dimensions = (header.pixel_width, header.pixel_height);
 
-    // Case 1: The KTX2 file contains uncompressed data in a known format.
     if let Some(format) = header.format {
         let wgpu_format = match format {
             ktx2::Format::R8G8B8A8_UNORM => wgpu::TextureFormat::Rgba8Unorm,
             ktx2::Format::R8G8B8A8_SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
             _ => return Err(format!("Unsupported direct KTX2 format: {:?}", format)),
         };
-
-        info!("KTX2 is uncompressed {:?}. Using raw data.", wgpu_format);
-        let level_data = reader
-            .levels()
-            .next()
-            .ok_or("No image levels found in uncompressed KTX2 file.")?;
+        let level_data = reader.levels().next().ok_or("No image levels found")?;
         return Ok((level_data.data.to_vec(), wgpu_format, dimensions));
     }
 
-    // Case 2: The KTX2 file is supercompressed with Basis Universal.
-    info!("KTX2 is supercompressed. Attempting to transcode...");
     let mut transcoder = Transcoder::new();
-
     if transcoder.prepare_transcoding(bytes).is_err() {
-        return Err("Failed to prepare Basis Universal transcoder. The KTX2 file might be invalid or not supercompressed.".to_string());
+        return Err("Failed to prepare Basis Universal transcoder.".to_string());
     }
 
-    // We'll transcode to BC7, a common high-quality format for desktop GPUs.
     let target_basis_format = TranscoderTextureFormat::BC7_RGBA;
     let target_wgpu_format = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
-
     let transcode_params = TranscodeParameters {
         level_index: 0,
         ..Default::default()
     };
-
     match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
-        Ok(transcoded_data) => {
-            info!("Successfully transcoded KTX2 to {:?}.", target_wgpu_format);
-            Ok((transcoded_data, target_wgpu_format, dimensions))
-        }
-        Err(e) => Err(format!(
-            "Failed to transcode KTX2 image level: {:?}. Is it a valid Basis Universal file?",
-            e
-        )),
+        Ok(transcoded_data) => Ok((transcoded_data, target_wgpu_format, dimensions)),
+        Err(e) => Err(format!("Failed to transcode KTX2 image level: {:?}", e)),
     }
 }
 
@@ -423,34 +593,20 @@ impl<'a> Geometry for MikkTSpaceWrapper<'a> {
     }
 }
 
-/// Parses a .glb file's binary content, now with tangent generation.
 fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>, Aabb), String> {
     let (gltf, buffers, _) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
-
     let mut all_vertices = Vec::new();
     let mut all_indices = Vec::new();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-            let positions: Vec<[f32; 3]> = reader
-                .read_positions()
-                .ok_or_else(|| {
-                    format!(
-                        "Primitive in mesh '{}' has no positions",
-                        mesh.name().unwrap_or("unnamed")
-                    )
-                })?
-                .collect();
-
+            let positions: Vec<[f32; 3]> = reader.read_positions().ok_or("No positions")?.collect();
             let vertex_count = positions.len();
-
             let normals: Vec<[f32; 3]> = reader
                 .read_normals()
                 .map(|iter| iter.collect())
                 .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; vertex_count]);
-
             let tex_coords: Vec<[f32; 2]> = reader
                 .read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect())
@@ -459,13 +615,10 @@ fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>, Aabb), String> {
             let index_offset = all_vertices.len() as u32;
             let indices: Vec<u32> = reader
                 .read_indices()
-                .map(|r| r.into_u32().map(|i| i + index_offset).collect())
-                .ok_or_else(|| {
-                    format!(
-                        "Primitive in mesh '{}' has no indices",
-                        mesh.name().unwrap_or("unnamed")
-                    )
-                })?;
+                .ok_or("No indices")?
+                .into_u32()
+                .map(|i| i + index_offset)
+                .collect();
 
             let mut vertices: Vec<Vertex> = positions
                 .iter()
@@ -478,47 +631,275 @@ fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>, Aabb), String> {
                 && reader.read_normals().is_some()
                 && reader.read_tex_coords(0).is_some()
             {
-                let mut temp_indices: Vec<u32> =
-                    reader.read_indices().unwrap().into_u32().collect();
+                let temp_indices: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
                 let mut wrapper = MikkTSpaceWrapper {
                     vertices: &mut vertices,
                     indices: &temp_indices,
                 };
-                if !mikktspace::generate_tangents(&mut wrapper) {
-                    warn!(
-                        "Failed to generate tangents for primitive in mesh '{}'",
-                        mesh.name().unwrap_or("unnamed")
-                    );
-                }
-            } else {
-                warn!(
-                    "Skipping tangent generation for primitive in mesh '{}' due to missing normals or texture coordinates.",
-                    mesh.name().unwrap_or("unnamed")
-                );
+                mikktspace::generate_tangents(&mut wrapper);
             }
-
             all_vertices.append(&mut vertices);
-            all_indices.append(&mut indices.clone());
+            all_indices.extend(indices);
+        }
+    }
+    if all_vertices.is_empty() {
+        return Err("No valid primitives in glTF".to_string());
+    }
+    let bounds = Aabb::calculate(&all_vertices);
+    Ok((all_vertices, all_indices, bounds))
+}
+
+fn parse_scene_glb(bytes: &[u8]) -> Result<ParsedGltfScene, String> {
+    let (doc, buffers, images) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
+
+    let mut out_meshes = Vec::new();
+    let mut out_materials = Vec::new();
+    let mut out_textures = Vec::new();
+    let mut out_nodes = Vec::new();
+    let mut material_map: HashMap<Option<usize>, usize> = HashMap::new();
+    let mut texture_map = HashMap::new();
+
+    let magenta_pixel = vec![255, 0, 255, 255];
+    out_textures.push((
+        "DEFAULT_ERROR_TEXTURE".to_string(),
+        AssetKind::Albedo,
+        magenta_pixel,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        (1, 1),
+    ));
+
+    out_materials.push(IntermediateMaterial {
+        albedo: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.5,
+        roughness: 0.5,
+        ao: 1.0,
+        emission_strength: 0.0,
+        emission_color: [0.0, 0.0, 0.0],
+        albedo_texture_index: None,
+        normal_texture_index: None,
+        metallic_roughness_texture_index: None,
+        emission_texture_index: None,
+    });
+    material_map.insert(None, 0);
+
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            process_node(
+                &node,
+                &Mat4::IDENTITY,
+                &buffers,
+                &images,
+                &mut out_meshes,
+                &mut out_materials,
+                &mut out_textures,
+                &mut out_nodes,
+                &mut material_map,
+                &mut texture_map,
+            );
         }
     }
 
-    if all_vertices.is_empty() {
-        return Err("No valid primitives found in glTF file".to_string());
+    Ok(ParsedGltfScene {
+        nodes: out_nodes,
+        meshes: out_meshes,
+        materials: out_materials,
+        textures: out_textures,
+    })
+}
+
+fn process_node(
+    node: &gltf::Node,
+    parent_transform: &Mat4,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+    out_meshes: &mut Vec<(Vec<Vertex>, Vec<u32>, Aabb)>,
+    out_materials: &mut Vec<IntermediateMaterial>,
+    out_textures: &mut Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
+    out_nodes: &mut Vec<GltfNode>,
+    material_map: &mut HashMap<Option<usize>, usize>,
+    texture_map: &mut HashMap<usize, usize>,
+) {
+    let local_transform = Mat4::from_cols_array_2d(&node.transform().matrix());
+    let transform = *parent_transform * local_transform;
+
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+            let Some(positions) = reader.read_positions() else {
+                continue;
+            };
+            let positions: Vec<[f32; 3]> = positions.collect();
+            if positions.is_empty() {
+                continue;
+            }
+
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|it| it.collect())
+                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+            let tex_coords: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
+                .map(|it| it.into_f32().collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let Some(indices_reader) = reader.read_indices() else {
+                continue;
+            };
+            let indices: Vec<u32> = indices_reader.into_u32().collect();
+
+            let mut vertices: Vec<Vertex> = positions
+                .iter()
+                .zip(normals.iter())
+                .zip(tex_coords.iter())
+                .map(|((&p, &n), &t)| Vertex::new(p, n, t, [0.0; 4]))
+                .collect();
+
+            if !indices.is_empty()
+                && reader.read_normals().is_some()
+                && reader.read_tex_coords(0).is_some()
+            {
+                let mut wrapper = MikkTSpaceWrapper {
+                    vertices: &mut vertices,
+                    indices: &indices,
+                };
+                mikktspace::generate_tangents(&mut wrapper);
+            }
+
+            let bounds = Aabb::calculate(&vertices);
+            let mesh_index = out_meshes.len();
+            out_meshes.push((vertices, indices, bounds));
+
+            let material = primitive.material();
+            let material_index = *material_map.entry(material.index()).or_insert_with(|| {
+                let my_mat_idx = out_materials.len();
+                let pbr = material.pbr_metallic_roughness();
+
+                let mut get_tex =
+                    |tex_opt: Option<GltfTexture>, kind: AssetKind| -> Option<usize> {
+                        tex_opt.map(|texture| {
+                            let tex_idx = texture.index();
+                            *texture_map.entry(tex_idx).or_insert_with(|| {
+                                process_texture(texture, buffers, images, out_textures, kind)
+                            })
+                        })
+                    };
+
+                let mat = IntermediateMaterial {
+                    albedo: pbr.base_color_factor(),
+                    metallic: pbr.metallic_factor(),
+                    roughness: pbr.roughness_factor(),
+                    ao: material.occlusion_texture().map_or(1.0, |t| t.strength()),
+                    emission_strength: material.emissive_strength().unwrap_or(1.0),
+                    emission_color: material.emissive_factor(),
+                    albedo_texture_index: get_tex(
+                        pbr.base_color_texture().map(|i| i.texture()),
+                        AssetKind::Albedo,
+                    ),
+                    normal_texture_index: get_tex(
+                        material.normal_texture().map(|i| i.texture()),
+                        AssetKind::Normal,
+                    ),
+                    metallic_roughness_texture_index: get_tex(
+                        pbr.metallic_roughness_texture().map(|i| i.texture()),
+                        AssetKind::MetallicRoughness,
+                    ),
+                    emission_texture_index: get_tex(
+                        material.emissive_texture().map(|i| i.texture()),
+                        AssetKind::Emission,
+                    ),
+                };
+
+                out_materials.push(mat);
+                my_mat_idx
+            });
+
+            out_nodes.push(GltfNode {
+                mesh_index,
+                material_index,
+                transform,
+            });
+        }
     }
 
-    // --- Calculate bounds ---
-    let mut min_bounds = Vec3::splat(f32::MAX);
-    let mut max_bounds = Vec3::splat(f32::MIN);
-
-    for vertex in &all_vertices {
-        min_bounds = min_bounds.min(Vec3::from(vertex.position));
-        max_bounds = max_bounds.max(Vec3::from(vertex.position));
+    for child in node.children() {
+        process_node(
+            &child,
+            &transform,
+            buffers,
+            images,
+            out_meshes,
+            out_materials,
+            out_textures,
+            out_nodes,
+            material_map,
+            texture_map,
+        );
     }
+}
 
-    let bounds = Aabb {
-        min: min_bounds,
-        max: max_bounds,
+fn process_texture(
+    gltf_texture: gltf::Texture,
+    buffers: &[gltf::buffer::Data],
+    images: &[gltf::image::Data],
+    out_textures: &mut Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
+    kind: AssetKind,
+) -> usize {
+    let image = gltf_texture.source();
+    let name = gltf_texture
+        .name()
+        .unwrap_or("unnamed_gltf_texture")
+        .to_string();
+
+    let (pixels, mime_type) = match image.source() {
+        gltf::image::Source::View { view, mime_type } => {
+            let parent_buffer_data = &buffers[view.buffer().index()];
+            let pixel_data = &parent_buffer_data[view.offset()..view.offset() + view.length()];
+            (pixel_data, mime_type)
+        }
+        gltf::image::Source::Uri { .. } => {
+            warn!(
+                "Skipping external image URI in glTF ('{}'), not yet supported.",
+                name
+            );
+            return 0;
+        }
     };
 
-    Ok((all_vertices, all_indices, bounds))
+    let decoding_result: Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> =
+        match mime_type {
+            "image/ktx2" => decode_ktx2(pixels),
+            "image/png" | "image/jpeg" => match image::load_from_memory(pixels) {
+                Ok(decoded) => {
+                    let rgba = decoded.to_rgba8();
+                    let dimensions = rgba.dimensions();
+                    let data = rgba.into_raw();
+                    let wgpu_format = match kind {
+                        AssetKind::Albedo | AssetKind::Emission => {
+                            wgpu::TextureFormat::Rgba8UnormSrgb
+                        }
+                        _ => wgpu::TextureFormat::Rgba8Unorm,
+                    };
+                    Ok((data, wgpu_format, dimensions))
+                }
+                Err(e) => Err(e.to_string()),
+            },
+            unsupported_mime => Err(format!(
+                "Unsupported image MIME type in glTF: {}",
+                unsupported_mime
+            )),
+        };
+
+    match decoding_result {
+        Ok((data, format, dimensions)) => {
+            let my_idx = out_textures.len();
+            out_textures.push((name, kind, data, format, dimensions));
+            my_idx
+        }
+        Err(e) => {
+            warn!(
+                "Failed to process texture '{}': {}. Using fallback.",
+                name, e
+            );
+            0
+        }
+    }
 }

@@ -20,10 +20,9 @@ struct Camera {
     frame_index: u32,
 };
 
-// These are now half-resolution inputs
 @group(0) @binding(0) var t_normal: texture_2d<f32>;
-@group(0) @binding(1) var t_albedo: texture_2d<f32>; // Not used directly, but kept for layout consistency
-@group(0) @binding(2) var t_depth: texture_2d<f32>; // Now R32Float, not texture_depth_2d
+@group(0) @binding(1) var t_direct_lighting_diffuse: texture_2d<f32>; 
+@group(0) @binding(2) var t_depth: texture_2d<f32>;
 @group(0) @binding(3) var t_history: texture_2d<f32>;
 @group(0) @binding(4) var t_direct_lighting : texture_2d<f32>;
 @group(0) @binding(5) var s_gbuffer: sampler;
@@ -39,7 +38,6 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 };
 
-// --- HELPER FUNCTIONS ---
 @vertex
 fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
@@ -50,6 +48,7 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// --- HELPER FUNCTIONS ---
 fn world_from_depth(uv: vec2<f32>, depth: f32, inv_vp: mat4x4<f32>) -> vec3<f32> {
     let ndc = vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
     let world = inv_vp * ndc;
@@ -87,9 +86,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (depth >= 1.0) { discard; }
 
     let origin_vs = view_pos_from_uv_depth(in.uv, depth);
-    let normal_packed = textureLoad(t_normal, frag_coord, 0).xyz;
-    let world_normal = normalize(normal_packed * 2.0 - 1.0);
-
+    let world_normal = normalize(textureLoad(t_normal, frag_coord, 0).xyz * 2.0 - 1.0);
     let normal_matrix = mat3x3<f32>(camera.view_matrix[0].xyz, camera.view_matrix[1].xyz, camera.view_matrix[2].xyz);
     let normal_vs = normalize(normal_matrix * world_normal);
     
@@ -97,7 +94,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var indirect_light = vec3<f32>(0.0);
     
     let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise));
-    let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting)) / blue_noise_dims;
+    let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse)) / blue_noise_dims;
     let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
 
     for (var i = 0; i < NUM_RAYS; i += 1) {
@@ -115,7 +112,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             if (any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0))) { break; }
 
-            // *** FIX: Use the non-filtering sampler (s_gbuffer) for the non-filterable depth texture ***
             let depth_at_sample = textureSample(t_depth, s_gbuffer, sample_uv).r;
             let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, depth_at_sample);
 
@@ -123,7 +119,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let scene_depth = -scene_vs_at_sample.z;
 
             if (ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS) {
-                let hit_light = textureSample(t_direct_lighting, s_scene, sample_uv).rgb;
+                let hit_light = textureSample(t_direct_lighting_diffuse, s_scene, sample_uv).rgb;
                 indirect_light += hit_light;
                 break;
             }
@@ -139,7 +135,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
     
     let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
-    
     let blended_light = mix(prev_result, ssgi_result, BLEND_FACTOR); 
     
     return vec4<f32>(blended_light, 1.0);

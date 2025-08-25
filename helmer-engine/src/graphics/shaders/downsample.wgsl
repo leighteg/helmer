@@ -1,7 +1,8 @@
 @group(0) @binding(0) var full_res_depth: texture_depth_2d;
 @group(0) @binding(1) var full_res_normal: texture_2d<f32>;
 @group(0) @binding(2) var full_res_lighting: texture_2d<f32>;
-@group(0) @binding(3) var s_point: sampler; 
+@group(0) @binding(3) var full_res_albedo: texture_2d<f32>;
+@group(0) @binding(4) var s_point: sampler; 
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -22,13 +23,13 @@ struct FragmentOutput {
     @location(0) half_res_depth: f32,
     @location(1) half_res_normal: vec4<f32>,
     @location(2) half_res_lighting: vec4<f32>,
+    @location(3) half_res_albedo: vec4<f32>,
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
     let texel_size = 1.0 / vec2<f32>(textureDimensions(full_res_depth));
     
-    // Sample a 2x2 block in the full-res textures
     let uv00 = in.uv;
     let uv10 = in.uv + vec2(texel_size.x, 0.0);
     let uv01 = in.uv + vec2(0.0, texel_size.y);
@@ -41,7 +42,6 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let d3 = textureSample(full_res_depth, s_point, uv11);
     let min_depth = min(min(d0, d1), min(d2, d3));
 
-    // For normal and lighting, a simple average of the 2x2 block is effective
     let n0 = textureSample(full_res_normal, s_point, uv00);
     let n1 = textureSample(full_res_normal, s_point, uv10);
     let n2 = textureSample(full_res_normal, s_point, uv01);
@@ -54,9 +54,17 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let l3 = textureSample(full_res_lighting, s_point, uv11);
     let avg_lighting = (l0 + l1 + l2 + l3) * 0.25;
 
+    // --- Downsample Albedo ---
+    let a0 = textureSample(full_res_albedo, s_point, uv00);
+    let a1 = textureSample(full_res_albedo, s_point, uv10);
+    let a2 = textureSample(full_res_albedo, s_point, uv01);
+    let a3 = textureSample(full_res_albedo, s_point, uv11);
+    let avg_albedo = (a0 + a1 + a2 + a3) * 0.25;
+
     var out: FragmentOutput;
     out.half_res_depth = min_depth;
     out.half_res_normal = avg_normal;
     out.half_res_lighting = avg_lighting;
+    out.half_res_albedo = avg_albedo;
     return out;
 }

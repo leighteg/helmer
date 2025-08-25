@@ -2,6 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
+const SSGI_INTENSITY: f32 = 1.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -22,7 +23,7 @@ struct VertexOutput {
 //=============== BINDINGS ===============//
 // --- Pass Inputs ---
 @group(0) @binding(0) var direct_lighting_tex: texture_2d<f32>;
-@group(0) @binding(1) var ssgi_tex: texture_2d<f32>; // Now receives the upsampled result
+@group(0) @binding(1) var ssgi_tex: texture_2d<f32>;
 @group(0) @binding(2) var ssr_tex: texture_2d<f32>;
 @group(0) @binding(3) var albedo_tex: texture_2d<f32>;
 @group(0) @binding(4) var emission_tex: texture_2d<f32>;
@@ -71,14 +72,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = albedo_sample.rgb;
     let alpha = albedo_sample.a;
     let emission = textureSample(emission_tex, scene_sampler, in.tex_coords).rgb;
-
     let emission_strength = length(emission);
-    if (emission_strength > EMISSIVE_THRESHOLD) {
-        let tonemapped = emission / (emission + vec3<f32>(1.0));
-        let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
-        return vec4<f32>(gamma_corrected, alpha);
-    }
-    
+
     let direct_light = textureSample(direct_lighting_tex, scene_sampler, in.tex_coords).rgb;
     let indirect_diffuse_ssgi = textureSample(ssgi_tex, scene_sampler, in.tex_coords).rgb;
     let ssr_sample = textureSample(ssr_tex, scene_sampler, in.tex_coords);
@@ -117,9 +112,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     // --- Final Combination ---
-    let total_indirect_diffuse = (indirect_diffuse_ssgi + diffuse_ibl) * kD_ibl;
+    let total_indirect_diffuse = (indirect_diffuse_ssgi * SSGI_INTENSITY + diffuse_ibl) * kD_ibl;
+    
     let total_indirect_specular = mix(specular_ibl, indirect_specular_ssr, ssr_confidence);
-    let final_hdr_color = direct_light + (total_indirect_diffuse + total_indirect_specular) * ao;
+
+    let surface_lighting = direct_light + (total_indirect_diffuse + total_indirect_specular) * ao;
+
+    let final_hdr_color = select(surface_lighting, vec3(0.0), emission_strength > EMISSIVE_THRESHOLD) + emission;
 
     // Tonemapping and Gamma Correction
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));

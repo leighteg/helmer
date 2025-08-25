@@ -109,8 +109,13 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) ve
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+struct LightingOutput {
+    @location(0) full_pbr: vec4<f32>,
+    @location(1) diffuse_only: vec4<f32>,
+}
+
 @fragment
-fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let screen_uv = frag_coord.xy / vec2<f32>(textureDimensions(gbuf_normal));
     let depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
     if (depth >= 1.0) { discard; }
@@ -119,7 +124,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
     let world_position = world_pos_h.xyz / world_pos_h.w;
 
-    // **FIX**: Correctly unpack the normal from [0, 1] to [-1, 1] range.
     let packed_normal = textureSample(gbuf_normal, gbuf_sampler, screen_uv).xyz;
     let N = safe_normalize(packed_normal * 2.0 - 1.0);
 
@@ -130,21 +134,23 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
 
     let V = safe_normalize(camera.view_position - world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
+    
     var direct_lighting = vec3<f32>(0.0);
-
+    var diffuse_lighting = vec3<f32>(0.0);
+    
     let view_pos = camera.view_matrix * vec4<f32>(world_position, 1.0);
-    let shadow_factor = calculate_shadow_factor(world_position, view_pos.z);
     
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
         var L: vec3<f32>;
         var radiance: vec3<f32>;
-        var shadow_multiplier = 1.0;
+        var shadow_multiplier = 1.0; // Default to no shadow
         
         if (light.light_type == 0u) { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
-            shadow_multiplier = shadow_factor;
+            // Only directional lights use the cascaded shadow map in this implementation
+            shadow_multiplier = calculate_shadow_factor(world_position, view_pos.z);
         } else { // Point
             let to_light_vector = light.position - world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
@@ -152,6 +158,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
             L = to_light_vector / sqrt(dist_sq);
             let attenuation = 1.0 / (dist_sq + 1.0);
             radiance = light.color * light.intensity * attenuation;
+            // Point lights do not cast shadows, so shadow_multiplier remains 1.0
         }
         
         let NdotL = max(dot(N, L), 0.0);
@@ -171,9 +178,16 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
             let kD = vec3<f32>(1.0) - kS;
             let diffuse_color_contribution = kD * (1.0 - metallic);
             
-            direct_lighting += (diffuse_color_contribution * albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
+            let final_radiance = radiance * NdotL * shadow_multiplier;
+            let current_diffuse = (diffuse_color_contribution * albedo / PI) * final_radiance;
+            
+            diffuse_lighting += current_diffuse;
+            direct_lighting += current_diffuse + (specular * final_radiance);
         }
     }
 
-    return vec4<f32>(direct_lighting, 1.0);
+    var out: LightingOutput;
+    out.full_pbr = vec4<f32>(direct_lighting, 1.0);
+    out.diffuse_only = vec4<f32>(diffuse_lighting, 1.0);
+    return out;
 }

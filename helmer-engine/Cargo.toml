@@ -3,12 +3,6 @@ name = "helmer-engine"
 version = "0.1.0"
 edition = "2024"
 
-[profile.dev]
-opt-level = 0
-
-[profile.release]
-opt-level = 3
-
 [dependencies]
 winit = "0.30.10"
 proc = { path = "proc" }

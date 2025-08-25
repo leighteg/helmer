@@ -5,3 +5,58 @@ members = [
     "test_game",
 ]
 resolver = "2" # Use the modern feature resolver
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+
+# slow dependencies debug optimization
+
+[profile.dev.package.gltf]
+opt-level = 3
+[profile.dev.package.gltf-json]
+opt-level = 3
+[profile.dev.package.serde_json]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+
+# Hot codecs
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.exr]
+opt-level = 3
+[profile.dev.package.tiff]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.ravif]
+opt-level = 3
+[profile.dev.package.qoi]
+opt-level = 3
+
+# Inflaters/compression
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.adler]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
+# Math helpers
+[profile.dev.package.num-traits]
+opt-level = 3
+[profile.dev.package.half]
+opt-level = 3

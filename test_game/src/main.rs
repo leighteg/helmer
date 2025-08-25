@@ -257,7 +257,7 @@ fn main() {
         );
         ecs_guard.add_component(
             light_entity_3,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 10.0),
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
         );
     });
     runtime.init();

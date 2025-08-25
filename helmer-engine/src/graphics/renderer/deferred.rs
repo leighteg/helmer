@@ -107,6 +107,8 @@ pub struct DeferredRenderer {
     // Lighting & Reflection Textures (Full-res)
     direct_lighting_texture: Option<wgpu::Texture>,
     direct_lighting_texture_view: Option<wgpu::TextureView>,
+    direct_lighting_diffuse_texture: Option<wgpu::Texture>,
+    direct_lighting_diffuse_view: Option<wgpu::TextureView>,
     ssr_texture: Option<wgpu::Texture>,
     ssr_texture_view: Option<wgpu::TextureView>,
     ssgi_upsampled_texture: Option<wgpu::Texture>,
@@ -118,6 +120,8 @@ pub struct DeferredRenderer {
     blue_noise_sampler: Option<wgpu::Sampler>,
 
     // Half-Resolution Textures for SSGI
+    direct_lighting_diffuse_half_texture: Option<wgpu::Texture>,
+    direct_lighting_diffuse_half_view: Option<wgpu::TextureView>,
     depth_half_texture: Option<wgpu::Texture>,
     depth_half_view: Option<wgpu::TextureView>,
     normal_half_texture: Option<wgpu::Texture>,
@@ -285,6 +289,8 @@ impl DeferredRenderer {
             gbuf_emission_texture_view: None,
             direct_lighting_texture: None,
             direct_lighting_texture_view: None,
+            direct_lighting_diffuse_texture: None,
+            direct_lighting_diffuse_view: None,
             ssr_texture: None,
             ssr_texture_view: None,
             ssgi_upsampled_texture: None,
@@ -294,6 +300,8 @@ impl DeferredRenderer {
             blue_noise_texture: None,
             blue_noise_texture_view: None,
             blue_noise_sampler: None,
+            direct_lighting_diffuse_half_texture: None,
+            direct_lighting_diffuse_half_view: None,
             depth_half_texture: None,
             depth_half_view: None,
             normal_half_texture: None,
@@ -1064,6 +1072,16 @@ impl DeferredRenderer {
             Some(direct_lighting_texture.create_view(&Default::default()));
         self.direct_lighting_texture = Some(direct_lighting_texture);
 
+        let direct_lighting_diffuse_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Direct Lighting Diffuse Texture"),
+            size: full_size,
+            usage: hdr_texture_usage,
+            ..default_texture_desc
+        });
+        self.direct_lighting_diffuse_view =
+            Some(direct_lighting_diffuse_texture.create_view(&Default::default()));
+        self.direct_lighting_diffuse_texture = Some(direct_lighting_diffuse_texture);
+
         let ssr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SSR Result Texture"),
             size: full_size,
@@ -1097,6 +1115,21 @@ impl DeferredRenderer {
         self.history_texture = Some(history_texture);
 
         // --- Half-Resolution Textures ---
+        self.direct_lighting_diffuse_half_texture =
+            Some(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Direct Lighting Diffuse Half-Res"),
+                size: half_size,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: hdr_texture_usage,
+                ..default_texture_desc
+            }));
+        self.direct_lighting_diffuse_half_view = Some(
+            self.direct_lighting_diffuse_half_texture
+                .as_ref()
+                .unwrap()
+                .create_view(&Default::default()),
+        );
+
         self.depth_half_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Half-Res"),
             size: half_size,
@@ -1395,6 +1428,7 @@ impl DeferredRenderer {
                         Some(wgpu::TextureFormat::R32Float.into()),
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
+                        Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()),
                     ],
                     compilation_options: Default::default(),
                 }),
@@ -1527,11 +1561,18 @@ impl DeferredRenderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &lighting_shader,
                     entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState::default(),
@@ -1656,7 +1697,8 @@ impl DeferredRenderer {
                     texture_binding(0, false, wgpu::TextureViewDimension::D2, true), // depth
                     texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // normal
                     texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // lighting
-                    sampler_binding(3, false, wgpu::SamplerBindingType::NonFiltering),
+                    texture_binding(3, false, wgpu::TextureViewDimension::D2, false), // diffuse lighting
+                    sampler_binding(4, false, wgpu::SamplerBindingType::NonFiltering),
                 ],
             });
 
@@ -1908,6 +1950,12 @@ impl DeferredRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        self.direct_lighting_diffuse_view.as_ref().unwrap(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: wgpu::BindingResource::Sampler(self.point_sampler.as_ref().unwrap()),
                 },
             ],
@@ -1967,7 +2015,7 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(
-                        self.gbuf_albedo_texture_view.as_ref().unwrap(), // Placeholder
+                        self.direct_lighting_diffuse_half_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -2567,14 +2615,24 @@ impl DeferredRenderer {
     fn run_lighting_pass(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Lighting Pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: self.direct_lighting_texture_view.as_ref().unwrap(),
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: self.direct_lighting_texture_view.as_ref().unwrap(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: self.direct_lighting_diffuse_view.as_ref().unwrap(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ],
             depth_stencil_attachment: None,
             ..Default::default()
         });
@@ -2607,6 +2665,14 @@ impl DeferredRenderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.direct_lighting_half_view.as_ref().unwrap(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: self.direct_lighting_diffuse_half_view.as_ref().unwrap(),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),

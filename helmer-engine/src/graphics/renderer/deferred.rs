@@ -1119,7 +1119,7 @@ impl DeferredRenderer {
             Some(device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Direct Lighting Diffuse Half-Res"),
                 size: half_size,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: wgpu::TextureFormat::Rgba16Float,
                 usage: hdr_texture_usage,
                 ..default_texture_desc
             }));
@@ -1428,7 +1428,7 @@ impl DeferredRenderer {
                         Some(wgpu::TextureFormat::R32Float.into()),
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
-                        Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()),
+                        Some(wgpu::TextureFormat::Rgba16Float.into()),
                     ],
                     compilation_options: Default::default(),
                 }),

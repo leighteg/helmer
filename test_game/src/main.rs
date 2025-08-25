@@ -167,8 +167,6 @@ fn main() {
             sponza_entity,
             SceneRoot(sponza_handle),
         );
-        ecs_guard.add_component(sponza_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(sponza_entity, FixedCollider {});
 
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(

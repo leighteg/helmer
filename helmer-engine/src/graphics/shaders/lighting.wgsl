@@ -45,7 +45,7 @@ struct CascadeData {
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
-    if (len < EPSILON) { return vec3<f32>(0.0); }
+    if len < EPSILON { return vec3<f32>(0.0); }
     return v / len;
 }
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
@@ -71,7 +71,7 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
 fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
     let bias: f32 = 0.005;
     let current_depth = depth - bias;
-    if (current_depth <= moments.x) {
+    if current_depth <= moments.x {
         return 1.0;
     }
     var variance = moments.y - (moments.x * moments.x);
@@ -84,17 +84,17 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
 fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
-        if (view_z > shadow_uniforms[i].split_depth.x) {
+        if view_z > shadow_uniforms[i].split_depth.x {
             cascade_index = i;
             break;
         }
     }
     let cascade = shadow_uniforms[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
-    if (shadow_pos_clip.w < EPSILON) { return 1.0; }
+    if shadow_pos_clip.w < EPSILON { return 1.0; }
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
-    if (any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0) {
+    if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
         return 1.0;
     }
     let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
@@ -118,7 +118,7 @@ struct LightingOutput {
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let screen_uv = frag_coord.xy / vec2<f32>(textureDimensions(gbuf_normal));
     let depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
-    if (depth >= 1.0) { discard; }
+    if depth >= 1.0 { discard; }
 
     let ndc = vec4<f32>(screen_uv.x * 2.0 - 1.0, (1.0 - screen_uv.y) * 2.0 - 1.0, depth, 1.0);
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
@@ -134,19 +134,19 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     let V = safe_normalize(camera.view_position - world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
-    
+
     var direct_lighting = vec3<f32>(0.0);
     var diffuse_lighting = vec3<f32>(0.0);
-    
+
     let view_pos = camera.view_matrix * vec4<f32>(world_position, 1.0);
-    
+
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
         var L: vec3<f32>;
         var radiance: vec3<f32>;
         var shadow_multiplier = 1.0; // Default to no shadow
-        
-        if (light.light_type == 0u) { // Directional
+
+        if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
             // Only directional lights use the cascaded shadow map in this implementation
@@ -154,35 +154,39 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         } else { // Point
             let to_light_vector = light.position - world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);
-            if (dist_sq < EPSILON) { continue; }
+            if dist_sq < EPSILON { continue; }
             L = to_light_vector / sqrt(dist_sq);
             let attenuation = 1.0 / (dist_sq + 1.0);
             radiance = light.color * light.intensity * attenuation;
             // Point lights do not cast shadows, so shadow_multiplier remains 1.0
         }
-        
+
         let NdotL = max(dot(N, L), 0.0);
-        if (NdotL > 0.0) {
+        if NdotL > 0.0 {
             let H = safe_normalize(V + L);
             let NdotH = max(dot(N, H), 0.0);
-            
+            let NdotV = max(dot(N, V), 0.0);
+
             let NDF = distribution_ggx(NdotH, roughness);
             let G = geometry_smith(N, V, L, roughness);
             let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-            
-            let numerator = NDF * G * F;
-            let denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + EPSILON;
-            let specular = numerator / denominator;
-            
+
+            let specular_numerator = NDF * G * F;
+            let specular_denominator = 4.0 * NdotV * NdotL + EPSILON;
+            let specular_brdf = specular_numerator / specular_denominator;
+
+            let diffuse_brdf = albedo / PI;
+
             let kS = F;
             let kD = vec3<f32>(1.0) - kS;
-            let diffuse_color_contribution = kD * (1.0 - metallic);
-            
+
             let final_radiance = radiance * NdotL * shadow_multiplier;
-            let current_diffuse = (diffuse_color_contribution * albedo / PI) * final_radiance;
-            
-            diffuse_lighting += current_diffuse;
-            direct_lighting += current_diffuse + (specular * final_radiance);
+
+            let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
+            let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
+
+            direct_lighting += current_pbr;
+            diffuse_lighting += current_diffuse_only;
         }
     }
 

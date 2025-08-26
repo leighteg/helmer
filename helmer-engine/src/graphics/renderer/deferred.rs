@@ -33,6 +33,7 @@ use winit::dpi::PhysicalSize;
 // --- CONSTANTS ---
 pub const MAX_LIGHTS: usize = 2048;
 const MAX_TOTAL_TEXTURES: u32 = 4096;
+const MAX_TOTAL_MATERIALS: usize = 4096;
 const DEFAULT_TEXTURE_RESOLUTION: u32 = 1024;
 
 /// The high-end renderer using a deferred pipeline and bindless textures.
@@ -120,14 +121,16 @@ pub struct DeferredRenderer {
     blue_noise_sampler: Option<wgpu::Sampler>,
 
     // Half-Resolution Textures for SSGI
-    direct_lighting_diffuse_half_texture: Option<wgpu::Texture>,
-    direct_lighting_diffuse_half_view: Option<wgpu::TextureView>,
     depth_half_texture: Option<wgpu::Texture>,
     depth_half_view: Option<wgpu::TextureView>,
     normal_half_texture: Option<wgpu::Texture>,
     normal_half_view: Option<wgpu::TextureView>,
+    albedo_half_texture: Option<wgpu::Texture>,
+    albedo_half_view: Option<wgpu::TextureView>,
     direct_lighting_half_texture: Option<wgpu::Texture>,
     direct_lighting_half_view: Option<wgpu::TextureView>,
+    direct_lighting_diffuse_half_texture: Option<wgpu::Texture>,
+    direct_lighting_diffuse_half_view: Option<wgpu::TextureView>,
     ssgi_raw_half_texture: Option<wgpu::Texture>,
     ssgi_raw_half_view: Option<wgpu::TextureView>,
     ssgi_denoised_half_texture: Option<wgpu::Texture>,
@@ -300,14 +303,16 @@ impl DeferredRenderer {
             blue_noise_texture: None,
             blue_noise_texture_view: None,
             blue_noise_sampler: None,
-            direct_lighting_diffuse_half_texture: None,
-            direct_lighting_diffuse_half_view: None,
             depth_half_texture: None,
             depth_half_view: None,
             normal_half_texture: None,
             normal_half_view: None,
+            albedo_half_texture: None,
+            albedo_half_view: None,
             direct_lighting_half_texture: None,
             direct_lighting_half_view: None,
+            direct_lighting_diffuse_half_texture: None,
+            direct_lighting_diffuse_half_view: None,
             ssgi_raw_half_texture: None,
             ssgi_raw_half_view: None,
             ssgi_denoised_half_texture: None,
@@ -383,7 +388,7 @@ impl DeferredRenderer {
 
         self.material_uniform_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("materials-buffer"),
-            size: (std::mem::size_of::<MaterialShaderData>() * 256) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<MaterialShaderData>() * MAX_TOTAL_MATERIALS) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -955,7 +960,7 @@ impl DeferredRenderer {
     }
 
     pub fn add_material(&mut self, id: usize, material: Material) -> Result<(), RendererError> {
-        if id >= 256 {
+        if id >= MAX_TOTAL_MATERIALS {
             return Err(RendererError::ResourceCreation(format!(
                 "Material ID {} is out of bounds. Maximum is 255.",
                 id
@@ -1029,7 +1034,7 @@ impl DeferredRenderer {
         let gbuf_albedo_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("G-Buffer Albedo"),
             size: full_size,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: gbuffer_usage,
             ..default_texture_desc
         });
@@ -1115,21 +1120,6 @@ impl DeferredRenderer {
         self.history_texture = Some(history_texture);
 
         // --- Half-Resolution Textures ---
-        self.direct_lighting_diffuse_half_texture =
-            Some(device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Direct Lighting Diffuse Half-Res"),
-                size: half_size,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: hdr_texture_usage,
-                ..default_texture_desc
-            }));
-        self.direct_lighting_diffuse_half_view = Some(
-            self.direct_lighting_diffuse_half_texture
-                .as_ref()
-                .unwrap()
-                .create_view(&Default::default()),
-        );
-
         self.depth_half_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Half-Res"),
             size: half_size,
@@ -1158,6 +1148,20 @@ impl DeferredRenderer {
                 .create_view(&Default::default()),
         );
 
+        self.albedo_half_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Albedo Half-Res"),
+            size: half_size,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: hdr_texture_usage,
+            ..default_texture_desc
+        }));
+        self.albedo_half_view = Some(
+            self.albedo_half_texture
+                .as_ref()
+                .unwrap()
+                .create_view(&Default::default()),
+        );
+
         self.direct_lighting_half_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Direct Lighting Half-Res"),
             size: half_size,
@@ -1167,6 +1171,21 @@ impl DeferredRenderer {
         }));
         self.direct_lighting_half_view = Some(
             self.direct_lighting_half_texture
+                .as_ref()
+                .unwrap()
+                .create_view(&Default::default()),
+        );
+
+        self.direct_lighting_diffuse_half_texture =
+            Some(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Direct Lighting Diffuse Half-Res"),
+                size: half_size,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: hdr_texture_usage,
+                ..default_texture_desc
+            }));
+        self.direct_lighting_diffuse_half_view = Some(
+            self.direct_lighting_diffuse_half_texture
                 .as_ref()
                 .unwrap()
                 .create_view(&Default::default()),
@@ -1388,7 +1407,7 @@ impl DeferredRenderer {
                     entry_point: Some("fs_main"),
                     targets: &[
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
-                        Some(wgpu::TextureFormat::Rgba8UnormSrgb.into()),
+                        Some(wgpu::TextureFormat::Rgba16Float.into()),
                         Some(wgpu::TextureFormat::Rgba8Unorm.into()),
                         Some(wgpu::TextureFormat::Rgba16Float.into()),
                     ],
@@ -1696,7 +1715,7 @@ impl DeferredRenderer {
                 entries: &[
                     texture_binding(0, false, wgpu::TextureViewDimension::D2, true), // depth
                     texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // normal
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // lighting
+                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // albedo
                     texture_binding(3, false, wgpu::TextureViewDimension::D2, false), // diffuse lighting
                     sampler_binding(4, false, wgpu::SamplerBindingType::NonFiltering),
                 ],
@@ -1720,10 +1739,10 @@ impl DeferredRenderer {
                 label: Some("SSGI Inputs Bind Group Layout"),
                 entries: &[
                     texture_binding(0, true, wgpu::TextureViewDimension::D2, false), // normal_half
-                    texture_binding(1, true, wgpu::TextureViewDimension::D2, false), // albedo_half (unused but for layout)
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // depth_half (not a depth texture)
+                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // depth_half
+                    texture_binding(2, true, wgpu::TextureViewDimension::D2, false), // albedo_half
                     texture_binding(3, true, wgpu::TextureViewDimension::D2, false), // history_half
-                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false), // lighting_half
+                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false), // lighting_diffuse_half
                     sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering),
                     sampler_binding(6, true, wgpu::SamplerBindingType::Filtering),
                 ],
@@ -1945,7 +1964,7 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(
-                        self.direct_lighting_texture_view.as_ref().unwrap(),
+                        self.gbuf_albedo_texture_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -2015,13 +2034,13 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(
-                        self.direct_lighting_diffuse_half_view.as_ref().unwrap(),
+                        self.depth_half_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(
-                        self.depth_half_view.as_ref().unwrap(),
+                        self.albedo_half_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -2033,7 +2052,7 @@ impl DeferredRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(
-                        self.direct_lighting_half_view.as_ref().unwrap(),
+                        self.direct_lighting_diffuse_half_view.as_ref().unwrap(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -2664,7 +2683,7 @@ impl DeferredRenderer {
                     },
                 }),
                 Some(wgpu::RenderPassColorAttachment {
-                    view: self.direct_lighting_half_view.as_ref().unwrap(),
+                    view: self.albedo_half_view.as_ref().unwrap(),
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),

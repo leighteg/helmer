@@ -16,15 +16,15 @@ struct Camera {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
-    prev_view_proj: mat4x4<f32>, 
+    prev_view_proj: mat4x4<f32>,
     frame_index: u32,
 };
 
 @group(0) @binding(0) var t_normal: texture_2d<f32>;
-@group(0) @binding(1) var t_direct_lighting_diffuse: texture_2d<f32>; 
-@group(0) @binding(2) var t_depth: texture_2d<f32>;
+@group(0) @binding(1) var t_depth: texture_2d<f32>;
+@group(0) @binding(2) var t_albedo: texture_2d<f32>; 
 @group(0) @binding(3) var t_history: texture_2d<f32>;
-@group(0) @binding(4) var t_direct_lighting : texture_2d<f32>;
+@group(0) @binding(4) var t_direct_lighting_diffuse : texture_2d<f32>;
 @group(0) @binding(5) var s_gbuffer: sampler;
 @group(0) @binding(6) var s_scene: sampler;
 
@@ -83,16 +83,16 @@ fn cosine_sample_hemisphere(r: vec2<f32>) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let frag_coord = vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth))));
     let depth = textureLoad(t_depth, frag_coord, 0).r;
-    if (depth >= 1.0) { discard; }
+    if depth >= 1.0 { discard; }
 
     let origin_vs = view_pos_from_uv_depth(in.uv, depth);
     let world_normal = normalize(textureLoad(t_normal, frag_coord, 0).xyz * 2.0 - 1.0);
     let normal_matrix = mat3x3<f32>(camera.view_matrix[0].xyz, camera.view_matrix[1].xyz, camera.view_matrix[2].xyz);
     let normal_vs = normalize(normal_matrix * world_normal);
-    
+
     let tangent_to_view = create_onb(normal_vs);
     var indirect_light = vec3<f32>(0.0);
-    
+
     let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise));
     let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse)) / blue_noise_dims;
     let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
@@ -101,16 +101,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let r = fract(blue_noise + vec2<f32>(f32(i) * 0.137, f32(camera.frame_index) * 0.379));
         let ray_dir_tangent = cosine_sample_hemisphere(r);
         let ray_dir_vs = tangent_to_view * ray_dir_tangent;
-        
+
         for (var j = 1; j <= NUM_STEPS; j += 1) {
             let sample_pos_vs = origin_vs + ray_dir_vs * RAY_STEP_SIZE * f32(j);
-            
+
             var sample_pos_clip = camera.projection_matrix * vec4(sample_pos_vs, 1.0);
-            if (sample_pos_clip.w <= EPSILON) { break; }
+            if sample_pos_clip.w <= EPSILON { break; }
             sample_pos_clip /= sample_pos_clip.w;
             let sample_uv = sample_pos_clip.xy * vec2(0.5, -0.5) + 0.5;
 
-            if (any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0))) { break; }
+            if any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0)) { break; }
 
             let depth_at_sample = textureSample(t_depth, s_gbuffer, sample_uv).r;
             let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, depth_at_sample);
@@ -118,9 +118,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let ray_depth = -sample_pos_vs.z;
             let scene_depth = -scene_vs_at_sample.z;
 
-            if (ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS) {
-                let hit_light = textureSample(t_direct_lighting_diffuse, s_scene, sample_uv).rgb;
-                indirect_light += hit_light;
+            if ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS {
+                // get the color of the surface the ray hit.
+                let albedo_at_hit = textureSample(t_albedo, s_gbuffer, sample_uv).rgb;
+
+                // get the light hitting that surface.
+                let lighting_at_hit = textureSample(t_direct_lighting_diffuse, s_gbuffer, sample_uv).rgb;
+
+                // combine them to get the final reflected light color.
+                let reflected_light = albedo_at_hit * lighting_at_hit;
+
+                indirect_light += reflected_light;
                 break;
             }
         }
@@ -133,9 +141,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var prev_clip = camera.prev_view_proj * vec4(world_pos, 1.0);
     prev_clip /= prev_clip.w;
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
-    
+
     let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
-    let blended_light = mix(prev_result, ssgi_result, BLEND_FACTOR); 
-    
+    let blended_light = mix(prev_result, ssgi_result, BLEND_FACTOR);
+
     return vec4<f32>(blended_light, 1.0);
 }

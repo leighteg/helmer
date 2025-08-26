@@ -86,6 +86,8 @@ fn main() {
 
         let sponza_handle = asset_server.load_scene("assets/models/sponza.glb");
 
+        let raptor_handle = asset_server.load_scene("assets/models/ford_raptor.glb");
+
         //let duck_handle = asset_server.load_mesh("assets/models/duck.glb");
 
         // Load materials from .ron files
@@ -149,7 +151,7 @@ fn main() {
         );
         ecs_guard.add_component(
             ground_entity,
-            MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, true),
+            MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, false),
         );
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
@@ -166,6 +168,20 @@ fn main() {
         ecs_guard.add_component(
             sponza_entity,
             SceneRoot(sponza_handle),
+        );
+
+        let raptor_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            raptor_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                rotation: glam::Quat::from_rotation_y(90.0),
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            raptor_entity,
+            SceneRoot(raptor_handle),
         );
 
         let cube_entity = ecs_guard.create_entity();
@@ -200,7 +216,7 @@ fn main() {
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
-        let light_entity = ecs_guard.create_entity();
+        /* let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity,
             Transform {
@@ -235,7 +251,7 @@ fn main() {
             MeshRenderer::new(box_handle.id, red_light_material_handle.id, true, true),
         );
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
+        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 }); */
 
         let sun_rotation = Quat::from_euler(
             glam::EulerRot::YXZ,
@@ -244,9 +260,9 @@ fn main() {
             50.0f32.to_radians(),  // Z rotation - no roll
         );
 
-        let light_entity_3: usize = ecs_guard.create_entity();
+        let sun_entity: usize = ecs_guard.create_entity();
         ecs_guard.add_component(
-            light_entity_3,
+            sun_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, 0.0),
                 rotation: sun_rotation,
@@ -254,8 +270,8 @@ fn main() {
             },
         );
         ecs_guard.add_component(
-            light_entity_3,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
+            sun_entity,
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 12.0),
         );
     });
     runtime.init();

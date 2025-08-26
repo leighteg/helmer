@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
-const SSGI_INTENSITY: f32 = 1.0;
+const SSGI_INTENSITY: f32 = 2.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -84,8 +84,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mra = textureSample(mra_tex, scene_sampler, in.tex_coords);
     let metallic = mra.r;
     let roughness = mra.g;
-    let ao = mra.b;
-    
+    let raw_ao = mra.b;
+    let ao = mix(0.25, 1.0, raw_ao); // ensure surfaces get at least some indirect light
+
     let packed_normal = textureSample(normal_tex, scene_sampler, in.tex_coords).xyz;
     let N = normalize(packed_normal * 2.0 - 1.0);
 
@@ -93,7 +94,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndc = vec4<f32>(in.tex_coords.x * 2.0 - 1.0, (1.0 - in.tex_coords.y) * 2.0 - 1.0, depth, 1.0);
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
     let world_position = world_pos_h.xyz / world_pos_h.w;
-    
+
     let V = normalize(camera.view_position - world_position);
     let R = reflect(-V, N);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -103,7 +104,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let kS_ibl = F_ibl;
     var kD_ibl = vec3(1.0) - kS_ibl;
     kD_ibl *= (1.0 - metallic);
-    
+
     let irradiance = textureSample(irradiance_map, ibl_sampler, N).rgb;
     let diffuse_ibl = irradiance * albedo;
 
@@ -112,11 +113,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     // --- Final Combination ---
-    let total_indirect_diffuse = (indirect_diffuse_ssgi * SSGI_INTENSITY + diffuse_ibl) * kD_ibl;
-    
-    let total_indirect_specular = mix(specular_ibl, indirect_specular_ssr, ssr_confidence);
+    let total_incoming_indirect_diffuse = (indirect_diffuse_ssgi * SSGI_INTENSITY) + irradiance;
 
-    let surface_lighting = direct_light + (total_indirect_diffuse + total_indirect_specular) * ao;
+    let indirect_diffuse_contribution = (total_incoming_indirect_diffuse * albedo) * kD_ibl * ao;
+
+    let total_indirect_specular = mix(specular_ibl * ao, indirect_specular_ssr, ssr_confidence);
+
+    let surface_lighting = direct_light + indirect_diffuse_contribution + total_indirect_specular;
 
     let final_hdr_color = select(surface_lighting, vec3(0.0), emission_strength > EMISSIVE_THRESHOLD) + emission;
 

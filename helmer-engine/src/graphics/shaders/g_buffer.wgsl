@@ -132,25 +132,26 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var out: GBufferOutput;
     let material = materials_buffer[in.material_id];
 
-    // --- Albedo Calculation (with fallback) ---
-    var albedo_sample = material.albedo;
-    if (material.albedo_idx >= 0i) {
-        albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
-    }
-    let albedo_color = albedo_sample.rgb * material.albedo.rgb;
-    let alpha = albedo_sample.a * material.albedo.a;
+    // --- Albedo Calculation ---
+var albedo_color = material.albedo.rgb;
+var alpha = material.albedo.a;
+if (material.albedo_idx >= 0i) {
+    let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
+    albedo_color *= albedo_sample.rgb; // Multiply factor by texture
+    alpha *= albedo_sample.a;
+}
 
-    // --- MRA Calculation (with fallback) ---
-    var metallic = material.metallic;
-    var roughness = material.roughness;
-    var ao = material.ao;
-    if (material.metallic_roughness_idx >= 0i) {
-        // Standard GLTF ORM (Occlusion, Roughness, Metallic) texture packing
-        let mr_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
-        ao *= mr_sample.r;
-        roughness *= mr_sample.g;
-        metallic *= mr_sample.b;
-    }
+    // --- MRA Calculation ---
+var metallic = material.metallic;
+var roughness = material.roughness;
+var ao = material.ao;
+if (material.metallic_roughness_idx >= 0i) {
+    // Standard GLTF packing: R=Occlusion, G=Roughness, B=Metallic
+    let mra_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
+    ao *= mra_sample.r;          // Occlusion from Red channel
+    roughness *= mra_sample.g;   // Roughness from Green channel
+    metallic *= mra_sample.b;    // Metallic from Blue channel
+}
 
     // --- Emission Calculation ---
     var emission_color = material.emission_color * material.emission_strength;

@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
-const SSGI_INTENSITY: f32 = 2.0;
+const SSGI_INTENSITY: f32 = 4.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//

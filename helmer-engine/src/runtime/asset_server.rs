@@ -788,7 +788,7 @@ fn process_node(
                     metallic: pbr.metallic_factor(),
                     roughness: pbr.roughness_factor(),
                     ao: material.occlusion_texture().map_or(1.0, |t| t.strength()),
-                    emission_strength: material.emissive_strength().unwrap_or(1.0),
+                    emission_strength: material.emissive_strength().unwrap_or(0.0),
                     emission_color: material.emissive_factor(),
                     albedo_texture_index: get_tex(
                         pbr.base_color_texture().map(|i| i.texture()),

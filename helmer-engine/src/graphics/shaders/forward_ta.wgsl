@@ -309,13 +309,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Simple ambient
-    let ambient = vec3<f32>(0.03) * albedo_color * ao;
+    //let ambient = vec3<f32>(0.03) * albedo_color * ao;
     
     // Add emission
     let emission = material.emission_color * material.emission_strength;
 
     // Combine
-    var color = ambient + Lo + emission;
+    var color = Lo + emission;
 
     // Tone mapping and gamma correction
     //color = color / (color + vec3<f32>(1.0));

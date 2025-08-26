@@ -1,3 +1,4 @@
+use crate::graphics::config::RenderConfig;
 use crate::graphics::renderer::error::RendererError;
 use crate::graphics::renderer::renderer::{
     Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
@@ -104,6 +105,7 @@ pub struct ForwardRendererPMU {
     current_render_data: Option<RenderData>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
+    config: RenderConfig,
 }
 
 impl ForwardRendererPMU {
@@ -195,6 +197,7 @@ impl ForwardRendererPMU {
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
+            config: RenderConfig::default(),
         };
 
         renderer.initialize_resources()?;
@@ -377,7 +380,7 @@ impl ForwardRendererPMU {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
@@ -386,7 +389,7 @@ impl ForwardRendererPMU {
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
@@ -707,7 +710,7 @@ impl ForwardRendererPMU {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg16Float,
+            format: wgpu::TextureFormat::Rg32Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -723,11 +726,6 @@ impl ForwardRendererPMU {
 
         self.shadow_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Shadow Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
 
@@ -836,7 +834,7 @@ impl ForwardRendererPMU {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rg16Float,
+                    format: wgpu::TextureFormat::Rg32Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1207,8 +1205,11 @@ impl RenderTrait for ForwardRendererPMU {
         let eye = camera_transform.position;
         let forward = camera_transform.forward();
         let up = camera_transform.up();
-        let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
-        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
+
+        if self.config.shadow_pass {
+            let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
+            self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1354,6 +1355,10 @@ impl RenderTrait for ForwardRendererPMU {
                 );
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::RenderConfig(config) => {
+                self.config = config;
+                let _ = self.initialize_resources();
+            }
             RenderMessage::Resize(size) => self.resize(size),
             _ => {}
         }

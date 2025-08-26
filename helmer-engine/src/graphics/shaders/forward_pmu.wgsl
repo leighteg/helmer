@@ -274,14 +274,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let ambient = kD_ibl * diffuse_indirect * ao;
     
+    let specular_indirect_occluded = specular_indirect * ao;
+
     // --- 3. FINAL COMPOSITION ---
-    var final_color = ambient + Lo + specular_indirect + emission;
+    var final_hdr_color = ambient + Lo + specular_indirect_occluded + emission;
 
-    // tonemapping
-    //final_color = final_color / (final_color + vec3<f32>(1.0));
+    let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));
+    let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
 
-    // gamma correction
-    //final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
-
-    return vec4<f32>(final_color, albedo_sample.a);
+    return vec4<f32>(gamma_corrected, alpha);
 }

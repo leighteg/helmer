@@ -1,13 +1,16 @@
 //! src/graphics/renderer/forward_renderer.rs
 
 use crate::{
-    graphics::renderer::{
-        error::RendererError,
+    graphics::{
+        config::RenderConfig,
         renderer::{
-            Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
-            Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES,
-            PbrConstants, RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShadowPipeline,
-            ShadowUniforms, Vertex, WGPU_CLIP_SPACE_CORRECTION,
+            error::RendererError,
+            renderer::{
+                Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
+                Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants,
+                RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms,
+                Vertex, WGPU_CLIP_SPACE_CORRECTION,
+            },
         },
     },
     provided::components::{Camera, LightType},
@@ -102,6 +105,7 @@ pub struct ForwardRendererTA {
     current_render_data: Option<RenderData>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
+    config: RenderConfig,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -209,6 +213,7 @@ impl ForwardRendererTA {
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
+            config: RenderConfig::default(),
         };
 
         renderer.initialize_resources()?;
@@ -1042,7 +1047,7 @@ impl ForwardRendererTA {
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
             prev_view_proj: [[0.0; 4]; 4], // PLACEHOLDER
-            frame_index: 0, // PLACEHOLDER,
+            frame_index: 0,                // PLACEHOLDER,
             _padding: [0; 3],
         };
         self.queue.write_buffer(
@@ -1386,10 +1391,13 @@ impl RenderTrait for ForwardRendererTA {
         let eye = camera_transform.position;
         let forward = camera_transform.forward();
         let up = camera_transform.up();
-        let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
 
-        // Shadow pass
-        self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
+        if self.config.shadow_pass {
+            // Shadow pass
+            let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
+
+            self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
+        }
 
         // Forward rendering pass
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1522,8 +1530,12 @@ impl RenderTrait for ForwardRendererTA {
                 self.pending_materials.push(mat_data);
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::RenderConfig(config) => {
+                self.config = config;
+                let _ = self.initialize_resources();
+            }
             RenderMessage::Resize(size) => self.resize(size),
-            RenderMessage::Shutdown => {},
+            RenderMessage::Shutdown => {}
             _ => {}
         }
     }

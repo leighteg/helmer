@@ -307,9 +307,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             Lo += (kD * albedo_color / PI + specular) * radiance * NdotL * shadow_multiplier;
         }
     }
-
-    // Simple ambient
-    //let ambient = vec3<f32>(0.03) * albedo_color * ao;
     
     // Add emission
     let emission = material.emission_color * material.emission_strength;
@@ -318,8 +315,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = Lo + emission;
 
     // Tone mapping and gamma correction
-    //color = color / (color + vec3<f32>(1.0));
-    //color = pow(color, vec3<f32>(1.0 / 2.2));
+    color = color / (color + vec3<f32>(1.0));
+    color = pow(color, vec3<f32>(1.0 / 2.2));
 
     return vec4<f32>(color, alpha);
 }

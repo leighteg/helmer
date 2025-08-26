@@ -102,10 +102,10 @@ pub async fn initialize_renderer(
     } else {
         info!("Initializing Low-End Forward Renderer.");
 
-        if path_str.as_str().ends_with("PMU") {
-            Box::new(ForwardRendererPMU::new(instance, surface, &adapter, size, target_tickrate).await?)
-        } else {
+        if path_str.as_str().ends_with("TA") {
             Box::new(ForwardRendererTA::new(instance, surface, adapter, size, target_tickrate).await?)
+        } else {
+            Box::new(ForwardRendererPMU::new(instance, surface, &adapter, size, target_tickrate).await?)
         }
     };
 

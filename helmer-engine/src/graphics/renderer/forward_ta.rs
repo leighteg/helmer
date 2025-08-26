@@ -27,10 +27,10 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
 // --- CONSTANTS ---
-pub const MAX_LIGHTS: usize = 248;
+const MAX_LIGHTS: usize = 248;
 const MAX_TEXTURES_PER_TYPE: u32 = 256; // Reduced for lower-end devices
 const DEFAULT_TEXTURE_RESOLUTION: u32 = 512; // Standard resolution for texture arrays
-const MAX_MATERIALS: usize = 128; // Reduced material count
+const MAX_MATERIALS: usize = 2048;
 
 /// Forward renderer optimized for lower-end devices
 pub struct ForwardRendererTA {

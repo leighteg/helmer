@@ -534,8 +534,9 @@ where
 fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
     let reader = Reader::new(bytes).map_err(|e| e.to_string())?;
     let header = reader.header();
-    let dimensions = (header.pixel_width, header.pixel_height);
+    let mut dimensions = (header.pixel_width, header.pixel_height);
 
+    // Handle uncompressed formats first
     if let Some(format) = header.format {
         let wgpu_format = match format {
             ktx2::Format::R8G8B8A8_UNORM => wgpu::TextureFormat::Rgba8Unorm,
@@ -543,23 +544,86 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
             _ => return Err(format!("Unsupported direct KTX2 format: {:?}", format)),
         };
         let level_data = reader.levels().next().ok_or("No image levels found")?;
-        return Ok((level_data.data.to_vec(), wgpu_format, dimensions));
+        let mut data = level_data.data.to_vec();
+
+        if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
+            const TARGET_WIDTH: u32 = 512;
+            const TARGET_HEIGHT: u32 = 512;
+            if dimensions.0 != TARGET_WIDTH || dimensions.1 != TARGET_HEIGHT {
+                // We assume R8G8B8A8 format here, which is 4 bytes per pixel.
+                if let Some(image_buffer) =
+                    image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(dimensions.0, dimensions.1, data.clone())
+                {
+                    let resized = image::imageops::resize(
+                        &image_buffer,
+                        TARGET_WIDTH,
+                        TARGET_HEIGHT,
+                        image::imageops::FilterType::Lanczos3,
+                    );
+                    data = resized.into_raw();
+                    dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+                } else {
+                    warn!("Failed to create image buffer for resizing KTX2 texture. Data length mismatch.");
+                }
+            }
+        }
+        return Ok((data, wgpu_format, dimensions));
     }
 
+    // Handle compressed Basis Universal formats
     let mut transcoder = Transcoder::new();
     if transcoder.prepare_transcoding(bytes).is_err() {
         return Err("Failed to prepare Basis Universal transcoder.".to_string());
     }
 
-    let target_basis_format = TranscoderTextureFormat::BC7_RGBA;
-    let target_wgpu_format = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
     let transcode_params = TranscodeParameters {
         level_index: 0,
         ..Default::default()
     };
-    match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
-        Ok(transcoded_data) => Ok((transcoded_data, target_wgpu_format, dimensions)),
-        Err(e) => Err(format!("Failed to transcode KTX2 image level: {:?}", e)),
+
+    if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
+        // Resize path: transcode to RGBA, resize, then use as uncompressed texture
+        const TARGET_WIDTH: u32 = 512;
+        const TARGET_HEIGHT: u32 = 512;
+
+        match transcoder.transcode_image_level(bytes, TranscoderTextureFormat::RGBA32, transcode_params)
+        {
+            Ok(transcoded_data) => {
+                let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                    dimensions.0,
+                    dimensions.1,
+                    transcoded_data,
+                )
+                .ok_or_else(|| {
+                    "Failed to create image buffer from transcoded KTX2 data".to_string()
+                })?;
+
+                let resized = image::imageops::resize(
+                    &image_buffer,
+                    TARGET_WIDTH,
+                    TARGET_HEIGHT,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                let final_data = resized.into_raw();
+                dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+
+                // Assuming sRGB for color textures, which is a reasonable default.
+                let final_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+                Ok((final_data, final_format, dimensions))
+            }
+            Err(e) => Err(format!(
+                "Failed to transcode KTX2 to RGBA for resizing: {:?}",
+                e
+            )),
+        }
+    } else {
+        // Original path: transcode to a compressed format
+        let target_basis_format = TranscoderTextureFormat::BC7_RGBA;
+        let target_wgpu_format = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
+        match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
+            Ok(transcoded_data) => Ok((transcoded_data, target_wgpu_format, dimensions)),
+            Err(e) => Err(format!("Failed to transcode KTX2 image level: {:?}", e)),
+        }
     }
 }
 
@@ -869,8 +933,23 @@ fn process_texture(
             "image/ktx2" => decode_ktx2(pixels),
             "image/png" | "image/jpeg" => match image::load_from_memory(pixels) {
                 Ok(decoded) => {
-                    let rgba = decoded.to_rgba8();
-                    let dimensions = rgba.dimensions();
+                    let mut rgba = decoded.to_rgba8();
+                    let mut dimensions = rgba.dimensions();
+
+                    if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
+                        const TARGET_WIDTH: u32 = 512;
+                        const TARGET_HEIGHT: u32 = 512;
+                        if dimensions.0 != TARGET_WIDTH || dimensions.1 != TARGET_HEIGHT {
+                            rgba = image::imageops::resize(
+                                &rgba,
+                                TARGET_WIDTH,
+                                TARGET_HEIGHT,
+                                image::imageops::FilterType::Lanczos3,
+                            );
+                            dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+                        }
+                    }
+
                     let data = rgba.into_raw();
                     let wgpu_format = match kind {
                         AssetKind::Albedo | AssetKind::Emission => {

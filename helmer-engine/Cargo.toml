@@ -16,12 +16,12 @@ thiserror = "2.0.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 bytemuck = "1.23.0"
-wgpu = "25.0.2"
+wgpu = "26.0.1"
 pollster = "0.4.0"
 resvg = "0.45.1"
 softbuffer = "0.4.6"
 colored = "3.0.0"
-rapier3d = "0.26.1"
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
 rand = "0.9.1"
 gltf = { version = "1.4.1", features = ["KHR_materials_emissive_strength", "KHR_texture_transform"] }
 ktx2 = "0.4.0"

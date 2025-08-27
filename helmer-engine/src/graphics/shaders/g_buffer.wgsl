@@ -67,20 +67,18 @@ var<push_constant> constants: PbrConstants;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
-    if (len < EPSILON) {
+    if len < EPSILON {
         return vec3<f32>(0.0, 0.0, 1.0);
     }
     return v / len;
 }
 
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
-              m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-              m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
     // If the determinant is zero or very close to it, the matrix is not invertible.
     // Return the identity matrix as a safe fallback to prevent division by zero.
-    if (abs(det) < EPSILON) {
+    if abs(det) < EPSILON {
         return mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
     }
 
@@ -105,7 +103,7 @@ fn vs_main(vertex: VertexInput) -> GBufferInput {
     let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
-    
+
     let model_mat3 = mat3x3<f32>(
         constants.model_matrix[0].xyz,
         constants.model_matrix[1].xyz,
@@ -119,11 +117,11 @@ fn vs_main(vertex: VertexInput) -> GBufferInput {
 
     out.world_normal = N;
     out.world_tangent = T;
-    out.world_bitangent = B; 
-    
+    out.world_bitangent = B;
+
     out.tex_coord = vertex.tex_coord;
     out.material_id = constants.material_id;
-    
+
     return out;
 }
 
@@ -133,35 +131,35 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     let material = materials_buffer[in.material_id];
 
     // --- Albedo Calculation ---
-var albedo_color = material.albedo.rgb;
-var alpha = material.albedo.a;
-if (material.albedo_idx >= 0i) {
-    let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
-    albedo_color *= albedo_sample.rgb; // Multiply factor by texture
-    alpha *= albedo_sample.a;
-}
+    var albedo_color = material.albedo.rgb;
+    var alpha = material.albedo.a;
+    if material.albedo_idx >= 0i {
+        let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
+        albedo_color *= albedo_sample.rgb; // Multiply factor by texture
+        alpha *= albedo_sample.a;
+    }
 
     // --- MRA Calculation ---
-var metallic = material.metallic;
-var roughness = material.roughness;
-var ao = material.ao;
-if (material.metallic_roughness_idx >= 0i) {
+    var metallic = material.metallic;
+    var roughness = material.roughness;
+    var ao = material.ao;
+    if material.metallic_roughness_idx >= 0i {
     // Standard GLTF packing: R=Occlusion, G=Roughness, B=Metallic
-    let mra_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
-    ao *= mra_sample.r;          // Occlusion from Red channel
-    roughness *= mra_sample.g;   // Roughness from Green channel
-    metallic *= mra_sample.b;    // Metallic from Blue channel
-}
+        let mra_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
+        ao *= mra_sample.r;          // Occlusion from Red channel
+        roughness *= mra_sample.g;   // Roughness from Green channel
+        metallic *= mra_sample.b;    // Metallic from Blue channel
+    }
 
     // --- Emission Calculation ---
     var emission_color = material.emission_color * material.emission_strength;
-    if (material.emission_idx >= 0i) {
+    if material.emission_idx >= 0i {
         emission_color *= textureSample(textures[material.emission_idx], pbr_sampler, in.tex_coord).rgb;
     }
 
     // --- Normal Mapping ---
     var N: vec3<f32>;
-    if (material.normal_idx >= 0i) {
+    if material.normal_idx >= 0i {
         let tangent_space_normal = textureSample(textures[material.normal_idx], pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
         let T = safe_normalize(in.world_tangent);
         let B = safe_normalize(in.world_bitangent);

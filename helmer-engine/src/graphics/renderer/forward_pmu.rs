@@ -953,6 +953,7 @@ impl ForwardRendererPMU {
                     label: Some(&format!("Shadow Pass {}", i)),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &cascade_view,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1216,6 +1217,7 @@ impl RenderTrait for ForwardRendererPMU {
                 label: Some("Forward Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &output_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

@@ -411,7 +411,7 @@ impl ForwardRendererTA {
         // Silencing a likely erroneous/version-specific warning from the toolchain.
         #[allow(deprecated)]
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -1186,6 +1186,7 @@ impl ForwardRendererTA {
                     label: Some(&format!("Shadow Pass {}", i)),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &cascade_view,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1405,6 +1406,7 @@ impl RenderTrait for ForwardRendererTA {
             label: Some("Forward Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &output_view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {

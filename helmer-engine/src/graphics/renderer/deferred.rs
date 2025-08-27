@@ -484,7 +484,7 @@ impl DeferredRenderer {
         self.queue.write_texture(
             texture.as_image_copy(),
             &blue_noise_rgba,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * dimensions.0),
                 rows_per_image: Some(dimensions.1),
@@ -575,7 +575,7 @@ impl DeferredRenderer {
         self.queue.write_texture(
             texture.as_image_copy(),
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * width),
                 rows_per_image: Some(height),
@@ -773,7 +773,7 @@ impl DeferredRenderer {
         let bytes_per_row = bytes_per_pixel * DEFAULT_TEXTURE_RESOLUTION;
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -784,7 +784,7 @@ impl DeferredRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION),
@@ -806,7 +806,7 @@ impl DeferredRenderer {
     ) {
         let bytes_per_row = bytes_per_pixel * DEFAULT_TEXTURE_RESOLUTION;
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -817,7 +817,7 @@ impl DeferredRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION),
@@ -843,7 +843,7 @@ impl DeferredRenderer {
         let bytes_per_row = width_in_blocks * block_size_bytes as u32;
 
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: target_array,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
@@ -854,7 +854,7 @@ impl DeferredRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(DEFAULT_TEXTURE_RESOLUTION / block_dimensions.1),
@@ -908,7 +908,7 @@ impl DeferredRenderer {
         self.queue.write_texture(
             texture.as_image_copy(),
             data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
                 rows_per_image: Some(height_in_blocks),
@@ -2473,6 +2473,7 @@ impl DeferredRenderer {
                     label: Some(&format!("Shadow Pass {}", i)),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &cascade_view,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -2549,6 +2550,7 @@ impl DeferredRenderer {
         let gbuffer_attachments = [
             Some(wgpu::RenderPassColorAttachment {
                 view: self.gbuf_normal_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2557,6 +2559,7 @@ impl DeferredRenderer {
             }),
             Some(wgpu::RenderPassColorAttachment {
                 view: self.gbuf_albedo_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -2565,6 +2568,7 @@ impl DeferredRenderer {
             }),
             Some(wgpu::RenderPassColorAttachment {
                 view: self.gbuf_mra_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -2573,6 +2577,7 @@ impl DeferredRenderer {
             }),
             Some(wgpu::RenderPassColorAttachment {
                 view: self.gbuf_emission_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -2637,6 +2642,7 @@ impl DeferredRenderer {
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.direct_lighting_texture_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2645,6 +2651,7 @@ impl DeferredRenderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.direct_lighting_diffuse_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2668,6 +2675,7 @@ impl DeferredRenderer {
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.depth_half_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2676,6 +2684,7 @@ impl DeferredRenderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.normal_half_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2684,6 +2693,7 @@ impl DeferredRenderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.albedo_half_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2692,6 +2702,7 @@ impl DeferredRenderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: self.direct_lighting_diffuse_half_view.as_ref().unwrap(),
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2711,6 +2722,7 @@ impl DeferredRenderer {
             label: Some("SSGI Pass (Half-Res)"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: self.ssgi_raw_half_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2732,6 +2744,7 @@ impl DeferredRenderer {
             label: Some("SSGI Denoise Pass (Half-Res)"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: self.ssgi_denoised_half_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2760,6 +2773,7 @@ impl DeferredRenderer {
             label: Some("SSGI Upsample Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: self.ssgi_upsampled_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2778,6 +2792,7 @@ impl DeferredRenderer {
             label: Some("SSR Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: self.ssr_texture_view.as_ref().unwrap(),
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -2802,6 +2817,7 @@ impl DeferredRenderer {
             label: Some("Composite Pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output_view,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {

@@ -1352,17 +1352,15 @@ impl DeferredRenderer {
             push_constant_ranges: &[],
         });
 
-        // *** FIX START: Add the camera bind group layout to the denoise pipeline layout ***
         let ssgi_denoise_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("SSGI Denoise Pipeline Layout"),
                 bind_group_layouts: &[
                     &ssgi_denoise_inputs_bind_group_layout,
-                    &ssr_camera_bind_group_layout, // This was missing
+                    &ssr_camera_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
-        // *** FIX END ***
 
         let ssgi_upsample_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2760,10 +2758,8 @@ impl DeferredRenderer {
             &[],
         );
 
-        // *** FIX START: Set the camera bind group for temporal reprojection ***
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(1, &self.ssr_camera_bind_groups[buffer_index], &[]);
-        // *** FIX END ***
 
         pass.draw(0..3, 0..1);
     }

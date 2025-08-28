@@ -388,7 +388,8 @@ impl DeferredRenderer {
 
         self.material_uniform_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("materials-buffer"),
-            size: (std::mem::size_of::<MaterialShaderData>() * MAX_TOTAL_MATERIALS) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<MaterialShaderData>() * MAX_TOTAL_MATERIALS)
+                as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -743,7 +744,7 @@ impl DeferredRenderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -2873,38 +2874,61 @@ impl DeferredRenderer {
             ];
 
             let frustum_corners_world: [Vec3; 8] =
-                std::array::from_fn(|i| (inv_camera_view * corners_view[i].extend(1.0)).xyz());
+                std::array::from_fn(|j| (inv_camera_view * corners_view[j].extend(1.0)).xyz());
 
             let world_center = frustum_corners_world.iter().sum::<Vec3>() / 8.0;
-
             let light_view = Mat4::look_at_rh(world_center - light_dir, world_center, Vec3::Y);
 
-            let mut cascade_min = Vec3::splat(f32::MAX);
-            let mut cascade_max = Vec3::splat(f32::MIN);
+            // --- 1. GET HYBRID Z-BOUNDS TO PREVENT CASTER CLIPPING ---
+            let mut frustum_min = Vec3::splat(f32::MAX);
+            let mut frustum_max = Vec3::splat(f32::MIN);
             for corner in frustum_corners_world {
                 let trf = light_view * corner.extend(1.0);
-                cascade_min = cascade_min.min(trf.xyz());
-                cascade_max = cascade_max.max(trf.xyz());
+                frustum_min = frustum_min.min(trf.xyz());
+                frustum_max = frustum_max.max(trf.xyz());
             }
 
-            let mut scene_min_z = f32::MAX;
-            let mut scene_max_z = f32::MIN;
+            let mut scene_min_z_in_light_space = f32::MAX;
             for corner in &scene_corners {
                 let trf = light_view * corner.extend(1.0);
-                scene_min_z = scene_min_z.min(trf.z);
-                scene_max_z = scene_max_z.max(trf.z);
+                scene_min_z_in_light_space = scene_min_z_in_light_space.min(trf.z);
             }
 
+            let cascade_near = -frustum_max.z;
+            let cascade_far = -scene_min_z_in_light_space;
+
+            // --- 2. STABILIZE THE PROJECTION TO PREVENT SHIMMERING ---
+            let cascade_extents = frustum_max - frustum_min;
+            let max_extent = cascade_extents.x.max(cascade_extents.y);
+            let texel_size = max_extent / SHADOW_MAP_RESOLUTION as f32;
+
+            let center = (frustum_min + frustum_max) * 0.5;
+            let snapped_center_x = (center.x / texel_size).floor() * texel_size;
+            let snapped_center_y = (center.y / texel_size).floor() * texel_size;
+
+            let half_size_x = ((cascade_extents.x * 0.5) / texel_size).ceil() * texel_size;
+            let half_size_y = ((cascade_extents.y * 0.5) / texel_size).ceil() * texel_size;
+
+            let stable_min_x = snapped_center_x - half_size_x;
+            let stable_max_x = snapped_center_x + half_size_x;
+            let stable_min_y = snapped_center_y - half_size_y;
+            let stable_max_y = snapped_center_y + half_size_y;
+
+            // --- 3. BUILD THE FINAL MATRIX ---
             let light_proj = Mat4::orthographic_rh(
-                cascade_min.x,
-                cascade_max.x,
-                cascade_min.y,
-                cascade_max.y,
-                -scene_max_z,
-                -scene_min_z,
+                stable_min_x,
+                stable_max_x,
+                stable_min_y,
+                stable_max_y,
+                cascade_near,
+                cascade_far,
             );
 
-            let final_light_vp = light_proj * light_view;
+            let mut clip_space_correction = WGPU_CLIP_SPACE_CORRECTION;
+            clip_space_correction.y_axis = -clip_space_correction.y_axis;
+
+            let final_light_vp = clip_space_correction * light_proj * light_view;
+
             uniforms.cascades[i] = CascadeUniform {
                 light_view_proj: final_light_vp.to_cols_array_2d(),
                 split_depth: [-z_far, 0.0, 0.0, 0.0],

@@ -1,3 +1,5 @@
+const EVSM_C = 40.0; // Positive warping constant
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -40,17 +42,15 @@ struct FragmentOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
     var out: FragmentOutput;
-    let depth = in.depth;
-    
-    // Calculate moments
-    let moment1 = depth;
-    let moment2 = depth * depth;
 
-    // Use derivatives to reduce aliasing artifacts at steep depth changes.
-    let dx = dpdx(depth);
-    let dy = dpdy(depth);
-    let moment2_magic = moment2 + 0.25 * (dx * dx + dy * dy);
+    let depth = in.depth; // depth is in [0, 1] range
 
-    out.moments = vec2<f32>(moment1, moment2_magic);
+    // Warp the depth exponentially
+    let warped_depth = exp(EVSM_C * (depth - 1.0));
+
+    let moment1 = warped_depth;
+    let moment2 = warped_depth * warped_depth;
+
+    out.moments = vec2<f32>(moment1, moment2);
     return out;
 }

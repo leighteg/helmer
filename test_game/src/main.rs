@@ -84,6 +84,8 @@ fn main() {
         // Load meshes from .glb files
         let box_handle = asset_server.load_mesh("assets/models/box.glb");
 
+        let city_handle = asset_server.load_scene("assets/models/city.glb");
+
         let sponza_handle = asset_server.load_scene("assets/models/sponza.glb");
 
         let raptor_handle = asset_server.load_scene("assets/models/ford_raptor.glb");
@@ -156,11 +158,25 @@ fn main() {
         ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
         ecs_guard.add_component(ground_entity, FixedCollider {});
 
+        let city_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            city_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::from_array([3.0; 3]),
+            },
+        );
+        ecs_guard.add_component(
+            city_entity,
+            SceneRoot(city_handle),
+        );
+
         let sponza_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             sponza_entity,
             Transform {
-                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                position: glam::Vec3::new(25.0, -4.0, 0.0),
                 rotation: glam::Quat::default(),
                 scale: glam::Vec3::ONE,
             },
@@ -271,7 +287,7 @@ fn main() {
         );
         ecs_guard.add_component(
             sun_entity,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 100.0),
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
         );
     });
     runtime.init();

@@ -1694,7 +1694,6 @@ impl DeferredRenderer {
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BufferBindingType::Storage { read_only: true },
                     ),
-                    sampler_binding(2, true, wgpu::SamplerBindingType::Filtering),
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1705,6 +1704,7 @@ impl DeferredRenderer {
                         },
                         count: Some(std::num::NonZeroU32::new(MAX_TOTAL_TEXTURES).unwrap()),
                     },
+                    sampler_binding(2, true, wgpu::SamplerBindingType::Filtering),
                 ],
             });
 
@@ -2937,6 +2937,71 @@ impl DeferredRenderer {
 
         uniforms
     }
+
+    fn sync_material_buffer(&mut self) {
+        if self.materials.is_empty() {
+            return;
+        }
+
+        // Pre-calculate the base offsets for each texture type.
+        let albedo_offset = 0i32;
+        let normal_offset = self.albedo_textures.len() as i32;
+        let mr_offset = normal_offset + self.normal_textures.len() as i32;
+        let emission_offset = mr_offset + self.mr_textures.len() as i32;
+
+        // 1. Create a single, large buffer on the CPU (the staging buffer).
+        let material_struct_size = std::mem::size_of::<MaterialShaderData>();
+        let mut cpu_buffer = vec![0u8; MAX_TOTAL_MATERIALS * material_struct_size];
+
+        // 2. Iterate through all loaded materials and write their data into the correct spot in the CPU buffer.
+        for (id, material) in &self.materials {
+            // Calculate the final, absolute texture indices for the shader.
+            let shader_data = MaterialShaderData {
+                albedo: material.albedo,
+                metallic: material.metallic,
+                roughness: material.roughness,
+                ao: material.ao,
+                emission_strength: material.emission_strength,
+                emission_color: material.emission_color,
+                albedo_idx: if material.albedo_texture_index == -1 {
+                    -1
+                } else {
+                    albedo_offset + material.albedo_texture_index
+                },
+                normal_idx: if material.normal_texture_index == -1 {
+                    -1
+                } else {
+                    normal_offset + material.normal_texture_index
+                },
+                metallic_roughness_idx: if material.metallic_roughness_texture_index == -1 {
+                    -1
+                } else {
+                    mr_offset + material.metallic_roughness_texture_index
+                },
+                emission_idx: if material.emission_texture_index == -1 {
+                    -1
+                } else {
+                    emission_offset + material.emission_texture_index
+                },
+                _padding: 0.0,
+            };
+
+            // Calculate the exact byte offset for this material in the buffer.
+            let offset = *id * material_struct_size;
+
+            // Write the raw bytes of the struct into the CPU buffer at the correct offset.
+            if let Some(slice) = cpu_buffer.get_mut(offset..offset + material_struct_size) {
+                slice.copy_from_slice(bytemuck::bytes_of(&shader_data));
+            }
+        }
+
+        // 3. Upload the entire CPU buffer to the GPU in a single command.
+        self.queue.write_buffer(
+            self.material_uniform_buffer.as_ref().unwrap(),
+            0,
+            &cpu_buffer,
+        );
+    }
 }
 
 impl RenderTrait for DeferredRenderer {
@@ -2954,6 +3019,8 @@ impl RenderTrait for DeferredRenderer {
     }
 
     fn render(&mut self) -> Result<(), RendererError> {
+        self.sync_material_buffer();
+
         let Some(render_data) = &self.current_render_data else {
             return Ok(());
         };
@@ -3140,29 +3207,6 @@ impl RenderTrait for DeferredRenderer {
             let (emission_ready, emission_idx) = resolve(mat_data.emission_texture_id);
 
             if albedo_ready && normal_ready && mr_ready && emission_ready {
-                let albedo_final_idx = albedo_idx;
-
-                let normal_final_idx = if normal_idx == -1 {
-                    -1
-                } else {
-                    self.albedo_textures.len() as i32 + normal_idx
-                };
-
-                let mr_final_idx = if mr_idx == -1 {
-                    -1
-                } else {
-                    (self.albedo_textures.len() + self.normal_textures.len()) as i32 + mr_idx
-                };
-
-                let emission_final_idx = if emission_idx == -1 {
-                    -1
-                } else {
-                    (self.albedo_textures.len()
-                        + self.normal_textures.len()
-                        + self.mr_textures.len()) as i32
-                        + emission_idx
-                };
-
                 let final_material = Material {
                     albedo: mat_data.albedo,
                     metallic: mat_data.metallic,
@@ -3170,10 +3214,10 @@ impl RenderTrait for DeferredRenderer {
                     ao: mat_data.ao,
                     emission_strength: mat_data.emission_strength,
                     emission_color: mat_data.emission_color,
-                    albedo_texture_index: albedo_final_idx,
-                    normal_texture_index: normal_final_idx,
-                    metallic_roughness_texture_index: mr_final_idx,
-                    emission_texture_index: emission_final_idx,
+                    albedo_texture_index: albedo_idx,
+                    normal_texture_index: normal_idx,
+                    metallic_roughness_texture_index: mr_idx,
+                    emission_texture_index: emission_idx,
                 };
 
                 newly_completed.push((mat_data.id, final_material));

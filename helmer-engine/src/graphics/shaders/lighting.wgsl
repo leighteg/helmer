@@ -143,6 +143,10 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let mra_sample = textureSample(gbuf_mra, gbuf_sampler, screen_uv);
     let metallic = mra_sample.r;
     let roughness = max(mra_sample.g, MIN_ROUGHNESS);
+    var ao = mra_sample.b;
+
+    ao = mix(ao, 1.0, 1.0 - smoothstep(0.0, 0.1, ao));
+
 
     let V = safe_normalize(camera.view_position - world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -156,12 +160,11 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         let light = lights_buffer[i];
         var L: vec3<f32>;
         var radiance: vec3<f32>;
-        var shadow_multiplier = 1.0; // Default to no shadow
+        var shadow_multiplier = 1.0;
 
         if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
-            // Only directional lights use the cascaded shadow map in this implementation
             shadow_multiplier = calculate_shadow_factor(world_position, view_pos.z, N, L);
         } else { // Point
             let to_light_vector = light.position - world_position;
@@ -170,7 +173,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             L = to_light_vector / sqrt(dist_sq);
             let attenuation = 1.0 / (dist_sq + 1.0);
             radiance = light.color * light.intensity * attenuation;
-            // Point lights do not cast shadows, so shadow_multiplier remains 1.0
         }
 
         let NdotL = max(dot(N, L), 0.0);
@@ -203,7 +205,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     }
 
     var out: LightingOutput;
-    out.full_pbr = vec4<f32>(direct_lighting, 1.0);
-    out.diffuse_only = vec4<f32>(diffuse_lighting, 1.0);
+    out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
+    out.diffuse_only = vec4<f32>(diffuse_lighting * ao, 1.0);
     return out;
 }

@@ -148,17 +148,17 @@ impl Default for Material {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct MaterialShaderData {
-    albedo: [f32; 4],
-    metallic: f32,
-    roughness: f32,
-    ao: f32,
-    emission_strength: f32,
-    albedo_idx: i32,
-    normal_idx: i32,
-    metallic_roughness_idx: i32,
-    emission_idx: i32,
-    emission_color: [f32; 3],
-    _padding: f32,
+    pub albedo: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub ao: f32,
+    pub emission_strength: f32,
+    pub albedo_idx: i32,
+    pub normal_idx: i32,
+    pub metallic_roughness_idx: i32,
+    pub emission_idx: i32,
+    pub emission_color: [f32; 3],
+    pub _padding: f32,
 }
 
 impl From<&Material> for MaterialShaderData {

@@ -1,11 +1,8 @@
-//! src/graphics/shaders/forward.wgsl
-
 //=============== CONSTANTS ===============//
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const VSM_MIN_VARIANCE: f32 = 0.00002;
-const SHADOW_BLEEDING_REDUCTION: f32 = 0.4;
+const EVSM_C = 40.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -141,21 +138,33 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
-    let bias: f32 = 0.005;
-    let current_depth = depth - bias;
+fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
+    // bias to push the shadow onto the surface to fix acne and detachment.
+    let min_bias = 0.0005; // smaller values now that EVSM is handling the heavy lifting
+    let max_bias = 0.005;
+    let NdotL = max(dot(N, L), 0.0);
+    let bias = mix(max_bias, min_bias, NdotL);
+
+    var current_depth = depth - bias;
+
+    // Warp the depth value
+    current_depth = exp(EVSM_C * (current_depth - 1.0));
+
+    // Chebyshev test
     if current_depth <= moments.x {
         return 1.0;
     }
+
     var variance = moments.y - (moments.x * moments.x);
-    variance = max(variance, VSM_MIN_VARIANCE);
+    variance = max(variance, 0.0);
+
     let d = current_depth - moments.x;
     let p_max = variance / (variance + d * d);
-    return smoothstep(SHADOW_BLEEDING_REDUCTION, 1.0, p_max);
+
+    return smoothstep(0.2, 1.0, p_max);
 }
 
-//=============== SHADOW FUNCTIONS ===============//
-fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
+fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: vec3<f32>) -> f32 {
     var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         if view_z > shadow_uniforms[i].split_depth.x {
@@ -163,24 +172,16 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
             break;
         }
     }
-
     let cascade = shadow_uniforms[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
-
-    if shadow_pos_clip.w < EPSILON {
-        return 1.0;
-    }
-
+    if shadow_pos_clip.w < EPSILON { return 1.0; }
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
-
-    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 || 
-       shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
+    if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
         return 1.0;
     }
-
     let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
-    return chebyshev_inequality(shadow_coord.z, moments);
+    return chebyshev_inequality(shadow_coord.z, moments, N, L);
 }
 
 //=============== VERTEX SHADER ===============//
@@ -264,7 +265,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Calculate lighting
     var Lo = vec3<f32>(0.0);
-    let shadow_factor = calculate_shadow_factor(in.world_position, in.view_z);
 
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
@@ -275,7 +275,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
-            shadow_multiplier = shadow_factor;
+            shadow_multiplier = calculate_shadow_factor(in.world_position, in.view_z, N, L);
         } else { // Point
             let to_light_vector = light.position - in.world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);

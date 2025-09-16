@@ -374,3 +374,12 @@ pub struct ShadowPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct SkyUniforms {
+    pub sun_direction: [f32; 3],
+    pub _padding: f32,
+    pub sun_color: [f32; 3],
+    pub sun_intensity: f32,
+}

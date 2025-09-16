@@ -271,9 +271,9 @@ fn main() {
 
         let sun_rotation = Quat::from_euler(
             glam::EulerRot::YXZ,
-            80.0f32.to_radians(),  // Y rotation - very slight side angle
-            -80.0f32.to_radians(), // X rotation - steeper downward angle
-            50.0f32.to_radians(),  // Z rotation - no roll
+            20.0f32.to_radians(),  // Y rotation - very slight side angle
+            -20.0f32.to_radians(), // X rotation - steeper downward angle
+            20.0f32.to_radians(),  // Z rotation - no roll
         );
 
         let sun_entity: usize = ecs_guard.create_entity();

@@ -32,6 +32,7 @@ struct VertexOutput {
 @group(0) @binding(6) var normal_tex: texture_2d<f32>;
 @group(0) @binding(7) var mra_tex: texture_2d<f32>;
 @group(0) @binding(8) var depth_tex: texture_depth_2d;
+@group(0) @binding(9) var sky_tex: texture_2d<f32>;
 
 // --- IBL Textures ---
 @group(1) @binding(0) var brdf_lut: texture_2d<f32>;
@@ -68,6 +69,15 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let depth = textureSample(depth_tex, scene_sampler, in.tex_coords);
+    if (depth <= 0.0) {
+        let sky_color = textureSample(sky_tex, scene_sampler, in.tex_coords).rgb;
+        // Tonemap and gamma correct the sky before outputting
+        let tonemapped = sky_color / (sky_color + vec3<f32>(1.0));
+        let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
+        return vec4<f32>(gamma_corrected, 1.0);
+    }
+
     let albedo_sample = textureSample(albedo_tex, scene_sampler, in.tex_coords);
     let albedo = albedo_sample.rgb;
     let alpha = albedo_sample.a;
@@ -90,7 +100,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let packed_normal = textureSample(normal_tex, scene_sampler, in.tex_coords).xyz;
     let N = normalize(packed_normal * 2.0 - 1.0);
 
-    let depth = textureSample(depth_tex, scene_sampler, in.tex_coords);
     let ndc = vec4<f32>(in.tex_coords.x * 2.0 - 1.0, (1.0 - in.tex_coords.y) * 2.0 - 1.0, depth, 1.0);
     let world_pos_h = camera.inverse_view_projection_matrix * ndc;
     let world_position = world_pos_h.xyz / world_pos_h.w;

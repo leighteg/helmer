@@ -7,7 +7,7 @@ use crate::{
                 Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
                 Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants,
                 RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms,
-                TextureManager, Vertex, WGPU_CLIP_SPACE_CORRECTION,
+                SkyUniforms, TextureManager, Vertex, WGPU_CLIP_SPACE_CORRECTION,
             },
         },
     },
@@ -54,6 +54,7 @@ pub struct DeferredRenderer {
 
     // Core Pipelines
     geometry_pipeline: Option<wgpu::RenderPipeline>,
+    sky_pipeline: Option<wgpu::RenderPipeline>,
     lighting_pipeline: Option<wgpu::RenderPipeline>,
     shadow_pipeline: Option<ShadowPipeline>,
     downsample_pipeline: Option<wgpu::RenderPipeline>,
@@ -74,6 +75,7 @@ pub struct DeferredRenderer {
     ssgi_upsample_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssr_camera_bind_group_layout: Option<wgpu::BindGroupLayout>,
     lighting_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    sky_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ibl_bind_group_layout: Option<wgpu::BindGroupLayout>,
     composite_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
 
@@ -88,6 +90,7 @@ pub struct DeferredRenderer {
     ssgi_upsample_bind_group: Option<wgpu::BindGroup>,
     ssr_camera_bind_groups: Vec<wgpu::BindGroup>,
     lighting_inputs_bind_group: Option<wgpu::BindGroup>,
+    sky_bind_groups: Vec<wgpu::BindGroup>,
     ibl_bind_group: Option<wgpu::BindGroup>,
     composite_inputs_bind_group: Option<wgpu::BindGroup>,
 
@@ -110,6 +113,8 @@ pub struct DeferredRenderer {
     direct_lighting_texture_view: Option<wgpu::TextureView>,
     direct_lighting_diffuse_texture: Option<wgpu::Texture>,
     direct_lighting_diffuse_view: Option<wgpu::TextureView>,
+    sky_texture: Option<wgpu::Texture>,
+    sky_texture_view: Option<wgpu::TextureView>,
     ssr_texture: Option<wgpu::Texture>,
     ssr_texture_view: Option<wgpu::TextureView>,
     ssgi_upsampled_texture: Option<wgpu::Texture>,
@@ -149,6 +154,7 @@ pub struct DeferredRenderer {
     // Buffers
     camera_buffers: Vec<wgpu::Buffer>,
     lights_buffers: Vec<wgpu::Buffer>,
+    sky_uniforms_buffers: Vec<wgpu::Buffer>,
     material_uniform_buffer: Option<wgpu::Buffer>,
     shadow_light_vp_buffer: Option<wgpu::Buffer>,
 
@@ -248,6 +254,7 @@ impl DeferredRenderer {
             handle_id_to_texture_index: HashMap::new(),
             pending_materials: Vec::new(),
             geometry_pipeline: None,
+            sky_pipeline: None,
             lighting_pipeline: None,
             shadow_pipeline: None,
             downsample_pipeline: None,
@@ -266,6 +273,7 @@ impl DeferredRenderer {
             ssgi_upsample_bind_group_layout: None,
             ssr_camera_bind_group_layout: None,
             lighting_inputs_bind_group_layout: None,
+            sky_bind_group_layout: None,
             ibl_bind_group_layout: None,
             composite_inputs_bind_group_layout: None,
             scene_data_bind_groups: Vec::new(),
@@ -278,6 +286,7 @@ impl DeferredRenderer {
             ssgi_upsample_bind_group: None,
             ssr_camera_bind_groups: Vec::new(),
             lighting_inputs_bind_group: None,
+            sky_bind_groups: Vec::new(),
             ibl_bind_group: None,
             composite_inputs_bind_group: None,
             main_depth_texture: None,
@@ -294,6 +303,8 @@ impl DeferredRenderer {
             direct_lighting_texture_view: None,
             direct_lighting_diffuse_texture: None,
             direct_lighting_diffuse_view: None,
+            sky_texture: None,
+            sky_texture_view: None,
             ssr_texture: None,
             ssr_texture_view: None,
             ssgi_upsampled_texture: None,
@@ -327,6 +338,7 @@ impl DeferredRenderer {
             prefiltered_env_map_view: None,
             camera_buffers: Vec::new(),
             lights_buffers: Vec::new(),
+            sky_uniforms_buffers: Vec::new(),
             material_uniform_buffer: None,
             shadow_light_vp_buffer: None,
             meshes: HashMap::new(),
@@ -381,6 +393,17 @@ impl DeferredRenderer {
                     label: Some(&format!("lights-buffer-{}", i)),
                     size: (std::mem::size_of::<LightData>() * MAX_LIGHTS) as wgpu::BufferAddress,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+
+        self.sky_uniforms_buffers = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("sky-uniforms-{}", i)),
+                    size: std::mem::size_of::<SkyUniforms>() as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })
             })
@@ -1088,6 +1111,15 @@ impl DeferredRenderer {
             Some(direct_lighting_diffuse_texture.create_view(&Default::default()));
         self.direct_lighting_diffuse_texture = Some(direct_lighting_diffuse_texture);
 
+        let sky_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Sky Texture"),
+            size: full_size,
+            usage: hdr_texture_usage,
+            ..default_texture_desc
+        });
+        self.sky_texture_view = Some(sky_texture.create_view(&Default::default()));
+        self.sky_texture = Some(sky_texture);
+
         let ssr_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SSR Result Texture"),
             size: full_size,
@@ -1289,6 +1321,7 @@ impl DeferredRenderer {
 
         let g_buffer_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/g_buffer.wgsl"));
+        let sky_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/sky.wgsl"));
         let downsample_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/downsample.wgsl"));
         let ssr_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/ssr.wgsl"));
@@ -1313,6 +1346,7 @@ impl DeferredRenderer {
             ssgi_upsample_bind_group_layout,
             ssr_camera_bind_group_layout,
             lighting_inputs_bind_group_layout,
+            sky_bind_group_layout,
             ibl_bind_group_layout,
             composite_inputs_bind_group_layout,
         ) = self.create_bind_group_layouts();
@@ -1329,6 +1363,12 @@ impl DeferredRenderer {
                     range: 0..std::mem::size_of::<PbrConstants>() as u32,
                 }],
             });
+
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sky Pipeline Layout"),
+            bind_group_layouts: &[&sky_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         let downsample_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1428,6 +1468,30 @@ impl DeferredRenderer {
                 cache: None,
             },
         ));
+
+        self.sky_pipeline = Some(
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Sky Pipeline"),
+                layout: Some(&sky_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sky_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sky_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            }),
+        );
 
         self.downsample_pipeline = Some(device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
@@ -1639,6 +1703,7 @@ impl DeferredRenderer {
         self.ssgi_upsample_bind_group_layout = Some(ssgi_upsample_bind_group_layout);
         self.ssr_camera_bind_group_layout = Some(ssr_camera_bind_group_layout);
         self.lighting_inputs_bind_group_layout = Some(lighting_inputs_bind_group_layout);
+        self.sky_bind_group_layout = Some(sky_bind_group_layout);
         self.ibl_bind_group_layout = Some(ibl_bind_group_layout);
         self.composite_inputs_bind_group_layout = Some(composite_inputs_bind_group_layout);
     }
@@ -1646,6 +1711,7 @@ impl DeferredRenderer {
     fn create_bind_group_layouts(
         &self,
     ) -> (
+        wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
@@ -1679,6 +1745,11 @@ impl DeferredRenderer {
                     sampler_binding(3, true, wgpu::SamplerBindingType::Filtering),
                     buffer_binding(
                         4,
+                        wgpu::ShaderStages::FRAGMENT,
+                        wgpu::BufferBindingType::Uniform,
+                    ),
+                    buffer_binding(
+                        5,
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BufferBindingType::Uniform,
                     ),
@@ -1795,12 +1866,29 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Lighting Inputs Bind Group Layout"),
                 entries: &[
-                    texture_binding(0, false, wgpu::TextureViewDimension::D2, true),
-                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(3, false, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(4, false, wgpu::TextureViewDimension::D2, false),
-                    sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering),
+                    texture_binding(0, false, wgpu::TextureViewDimension::D2, true), // depth
+                    texture_binding(1, false, wgpu::TextureViewDimension::D2, false), // normal
+                    texture_binding(2, false, wgpu::TextureViewDimension::D2, false), // albedo
+                    texture_binding(3, false, wgpu::TextureViewDimension::D2, false), // mra
+                    texture_binding(4, false, wgpu::TextureViewDimension::D2, false), // emission
+                    sampler_binding(5, false, wgpu::SamplerBindingType::NonFiltering), // gbuffer sampler
+                ],
+            });
+
+        let sky_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Sky Bind Group Layout"),
+                entries: &[
+                    buffer_binding(
+                        0,
+                        wgpu::ShaderStages::FRAGMENT,
+                        wgpu::BufferBindingType::Uniform,
+                    ),
+                    buffer_binding(
+                        1,
+                        wgpu::ShaderStages::FRAGMENT,
+                        wgpu::BufferBindingType::Uniform,
+                    ),
                 ],
             });
 
@@ -1820,15 +1908,16 @@ impl DeferredRenderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Composite Inputs Bind Group Layout"),
                 entries: &[
-                    texture_binding(0, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(1, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(2, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false),
+                    texture_binding(0, true, wgpu::TextureViewDimension::D2, false), // direct lighting
+                    texture_binding(1, true, wgpu::TextureViewDimension::D2, false), // ssgi
+                    texture_binding(2, true, wgpu::TextureViewDimension::D2, false), // ssr
+                    texture_binding(3, true, wgpu::TextureViewDimension::D2, false), // albedo
+                    texture_binding(4, true, wgpu::TextureViewDimension::D2, false), // emission
                     sampler_binding(5, true, wgpu::SamplerBindingType::Filtering),
-                    texture_binding(6, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(7, true, wgpu::TextureViewDimension::D2, false),
-                    texture_binding(8, false, wgpu::TextureViewDimension::D2, true),
+                    texture_binding(6, true, wgpu::TextureViewDimension::D2, false), // normal
+                    texture_binding(7, true, wgpu::TextureViewDimension::D2, false), // mra
+                    texture_binding(8, false, wgpu::TextureViewDimension::D2, true), // depth
+                    texture_binding(9, true, wgpu::TextureViewDimension::D2, false), // sky texture
                 ],
             });
 
@@ -1843,6 +1932,7 @@ impl DeferredRenderer {
             ssgi_upsample_bind_group_layout,
             ssr_camera_bind_group_layout,
             lighting_inputs_bind_group_layout,
+            sky_bind_group_layout,
             ibl_bind_group_layout,
             composite_inputs_bind_group_layout,
         )
@@ -1926,6 +2016,10 @@ impl DeferredRenderer {
                                 .unwrap()
                                 .as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.sky_uniforms_buffers[i].as_entire_binding(),
+                        },
                     ],
                 })
             })
@@ -1940,6 +2034,25 @@ impl DeferredRenderer {
                         binding: 0,
                         resource: self.camera_buffers[i].as_entire_binding(),
                     }],
+                })
+            })
+            .collect();
+
+        self.sky_bind_groups = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: self.sky_bind_group_layout.as_ref().unwrap(),
+                    label: Some(&format!("Sky Bind Group {}", i)),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.camera_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.sky_uniforms_buffers[i].as_entire_binding(),
+                        },
+                    ],
                 })
             })
             .collect();
@@ -2305,6 +2418,12 @@ impl DeferredRenderer {
                             self.main_depth_texture_view.as_ref().unwrap(),
                         ),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.sky_texture_view.as_ref().unwrap(),
+                        ),
+                    },
                 ],
             }));
     }
@@ -2633,6 +2752,27 @@ impl DeferredRenderer {
                 geometry_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
+    }
+
+    fn run_sky_pass(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Sky Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: self.sky_texture_view.as_ref().unwrap(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+        pass.set_bind_group(0, &self.sky_bind_groups[buffer_index], &[]);
+        pass.draw(0..3, 0..1);
     }
 
     fn run_lighting_pass(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -3047,6 +3187,39 @@ impl RenderTrait for DeferredRenderer {
             bytemuck::cast_slice(&light_data),
         );
 
+        let directional_light = render_data
+            .lights
+            .iter()
+            .find(|l| matches!(l.light_type, LightType::Directional));
+
+        let (mut sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
+            (
+                (light.current_transform.rotation * -Vec3::Z).normalize_or_zero(),
+                light.color,
+                light.intensity,
+            )
+        } else {
+            (
+                Vec3::new(0.2, -0.8, 0.1).normalize(),
+                Vec3::ONE.to_array(),
+                100.0,
+            ) // Default sun
+        };
+
+        sun_dir = Vec3::new(-sun_dir.x, -sun_dir.z, -sun_dir.y);
+
+        let sky_uniforms = SkyUniforms {
+            sun_direction: sun_dir.to_array(),
+            _padding: 0.0,
+            sun_color: sun_color,
+            sun_intensity,
+        };
+        self.queue.write_buffer(
+            &self.sky_uniforms_buffers[buffer_index],
+            0,
+            bytemuck::bytes_of(&sky_uniforms),
+        );
+
         self.prev_view_proj = new_view_proj;
 
         let output_frame = match self.surface.get_current_texture() {
@@ -3080,7 +3253,10 @@ impl RenderTrait for DeferredRenderer {
         if self.config.shadow_pass {
             self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
         }
+
         self.run_geometry_pass(&mut encoder, render_data, alpha);
+        self.run_sky_pass(&mut encoder);
+
         if self.config.direct_lighting_pass {
             self.run_lighting_pass(&mut encoder);
         }

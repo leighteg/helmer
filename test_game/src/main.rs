@@ -305,7 +305,7 @@ impl System for SpinnerSystem {
         ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        let rotation_speed = 0.10 * dt;
+        let rotation_speed = 0.30 * dt;
         let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
         let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
         let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);

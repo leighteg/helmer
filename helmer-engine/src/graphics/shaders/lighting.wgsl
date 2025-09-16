@@ -133,7 +133,7 @@ fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius
     let b = dot(ray_origin, ray_dir);
     let c = dot(ray_origin, ray_origin) - sphere_radius * sphere_radius;
     var delta = b * b - c;
-    if (delta < 0.0) { return vec2(-1.0); }
+    if delta < 0.0 { return vec2(-1.0); }
     delta = sqrt(delta);
     return vec2(-b - delta, -b + delta);
 }
@@ -146,7 +146,7 @@ fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f
     for (var j = 0; j < num_light_samples; j = j + 1) {
         let light_pos = sample_pos + sun_dir * (f32(j) + 0.5) * light_step_size;
         let height = length(light_pos) - planet_radius;
-        if (height < 0.0) { return vec3(0.0); }
+        if height < 0.0 { return vec3(0.0); }
         let rayleigh_density = exp(-height / rayleigh_scale_height);
         let mie_density = exp(-height / mie_scale_height);
         optical_depth += (rayleigh_scattering_coeff * rayleigh_density + mie_scattering_coeff * mie_density) * light_step_size;
@@ -164,7 +164,7 @@ fn get_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     for (var i = 0; i < num_samples; i = i + 1) {
         let sample_pos = camera_pos + view_dir * (f32(i) + 0.5) * step_size;
         let height = length(sample_pos) - planet_radius;
-        if (height < 0.0) { break; }
+        if height < 0.0 { break; }
         let rayleigh_density = exp(-height / rayleigh_scale_height);
         let mie_density = exp(-height / mie_scale_height);
         let optical_depth_step = (rayleigh_scattering_coeff * rayleigh_density + mie_scattering_coeff * mie_density) * step_size;
@@ -200,7 +200,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
 
     if depth <= 0.0 { 
-        discard; 
+        discard;
     }
 
     let ndc = vec4<f32>(screen_uv.x * 2.0 - 1.0, (1.0 - screen_uv.y) * 2.0 - 1.0, depth, 1.0);
@@ -218,6 +218,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     ao = mix(ao, 1.0, 1.0 - smoothstep(0.0, 0.1, ao));
 
+    let sun_height_factor = max(sky.sun_direction.y, 0.0); 
+    let sun_fade = pow(sun_height_factor, 1.5); // adjust exponent for faster/slower fade
 
     let V = safe_normalize(camera.view_position - world_position);
     let F0 = mix(vec3<f32>(0.04), albedo, metallic);
@@ -235,7 +237,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
         if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
-            radiance = light.color * light.intensity;
+            radiance = light.color * light.intensity * sun_fade;
             shadow_multiplier = calculate_shadow_factor(world_position, view_pos.z, N, L);
         } else { // Point
             let to_light_vector = light.position - world_position;
@@ -284,7 +286,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let ambient_contribution = kD_ambient * albedo * sky_ambient_color;
     direct_lighting += ambient_contribution;
     diffuse_lighting += ambient_contribution;
-    
+
     var out: LightingOutput;
     out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
     out.diffuse_only = vec4<f32>(diffuse_lighting * ao, 1.0);

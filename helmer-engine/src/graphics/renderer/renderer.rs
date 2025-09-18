@@ -382,4 +382,6 @@ pub struct SkyUniforms {
     pub _padding: f32,
     pub sun_color: [f32; 3],
     pub sun_intensity: f32,
+    pub ground_albedo: [f32; 3],
+    pub ground_brightness: f32,
 }

@@ -2,6 +2,7 @@
 pub struct RenderConfig {
     pub shadow_pass: bool,
     pub direct_lighting_pass: bool,
+    pub sky_pass: bool,
     pub ssgi_pass: bool,
     pub ssgi_denoise_pass: bool,
     pub ssr_pass: bool,
@@ -15,6 +16,7 @@ impl Default for RenderConfig {
         RenderConfig {
             shadow_pass: true,
             direct_lighting_pass: true,
+            sky_pass: true,
             ssgi_pass: true,
             ssgi_denoise_pass: true,
             ssr_pass: true,

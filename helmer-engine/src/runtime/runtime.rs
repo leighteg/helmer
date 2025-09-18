@@ -558,10 +558,19 @@ impl ApplicationHandler for Runtime {
                                     .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
-                        KeyCode::Numpad0 => {
+                        KeyCode::Digit0 => {
                             if event.state.is_pressed() {
                                 self.config.render_config.direct_lighting_pass =
                                     !self.config.render_config.direct_lighting_pass;
+                                let _ = self
+                                    .render_thread_sender
+                                    .send(RenderMessage::RenderConfig(self.config.render_config));
+                            }
+                        }
+                        KeyCode::KeyH => {
+                            if event.state.is_pressed() {
+                                self.config.render_config.sky_pass =
+                                    !self.config.render_config.sky_pass;
                                 let _ = self
                                     .render_thread_sender
                                     .send(RenderMessage::RenderConfig(self.config.render_config));

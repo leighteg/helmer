@@ -3194,7 +3194,7 @@ impl RenderTrait for DeferredRenderer {
 
         let (mut sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
             (
-                (light.current_transform.rotation * -Vec3::Z).normalize_or_zero(),
+                (light.current_transform.rotation * Vec3::Z).normalize_or_zero(),
                 light.color,
                 light.intensity,
             )
@@ -3206,13 +3206,13 @@ impl RenderTrait for DeferredRenderer {
             ) // Default sun
         };
 
-        sun_dir = Vec3::new(-sun_dir.x, -sun_dir.z, -sun_dir.y);
-
         let sky_uniforms = SkyUniforms {
             sun_direction: sun_dir.to_array(),
             _padding: 0.0,
             sun_color: sun_color,
             sun_intensity,
+            ground_albedo: [0.3, 0.25, 0.2], // Brownish ground
+            ground_brightness: 1.0,
         };
         self.queue.write_buffer(
             &self.sky_uniforms_buffers[buffer_index],
@@ -3255,7 +3255,10 @@ impl RenderTrait for DeferredRenderer {
         }
 
         self.run_geometry_pass(&mut encoder, render_data, alpha);
-        self.run_sky_pass(&mut encoder);
+
+        if (self.config.sky_pass) {
+            self.run_sky_pass(&mut encoder);
+        }
 
         if self.config.direct_lighting_pass {
             self.run_lighting_pass(&mut encoder);

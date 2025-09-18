@@ -23,7 +23,8 @@ use helmer_engine::{
     },
     runtime::{
         input_manager::{self, InputManager},
-        runtime::{RenderMessage, Runtime}, scene_system::SceneRoot,
+        runtime::{RenderMessage, Runtime},
+        scene_system::SceneRoot,
     },
 };
 use rand::Rng;
@@ -38,9 +39,10 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");
     if current_path.ends_with("helmer-rs") {
-        env::set_current_dir(current_path.join("test_game")).expect("Failed to change working directory");
+        env::set_current_dir(current_path.join("test_game"))
+            .expect("Failed to change working directory");
     }
-    
+
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
 
@@ -64,7 +66,7 @@ fn main() {
 
         // Priority 25: General game logic that modifies transforms.
         ecs_guard.system_scheduler.register_system(
-            SpinnerSystem {},
+            SpinnerSystem { time_elapsed: 0.0 },
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
@@ -110,10 +112,12 @@ fn main() {
         // directly to the renderer via a RenderMessage.
 
         let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".into(), 32, 32);
-        let uv_sphere_mesh_handle = asset_server.add_mesh(uv_sphere_mesh.vertices.unwrap(), uv_sphere_mesh.indices);
+        let uv_sphere_mesh_handle =
+            asset_server.add_mesh(uv_sphere_mesh.vertices.unwrap(), uv_sphere_mesh.indices);
 
         let plane_mesh = MeshAsset::plane("plane".into());
-        let plane_mesh_handle = asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
+        let plane_mesh_handle =
+            asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
         let camera_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -167,10 +171,7 @@ fn main() {
                 scale: glam::Vec3::from_array([3.0; 3]),
             },
         );
-        ecs_guard.add_component(
-            city_entity,
-            SceneRoot(city_handle),
-        );
+        ecs_guard.add_component(city_entity, SceneRoot(city_handle));
 
         let sponza_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -181,10 +182,7 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
-            sponza_entity,
-            SceneRoot(sponza_handle),
-        );
+        ecs_guard.add_component(sponza_entity, SceneRoot(sponza_handle));
 
         let raptor_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -195,10 +193,7 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
-            raptor_entity,
-            SceneRoot(raptor_handle),
-        );
+        ecs_guard.add_component(raptor_entity, SceneRoot(raptor_handle));
 
         let cube_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -227,7 +222,12 @@ fn main() {
         );
         ecs_guard.add_component(
             sphere_entity,
-            MeshRenderer::new(uv_sphere_mesh_handle.id, metal_material_handle.id, true, true),
+            MeshRenderer::new(
+                uv_sphere_mesh_handle.id,
+                metal_material_handle.id,
+                true,
+                true,
+            ),
         );
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
@@ -293,7 +293,9 @@ fn main() {
     runtime.init();
 }
 
-struct SpinnerSystem {}
+struct SpinnerSystem {
+    time_elapsed: f32,
+}
 impl System for SpinnerSystem {
     fn name(&self) -> &str {
         "SpinnerSystem"
@@ -305,28 +307,35 @@ impl System for SpinnerSystem {
         ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        let rotation_speed = 0.30 * dt;
-        let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);
-        let delta_y_rotation = Quat::from_axis_angle(glam::Vec3::Y, rotation_speed);
-        let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, rotation_speed);
+        self.time_elapsed += dt;
+
+        // Rotation speeds
+        let y_rotation_speed = 0.05 * dt; // around world
+        let z_rotation_speed = 0.1 * dt; // optional twist
+        let oscillation_speed = 0.1; // how fast it bobs up/down
+
+        // Oscillating X (up/down)
+        let base_angle = -24.0f32.to_radians(); // horizon
+        let deviation = 28.0f32.to_radians();
+        let x_angle = base_angle + deviation * (self.time_elapsed * oscillation_speed).sin();
+        let rotation_x = Quat::from_axis_angle(glam::Vec3::X, x_angle);
+
+        // Incremental Y/Z rotation (around the world)
+        let delta_y = Quat::from_axis_angle(glam::Vec3::Y, y_rotation_speed);
+        let delta_z = Quat::from_axis_angle(glam::Vec3::Z, z_rotation_speed);
 
         ecs.component_pool
             .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, _)| {
-                // Apply Y and Z rotations
-                transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
+                // Apply Y/Z world rotation first
+                transform.rotation = delta_y * delta_z * transform.rotation;
 
-                // Extract euler angles to constrain X rotation
-                let (y, x, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                // Extract current Y/Z angles to preserve world spin
+                let (y, _, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
 
-                // Clamp X rotation to stay around 90 degrees (with some wiggle room)
-                let target_x = -90.0f32.to_radians();
-                let max_deviation = 28.0f32.to_radians();
-                let clamped_x = (x).clamp(target_x - max_deviation, target_x + max_deviation);
+                // Compose final rotation: oscillating X + world Y/Z
+                transform.rotation = Quat::from_euler(glam::EulerRot::YXZ, y, x_angle, z);
 
-                // Reconstruct quaternion with clamped X rotation
-                transform.rotation = Quat::from_euler(glam::EulerRot::YXZ, y, clamped_x, z);
-
-                // Re-normalize the quaternion to prevent floating-point drift over time.
+                // Normalize to avoid drift
                 transform.rotation = transform.rotation.normalize();
             });
     }

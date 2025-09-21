@@ -218,7 +218,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     ao = mix(ao, 1.0, 1.0 - smoothstep(0.0, 0.1, ao));
 
-    let sun_height_factor = max(sky.sun_direction.y, 0.0); 
+    let sun_height_factor = max(sky.sun_direction.y, 0.0);
     let sun_fade = pow(sun_height_factor, 1.5); // adjust exponent for faster/slower fade
 
     let V = safe_normalize(camera.view_position - world_position);
@@ -278,14 +278,30 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     }
 
     // --- SKY AMBIENT LIGHTING ---
-    // Calculate sky color based on the surface normal to get ambient diffuse light.
-    let sky_ambient_color = get_sky_color(N, normalize(sky.sun_direction));
+    // Use basic AO as the only practical occlusion method
+    let sky_visibility = ao;
+
+    // Fix grit: gentle bias for rough surfaces
+    let up_bias = mix(0.25, 0.0, 1.0 - roughness);
+    let smoothed_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), up_bias));
+
+    // Sky color sampling
+    let diffuse_sky_color = get_sky_color(smoothed_normal, normalize(sky.sun_direction));
+    let R = reflect(-V, N);
+    let reflection_sky_color = get_sky_color(R, normalize(sky.sun_direction));
+
+    // PBR calculations
     let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
-    let kS_ambient = F_ambient;
+    let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
     let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
-    let ambient_contribution = kD_ambient * albedo * sky_ambient_color;
-    direct_lighting += ambient_contribution;
-    diffuse_lighting += ambient_contribution;
+
+    // Final contributions
+    let diffuse_contribution = kD_ambient * albedo * diffuse_sky_color;
+    let reflection_contribution = kS_ambient * reflection_sky_color;
+    let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+
+    direct_lighting += total_contribution;
+    diffuse_lighting += diffuse_contribution * sky_visibility;
 
     var out: LightingOutput;
     out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);

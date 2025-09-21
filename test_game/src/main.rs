@@ -315,7 +315,7 @@ impl System for SpinnerSystem {
         let oscillation_speed = 0.1; // how fast it bobs up/down
 
         // Oscillating X (up/down)
-        let base_angle = -24.0f32.to_radians(); // horizon
+        let base_angle = -20.0f32.to_radians(); // horizon
         let deviation = 28.0f32.to_radians();
         let x_angle = base_angle + deviation * (self.time_elapsed * oscillation_speed).sin();
         let rotation_x = Quat::from_axis_angle(glam::Vec3::X, x_angle);

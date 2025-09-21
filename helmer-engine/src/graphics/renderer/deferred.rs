@@ -3199,11 +3199,11 @@ impl RenderTrait for DeferredRenderer {
                 light.intensity,
             )
         } else {
-            (
-                Vec3::new(0.2, -0.8, 0.1).normalize(),
+            ( // Default sun
+                Vec3::new(0.2, 0.8, 0.1).normalize(),
                 Vec3::ONE.to_array(),
                 100.0,
-            ) // Default sun
+            )
         };
 
         let sky_uniforms = SkyUniforms {

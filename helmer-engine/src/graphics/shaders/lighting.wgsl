@@ -211,6 +211,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     let N = safe_normalize(packed_normal * 2.0 - 1.0);
 
     let albedo = textureSample(gbuf_albedo, gbuf_sampler, screen_uv).rgb;
+    let emission = textureSample(gbuf_emission, gbuf_sampler, screen_uv).rgb;
     let mra_sample = textureSample(gbuf_mra, gbuf_sampler, screen_uv);
     let metallic = mra_sample.r;
     let roughness = max(mra_sample.g, MIN_ROUGHNESS);
@@ -305,6 +306,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     var out: LightingOutput;
     out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
-    out.diffuse_only = vec4<f32>(diffuse_lighting * ao, 1.0);
+    out.diffuse_only = vec4(diffuse_lighting * ao + emission, 1.0);
     return out;
 }

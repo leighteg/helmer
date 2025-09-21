@@ -232,7 +232,7 @@ fn main() {
         ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
         ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
-        /* let light_entity = ecs_guard.create_entity();
+        let light_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
             light_entity,
             Transform {
@@ -253,7 +253,7 @@ fn main() {
         ecs_guard.add_component(
             light_entity_2,
             Transform {
-                position: glam::Vec3::new(-1.5, 0.0, 0.0),
+                position: glam::Vec3::new(-1.5, 0.0, -4.0),
                 rotation: glam::Quat::from_array([0.0, 0.0, 0.0, 1.0]),
                 scale: glam::Vec3::ONE,
             },
@@ -267,12 +267,12 @@ fn main() {
             MeshRenderer::new(box_handle.id, red_light_material_handle.id, true, true),
         );
         ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 }); */
+        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
 
         let sun_rotation = Quat::from_euler(
             glam::EulerRot::YXZ,
             20.0f32.to_radians(),  // Y rotation - very slight side angle
-            -20.0f32.to_radians(), // X rotation - steeper downward angle
+            -50.0f32.to_radians(), // X rotation - steeper downward angle
             20.0f32.to_radians(),  // Z rotation - no roll
         );
 

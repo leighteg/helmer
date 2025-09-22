@@ -3192,7 +3192,7 @@ impl RenderTrait for DeferredRenderer {
             .iter()
             .find(|l| matches!(l.light_type, LightType::Directional));
 
-        let (mut sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
+        let (sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
             (
                 (light.current_transform.rotation * Vec3::Z).normalize_or_zero(),
                 light.color,

@@ -377,60 +377,97 @@ impl System for FreecamSystem {
         ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
+        // --- 1. Handle Rotation (Mouse and Controller Right Stick) ---
         if input_manager.is_mouse_button_active(&MouseButton::Right) {
-            // --- 1. Handle Rotation from Mouse Input ---
             if !self.is_looking {
-                // This is the first frame the button is pressed.
-                // Reset last_cursor_position to the current position to avoid the "spaz".
                 self.last_cursor_position = input_manager.cursor_position;
                 self.is_looking = true;
             } else {
-                // We are actively looking, so calculate delta and apply rotation.
                 let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
                 self.last_cursor_position = input_manager.cursor_position;
-
                 if cursor_delta.length_squared() > 0.0 {
                     self.yaw -= cursor_delta.x as f32 * self.sensitivity / 100.0;
                     self.pitch += cursor_delta.y as f32 * self.sensitivity / 100.0;
-
-                    // Clamp pitch
-                    let pitch_limit = FRAC_PI_2 - 0.01;
-                    self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
                 }
             }
         } else {
             self.is_looking = false;
         }
 
-        if self.speed >= 0.5 || input_manager.mouse_wheel.y.is_sign_positive() {
-            self.speed += input_manager.mouse_wheel.y / 2.0;
+        let maybe_gamepad_id = input_manager.first_gamepad_id();
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            const CONTROLLER_SENSITIVITY: f32 = 2.0;
+            let right_stick_x =
+                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX);
+            let right_stick_y =
+                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY);
+            self.yaw -= right_stick_x * CONTROLLER_SENSITIVITY * dt;
+            self.pitch -= right_stick_y * CONTROLLER_SENSITIVITY * dt;
         }
+
+        let pitch_limit = FRAC_PI_2 - 0.01;
+        self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
+
+        // --- 2. Handle Speed Adjustment (Mouse Wheel and D-Pad) ---
+        self.speed += input_manager.mouse_wheel.y * 2.0;
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::RightTrigger) {
+                self.speed += 10.0 * dt;
+            }
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftTrigger) {
+                self.speed -= 10.0 * dt;
+            }
+        }
+        self.speed = self.speed.max(0.5);
         let mut speed = self.speed;
 
-        // --- 2. Calculate Final Orientation ---
+        // --- 3. Calculate Final Orientation & Direction Vectors ---
         let yaw_rotation = Quat::from_axis_angle(Vec3::Y, self.yaw);
         let pitch_rotation = Quat::from_axis_angle(Vec3::X, self.pitch);
         let orientation = yaw_rotation * pitch_rotation;
+        let forward = orientation * Vec3::Z;
+        let right = orientation * -Vec3::X;
 
-        // --- 3. Handle Movement from Keyboard Input ---
+        // --- 4. Handle Movement Input ---
         let mut velocity = Vec3::ZERO;
-        let forward = orientation * Vec3::Z; // Use -Z for forward in a right-handed system
-        let right = orientation * Vec3::X;
 
+        // A. From Keyboard
         for key in input_manager.active_keys.iter() {
             match key {
                 KeyCode::KeyW => velocity += forward,
                 KeyCode::KeyS => velocity -= forward,
-                KeyCode::KeyA => velocity += right,
-                KeyCode::KeyD => velocity -= right,
+                KeyCode::KeyA => velocity -= right,
+                KeyCode::KeyD => velocity += right,
                 KeyCode::Space => velocity += Vec3::Y,
                 KeyCode::KeyC => velocity -= Vec3::Y,
-                KeyCode::ShiftLeft => speed *= 2.5,
                 _ => {}
             }
         }
 
-        // --- 4. Apply Updates to ECS Components ---
+        // B. From Controller
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            let left_stick_y =
+                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
+            let left_stick_x =
+                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
+            velocity += forward * left_stick_y;
+            velocity += right * left_stick_x;
+
+            let move_up_amount = input_manager.get_right_trigger_value(gamepad_id);
+            let move_down_amount = input_manager.get_left_trigger_value(gamepad_id);
+            velocity += Vec3::Y * move_up_amount;
+            velocity -= Vec3::Y * move_down_amount;
+
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftThumb) {
+                speed *= 2.5;
+            }
+        }
+
+        if input_manager.is_key_active(&KeyCode::ShiftLeft) {
+            speed *= 2.5;
+        }
+
+        // --- 5. Apply Updates to ECS Components ---
         ecs.component_pool
             .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
                 |(transform, _, _)| {

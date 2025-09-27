@@ -348,9 +348,12 @@ struct FreecamSystem {
     yaw: f32,
     pitch: f32,
 
-    // State for handling activation
     last_cursor_position: DVec2,
-    is_looking: bool, // Our new state flag
+    is_looking: bool,
+
+    base_fov: Option<f32>,
+    target_fov: f32,
+    fov_lerp_speed: f32,
 }
 
 impl FreecamSystem {
@@ -361,7 +364,11 @@ impl FreecamSystem {
             yaw: 0.0,
             pitch: 0.0,
             last_cursor_position: DVec2::ZERO,
-            is_looking: false, // Start in an inactive state
+            is_looking: false,
+
+            base_fov: None,
+            target_fov: 0.0,
+            fov_lerp_speed: 8.0,
         }
     }
 }
@@ -470,11 +477,34 @@ impl System for FreecamSystem {
         // --- 5. Apply Updates to ECS Components ---
         ecs.component_pool
             .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
-                |(transform, _, _)| {
+                |(transform, camera, _)| {
                     transform.rotation = orientation;
                     if velocity.length_squared() > 0.0 {
                         transform.position += velocity.normalize() * speed * dt;
                     }
+
+                    // --- FOV handling ---
+                    if self.base_fov.is_none() {
+                        self.base_fov = Some(camera.fov_y_rad);
+                        self.target_fov = camera.fov_y_rad;
+                    }
+
+                    let base_fov = self.base_fov.unwrap();
+                    let boost_active = input_manager.is_key_active(&KeyCode::ShiftLeft)
+                        || maybe_gamepad_id.map_or(false, |id| {
+                            input_manager.is_controller_button_active(id, gilrs::Button::LeftThumb)
+                        });
+
+                    // Pick target fov
+                    self.target_fov = if boost_active {
+                        base_fov * 1.15
+                    } else {
+                        base_fov
+                    };
+
+                    // Smoothly interpolate camera.fov_y_rad -> target_fov
+                    let t = 1.0 - (-self.fov_lerp_speed * dt).exp();
+                    camera.fov_y_rad = camera.fov_y_rad + (self.target_fov - camera.fov_y_rad) * t;
                 },
             );
     }

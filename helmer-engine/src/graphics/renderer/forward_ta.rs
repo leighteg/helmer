@@ -9,7 +9,6 @@ use crate::{
                 Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
                 Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants,
                 RenderData, RenderTrait, ShadowPipeline, ShadowUniforms, Vertex,
-                WGPU_CLIP_SPACE_CORRECTION,
             },
         },
     },
@@ -1036,13 +1035,12 @@ impl ForwardRendererTA {
             camera.near_plane,
         );
 
-        let corrected_proj = WGPU_CLIP_SPACE_CORRECTION * projection_matrix;
-        let inv_proj = corrected_proj.inverse();
-        let inv_view_proj = (corrected_proj * view_matrix).inverse();
+        let inv_proj = projection_matrix.inverse();
+        let inv_view_proj = (projection_matrix * view_matrix).inverse();
 
         let camera_uniforms = CameraUniforms {
             view_matrix: view_matrix.to_cols_array_2d(),
-            projection_matrix: corrected_proj.to_cols_array_2d(),
+            projection_matrix: projection_matrix.to_cols_array_2d(),
             inverse_projection_matrix: inv_proj.to_cols_array_2d(),
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),

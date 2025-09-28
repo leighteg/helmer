@@ -1,4 +1,4 @@
-const EVSM_C = 40.0; // Positive warping constant
+const EVSM_C = 10.0; // Positive warping constant
 
 struct VertexInput {
     @location(0) position: vec3<f32>,

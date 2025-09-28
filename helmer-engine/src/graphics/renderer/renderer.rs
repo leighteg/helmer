@@ -28,13 +28,6 @@ pub const SHADOW_MAP_RESOLUTION: u32 = 2048;
 pub const NUM_CASCADES: usize = 4;
 pub const CASCADE_SPLITS: [f32; 5] = [0.1, 15.0, 40.0, 100.0, 300.0];
 
-pub const WGPU_CLIP_SPACE_CORRECTION: Mat4 = Mat4::from_cols(
-    Vec4::new(1.0, 0.0, 0.0, 0.0),
-    Vec4::new(0.0, 1.0, 0.0, 0.0),
-    Vec4::new(0.0, 0.0, 0.5, 0.0),
-    Vec4::new(0.0, 0.0, 0.5, 1.0),
-);
-
 // --- The Public Rendering Trait ---
 /// Defines the common interface for any rendering backend in the engine.
 pub trait RenderTrait {

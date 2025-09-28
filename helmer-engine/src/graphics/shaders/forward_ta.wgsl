@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 40.0;
+const EVSM_C = 10.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -139,13 +139,7 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
 }
 
 fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f32>) -> f32 {
-    // bias to push the shadow onto the surface to fix acne and detachment.
-    let min_bias = 0.0005; // smaller values now that EVSM is handling the heavy lifting
-    let max_bias = 0.005;
-    let NdotL = max(dot(N, L), 0.0);
-    let bias = mix(max_bias, min_bias, NdotL);
-
-    var current_depth = depth - bias;
+    var current_depth = depth;
 
     // Warp the depth value
     current_depth = exp(EVSM_C * (current_depth - 1.0));
@@ -275,7 +269,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if light.light_type == 0u { // Directional
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
-            shadow_multiplier = calculate_shadow_factor(in.world_position, in.view_z, N, L);
+
+            let biased_world_position = in.world_position + N * 0.05;
+            shadow_multiplier = calculate_shadow_factor(biased_world_position, in.view_z, N, L);
         } else { // Point
             let to_light_vector = light.position - in.world_position;
             let dist_sq = dot(to_light_vector, to_light_vector);

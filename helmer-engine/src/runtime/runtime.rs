@@ -10,7 +10,7 @@ use std::{
     num::NonZeroU32,
     sync::{
         Arc, Barrier,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -35,22 +35,33 @@ use crate::{
         renderer::{
             deferred::DeferredRenderer,
             renderer::{
-                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
+                Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
+                initialize_renderer,
             },
         },
         renderer_system::{RenderDataSystem, RenderPacket},
     },
-    physics::{physics_resource::PhysicsResource, systems::{
-        CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem,
-        SyncPhysicsToEntitiesSystem,
-    }},
+    physics::{
+        physics_resource::PhysicsResource,
+        systems::{
+            CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem,
+            SyncPhysicsToEntitiesSystem,
+        },
+    },
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::{
         asset_server::{AssetKind, AssetServer, MaterialGpuData},
         config::RuntimeConfig,
-        input_manager::{InputEvent, InputManager}, scene_system::SceneSpawningSystem,
+        input_manager::{InputEvent, InputManager},
+        scene_system::SceneSpawningSystem,
     },
 };
+
+#[derive(Default)]
+pub struct PerformanceMetrics {
+    pub fps: AtomicU32,
+    pub tps: AtomicU32,
+}
 
 pub enum RenderMessage {
     RenderData(RenderData),
@@ -100,6 +111,9 @@ pub struct Runtime {
     init_callback: fn(&mut Runtime),
 
     config: RuntimeConfig,
+
+    performance_metrics: Arc<PerformanceMetrics>,
+    last_title_update: Instant,
 }
 
 impl Runtime {
@@ -141,6 +155,9 @@ impl Runtime {
             init_callback,
 
             config: RuntimeConfig::default(),
+
+            performance_metrics: Arc::new(PerformanceMetrics::default()),
+            last_title_update: Instant::now(),
         }
     }
 
@@ -155,11 +172,13 @@ impl Runtime {
         let asset_server = Arc::clone(&self.asset_server.as_ref().unwrap());
         let state = Arc::clone(&self.logic_thread_state);
         let target_tickrate = self.target_tickrate;
+        let performance_metrics = Arc::clone(&self.performance_metrics);
 
         let sender = self.render_thread_sender.clone();
 
         self.logic_thread = Some(thread::spawn(move || {
-            { // CORE ENGINE ECS BOOTSTRAP
+            {
+                // CORE ENGINE ECS BOOTSTRAP
                 let mut ecs_guard = ecs.write();
 
                 ecs_guard.add_resource(asset_server.clone());
@@ -280,6 +299,9 @@ impl Runtime {
                 }
 
                 last_time = frame_start;
+
+                let tps = (1.0 / dt).round() as u32;
+                performance_metrics.tps.store(tps, Ordering::Relaxed);
             }
 
             info!("logic thread shutting down");
@@ -294,6 +316,7 @@ impl Runtime {
         let state = Arc::clone(&self.render_thread_state);
         let window = Arc::clone(self.window.as_ref().unwrap());
         let window_size = window.inner_size();
+        let performance_metrics = Arc::clone(&self.performance_metrics);
 
         let backend_str = env::var("HELMER_BACKEND").unwrap_or_else(|_| "all".to_string());
 
@@ -349,6 +372,10 @@ impl Runtime {
 
                     renderer.process_message(message);
                 }
+
+                let dt = frame_start.duration_since(last_render).as_secs_f32();
+                let fps = (1.0 / dt).round() as u32;
+                performance_metrics.fps.store(fps, Ordering::Relaxed);
 
                 if target_fps.is_some() {
                     // Render at target FPS if we have new data OR if enough time has passed
@@ -671,7 +698,22 @@ impl ApplicationHandler for Runtime {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let update_interval = std::time::Duration::from_millis(200);
+
+        if now.duration_since(self.last_title_update) >= update_interval {
+            if let Some(window) = &self.window {
+                let fps = self.performance_metrics.fps.load(Ordering::Relaxed);
+                let tps = self.performance_metrics.tps.load(Ordering::Relaxed);
+
+                let new_title = format!("helmer engine | FPS: {} | TPS: {}", fps, tps);
+                window.set_title(&new_title);
+            }
+
+            self.last_title_update = now;
+        }
+    }
 }
 
 fn copy_pixmap_to_buffer(

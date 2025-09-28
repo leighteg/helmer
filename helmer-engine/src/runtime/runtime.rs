@@ -35,11 +35,10 @@ use crate::{
         renderer::{
             deferred::DeferredRenderer,
             renderer::{
-                Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
-                initialize_renderer,
+                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
             },
         },
-        renderer_system::{RenderDataSystem, RenderPacket},
+        renderer_system::{MeshAabbMap, RenderDataSystem, RenderPacket},
     },
     physics::{
         physics_resource::PhysicsResource,
@@ -73,7 +72,7 @@ pub enum RenderMessage {
     CreateMesh {
         id: usize,
         vertices: Vec<Vertex>,
-        indices: Vec<u32>,
+        lod_indices: Vec<Vec<u32>>,
         bounds: Aabb,
     },
     CreateTexture {
@@ -184,6 +183,7 @@ impl Runtime {
                 ecs_guard.add_resource(asset_server.clone());
                 ecs_guard.add_resource(RenderPacket::default());
                 ecs_guard.add_resource(PhysicsResource::new());
+                ecs_guard.add_resource(MeshAabbMap::default());
 
                 ecs_guard.system_scheduler.register_system(
                     SceneSpawningSystem {},
@@ -685,6 +685,7 @@ impl ApplicationHandler for Runtime {
 
             self.asset_server = Some(Arc::new(Mutex::new(AssetServer::new(
                 self.render_thread_sender.clone(),
+                self.ecs.clone(),
             ))));
 
             self.start_render_thread(receiver);

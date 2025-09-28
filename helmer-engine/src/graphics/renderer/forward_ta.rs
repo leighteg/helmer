@@ -7,8 +7,8 @@ use crate::{
             error::RendererError,
             renderer::{
                 Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
-                Material, MaterialShaderData, Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants,
-                RenderData, RenderTrait, ShadowPipeline, ShadowUniforms, Vertex,
+                Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES,
+                PbrConstants, RenderData, RenderTrait, ShadowPipeline, ShadowUniforms, Vertex,
             },
         },
     },
@@ -926,7 +926,7 @@ impl ForwardRendererTA {
         &mut self,
         id: usize,
         vertices: &[Vertex],
-        indices: &[u32],
+        lod_indices: &[Vec<u32>],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
         let vertex_buffer = self
@@ -937,20 +937,26 @@ impl ForwardRendererTA {
                 usage: wgpu::BufferUsages::VERTEX,
             });
 
-        let index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("mesh-ibo-{}", id)),
-                contents: bytemuck::cast_slice(indices),
-                usage: wgpu::BufferUsages::INDEX,
+        let mut gpu_lods = Vec::new();
+        for (lod_level, indices) in lod_indices.iter().enumerate() {
+            let index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
+                    contents: bytemuck::cast_slice(indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            gpu_lods.push(MeshLod {
+                index_buffer,
+                index_count: indices.len() as u32,
             });
+        }
 
         self.meshes.insert(
             id,
             Mesh {
                 vertex_buffer,
-                index_buffer,
-                index_count: indices.len() as u32,
+                lods: gpu_lods,
                 bounds,
             },
         );
@@ -1218,6 +1224,14 @@ impl ForwardRendererTA {
                         }
 
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            if mesh.lods.is_empty() {
+                                continue;
+                            }
+
+                            // Ensure the lod_index is valid to prevent a panic
+                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                            let lod = &mesh.lods[lod_index];
+
                             let position = object
                                 .previous_transform
                                 .position
@@ -1241,10 +1255,10 @@ impl ForwardRendererTA {
                             );
                             shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                             shadow_pass.set_index_buffer(
-                                mesh.index_buffer.slice(..),
+                                lod.index_buffer.slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
-                            shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                            shadow_pass.draw_indexed(0..lod.index_count, 0, 0..1);
                         }
                     }
                 }
@@ -1441,6 +1455,14 @@ impl RenderTrait for ForwardRendererTA {
                 self.meshes.get(&object.mesh_id),
                 self.material_bind_groups.contains_key(&object.material_id),
             ) {
+                if mesh.lods.is_empty() {
+                    continue;
+                }
+
+                // Ensure the lod_index is valid to prevent a panic
+                let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                let lod = &mesh.lods[lod_index];
+
                 // Set material bind group if changed
                 if current_material_id != Some(object.material_id) {
                     render_pass.set_bind_group(
@@ -1471,9 +1493,8 @@ impl RenderTrait for ForwardRendererTA {
                     bytemuck::bytes_of(&push_constants),
                 );
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                render_pass.set_index_buffer(lod.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..lod.index_count, 0, 0..1);
             }
         }
 
@@ -1492,10 +1513,10 @@ impl RenderTrait for ForwardRendererTA {
             RenderMessage::CreateMesh {
                 id,
                 vertices,
-                indices,
+                lod_indices,
                 bounds,
             } => {
-                self.add_mesh(id, &vertices, &indices, bounds).unwrap();
+                self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
             }
             RenderMessage::CreateTexture {
                 id,

@@ -1,8 +1,8 @@
 use crate::graphics::config::RenderConfig;
 use crate::graphics::renderer::error::RendererError;
 use crate::graphics::renderer::renderer::{
-    Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
-    Mesh, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderObject, RenderTrait,
+    Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData, Mesh,
+    MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderObject, RenderTrait,
     SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex,
 };
 use crate::provided::components::{Camera, LightType};
@@ -859,6 +859,47 @@ impl ForwardRendererPMU {
         });
     }
 
+    pub fn add_mesh(
+        &mut self,
+        id: usize,
+        vertices: &[Vertex],
+        lod_indices: &[Vec<u32>],
+        bounds: Aabb,
+    ) -> Result<(), RendererError> {
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("mesh-vbo-{}", id)),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let mut gpu_lods = Vec::new();
+        for (lod_level, indices) in lod_indices.iter().enumerate() {
+            let index_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
+                    contents: bytemuck::cast_slice(indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            gpu_lods.push(MeshLod {
+                index_buffer,
+                index_count: indices.len() as u32,
+            });
+        }
+
+        self.meshes.insert(
+            id,
+            Mesh {
+                vertex_buffer,
+                lods: gpu_lods,
+                bounds,
+            },
+        );
+        Ok(())
+    }
+
     fn run_shadow_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -974,6 +1015,14 @@ impl ForwardRendererPMU {
                 for object in &render_data.objects {
                     if object.casts_shadow && !*culled_objects.get(&object.id).unwrap_or(&true) {
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            if mesh.lods.is_empty() {
+                                continue;
+                            }
+
+                            // Ensure the lod_index is valid to prevent a panic
+                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                            let lod = &mesh.lods[lod_index];
+
                             let position = object
                                 .previous_transform
                                 .position
@@ -996,10 +1045,10 @@ impl ForwardRendererPMU {
                             );
                             shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                             shadow_pass.set_index_buffer(
-                                mesh.index_buffer.slice(..),
+                                lod.index_buffer.slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
-                            shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                            shadow_pass.draw_indexed(0..lod.index_count, 0, 0..1);
                         }
                     }
                 }
@@ -1099,7 +1148,7 @@ impl ForwardRendererPMU {
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
             prev_view_proj: [[0.0; 4]; 4], // PLACEHOLDER
-            frame_index: 0, // PLACEHOLDER,
+            frame_index: 0,                // PLACEHOLDER,
             _padding: [0; 3],
         };
         self.queue.write_buffer(
@@ -1245,6 +1294,14 @@ impl RenderTrait for ForwardRendererPMU {
                     pass.set_bind_group(1, &material.bind_group, &[]);
                     for object in objects {
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            if mesh.lods.is_empty() {
+                                continue;
+                            }
+
+                            // Ensure the lod_index is valid to prevent a panic
+                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                            let lod = &mesh.lods[lod_index];
+
                             let position = object
                                 .previous_transform
                                 .position
@@ -1269,10 +1326,10 @@ impl RenderTrait for ForwardRendererPMU {
                             );
                             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                             pass.set_index_buffer(
-                                mesh.index_buffer.slice(..),
+                                lod.index_buffer.slice(..),
                                 wgpu::IndexFormat::Uint32,
                             );
-                            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                            pass.draw_indexed(0..lod.index_count, 0, 0..1);
                         }
                     }
                 }
@@ -1321,32 +1378,10 @@ impl RenderTrait for ForwardRendererPMU {
             RenderMessage::CreateMesh {
                 id,
                 vertices,
-                indices,
+                lod_indices,
                 bounds,
             } => {
-                let vbo = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::cast_slice(&vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                let ibo = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::cast_slice(&indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                self.meshes.insert(
-                    id,
-                    Mesh {
-                        vertex_buffer: vbo,
-                        index_buffer: ibo,
-                        index_count: indices.len() as u32,
-                        bounds,
-                    },
-                );
+                self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
             RenderMessage::RenderConfig(config) => {

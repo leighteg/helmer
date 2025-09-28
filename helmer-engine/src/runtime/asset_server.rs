@@ -1,13 +1,17 @@
 use crate::{
-    graphics::renderer::renderer::{Aabb, Vertex},
+    ecs::ecs_core::ECSCore,
+    graphics::{
+        renderer::renderer::{Aabb, Vertex},
+        renderer_system::MeshAabbMap,
+    },
     runtime::runtime::RenderMessage,
 };
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
 use glam::{Mat4, Vec3};
-use gltf::{Material as GltfMaterial, Texture as GltfTexture, texture::Info};
+use gltf::{Material as GltfMaterial, Texture as GltfTexture};
 use hashbrown::HashMap;
-use image::GenericImageView;
 use ktx2::Reader;
+use meshopt::{SimplifyOptions, VertexDataAdapter, optimize_vertex_cache, simplify};
 use mikktspace::Geometry;
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -51,7 +55,7 @@ impl<T> Handle<T> {
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
+    pub lod_indices: Vec<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +99,7 @@ pub struct Scene {
 #[derive(Debug)]
 struct ParsedGltfScene {
     nodes: Vec<GltfNode>,
-    meshes: Vec<(Vec<Vertex>, Vec<u32>, Aabb)>,
+    meshes: Vec<(Vec<Vertex>, Vec<Vec<u32>>, Aabb)>,
     materials: Vec<IntermediateMaterial>,
     textures: Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
 }
@@ -177,7 +181,9 @@ enum AssetLoadRequest {
 enum AssetLoadResult {
     Mesh {
         id: usize,
-        data: (Vec<Vertex>, Vec<u32>, Aabb),
+        vertices: Vec<Vertex>,
+        lod_indices: Vec<Vec<u32>>,
+        bounds: Aabb,
     },
     Texture {
         id: usize,
@@ -198,34 +204,40 @@ enum AssetLoadResult {
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
-    materials: Arc<RwLock<HashMap<usize, Arc<Material>>>>,
     scenes: Arc<RwLock<HashMap<usize, Arc<Scene>>>>,
     next_id: AtomicUsize,
     request_sender: crossbeam_channel::Sender<AssetLoadRequest>,
     result_receiver: crossbeam_channel::Receiver<AssetLoadResult>,
     render_sender: mpsc::Sender<RenderMessage>,
-    worker_handles: Vec<JoinHandle<()>>,
+    _worker_handles: Vec<JoinHandle<()>>,
+    ecs: Arc<RwLock<ECSCore>>,
 }
 
 impl AssetServer {
-    pub fn new(render_sender: mpsc::Sender<RenderMessage>) -> Self {
+    pub fn new(render_sender: mpsc::Sender<RenderMessage>, ecs: Arc<RwLock<ECSCore>>) -> Self {
         let (request_sender, request_receiver) = crossbeam_channel::unbounded();
         let (result_sender, result_receiver) = crossbeam_channel::unbounded();
         let mut worker_handles = Vec::new();
 
-        for _ in 0..4 {
+        let num_workers = num_cpus::get().min(4).max(1);
+        for _ in 0..num_workers {
             let req_receiver = request_receiver.clone();
             let res_sender = result_sender.clone();
             let handle = thread::spawn(move || {
                 while let Ok(request) = req_receiver.recv() {
                     let path_str = request_path(&request).to_string_lossy().to_string();
                     let result = match request {
-                        AssetLoadRequest::Mesh { id, path } => {
-                            load_and_parse(id, &path, parse_glb, |id, data| AssetLoadResult::Mesh {
+                        AssetLoadRequest::Mesh { id, path } => load_and_parse(
+                            id,
+                            &path,
+                            parse_glb,
+                            |id, (vertices, lod_indices, bounds)| AssetLoadResult::Mesh {
                                 id,
-                                data,
-                            })
-                        }
+                                vertices,
+                                lod_indices,
+                                bounds,
+                            },
+                        ),
                         AssetLoadRequest::Texture { id, path, kind } => {
                             load_and_parse(id, &path, decode_ktx2, |id, data| {
                                 AssetLoadResult::Texture {
@@ -257,26 +269,30 @@ impl AssetServer {
             worker_handles.push(handle);
         }
 
-        info!("initialized AssetServer");
+        info!(
+            "AssetServer initialized with {} worker threads.",
+            num_workers
+        );
 
         Self {
-            materials: Arc::new(RwLock::new(HashMap::new())),
             scenes: Arc::new(RwLock::new(HashMap::new())),
             next_id: AtomicUsize::new(0),
             request_sender,
             result_receiver,
             render_sender,
-            worker_handles,
+            _worker_handles: worker_handles,
+            ecs,
         }
     }
 
     pub fn add_mesh(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Handle<Mesh> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let lod_indices = generate_lods(&vertices, &indices);
         self.render_sender
             .send(RenderMessage::CreateMesh {
                 id,
                 vertices: vertices.clone(),
-                indices,
+                lod_indices,
                 bounds: Aabb::calculate(&vertices),
             })
             .unwrap_or_else(|e| {
@@ -348,16 +364,24 @@ impl AssetServer {
     pub fn update(&self) {
         while let Ok(result) = self.result_receiver.try_recv() {
             match result {
-                AssetLoadResult::Mesh { id, data } => {
-                    let (vertices, indices, bounds) = data;
+                AssetLoadResult::Mesh {
+                    id,
+                    vertices,
+                    lod_indices,
+                    bounds,
+                } => {
                     self.render_sender
                         .send(RenderMessage::CreateMesh {
                             id,
                             vertices,
-                            indices,
+                            lod_indices,
                             bounds,
                         })
                         .unwrap();
+                    let mut ecs_guard = self.ecs.write();
+                    if let Some(map) = ecs_guard.get_resource_mut::<MeshAabbMap>() {
+                        map.0.insert(id, bounds);
+                    }
                 }
                 AssetLoadResult::Texture {
                     id,
@@ -385,7 +409,7 @@ impl AssetServer {
                         .unwrap();
                 }
                 AssetLoadResult::Scene { id: scene_id, data } => {
-                    let mut texture_map: HashMap<usize, usize> = HashMap::new(); // local_index -> global_handle_id
+                    let mut texture_map = HashMap::new();
                     for (i, (name, kind, tex_data, format, (width, height))) in
                         data.textures.into_iter().enumerate()
                     {
@@ -404,14 +428,12 @@ impl AssetServer {
                         texture_map.insert(i, tex_id);
                     }
 
-                    let mut material_map: HashMap<usize, usize> = HashMap::new();
+                    let mut material_map = HashMap::new();
                     for (i, mat) in data.materials.into_iter().enumerate() {
                         let mat_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-
-                        let resolve_tex = |local_idx_opt: Option<usize>| -> Option<usize> {
-                            local_idx_opt.and_then(|local_idx| texture_map.get(&local_idx).copied())
+                        let resolve_tex = |local_idx_opt: Option<usize>| {
+                            local_idx_opt.and_then(|idx| texture_map.get(&idx).copied())
                         };
-
                         let gpu_data = MaterialGpuData {
                             id: mat_id,
                             albedo: mat.albedo,
@@ -427,24 +449,28 @@ impl AssetServer {
                             ),
                             emission_texture_id: resolve_tex(mat.emission_texture_index),
                         };
-
                         self.render_sender
                             .send(RenderMessage::CreateMaterial(gpu_data))
                             .unwrap();
                         material_map.insert(i, mat_id);
                     }
 
-                    let mut mesh_map: HashMap<usize, usize> = HashMap::new();
-                    for (i, (vertices, indices, bounds)) in data.meshes.into_iter().enumerate() {
+                    let mut mesh_map = HashMap::new();
+                    for (i, (vertices, lod_indices, bounds)) in data.meshes.into_iter().enumerate()
+                    {
                         let mesh_id = self.next_id.fetch_add(1, Ordering::Relaxed);
                         self.render_sender
                             .send(RenderMessage::CreateMesh {
                                 id: mesh_id,
                                 vertices,
-                                indices,
+                                lod_indices,
                                 bounds,
                             })
                             .unwrap();
+                        let mut ecs_guard = self.ecs.write();
+                        if let Some(map) = ecs_guard.get_resource_mut::<MeshAabbMap>() {
+                            map.0.insert(mesh_id, bounds);
+                        }
                         mesh_map.insert(i, mesh_id);
                     }
 
@@ -461,7 +487,7 @@ impl AssetServer {
                             })
                         })
                         .collect();
-
+                    
                     let scene = Arc::new(Scene { nodes: scene_nodes });
                     self.scenes.write().insert(scene_id, scene);
                     info!("Successfully loaded scene with handle {}", scene_id);
@@ -551,9 +577,11 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
             const TARGET_HEIGHT: u32 = 512;
             if dimensions.0 != TARGET_WIDTH || dimensions.1 != TARGET_HEIGHT {
                 // We assume R8G8B8A8 format here, which is 4 bytes per pixel.
-                if let Some(image_buffer) =
-                    image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(dimensions.0, dimensions.1, data.clone())
-                {
+                if let Some(image_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                    dimensions.0,
+                    dimensions.1,
+                    data.clone(),
+                ) {
                     let resized = image::imageops::resize(
                         &image_buffer,
                         TARGET_WIDTH,
@@ -563,7 +591,9 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
                     data = resized.into_raw();
                     dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
                 } else {
-                    warn!("Failed to create image buffer for resizing KTX2 texture. Data length mismatch.");
+                    warn!(
+                        "Failed to create image buffer for resizing KTX2 texture. Data length mismatch."
+                    );
                 }
             }
         }
@@ -586,8 +616,11 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
         const TARGET_WIDTH: u32 = 512;
         const TARGET_HEIGHT: u32 = 512;
 
-        match transcoder.transcode_image_level(bytes, TranscoderTextureFormat::RGBA32, transcode_params)
-        {
+        match transcoder.transcode_image_level(
+            bytes,
+            TranscoderTextureFormat::RGBA32,
+            transcode_params,
+        ) {
             Ok(transcoded_data) => {
                 let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
                     dimensions.0,
@@ -657,88 +690,144 @@ impl<'a> Geometry for MikkTSpaceWrapper<'a> {
     }
 }
 
-fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>, Aabb), String> {
+fn generate_lods(vertices: &[Vertex], indices: &[u32]) -> Vec<Vec<u32>> {
+    let mut lods = Vec::new();
+    if indices.is_empty() || vertices.is_empty() {
+        return lods;
+    }
+
+    // LOD 0: The original mesh, optimized for the GPU vertex cache.
+    let lod0 = optimize_vertex_cache(indices, vertices.len());
+    lods.push(lod0);
+
+    // Prepare the vertex data adapter for the simplifier.
+    // The adapter tells meshopt how to access the position data from your Vertex struct.
+    let vertex_data_adapter = VertexDataAdapter::new(
+        bytemuck::cast_slice(vertices), // The raw vertex buffer as a byte slice
+        std::mem::size_of::<Vertex>(),  // The stride (size of one vertex)
+        0, // The offset of the position attribute (it's the first field)
+    )
+    .unwrap();
+
+    // Generate lower detail LODs from the original index buffer.
+    const LOD_TARGETS: [f32; 3] = [0.7, 0.4, 0.15];
+    const SIMPLIFICATION_ERROR_TOLERANCE: f32 = 0.02;
+
+    for &ratio in &LOD_TARGETS {
+        let target_index_count = (indices.len() as f32 * ratio) as usize;
+        let target_index_count = target_index_count - (target_index_count % 3);
+
+        if target_index_count < indices.len() {
+            // Always simplify from the original, high-quality index buffer.
+            let simplified_indices = simplify(
+                indices,
+                &vertex_data_adapter,
+                target_index_count,
+                SIMPLIFICATION_ERROR_TOLERANCE,
+                SimplifyOptions::all(),
+                None,
+            );
+
+            if !simplified_indices.is_empty() {
+                // Optimize the new, smaller index buffer for the vertex cache.
+                lods.push(optimize_vertex_cache(&simplified_indices, vertices.len()));
+            } else if let Some(prev_lod) = lods.last() {
+                // If simplification fails (e.g., target is too low), reuse the previous LOD.
+                lods.push(prev_lod.clone());
+            }
+        }
+    }
+    lods
+}
+
+fn process_primitive(
+    primitive: &gltf::Primitive,
+    buffers: &[gltf::buffer::Data],
+) -> Option<(Vec<Vertex>, Vec<Vec<u32>>, Aabb)> {
+    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+    let positions: Vec<[f32; 3]> = reader.read_positions()?.collect();
+    if positions.is_empty() {
+        return None;
+    }
+    let normals = reader
+        .read_normals()
+        .map(|n| n.collect())
+        .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+    let tex_coords = reader
+        .read_tex_coords(0)
+        .map(|tc| tc.into_f32().collect())
+        .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+    let indices: Vec<u32> = reader.read_indices()?.into_u32().collect();
+    if indices.is_empty() {
+        return None;
+    }
+
+    let mut vertices: Vec<Vertex> = positions
+        .iter()
+        .zip(normals.iter())
+        .zip(tex_coords.iter())
+        .map(|((&p, &n), &t)| Vertex::new(p, n, t, [0.0; 4]))
+        .collect();
+
+    mikktspace::generate_tangents(&mut MikkTSpaceWrapper {
+        vertices: &mut vertices,
+        indices: &indices,
+    });
+
+    let bounds = Aabb::calculate(&vertices);
+    let lods = generate_lods(&vertices, &indices);
+    Some((vertices, lods, bounds))
+}
+
+fn parse_glb(bytes: &[u8]) -> Result<(Vec<Vertex>, Vec<Vec<u32>>, Aabb), String> {
     let (gltf, buffers, _) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
-    let mut all_vertices = Vec::new();
-    let mut all_indices = Vec::new();
+    let mut all_vertices: Vec<Vertex> = Vec::new();
+    let mut all_indices: Vec<u32> = Vec::new();
 
     for mesh in gltf.meshes() {
         for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-            let positions: Vec<[f32; 3]> = reader.read_positions().ok_or("No positions")?.collect();
-            let vertex_count = positions.len();
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|iter| iter.collect())
-                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; vertex_count]);
-            let tex_coords: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(|iter| iter.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
-
-            let index_offset = all_vertices.len() as u32;
-            let indices: Vec<u32> = reader
-                .read_indices()
-                .ok_or("No indices")?
-                .into_u32()
-                .map(|i| i + index_offset)
-                .collect();
-
-            let mut vertices: Vec<Vertex> = positions
-                .iter()
-                .zip(normals.iter())
-                .zip(tex_coords.iter())
-                .map(|((&p, &n), &t)| Vertex::new(p, n, t, [0.0; 4]))
-                .collect();
-
-            if !indices.is_empty()
-                && reader.read_normals().is_some()
-                && reader.read_tex_coords(0).is_some()
-            {
-                let temp_indices: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
-                let mut wrapper = MikkTSpaceWrapper {
-                    vertices: &mut vertices,
-                    indices: &temp_indices,
-                };
-                mikktspace::generate_tangents(&mut wrapper);
+            if let Some((mut vertices, lods, _)) = process_primitive(&primitive, &buffers) {
+                let index_offset = all_vertices.len() as u32;
+                all_vertices.append(&mut vertices);
+                // We only care about the base LOD for combining meshes
+                if let Some(base_lod_indices) = lods.get(0) {
+                    all_indices.extend(base_lod_indices.iter().map(|i| i + index_offset));
+                }
             }
-            all_vertices.append(&mut vertices);
-            all_indices.extend(indices);
         }
     }
+
     if all_vertices.is_empty() {
-        return Err("No valid primitives in glTF".to_string());
+        return Err("GLTF contains no valid mesh primitives.".to_string());
     }
     let bounds = Aabb::calculate(&all_vertices);
-    Ok((all_vertices, all_indices, bounds))
+    let final_lods = generate_lods(&all_vertices, &all_indices);
+    Ok((all_vertices, final_lods, bounds))
 }
 
 fn parse_scene_glb(bytes: &[u8]) -> Result<ParsedGltfScene, String> {
     let (doc, buffers, images) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
-
     let mut out_meshes = Vec::new();
     let mut out_materials = Vec::new();
     let mut out_textures = Vec::new();
     let mut out_nodes = Vec::new();
     let mut material_map: HashMap<Option<usize>, usize> = HashMap::new();
-    let mut texture_map = HashMap::new();
+    let mut texture_map: HashMap<usize, usize> = HashMap::new();
 
-    let magenta_pixel = vec![255, 0, 255, 255];
     out_textures.push((
-        "DEFAULT_ERROR_TEXTURE".to_string(),
+        "DEFAULT_ERROR".to_string(),
         AssetKind::Albedo,
-        magenta_pixel,
+        vec![255, 0, 255, 255],
         wgpu::TextureFormat::Rgba8UnormSrgb,
         (1, 1),
     ));
-
     out_materials.push(IntermediateMaterial {
-        albedo: [1.0, 1.0, 1.0, 1.0],
+        albedo: [1.0; 4],
         metallic: 0.5,
         roughness: 0.5,
         ao: 1.0,
         emission_strength: 0.0,
-        emission_color: [0.0, 0.0, 0.0],
+        emission_color: [0.0; 3],
         albedo_texture_index: None,
         normal_texture_index: None,
         metallic_roughness_texture_index: None,
@@ -762,7 +851,6 @@ fn parse_scene_glb(bytes: &[u8]) -> Result<ParsedGltfScene, String> {
             );
         }
     }
-
     Ok(ParsedGltfScene {
         nodes: out_nodes,
         meshes: out_meshes,
@@ -776,114 +864,64 @@ fn process_node(
     parent_transform: &Mat4,
     buffers: &[gltf::buffer::Data],
     images: &[gltf::image::Data],
-    out_meshes: &mut Vec<(Vec<Vertex>, Vec<u32>, Aabb)>,
+    out_meshes: &mut Vec<(Vec<Vertex>, Vec<Vec<u32>>, Aabb)>,
     out_materials: &mut Vec<IntermediateMaterial>,
     out_textures: &mut Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
     out_nodes: &mut Vec<GltfNode>,
     material_map: &mut HashMap<Option<usize>, usize>,
     texture_map: &mut HashMap<usize, usize>,
 ) {
-    let local_transform = Mat4::from_cols_array_2d(&node.transform().matrix());
-    let transform = *parent_transform * local_transform;
-
+    let transform = *parent_transform * Mat4::from_cols_array_2d(&node.transform().matrix());
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-            let Some(positions) = reader.read_positions() else {
-                continue;
-            };
-            let positions: Vec<[f32; 3]> = positions.collect();
-            if positions.is_empty() {
-                continue;
-            }
-
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|it| it.collect())
-                .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
-            let tex_coords: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(|it| it.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-            let Some(indices_reader) = reader.read_indices() else {
-                continue;
-            };
-            let indices: Vec<u32> = indices_reader.into_u32().collect();
-
-            let mut vertices: Vec<Vertex> = positions
-                .iter()
-                .zip(normals.iter())
-                .zip(tex_coords.iter())
-                .map(|((&p, &n), &t)| Vertex::new(p, n, t, [0.0; 4]))
-                .collect();
-
-            if !indices.is_empty()
-                && reader.read_normals().is_some()
-                && reader.read_tex_coords(0).is_some()
-            {
-                let mut wrapper = MikkTSpaceWrapper {
-                    vertices: &mut vertices,
-                    indices: &indices,
-                };
-                mikktspace::generate_tangents(&mut wrapper);
-            }
-
-            let bounds = Aabb::calculate(&vertices);
-            let mesh_index = out_meshes.len();
-            out_meshes.push((vertices, indices, bounds));
-
-            let material = primitive.material();
-            let material_index = *material_map.entry(material.index()).or_insert_with(|| {
-                let my_mat_idx = out_materials.len();
-                let pbr = material.pbr_metallic_roughness();
-
-                let mut get_tex =
-                    |tex_opt: Option<GltfTexture>, kind: AssetKind| -> Option<usize> {
-                        tex_opt.map(|texture| {
-                            let tex_idx = texture.index();
-                            *texture_map.entry(tex_idx).or_insert_with(|| {
-                                process_texture(texture, buffers, images, out_textures, kind)
-                            })
+            if let Some((vertices, lods, bounds)) = process_primitive(&primitive, buffers) {
+                let mesh_index = out_meshes.len();
+                out_meshes.push((vertices, lods, bounds));
+                let material = primitive.material();
+                let material_index = *material_map.entry(material.index()).or_insert_with(|| {
+                    let my_mat_idx = out_materials.len();
+                    let pbr = material.pbr_metallic_roughness();
+                    let mut get_tex = |tex_opt: Option<GltfTexture>, kind| {
+                        tex_opt.map(|t| {
+                            *texture_map
+                                .entry(t.index())
+                                .or_insert_with(|| process_texture(t, buffers, out_textures, kind))
                         })
                     };
-
-                let mat = IntermediateMaterial {
-                    albedo: pbr.base_color_factor(),
-                    metallic: pbr.metallic_factor(),
-                    roughness: pbr.roughness_factor(),
-                    ao: material.occlusion_texture().map_or(1.0, |t| t.strength()),
-                    emission_strength: material.emissive_strength().unwrap_or(0.0),
-                    emission_color: material.emissive_factor(),
-                    albedo_texture_index: get_tex(
-                        pbr.base_color_texture().map(|i| i.texture()),
-                        AssetKind::Albedo,
-                    ),
-                    normal_texture_index: get_tex(
-                        material.normal_texture().map(|i| i.texture()),
-                        AssetKind::Normal,
-                    ),
-                    metallic_roughness_texture_index: get_tex(
-                        pbr.metallic_roughness_texture().map(|i| i.texture()),
-                        AssetKind::MetallicRoughness,
-                    ),
-                    emission_texture_index: get_tex(
-                        material.emissive_texture().map(|i| i.texture()),
-                        AssetKind::Emission,
-                    ),
-                };
-
-                out_materials.push(mat);
-                my_mat_idx
-            });
-
-            out_nodes.push(GltfNode {
-                mesh_index,
-                material_index,
-                transform,
-            });
+                    out_materials.push(IntermediateMaterial {
+                        albedo: pbr.base_color_factor(),
+                        metallic: pbr.metallic_factor(),
+                        roughness: pbr.roughness_factor(),
+                        ao: material.occlusion_texture().map_or(1.0, |t| t.strength()),
+                        emission_strength: material.emissive_strength().unwrap_or(0.0),
+                        emission_color: material.emissive_factor(),
+                        albedo_texture_index: get_tex(
+                            pbr.base_color_texture().map(|i| i.texture()),
+                            AssetKind::Albedo,
+                        ),
+                        normal_texture_index: get_tex(
+                            material.normal_texture().map(|i| i.texture()),
+                            AssetKind::Normal,
+                        ),
+                        metallic_roughness_texture_index: get_tex(
+                            pbr.metallic_roughness_texture().map(|i| i.texture()),
+                            AssetKind::MetallicRoughness,
+                        ),
+                        emission_texture_index: get_tex(
+                            material.emissive_texture().map(|i| i.texture()),
+                            AssetKind::Emission,
+                        ),
+                    });
+                    my_mat_idx
+                });
+                out_nodes.push(GltfNode {
+                    mesh_index,
+                    material_index,
+                    transform,
+                });
+            }
         }
     }
-
     for child in node.children() {
         process_node(
             &child,
@@ -903,7 +941,6 @@ fn process_node(
 fn process_texture(
     gltf_texture: gltf::Texture,
     buffers: &[gltf::buffer::Data],
-    images: &[gltf::image::Data],
     out_textures: &mut Vec<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>,
     kind: AssetKind,
 ) -> usize {

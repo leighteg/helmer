@@ -3,7 +3,8 @@
 // --- Standard library and crate imports ---
 use crate::{
     graphics::renderer::{
-        deferred::DeferredRenderer, error::RendererError, forward_pmu::ForwardRendererPMU, forward_ta::ForwardRendererTA,
+        deferred::DeferredRenderer, error::RendererError, forward_pmu::ForwardRendererPMU,
+        forward_ta::ForwardRendererTA,
     },
     provided::components::{Camera, LightType, Transform},
     runtime::{
@@ -96,9 +97,13 @@ pub async fn initialize_renderer(
         info!("Initializing Low-End Forward Renderer.");
 
         if path_str.as_str().ends_with("TA") {
-            Box::new(ForwardRendererTA::new(instance, surface, adapter, size, target_tickrate).await?)
+            Box::new(
+                ForwardRendererTA::new(instance, surface, adapter, size, target_tickrate).await?,
+            )
         } else {
-            Box::new(ForwardRendererPMU::new(instance, surface, &adapter, size, target_tickrate).await?)
+            Box::new(
+                ForwardRendererPMU::new(instance, surface, &adapter, size, target_tickrate).await?,
+            )
         }
     };
 
@@ -212,10 +217,14 @@ impl Vertex {
     }
 }
 
-pub struct Mesh {
-    pub vertex_buffer: wgpu::Buffer,
+pub struct MeshLod {
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+}
+
+pub struct Mesh {
+    pub vertex_buffer: wgpu::Buffer, // A single vertex buffer is shared across all LODs
+    pub lods: Vec<MeshLod>,
     pub bounds: Aabb,
 }
 
@@ -227,6 +236,7 @@ pub struct RenderObject {
     pub mesh_id: usize,
     pub material_id: usize,
     pub casts_shadow: bool,
+    pub lod_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +356,14 @@ impl Aabb {
             Vec3::new(self.max.x, self.max.y, self.min.z),
             self.max,
         ]
+    }
+
+    pub fn center(&self) -> Vec3 {
+        (self.min + self.max) / 2.0
+    }
+
+    pub fn extents(&self) -> Vec3 {
+        (self.max - self.min) / 2.0
     }
 }
 

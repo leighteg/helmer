@@ -247,8 +247,11 @@ impl Runtime {
                 let frame_start = Instant::now();
                 let dt = (frame_start - last_time).as_secs_f32();
 
-                const MAX_DELTA_TIME: f32 = 1.0 / 30.0;
-                let dt = dt.min(MAX_DELTA_TIME);
+                let tps = (1.0 / dt).round() as u32;
+                performance_metrics.tps.store(tps, Ordering::Relaxed);
+
+                //const MAX_DELTA_TIME: f32 = 1.0 / 30.0;
+                //let dt = dt.min(MAX_DELTA_TIME);
 
                 asset_server.lock().update();
                 input_manager.write().process_events();
@@ -299,9 +302,6 @@ impl Runtime {
                 }
 
                 last_time = frame_start;
-
-                let tps = (1.0 / dt).round() as u32;
-                performance_metrics.tps.store(tps, Ordering::Relaxed);
             }
 
             info!("logic thread shutting down");
@@ -353,6 +353,10 @@ impl Runtime {
                 let frame_start = Instant::now();
                 let mut should_render = false;
 
+                let dt = frame_start.duration_since(last_render).as_secs_f32();
+                let fps = (1.0 / dt).round() as u32;
+                performance_metrics.fps.store(fps, Ordering::Relaxed);
+
                 renderer.resolve_pending_materials();
 
                 while let Ok(message) = render_receiver.try_recv() {
@@ -372,10 +376,6 @@ impl Runtime {
 
                     renderer.process_message(message);
                 }
-
-                let dt = frame_start.duration_since(last_render).as_secs_f32();
-                let fps = (1.0 / dt).round() as u32;
-                performance_metrics.fps.store(fps, Ordering::Relaxed);
 
                 if target_fps.is_some() {
                     // Render at target FPS if we have new data OR if enough time has passed

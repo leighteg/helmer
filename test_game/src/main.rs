@@ -158,7 +158,7 @@ fn main() {
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
                 rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([50.0, 0.001, 50.0]),
+                scale: glam::Vec3::from([500.0, 0.001, 500.0]),
             },
         );
         ecs_guard.add_component(

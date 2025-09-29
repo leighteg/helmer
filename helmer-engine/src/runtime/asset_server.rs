@@ -163,6 +163,11 @@ enum AssetLoadRequest {
         id: usize,
         path: PathBuf,
     },
+    ProceduralMesh {
+        id: usize,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+    },
     Texture {
         id: usize,
         path: PathBuf,
@@ -238,6 +243,21 @@ impl AssetServer {
                                 bounds,
                             },
                         ),
+                        AssetLoadRequest::ProceduralMesh {
+                            id,
+                            vertices,
+                            indices,
+                        } => {
+                            let lod_indices = generate_lods(&vertices, &indices);
+                            let bounds = Aabb::calculate(&vertices);
+
+                            Some(AssetLoadResult::Mesh {
+                                id,
+                                vertices,
+                                lod_indices,
+                                bounds,
+                            })
+                        }
                         AssetLoadRequest::Texture { id, path, kind } => {
                             load_and_parse(id, &path, decode_ktx2, |id, data| {
                                 AssetLoadResult::Texture {
@@ -287,23 +307,22 @@ impl AssetServer {
 
     pub fn add_mesh(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Handle<Mesh> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let lod_indices = generate_lods(&vertices, &indices);
-        self.render_sender
-            .send(RenderMessage::CreateMesh {
-                id,
-                vertices: vertices.clone(),
-                lod_indices,
-                bounds: Aabb::calculate(&vertices),
-            })
-            .unwrap_or_else(|e| {
-                warn!(
-                    "Failed to send procedural mesh '{}' to render thread: {}",
-                    id, e
-                );
-            });
+
+        let request = AssetLoadRequest::ProceduralMesh {
+            id,
+            vertices,
+            indices,
+        };
+
+        self.request_sender.send(request).unwrap_or_else(|e| {
+            warn!(
+                "Failed to send procedural mesh request to worker thread: {}",
+                e
+            );
+        });
+
         Handle::new(id)
     }
-
     pub fn load_mesh<P: AsRef<Path>>(&self, path: P) -> Handle<Mesh> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = AssetLoadRequest::Mesh {
@@ -487,7 +506,7 @@ impl AssetServer {
                             })
                         })
                         .collect();
-                    
+
                     let scene = Arc::new(Scene { nodes: scene_nodes });
                     self.scenes.write().insert(scene_id, scene);
                     info!("Successfully loaded scene with handle {}", scene_id);
@@ -529,6 +548,7 @@ fn request_path(req: &AssetLoadRequest) -> &Path {
         AssetLoadRequest::Texture { path, .. } => path,
         AssetLoadRequest::Material { path, .. } => path,
         AssetLoadRequest::Scene { path, .. } => path,
+        _ => Path::new(""),
     }
 }
 

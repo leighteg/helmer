@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 10.0;
+const EVSM_C = 20.0;
 const EPSILON: f32 = 0.0001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 
@@ -243,7 +243,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             L = normalize(-light.direction);
             radiance = light.color * light.intensity;
 
-            let biased_world_position = in.world_position + N * 0.05;
+            let NdotL = max(dot(N, L), 0.0);
+            let bias_amount = 0.001 + 0.005 * (1.0 - NdotL);
+            let biased_world_position = in.world_position + N * bias_amount;
             shadow_multiplier = calculate_shadow_factor(biased_world_position, in.view_space_depth, N, L);
         } else { // Point
             let to_light = light.position - in.world_position;
@@ -283,7 +285,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     let ambient = kD_ibl * diffuse_indirect * ao;
-    
+
     let specular_indirect_occluded = specular_indirect * ao;
 
     // --- 3. FINAL COMPOSITION ---

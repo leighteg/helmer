@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 10.0;
+const EVSM_C = 20.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -84,18 +84,16 @@ struct ModelPushConstant {
 //=============== UTILITY FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
-    if (len < EPSILON) {
+    if len < EPSILON {
         return vec3<f32>(0.0, 0.0, 1.0);
     }
     return v / len;
 }
 
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
-              m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-              m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
-    if (abs(det) < EPSILON) {
+    if abs(det) < EPSILON {
         return mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
     }
 
@@ -186,7 +184,7 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     let world_position_vec4 = model.model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
-    
+
     let model_mat3 = mat3x3<f32>(
         model.model_matrix[0].xyz,
         model.model_matrix[1].xyz,
@@ -206,7 +204,7 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     // Calculate view space z for cascade selection
     let view_pos = camera.view_matrix * world_position_vec4;
     out.view_z = view_pos.z;
-    
+
     return out;
 }
 
@@ -216,7 +214,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Albedo Calculation (FIXED) ---
     var albedo_color: vec3<f32>;
     var alpha: f32;
-    if (material.albedo_idx >= 0i) {
+    if material.albedo_idx >= 0i {
         let albedo_sample = textureSample(albedo_textures, texture_sampler, in.tex_coord, u32(material.albedo_idx));
         albedo_color = albedo_sample.rgb * material.albedo.rgb;
         alpha = albedo_sample.a * material.albedo.a;
@@ -229,7 +227,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var ao: f32;
     var metallic: f32;
     var roughness: f32;
-    if (material.metallic_roughness_idx >= 0i) {
+    if material.metallic_roughness_idx >= 0i {
         let mr_sample = textureSample(mr_textures, texture_sampler, in.tex_coord, u32(material.metallic_roughness_idx));
         ao = mr_sample.r * material.ao;
         metallic = mr_sample.b * material.metallic;
@@ -242,7 +240,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // --- Normal Calculation (Correct as-is) ---
     var N: vec3<f32>;
-    if (material.normal_idx >= 0i) {
+    if material.normal_idx >= 0i {
         let tangent_space_normal = textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz * 2.0 - 1.0;
         let T = safe_normalize(in.world_tangent);
         let B = safe_normalize(in.world_bitangent);
@@ -270,7 +268,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity;
 
-            let biased_world_position = in.world_position + N * 0.05;
+            let NdotL = max(dot(N, L), 0.0);
+            let bias_amount = 0.001 + 0.005 * (1.0 - NdotL);
+            let biased_world_position = in.world_position + N * bias_amount;
             shadow_multiplier = calculate_shadow_factor(biased_world_position, in.view_z, N, L);
         } else { // Point
             let to_light_vector = light.position - in.world_position;
@@ -282,7 +282,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         let NdotL = max(dot(N, L), 0.0);
-        if (NdotL > 0.0) {
+        if NdotL > 0.0 {
             let H = safe_normalize(V + L);
             let NdotH = max(dot(N, H), 0.0);
             let HdotV = max(dot(H, V), 0.0);

@@ -2,7 +2,7 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 10.0;
+const EVSM_C = 20.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -46,7 +46,7 @@ struct CascadeData {
 @group(1) @binding(2) var shadow_map: texture_2d_array<f32>;
 @group(1) @binding(3) var shadow_sampler: sampler;
 @group(1) @binding(4) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
-@group(1) @binding(5) var<uniform> sky: SkyUniforms; // ADDED sky uniforms
+@group(1) @binding(5) var<uniform> sky: SkyUniforms;
 
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
@@ -234,7 +234,9 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             L = safe_normalize(-light.direction);
             radiance = light.color * light.intensity * sun_fade;
 
-            let biased_world_position = world_position + N * 0.05;
+            let NdotL = max(dot(N, L), 0.0);
+            let bias_amount = 0.001 + 0.005 * (1.0 - NdotL);
+            let biased_world_position = world_position + N * bias_amount;
             shadow_multiplier = calculate_shadow_factor(biased_world_position, view_pos.z, N, L);
         } else { // Point
             let to_light_vector = light.position - world_position;

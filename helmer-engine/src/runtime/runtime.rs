@@ -65,7 +65,6 @@ pub struct PerformanceMetrics {
 pub enum RenderMessage {
     RenderData(RenderData),
     Resize(PhysicalSize<u32>),
-    RenderConfig(RenderConfig),
     Shutdown,
 
     // --- Asset Pipeline Messages ---
@@ -109,8 +108,6 @@ pub struct Runtime {
 
     init_callback: fn(&mut Runtime),
 
-    config: RuntimeConfig,
-
     performance_metrics: Arc<PerformanceMetrics>,
     last_title_update: Instant,
 }
@@ -153,8 +150,6 @@ impl Runtime {
 
             init_callback,
 
-            config: RuntimeConfig::default(),
-
             performance_metrics: Arc::new(PerformanceMetrics::default()),
             last_title_update: Instant::now(),
         }
@@ -180,6 +175,7 @@ impl Runtime {
                 // CORE ENGINE ECS BOOTSTRAP
                 let mut ecs_guard = ecs.write();
 
+                ecs_guard.add_resource(RuntimeConfig::default());
                 ecs_guard.add_resource(asset_server.clone());
                 ecs_guard.add_resource(RenderPacket::default());
                 ecs_guard.add_resource(PhysicsResource::new());
@@ -563,53 +559,6 @@ impl ApplicationHandler for Runtime {
                                         winit::window::Fullscreen::Borderless(None),
                                     ));
                                 }
-                            }
-                        }
-
-                        // debug toggles
-                        KeyCode::KeyZ => {
-                            if event.state.is_pressed() {
-                                self.config.render_config.shadow_pass =
-                                    !self.config.render_config.shadow_pass;
-                                let _ = self
-                                    .render_thread_sender
-                                    .send(RenderMessage::RenderConfig(self.config.render_config));
-                            }
-                        }
-                        KeyCode::KeyG => {
-                            if event.state.is_pressed() {
-                                self.config.render_config.ssgi_pass =
-                                    !self.config.render_config.ssgi_pass;
-                                let _ = self
-                                    .render_thread_sender
-                                    .send(RenderMessage::RenderConfig(self.config.render_config));
-                            }
-                        }
-                        KeyCode::Digit0 => {
-                            if event.state.is_pressed() {
-                                self.config.render_config.direct_lighting_pass =
-                                    !self.config.render_config.direct_lighting_pass;
-                                let _ = self
-                                    .render_thread_sender
-                                    .send(RenderMessage::RenderConfig(self.config.render_config));
-                            }
-                        }
-                        KeyCode::KeyH => {
-                            if event.state.is_pressed() {
-                                self.config.render_config.sky_pass =
-                                    !self.config.render_config.sky_pass;
-                                let _ = self
-                                    .render_thread_sender
-                                    .send(RenderMessage::RenderConfig(self.config.render_config));
-                            }
-                        }
-                        KeyCode::KeyR => {
-                            if event.state.is_pressed() {
-                                self.config.render_config.ssr_pass =
-                                    !self.config.render_config.ssr_pass;
-                                let _ = self
-                                    .render_thread_sender
-                                    .send(RenderMessage::RenderConfig(self.config.render_config));
                             }
                         }
 

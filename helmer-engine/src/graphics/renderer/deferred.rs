@@ -192,7 +192,6 @@ pub struct DeferredRenderer {
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
     prev_view_proj: Mat4,
-    config: RenderConfig,
 }
 
 impl DeferredRenderer {
@@ -366,7 +365,6 @@ impl DeferredRenderer {
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
             prev_view_proj: Mat4::IDENTITY,
-            config: RenderConfig::default(),
         };
 
         renderer.initialize_resources()?;
@@ -3248,26 +3246,26 @@ impl RenderTrait for DeferredRenderer {
         let up = camera_transform.up();
         let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
 
-        if self.config.shadow_pass {
+        if render_data.render_config.shadow_pass {
             self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
         }
 
         self.run_geometry_pass(&mut encoder, render_data, alpha);
 
-        if (self.config.sky_pass) {
+        if render_data.render_config.sky_pass {
             self.run_sky_pass(&mut encoder);
         }
 
-        if self.config.direct_lighting_pass {
+        if render_data.render_config.direct_lighting_pass {
             self.run_lighting_pass(&mut encoder);
         }
 
         self.run_downsample_pass(&mut encoder);
 
-        if self.config.ssgi_pass {
+        if render_data.render_config.ssgi_pass {
             self.run_ssgi_pass(&mut encoder);
 
-            if self.config.ssgi_denoise_pass {
+            if render_data.render_config.ssgi_denoise_pass {
                 self.run_ssgi_denoise_pass(&mut encoder);
             }
 
@@ -3290,7 +3288,7 @@ impl RenderTrait for DeferredRenderer {
             self.run_ssgi_upsample_pass(&mut encoder);
         }
 
-        if self.config.ssr_pass {
+        if render_data.render_config.ssr_pass {
             self.run_ssr_pass(&mut encoder);
         }
         self.run_composite_pass(&mut encoder, &output_view);
@@ -3341,16 +3339,17 @@ impl RenderTrait for DeferredRenderer {
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
             RenderMessage::Resize(size) => self.resize(size),
-            RenderMessage::RenderConfig(config) => {
-                self.config = config;
-                self.create_shadow_resources();
-                self.resize(self.window_size);
-            }
             RenderMessage::Shutdown => {}
         }
     }
 
     fn update_render_data(&mut self, render_data: RenderData) {
+        if let Some(current_data) = &self.current_render_data {
+            if current_data.render_config != render_data.render_config {
+                self.create_shadow_resources();
+                self.resize(self.window_size);
+            }
+        }
         self.current_render_data = Some(render_data);
     }
 

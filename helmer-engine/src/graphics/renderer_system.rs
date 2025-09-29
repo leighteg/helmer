@@ -3,9 +3,12 @@ use crate::{
         ecs_core::{ECSCore, Entity},
         system::System,
     },
-    graphics::renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject},
+    graphics::{
+        config::RenderConfig,
+        renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject},
+    },
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
-    runtime::input_manager::InputManager,
+    runtime::{config::RuntimeConfig, input_manager::InputManager},
 };
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 use hashbrown::HashMap;
@@ -91,6 +94,7 @@ pub struct ExtractedState {
     pub lights: HashMap<Entity, (Transform, Light)>,
     pub camera_transform: Transform,
     pub camera_component: Camera,
+    pub render_config: RenderConfig,
 }
 
 #[derive(Default)]
@@ -132,6 +136,13 @@ impl System for RenderDataSystem {
                     return;
                 }
             };
+            let runtime_config = match ecs.get_resource::<RuntimeConfig>() {
+                Some(config) => config.clone(),
+                None => {
+                    warn!("RuntimeConfig resource not found");
+                    return;
+                }
+            };
 
             let (camera_component, camera_transform) = if let Some((cam, trans, _)) = ecs
                 .component_pool
@@ -159,6 +170,7 @@ impl System for RenderDataSystem {
             let mut state = ExtractedState::default();
             state.camera_component = camera_component;
             state.camera_transform = camera_transform;
+            state.render_config = runtime_config.render_config;
 
             ecs.component_pool
                 .query_for_each::<(Transform, MeshRenderer), _>(
@@ -169,38 +181,44 @@ impl System for RenderDataSystem {
 
                         if let Some(aabb) = mesh_aabb_map.get(&mesh_renderer.mesh_id) {
                             // --- Frustum Culling (Correct) ---
-                            if !frustum.intersects_aabb(aabb, transform) {
-                                return;
+                            if runtime_config.render_config.frustum_culling {
+                                if !frustum.intersects_aabb(aabb, transform) {
+                                    return;
+                                }
                             }
 
                             // --- LOD SELECTION ---
                             // This method calculates the distance to the closest point on the object's bounding box.
+                            let lod_index: usize = if runtime_config.render_config.lod {
+                                // 1. Get the matrix to transform from world space to the object's local space.
+                                let model_matrix = Mat4::from_scale_rotation_translation(
+                                    transform.scale,
+                                    transform.rotation,
+                                    transform.position,
+                                );
+                                let inverse_model = model_matrix.inverse();
 
-                            // 1. Get the matrix to transform from world space to the object's local space.
-                            let model_matrix = Mat4::from_scale_rotation_translation(
-                                transform.scale,
-                                transform.rotation,
-                                transform.position,
-                            );
-                            let inverse_model = model_matrix.inverse();
+                                // 2. Move the camera's position into the object's local space.
+                                let camera_pos_local =
+                                    inverse_model.transform_point3(camera_transform.position);
 
-                            // 2. Move the camera's position into the object's local space.
-                            let camera_pos_local =
-                                inverse_model.transform_point3(camera_transform.position);
+                                // 3. Find the closest point on the axis-aligned bounding box to the camera's local position.
+                                //    The `clamp` function is perfect for this. If the camera is inside the box, this will be the camera's own position.
+                                let closest_point_local =
+                                    camera_pos_local.clamp(aabb.min, aabb.max);
 
-                            // 3. Find the closest point on the axis-aligned bounding box to the camera's local position.
-                            //    The `clamp` function is perfect for this. If the camera is inside the box, this will be the camera's own position.
-                            let closest_point_local = camera_pos_local.clamp(aabb.min, aabb.max);
+                                // 4. The squared distance is now between the camera (in local space) and the closest point on the box (in local space).
+                                //    If the camera is inside the box, this distance is 0, correctly selecting LOD 0.
+                                let distance_sq =
+                                    camera_pos_local.distance_squared(closest_point_local);
 
-                            // 4. The squared distance is now between the camera (in local space) and the closest point on the box (in local space).
-                            //    If the camera is inside the box, this distance is 0, correctly selecting LOD 0.
-                            let distance_sq =
-                                camera_pos_local.distance_squared(closest_point_local);
-
-                            let lod_index = LOD_THRESHOLDS
-                                .iter()
-                                .filter(|&&threshold| distance_sq > threshold)
-                                .count();
+                                LOD_THRESHOLDS
+                                    .iter()
+                                    .filter(|&&threshold| distance_sq > threshold)
+                                    .count()
+                            } else {
+                                0
+                            };
 
                             state.objects.insert(
                                 entity,
@@ -274,6 +292,7 @@ impl System for RenderDataSystem {
             current_camera_transform: current_state.camera_transform,
             previous_camera_transform: prev_state.camera_transform,
             timestamp: Instant::now(),
+            render_config: current_state.render_config,
         };
 
         if let Some(render_packet) = ecs.get_resource_mut::<RenderPacket>() {

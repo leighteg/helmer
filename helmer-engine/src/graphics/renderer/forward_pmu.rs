@@ -98,7 +98,6 @@ pub struct ForwardRendererPMU {
     current_render_data: Option<RenderData>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
-    config: RenderConfig,
 }
 
 impl ForwardRendererPMU {
@@ -190,7 +189,6 @@ impl ForwardRendererPMU {
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
-            config: RenderConfig::default(),
         };
 
         renderer.initialize_resources()?;
@@ -1248,7 +1246,7 @@ impl RenderTrait for ForwardRendererPMU {
         let forward = camera_transform.forward();
         let up = camera_transform.up();
 
-        if self.config.shadow_pass {
+        if render_data.render_config.shadow_pass {
             let static_camera_view = Mat4::look_at_rh(eye, eye + forward, up);
             self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
         }
@@ -1384,16 +1382,17 @@ impl RenderTrait for ForwardRendererPMU {
                 self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
-            RenderMessage::RenderConfig(config) => {
-                self.config = config;
-                let _ = self.initialize_resources();
-            }
             RenderMessage::Resize(size) => self.resize(size),
             _ => {}
         }
     }
 
     fn update_render_data(&mut self, render_data: RenderData) {
+        if let Some(current_data) = &self.current_render_data {
+            if current_data.render_config != render_data.render_config {
+                let _ = self.initialize_resources();
+            }
+        }
         self.current_render_data = Some(render_data);
     }
 

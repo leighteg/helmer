@@ -2,10 +2,10 @@
 
 // --- Standard library and crate imports ---
 use crate::{
-    graphics::renderer::{
+    graphics::{config::RenderConfig, renderer::{
         deferred::DeferredRenderer, error::RendererError, forward_pmu::ForwardRendererPMU,
         forward_ta::ForwardRendererTA,
-    },
+    }},
     provided::components::{Camera, LightType, Transform},
     runtime::{
         asset_server::{AssetKind, MaterialGpuData},
@@ -256,6 +256,7 @@ pub struct RenderData {
     pub current_camera_transform: Transform,
     pub camera_component: Camera,
     pub timestamp: Instant,
+    pub render_config: RenderConfig,
 }
 
 // --- SHARED SHADER DATA STRUCTS ---

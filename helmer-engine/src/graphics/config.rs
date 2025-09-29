@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderConfig {
     pub shadow_pass: bool,
     pub direct_lighting_pass: bool,
@@ -9,6 +9,9 @@ pub struct RenderConfig {
 
     pub max_lights_forward: usize,
     pub max_lights_deferred: usize,
+
+    pub frustum_culling: bool,
+    pub lod: bool,
 }
 
 impl Default for RenderConfig {
@@ -23,6 +26,9 @@ impl Default for RenderConfig {
 
             max_lights_forward: 248,
             max_lights_deferred: 2048,
+
+            frustum_culling: true,
+            lod: true,
         }
     }
 }

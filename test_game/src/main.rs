@@ -22,9 +22,7 @@ use helmer_engine::{
         ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
     },
     runtime::{
-        input_manager::{self, InputManager},
-        runtime::{RenderMessage, Runtime},
-        scene_system::SceneRoot,
+        config::RuntimeConfig, input_manager::{self, InputManager}, runtime::{RenderMessage, Runtime}, scene_system::SceneRoot
     },
 };
 use rand::Rng;
@@ -45,6 +43,14 @@ fn main() {
 
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
+
+        ecs_guard.system_scheduler.register_system(
+            ConfigToggleSystem {},
+            30,
+            vec![],
+            HashSet::from([]),
+            HashSet::from([]),
+        );
 
         // Priority 30: Input and high-level camera control. Runs first.
         ecs_guard.system_scheduler.register_system(
@@ -291,6 +297,36 @@ fn main() {
         );
     });
     runtime.init();
+}
+
+struct ConfigToggleSystem {}
+
+impl System for ConfigToggleSystem {
+    fn name(&self) -> &str {
+        "ConfigToggleSystem"
+    }
+
+    fn run(
+        &mut self,
+        dt: f32,
+        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
+        input_manager: &InputManager,
+    ) {
+        let runtime_config = ecs.get_resource_mut::<RuntimeConfig>().unwrap();
+
+        for key in input_manager.just_pressed.iter() {
+            match key {
+                KeyCode::KeyZ => runtime_config.render_config.shadow_pass = !runtime_config.render_config.shadow_pass,
+                KeyCode::KeyG => runtime_config.render_config.ssgi_pass = !runtime_config.render_config.ssgi_pass,
+                KeyCode::Digit0 => runtime_config.render_config.direct_lighting_pass = !runtime_config.render_config.direct_lighting_pass,
+                KeyCode::KeyH => runtime_config.render_config.sky_pass = !runtime_config.render_config.sky_pass,
+                KeyCode::KeyR => runtime_config.render_config.ssr_pass = !runtime_config.render_config.ssr_pass,
+                KeyCode::KeyF => runtime_config.render_config.frustum_culling = !runtime_config.render_config.frustum_culling,
+                KeyCode::KeyL => runtime_config.render_config.lod = !runtime_config.render_config.lod,
+                _ => {}
+            }
+        }
+    }
 }
 
 struct SpinnerSystem {

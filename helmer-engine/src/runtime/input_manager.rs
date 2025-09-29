@@ -31,6 +31,7 @@ pub struct InputManager {
 
     // Keyboard and Mouse state
     pub active_keys: HashSet<KeyCode>,
+    pub just_pressed: HashSet<KeyCode>,
     pub active_mouse_buttons: HashSet<MouseButton>,
     pub mouse_wheel: Vec2,
     mouse_wheel_accumulator: Vec2,
@@ -43,21 +44,11 @@ pub struct InputManager {
 
 impl InputManager {
     pub fn new() -> Self {
-        let gilrs_instance = match Gilrs::new() {
-            Ok(g) => {
-                info!("Gilrs initialized for controller support.");
-                g
-            }
-            Err(e) => {
-                warn!("Failed to initialize gilrs, controller input unavailable: {}", e);
-                Gilrs::new().unwrap()
-            }
-        };
-
         Self {
             event_queue: Mutex::new(Vec::new()),
-            gilrs: Mutex::new(gilrs_instance),
+            gilrs: Mutex::new(Gilrs::new().unwrap()),
             active_keys: HashSet::new(),
+            just_pressed: HashSet::new(),
             active_mouse_buttons: HashSet::new(),
             mouse_wheel: Vec2::ZERO,
             mouse_wheel_accumulator: Vec2::ZERO,
@@ -74,6 +65,8 @@ impl InputManager {
 
     /// Called by the logic thread once per tick to process all pending input.
     pub fn process_events(&mut self) {
+        self.just_pressed.clear();
+        
         // --- 1. Poll gilrs for controller events and update state directly ---
         {
             let mut gilrs = self.gilrs.lock().unwrap();
@@ -131,7 +124,14 @@ impl InputManager {
         for event in events {
             match event {
                 InputEvent::Keyboard { key, pressed } => {
-                    if pressed { self.active_keys.insert(key); } else { self.active_keys.remove(&key); }
+                    if pressed {
+                        if !self.active_keys.contains(&key) {
+                            self.just_pressed.insert(key);
+                        }
+                        self.active_keys.insert(key);
+                    } else {
+                        self.active_keys.remove(&key);
+                    }
                 }
                 InputEvent::CursorMoved(pos) => { self.cursor_position = pos; }
                 InputEvent::MouseButton { button, pressed } => {
@@ -145,6 +145,7 @@ impl InputManager {
     // --- Query Methods ---
 
     pub fn is_key_active(&self, keycode: &KeyCode) -> bool { self.active_keys.contains(keycode) }
+    pub fn was_just_pressed(&self, key: KeyCode) -> bool { self.just_pressed.contains(&key) }
     pub fn is_mouse_button_active(&self, button: &MouseButton) -> bool { self.active_mouse_buttons.contains(button) }
     pub fn is_controller_button_active(&self, gamepad_id: GamepadId, button: Button) -> bool {
         self.controller_states.get(&gamepad_id).map_or(false, |state| state.active_buttons.contains(&button))

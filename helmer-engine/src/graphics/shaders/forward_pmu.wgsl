@@ -244,7 +244,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             radiance = light.color * light.intensity;
 
             let NdotL = max(dot(N, L), 0.0);
-            let bias_amount = 0.001 + 0.005 * (1.0 - NdotL);
+            let bias_amount = 0.01 + 0.05 * (1.0 - NdotL);
             let biased_world_position = in.world_position + N * bias_amount;
             shadow_multiplier = calculate_shadow_factor(biased_world_position, in.view_space_depth, N, L);
         } else { // Point

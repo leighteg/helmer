@@ -1143,8 +1143,7 @@ impl DeferredRenderer {
             Some(ssgi_upsampled_texture.create_view(&Default::default()));
         self.ssgi_upsampled_texture = Some(ssgi_upsampled_texture);
 
-        let surface_caps = self.surface.get_capabilities(&self.adapter);
-        let surface_format = surface_caps.formats[0];
+        let surface_format = self.surface.get_current_texture().unwrap().texture.format();
 
         let history_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("History Texture"),

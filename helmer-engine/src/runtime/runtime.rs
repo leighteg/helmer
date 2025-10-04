@@ -3,6 +3,7 @@ use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use resvg::{tiny_skia, usvg::Tree};
+use wgpu::{BackendOptions, Dx12BackendOptions};
 use std::{
     any::TypeId,
     collections::HashSet,
@@ -330,6 +331,13 @@ impl Runtime {
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
+            backend_options: BackendOptions {
+                dx12: Dx12BackendOptions {
+                    shader_compiler: wgpu::Dx12Compiler::StaticDxc,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Default::default()
         });
 

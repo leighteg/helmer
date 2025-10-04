@@ -1,5 +1,4 @@
-# helmer
-![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
+# [helmer](http://helmer.leighteg.dev) &nbsp; ![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
 
 an ECS game engine featuring 3 purpose built renderers written in rust
 
@@ -38,7 +37,10 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] SSR cubemap fallback?
 - [ ] more light types
 - [ ] occlusion culling
+- [ ] soft shadows (PCSS?)
 - [ ] full pbr/modern brdf
 - [ ] implement supported advanced features to forward renderers
 - [ ] gpu compute based culling?
 - [ ] hardware RT path/pipeline or acceleration?
+- [ ] touch support
+- [ ] physically based audio engine

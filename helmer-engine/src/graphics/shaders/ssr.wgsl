@@ -1,4 +1,28 @@
 //=============== STRUCTS ===============//
+struct Constants {
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    // SSGI
+    ssgi_num_rays: u32,
+    
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    
+    // EVSM
+    evsm_c: f32,
+    // Composite
+    ssgi_intensity: f32,
+};
+
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
     projection_matrix: mat4x4<f32>,
@@ -17,6 +41,8 @@ struct CameraUniforms {
 @group(0) @binding(5) var scene_sampler: sampler; // Should be a linear sampler
 
 @group(1) @binding(0) var<uniform> camera: CameraUniforms;
+
+@group(2) @binding(0) var<uniform> constants: Constants;
 
 //=============== CONSTANTS ===============//
 // Using a stricter thickness check to improve reflection accuracy on top surfaces.
@@ -89,7 +115,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     // --- 1. G-Buffer Unpack ---
     let mra = textureSample(gbuf_mra, gbuf_sampler, screen_uv);
     let roughness = mra.g;
-    if (roughness > ROUGHNESS_FADE_END) {
+    if (roughness > constants.ssr_roughness_fade_end) {
         discard;
     }
 
@@ -115,12 +141,12 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     var ray_pos_vs = origin_vs + N_vs * SELF_INTERSECTION_TOLERANCE;
     
     let dither_amount = rand(screen_uv);
-    let step_size = LINEAR_STEP_SIZE * (1.0 + dither_amount * 0.2);
+    let step_size = constants.ssr_linear_step_size * (1.0 + dither_amount * 0.2);
     
     var hit_found = false;
     var last_ray_pos_vs = ray_pos_vs;
 
-    for (var i = 0u; i < COARSE_STEPS; i = i + 1u) {
+    for (var i = 0u; i < constants.ssr_coarse_steps; i = i + 1u) {
         last_ray_pos_vs = ray_pos_vs;
         ray_pos_vs += R_vs * step_size;
 
@@ -129,7 +155,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         
         let hit_uv = (ray_pos_cs.xy / ray_pos_cs.w) * vec2(0.5, -0.5) + 0.5;
 
-        if (any(hit_uv < vec2(0.0)) || any(hit_uv > vec2(1.0)) || length(origin_vs - ray_pos_vs) > MAX_DISTANCE) {
+        if (any(hit_uv < vec2(0.0)) || any(hit_uv > vec2(1.0)) || length(origin_vs - ray_pos_vs) > constants.ssr_max_distance) {
             break;
         }
 
@@ -140,7 +166,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let scene_depth = scene_vs_at_hit.z;
         let depth_difference = scene_depth - ray_depth;
 
-        if (depth_difference > 0.0 && depth_difference < THICKNESS) {
+        if (depth_difference > 0.0 && depth_difference < constants.ssr_thickness) {
             hit_found = true;
             break;
         }
@@ -154,7 +180,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     var start_pos = last_ray_pos_vs;
     var end_pos = ray_pos_vs;
 
-    for (var j = 0u; j < BINARY_SEARCH_STEPS; j = j + 1u) {
+    for (var j = 0u; j < constants.ssr_binary_search_steps; j = j + 1u) {
         let mid_pos = (start_pos + end_pos) * 0.5;
         let mid_cs = camera.projection_matrix * vec4(mid_pos, 1.0);
         if (mid_cs.w <= EPSILON) { break; }
@@ -164,7 +190,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let depth_difference = scene_vs_at_mid.z - mid_pos.z;
 
         // Using the same thickness check as the coarse march for consistent, accurate refinement.
-        if (depth_difference > 0.0 && depth_difference < THICKNESS) {
+        if (depth_difference > 0.0 && depth_difference < constants.ssr_thickness) {
             end_pos = mid_pos;
         } else {
             start_pos = mid_pos;
@@ -179,7 +205,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let reflection_color = textureSample(lit_scene_texture, scene_sampler, refined_uv);
     
     let edge_fade = smoothstep(0.0, 0.1, min(min(refined_uv.x, 1.0 - refined_uv.x), min(refined_uv.y, 1.0 - refined_uv.y)));
-    let roughness_fade = 1.0 - smoothstep(ROUGHNESS_FADE_START, ROUGHNESS_FADE_END, roughness);
+    let roughness_fade = 1.0 - smoothstep(constants.ssr_roughness_fade_start, constants.ssr_roughness_fade_end, roughness);
     let confidence = edge_fade * roughness_fade;
 
     return vec4(reflection_color.rgb, confidence);

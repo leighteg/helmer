@@ -1,8 +1,31 @@
+struct Constants {
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    // SSGI
+    ssgi_num_rays: u32,
+    
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    
+    // EVSM
+    evsm_c: f32,
+    // Composite
+    ssgi_intensity: f32,
+};
+
 //=============== CONSTANTS ===============//
 const PI: f32 = 3.14159265359;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
-const SSGI_INTENSITY: f32 = 30.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -43,6 +66,8 @@ struct VertexOutput {
 
 // --- Scene Uniforms ---
 @group(2) @binding(0) var<uniform> camera: CameraUniforms;
+
+@group(3) @binding(0) var<uniform> constants: Constants;
 
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
@@ -122,7 +147,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let specular_ibl = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     // --- Final Combination ---
-    let total_incoming_indirect_diffuse = (indirect_diffuse_ssgi * SSGI_INTENSITY) + irradiance;
+    let total_incoming_indirect_diffuse = (indirect_diffuse_ssgi * constants.ssgi_intensity) + irradiance;
 
     let indirect_diffuse_contribution = (total_incoming_indirect_diffuse * albedo) * kD_ibl * ao;
 

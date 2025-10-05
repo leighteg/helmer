@@ -397,3 +397,56 @@ pub struct SkyUniforms {
     pub ground_albedo: [f32; 3],
     pub ground_brightness: f32,
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
+pub struct ShaderConstants {
+    // SSR
+    pub ssr_coarse_steps: u32,
+    pub ssr_binary_search_steps: u32,
+    pub ssr_linear_step_size: f32,
+    pub ssr_thickness: f32,
+    
+    pub ssr_max_distance: f32,
+    pub ssr_roughness_fade_start: f32,
+    pub ssr_roughness_fade_end: f32,
+    // SSGI
+    pub ssgi_num_rays: u32,
+    
+    pub ssgi_num_steps: u32,
+    pub ssgi_ray_step_size: f32,
+    pub ssgi_thickness: f32,
+    pub ssgi_blend_factor: f32,
+    
+    // EVSM
+    pub evsm_c: f32,
+    // Composite
+    pub ssgi_intensity: f32,
+    _padding: [f32; 2], // Ensure alignment to 16 bytes
+}
+
+impl Default for ShaderConstants {
+    fn default() -> Self {
+        Self {
+            // SSR Defaults
+            ssr_coarse_steps: 160,
+            ssr_binary_search_steps: 6,
+            ssr_linear_step_size: 0.07,
+            ssr_thickness: 0.1,
+            ssr_max_distance: 250.0,
+            ssr_roughness_fade_start: 0.1,
+            ssr_roughness_fade_end: 0.5,
+            // SSGI Defaults
+            ssgi_num_rays: 6,
+            ssgi_num_steps: 12,
+            ssgi_ray_step_size: 0.6,
+            ssgi_thickness: 0.4,
+            ssgi_blend_factor: 0.15,
+            // EVSM Default
+            evsm_c: 20.0,
+            // Composite Default
+            ssgi_intensity: 30.0,
+            _padding: [0.0; 2],
+        }
+    }
+}

@@ -1,3 +1,27 @@
+struct Constants {
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    // SSGI
+    ssgi_num_rays: u32,
+    
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    
+    // EVSM
+    evsm_c: f32,
+    // Composite
+    ssgi_intensity: f32,
+};
+
 const PI: f32 = 3.14159265359;
 
 // --- TUNING PARAMETERS ---
@@ -32,6 +56,8 @@ struct Camera {
 
 @group(2) @binding(0) var t_blue_noise: texture_2d<f32>;
 @group(2) @binding(1) var s_blue_noise: sampler;
+
+@group(3) @binding(0) var<uniform> constants: Constants;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -97,13 +123,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse)) / blue_noise_dims;
     let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
 
-    for (var i = 0; i < NUM_RAYS; i += 1) {
+    for (var i = 0; i < i32(constants.ssgi_num_rays); i += 1) {
         let r = fract(blue_noise + vec2<f32>(f32(i) * 0.137, f32(camera.frame_index) * 0.379));
         let ray_dir_tangent = cosine_sample_hemisphere(r);
         let ray_dir_vs = tangent_to_view * ray_dir_tangent;
 
-        for (var j = 1; j <= NUM_STEPS; j += 1) {
-            let sample_pos_vs = origin_vs + ray_dir_vs * RAY_STEP_SIZE * f32(j);
+        for (var j = 1; j <= i32(constants.ssgi_num_steps); j += 1) {
+            let sample_pos_vs = origin_vs + ray_dir_vs * constants.ssgi_ray_step_size * f32(j);
 
             var sample_pos_clip = camera.projection_matrix * vec4(sample_pos_vs, 1.0);
             if sample_pos_clip.w <= EPSILON { break; }
@@ -118,7 +144,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let ray_depth = -sample_pos_vs.z;
             let scene_depth = -scene_vs_at_sample.z;
 
-            if ray_depth > scene_depth && ray_depth < scene_depth + THICKNESS {
+            if ray_depth > scene_depth && ray_depth < scene_depth + constants.ssgi_thickness {
                 // get the color of the surface the ray hit.
                 let albedo_at_hit = textureSample(t_albedo, s_gbuffer, sample_uv).rgb;
 
@@ -134,7 +160,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    let ssgi_result = indirect_light / f32(NUM_RAYS);
+    let ssgi_result = indirect_light / f32(constants.ssgi_num_rays);
     
     // --- Temporal Blending ---
     let world_pos = world_from_depth(in.uv, depth, camera.inverse_view_projection_matrix);
@@ -143,7 +169,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
 
     let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
-    let blended_light = mix(prev_result, ssgi_result, BLEND_FACTOR);
+    let blended_light = mix(prev_result, ssgi_result, constants.ssgi_blend_factor);
 
     return vec4<f32>(blended_light, 1.0);
 }

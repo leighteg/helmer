@@ -1,3 +1,5 @@
+use crate::graphics::renderer::renderer::ShaderConstants;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderConfig {
     pub shadow_pass: bool,
@@ -12,6 +14,8 @@ pub struct RenderConfig {
 
     pub frustum_culling: bool,
     pub lod: bool,
+
+    pub shader_constants: ShaderConstants,
 }
 
 impl Default for RenderConfig {
@@ -29,6 +33,8 @@ impl Default for RenderConfig {
 
             frustum_culling: true,
             lod: true,
+
+            shader_constants: ShaderConstants::default(),
         }
     }
 }

@@ -1,8 +1,31 @@
+struct Constants {
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    // SSGI
+    ssgi_num_rays: u32,
+    
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    
+    // EVSM
+    evsm_c: f32,
+    // Composite
+    ssgi_intensity: f32,
+};
+
 //=============== CONSTANTS ===============//
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 20.0;
 const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
@@ -48,6 +71,8 @@ struct CascadeData {
 @group(1) @binding(4) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
 @group(1) @binding(5) var<uniform> sky: SkyUniforms;
 
+@group(2) @binding(0) var<uniform> constants: Constants;
+
 //=============== UTILITY & PBR FUNCTIONS ===============//
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
@@ -78,7 +103,7 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
     var current_depth = depth;
 
     // Warp the depth value
-    current_depth = exp(EVSM_C * (current_depth - 1.0));
+    current_depth = exp(constants.evsm_c * (current_depth - 1.0));
 
     // Chebyshev test
     if current_depth <= moments.x {

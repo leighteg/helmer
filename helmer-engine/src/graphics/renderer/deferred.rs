@@ -6,8 +6,8 @@ use crate::{
             renderer::{
                 Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
                 Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES,
-                PbrConstants, RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShadowPipeline,
-                ShadowUniforms, SkyUniforms, TextureManager, Vertex,
+                PbrConstants, RenderData, RenderTrait, SHADOW_MAP_RESOLUTION, ShaderConstants,
+                ShadowPipeline, ShadowUniforms, SkyUniforms, TextureManager, Vertex,
             },
         },
     },
@@ -67,6 +67,7 @@ pub struct DeferredRenderer {
     // Bind Group Layouts
     scene_data_bind_group_layout: Option<wgpu::BindGroupLayout>,
     object_data_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    render_constants_bind_group_layout: Option<wgpu::BindGroupLayout>,
     downsample_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssr_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ssgi_inputs_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -82,6 +83,7 @@ pub struct DeferredRenderer {
     // Bind Groups
     scene_data_bind_groups: Vec<wgpu::BindGroup>,
     object_data_bind_group: Option<wgpu::BindGroup>,
+    render_constants_bind_group: Option<wgpu::BindGroup>,
     downsample_bind_group: Option<wgpu::BindGroup>,
     ssr_inputs_bind_group: Option<wgpu::BindGroup>,
     ssgi_inputs_bind_group: Option<wgpu::BindGroup>,
@@ -156,6 +158,7 @@ pub struct DeferredRenderer {
     lights_buffers: Vec<wgpu::Buffer>,
     sky_uniforms_buffers: Vec<wgpu::Buffer>,
     material_uniform_buffer: Option<wgpu::Buffer>,
+    render_constants_buffer: Option<wgpu::Buffer>,
     shadow_light_vp_buffer: Option<wgpu::Buffer>,
 
     // Asset Storage
@@ -264,6 +267,7 @@ impl DeferredRenderer {
             composite_pipeline: None,
             scene_data_bind_group_layout: None,
             object_data_bind_group_layout: None,
+            render_constants_bind_group_layout: None,
             downsample_bind_group_layout: None,
             ssr_inputs_bind_group_layout: None,
             ssgi_inputs_bind_group_layout: None,
@@ -277,6 +281,7 @@ impl DeferredRenderer {
             composite_inputs_bind_group_layout: None,
             scene_data_bind_groups: Vec::new(),
             object_data_bind_group: None,
+            render_constants_bind_group: None,
             downsample_bind_group: None,
             ssr_inputs_bind_group: None,
             ssgi_inputs_bind_group: None,
@@ -339,6 +344,7 @@ impl DeferredRenderer {
             lights_buffers: Vec::new(),
             sky_uniforms_buffers: Vec::new(),
             material_uniform_buffer: None,
+            render_constants_buffer: None,
             shadow_light_vp_buffer: None,
             meshes: HashMap::new(),
             materials: HashMap::new(),
@@ -415,6 +421,18 @@ impl DeferredRenderer {
             mapped_at_creation: false,
         }));
 
+        self.render_constants_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Render Constants Uniform Buffer"),
+            size: std::mem::size_of::<ShaderConstants>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.queue.write_buffer(
+            self.render_constants_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::bytes_of(&ShaderConstants::default()),
+        );
+
         self.pbr_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("PBR Filtering Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -468,6 +486,7 @@ impl DeferredRenderer {
         self.create_shadow_resources();
         self.create_pipelines_and_bind_groups();
         self.create_object_data_bind_group();
+        self.create_shadow_pipeline();
 
         // This must be called after pipelines are created, but before render
         self.resize(self.window_size);
@@ -688,8 +707,6 @@ impl DeferredRenderer {
             cascade_views.push(cascade_view);
         }
         self.cascade_views = Some(cascade_views);
-
-        self.create_shadow_pipeline();
     }
 
     fn create_shadow_pipeline(&mut self) {
@@ -738,7 +755,10 @@ impl DeferredRenderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[
+                &bind_group_layout,
+                self.render_constants_bind_group_layout.as_ref().unwrap(),
+            ],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX,
                 range: 0..std::mem::size_of::<ModelPushConstant>() as u32,
@@ -1352,6 +1372,7 @@ impl DeferredRenderer {
             sky_bind_group_layout,
             ibl_bind_group_layout,
             composite_inputs_bind_group_layout,
+            render_constants_bind_group_layout,
         ) = self.create_bind_group_layouts();
 
         let geometry_pipeline_layout =
@@ -1382,7 +1403,11 @@ impl DeferredRenderer {
 
         let ssr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSR Pipeline Layout"),
-            bind_group_layouts: &[&ssr_inputs_bind_group_layout, &ssr_camera_bind_group_layout],
+            bind_group_layouts: &[
+                &ssr_inputs_bind_group_layout,
+                &ssr_camera_bind_group_layout,
+                &render_constants_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -1392,6 +1417,7 @@ impl DeferredRenderer {
                 &ssgi_inputs_bind_group_layout,
                 &ssr_camera_bind_group_layout,
                 &ssgi_blue_noise_bind_group_layout,
+                &render_constants_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -1419,6 +1445,7 @@ impl DeferredRenderer {
                 bind_group_layouts: &[
                     &lighting_inputs_bind_group_layout,
                     &scene_data_bind_group_layout,
+                    &render_constants_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -1430,6 +1457,7 @@ impl DeferredRenderer {
                     &composite_inputs_bind_group_layout,
                     &ibl_bind_group_layout,
                     &scene_data_bind_group_layout,
+                    &render_constants_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -1709,11 +1737,13 @@ impl DeferredRenderer {
         self.sky_bind_group_layout = Some(sky_bind_group_layout);
         self.ibl_bind_group_layout = Some(ibl_bind_group_layout);
         self.composite_inputs_bind_group_layout = Some(composite_inputs_bind_group_layout);
+        self.render_constants_bind_group_layout = Some(render_constants_bind_group_layout);
     }
 
     fn create_bind_group_layouts(
         &self,
     ) -> (
+        wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
@@ -1924,6 +1954,16 @@ impl DeferredRenderer {
                 ],
             });
 
+        let render_constants_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Constants Bind Group Layout"),
+                entries: &[buffer_binding(
+                    0,
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BufferBindingType::Uniform,
+                )],
+            });
+
         (
             scene_data_bind_group_layout,
             object_data_bind_group_layout,
@@ -1938,6 +1978,7 @@ impl DeferredRenderer {
             sky_bind_group_layout,
             ibl_bind_group_layout,
             composite_inputs_bind_group_layout,
+            render_constants_bind_group_layout,
         )
     }
 
@@ -2429,6 +2470,21 @@ impl DeferredRenderer {
                     },
                 ],
             }));
+
+        self.render_constants_bind_group = Some(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Constants Bind Group"),
+                layout: self.render_constants_bind_group_layout.as_ref().unwrap(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self
+                        .render_constants_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                }],
+            }),
+        );
     }
 
     fn calculate_uniforms(
@@ -2619,6 +2675,11 @@ impl DeferredRenderer {
 
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
+                shadow_pass.set_bind_group(
+                    1,
+                    self.render_constants_bind_group.as_ref().unwrap(),
+                    &[],
+                );
 
                 for object in &render_data.objects {
                     if object.casts_shadow {
@@ -2823,6 +2884,7 @@ impl DeferredRenderer {
         pass.set_bind_group(0, self.lighting_inputs_bind_group.as_ref().unwrap(), &[]);
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(1, &self.scene_data_bind_groups[buffer_index], &[]);
+        pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2893,6 +2955,7 @@ impl DeferredRenderer {
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(1, &self.ssr_camera_bind_groups[buffer_index], &[]);
         pass.set_bind_group(2, self.ssgi_blue_noise_bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(3, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2960,6 +3023,7 @@ impl DeferredRenderer {
         pass.set_bind_group(0, self.ssr_inputs_bind_group.as_ref().unwrap(), &[]);
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(1, &self.ssr_camera_bind_groups[buffer_index], &[]);
+        pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2992,6 +3056,7 @@ impl DeferredRenderer {
         pass.set_bind_group(1, self.ibl_bind_group.as_ref().unwrap(), &[]);
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(2, &self.scene_data_bind_groups[buffer_index], &[]);
+        pass.set_bind_group(3, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -3345,6 +3410,15 @@ impl RenderTrait for DeferredRenderer {
     fn update_render_data(&mut self, render_data: RenderData) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
+                if current_data.render_config.shader_constants
+                    != render_data.render_config.shader_constants
+                {
+                    self.queue.write_buffer(
+                        self.render_constants_buffer.as_ref().unwrap(),
+                        0,
+                        bytemuck::bytes_of(&render_data.render_config.shader_constants),
+                    );
+                }
                 self.create_shadow_resources();
                 self.resize(self.window_size);
             }

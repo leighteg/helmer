@@ -3,11 +3,14 @@ use crate::graphics::renderer::error::RendererError;
 use crate::graphics::renderer::renderer::{
     Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData, Mesh,
     MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderObject, RenderTrait,
-    SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex,
+    SHADOW_MAP_RESOLUTION, ShaderConstants, ShadowPipeline, ShadowUniforms, Vertex,
 };
 use crate::provided::components::{Camera, LightType};
 use crate::runtime::asset_server::MaterialGpuData;
+use crate::runtime::egui_integration::EguiRenderData;
 use crate::runtime::runtime::RenderMessage;
+use egui_wgpu::Renderer;
+use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use std::{
     collections::HashMap,
@@ -84,12 +87,21 @@ pub struct ForwardRendererPMU {
     irradiance_map_view: Option<wgpu::TextureView>,
     prefiltered_env_map_view: Option<wgpu::TextureView>,
 
+    // render constants
+    render_constants_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    render_constants_bind_group: Option<wgpu::BindGroup>,
+    render_constants_buffer: Option<wgpu::Buffer>,
+
     // Texture Management
     loaded_texture_views: HashMap<usize, Arc<wgpu::TextureView>>,
     default_albedo_view: Option<Arc<wgpu::TextureView>>,
     default_normal_view: Option<Arc<wgpu::TextureView>>,
     default_mr_view: Option<Arc<wgpu::TextureView>>,
     default_emission_view: Option<Arc<wgpu::TextureView>>,
+
+    // EGUI
+    egui_renderer: EguiRenderer,
+    current_egui_data: Option<EguiRenderData>,
 
     // State
     window_size: PhysicalSize<u32>,
@@ -146,6 +158,14 @@ impl ForwardRendererPMU {
         };
         surface.configure(&device, &surface_config);
 
+        let egui_renderer = EguiRenderer::new(
+            &device,
+            surface_config.format,
+            None,
+            1, // No MSAA
+            false,
+        );
+
         let mut renderer = Self {
             device,
             queue,
@@ -179,11 +199,16 @@ impl ForwardRendererPMU {
             brdf_lut_view: None,
             irradiance_map_view: None,
             prefiltered_env_map_view: None,
+            render_constants_bind_group_layout: None,
+            render_constants_bind_group: None,
+            render_constants_buffer: None,
             loaded_texture_views: HashMap::new(),
             default_albedo_view: None,
             default_normal_view: None,
             default_mr_view: None,
             default_emission_view: None,
+            egui_renderer,
+            current_egui_data: None,
             frame_index: 0,
             pending_materials: Vec::new(),
             current_render_data: None,
@@ -508,6 +533,16 @@ impl ForwardRendererPMU {
                 ],
             },
         ));
+        self.render_constants_bind_group_layout = Some(self.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Constants Bind Group Layout"),
+                entries: &[buffer_binding(
+                    0,
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BufferBindingType::Uniform,
+                )],
+            },
+        ));
     }
 
     fn create_pipelines(&mut self) {
@@ -599,6 +634,20 @@ impl ForwardRendererPMU {
                 },
             ],
         }));
+        self.render_constants_bind_group = Some(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Constants Bind Group"),
+                layout: self.render_constants_bind_group_layout.as_ref().unwrap(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self
+                        .render_constants_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                }],
+            }),
+        );
     }
 
     fn create_depth_texture(
@@ -646,6 +695,18 @@ impl ForwardRendererPMU {
                 })
             })
             .collect();
+
+        self.render_constants_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Render Constants Uniform Buffer"),
+            size: std::mem::size_of::<ShaderConstants>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.queue.write_buffer(
+            self.render_constants_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::bytes_of(&ShaderConstants::default()),
+        );
     }
 
     fn create_scene_bind_groups(&mut self) {
@@ -806,7 +867,10 @@ impl ForwardRendererPMU {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[
+                &bind_group_layout,
+                self.render_constants_bind_group_layout.as_ref().unwrap(),
+            ],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX,
                 range: 0..std::mem::size_of::<ModelPushConstant>() as u32,
@@ -1010,6 +1074,11 @@ impl ForwardRendererPMU {
                 });
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
+                shadow_pass.set_bind_group(
+                    1,
+                    self.render_constants_bind_group.as_ref().unwrap(),
+                    &[],
+                );
                 for object in &render_data.objects {
                     if object.casts_shadow && !*culled_objects.get(&object.id).unwrap_or(&true) {
                         if let Some(mesh) = self.meshes.get(&object.mesh_id) {
@@ -1334,6 +1403,44 @@ impl RenderTrait for ForwardRendererPMU {
             }
         }
 
+        if render_data.render_config.egui_pass {
+            if let Some(egui_data) = &self.current_egui_data {
+                let screen_descriptor = &egui_data.screen_descriptor;
+
+                self.egui_renderer.update_buffers(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &egui_data.primitives,
+                    &screen_descriptor,
+                );
+
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Egui Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &output_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    self.egui_renderer.render(
+                        &mut rpass.forget_lifetime(),
+                        &egui_data.primitives,
+                        &screen_descriptor,
+                    );
+                }
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
@@ -1382,6 +1489,20 @@ impl RenderTrait for ForwardRendererPMU {
                 self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::EguiData(data) => {
+                // Upload textures immediately when message arrives
+                for (id, delta) in &data.textures_delta.set {
+                    self.egui_renderer
+                        .update_texture(&self.device, &self.queue, *id, delta);
+                }
+
+                // Free old textures
+                for id in &data.textures_delta.free {
+                    self.egui_renderer.free_texture(id);
+                }
+
+                self.current_egui_data = Some(data);
+            }
             RenderMessage::Resize(size) => self.resize(size),
             _ => {}
         }
@@ -1390,7 +1511,34 @@ impl RenderTrait for ForwardRendererPMU {
     fn update_render_data(&mut self, render_data: RenderData) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
-                let _ = self.initialize_resources();
+                if current_data.render_config.shader_constants
+                    != render_data.render_config.shader_constants
+                {
+                    self.queue.write_buffer(
+                        self.render_constants_buffer.as_ref().unwrap(),
+                        0,
+                        bytemuck::bytes_of(&render_data.render_config.shader_constants),
+                    );
+                } else if current_data.render_config.shadow_pass
+                    != render_data.render_config.shadow_pass
+                {
+                    self.create_shadow_resources();
+                    self.resize(self.window_size);
+                } else if current_data.render_config.direct_lighting_pass
+                    != render_data.render_config.direct_lighting_pass
+                {
+                    self.resize(self.window_size);
+                } else if current_data.render_config.sky_pass != render_data.render_config.sky_pass
+                {
+                    self.resize(self.window_size);
+                } else if current_data.render_config.ssr_pass != render_data.render_config.ssr_pass
+                {
+                    self.resize(self.window_size);
+                } else if current_data.render_config.ssgi_pass
+                    != render_data.render_config.ssgi_pass
+                {
+                    self.resize(self.window_size);
+                }
             }
         }
         self.current_render_data = Some(render_data);
@@ -1508,5 +1656,22 @@ impl RenderTrait for ForwardRendererPMU {
                 },
             );
         }
+    }
+}
+
+fn buffer_binding(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BufferBindingType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
     }
 }

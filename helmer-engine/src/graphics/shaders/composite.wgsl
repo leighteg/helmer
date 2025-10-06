@@ -1,4 +1,8 @@
 struct Constants {
+    // sky
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
     // SSR
     ssr_coarse_steps: u32,
     ssr_binary_search_steps: u32,

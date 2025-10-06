@@ -1,4 +1,30 @@
-// src/graphics/shaders/sky.wgsl (PRODUCTION VERSION)
+struct Constants {
+    // sky
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    // SSGI
+    ssgi_num_rays: u32,
+    
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    
+    // EVSM
+    evsm_c: f32,
+    // Composite
+    ssgi_intensity: f32,
+};
 
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
@@ -24,11 +50,11 @@ struct VertexOutput {
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<uniform> sky: SkyUniforms;
 
+@group(1) @binding(0) var<uniform> constants: Constants;
+
 const PI = 3.14159265;
 
 // Atmospheric scattering parameters
-const planet_radius = 6371e3;
-const atmosphere_radius = 6471e3;
 const rayleigh_scattering_coeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
 const rayleigh_scale_height = 8e3;
 
@@ -49,14 +75,14 @@ fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius
 
 // Calculates transmittance (how much light is NOT scattered) from a point to the sun
 fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
-    let dist_to_atmosphere = ray_sphere_intersect(sample_pos, sun_dir, atmosphere_radius).y;
-    let num_light_samples = 8;
+    let dist_to_atmosphere = ray_sphere_intersect(sample_pos, sun_dir, constants.atmosphere_radius).y;
+    let num_light_samples = i32(constants.sky_light_samples);
     let light_step_size = dist_to_atmosphere / f32(num_light_samples);
     var optical_depth = vec3(0.0);
 
     for (var j = 0; j < num_light_samples; j = j + 1) {
         let light_pos = sample_pos + sun_dir * (f32(j) + 0.5) * light_step_size;
-        let height = length(light_pos) - planet_radius;
+        let height = length(light_pos) - constants.planet_radius;
         if (height < 0.0) { // Below ground
             return vec3(0.0);
         }
@@ -70,10 +96,10 @@ fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f
 }
 
 fn get_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
-    let camera_pos = vec3(0.0, planet_radius + 1.0, 0.0);
-    let dist_to_atmosphere = ray_sphere_intersect(camera_pos, view_dir, atmosphere_radius).y;
+    let camera_pos = vec3(0.0, constants.planet_radius + 1.0, 0.0);
+    let dist_to_atmosphere = ray_sphere_intersect(camera_pos, view_dir, constants.atmosphere_radius).y;
     
-    let num_samples = 16;
+    let num_samples = i32(constants.sky_light_samples);
     let step_size = dist_to_atmosphere / f32(num_samples);
 
     var transmittance_to_camera = vec3(1.0);
@@ -81,7 +107,7 @@ fn get_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
 
     for (var i = 0; i < num_samples; i = i + 1) {
         let sample_pos = camera_pos + view_dir * (f32(i) + 0.5) * step_size;
-        let height = length(sample_pos) - planet_radius;
+        let height = length(sample_pos) - constants.planet_radius;
 
         if (height < 0.0) { break; }
 

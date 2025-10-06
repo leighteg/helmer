@@ -401,33 +401,45 @@ pub struct SkyUniforms {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct ShaderConstants {
+    // sky
+    pub planet_radius: f32,            // 0x00
+    pub atmosphere_radius: f32,        // 0x04
+    pub sky_light_samples: u32,        // 0x08
+    pub _pad0: u32,                    // 0x0C - padding to 16 bytes
+
     // SSR
-    pub ssr_coarse_steps: u32,
-    pub ssr_binary_search_steps: u32,
-    pub ssr_linear_step_size: f32,
-    pub ssr_thickness: f32,
-    
-    pub ssr_max_distance: f32,
-    pub ssr_roughness_fade_start: f32,
-    pub ssr_roughness_fade_end: f32,
+    pub ssr_coarse_steps: u32,         // 0x10
+    pub ssr_binary_search_steps: u32,  // 0x14
+    pub ssr_linear_step_size: f32,     // 0x18
+    pub ssr_thickness: f32,            // 0x1C
+
+    pub ssr_max_distance: f32,         // 0x20
+    pub ssr_roughness_fade_start: f32, // 0x24
+    pub ssr_roughness_fade_end: f32,   // 0x28
+    pub _pad1: f32,                    // 0x2C - padding to 16 bytes
+
     // SSGI
-    pub ssgi_num_rays: u32,
-    
-    pub ssgi_num_steps: u32,
-    pub ssgi_ray_step_size: f32,
-    pub ssgi_thickness: f32,
-    pub ssgi_blend_factor: f32,
-    
-    // EVSM
-    pub evsm_c: f32,
-    // Composite
-    pub ssgi_intensity: f32,
-    _padding: [f32; 2], // Ensure alignment to 16 bytes
+    pub ssgi_num_rays: u32,            // 0x30
+    pub ssgi_num_steps: u32,           // 0x34
+    pub ssgi_ray_step_size: f32,       // 0x38
+    pub ssgi_thickness: f32,           // 0x3C
+
+    pub ssgi_blend_factor: f32,        // 0x40
+    pub evsm_c: f32,                   // 0x44
+    pub ssgi_intensity: f32,           // 0x48
+    pub _pad2: f32,                    // 0x4C - padding to 16 bytes
+
+    pub _padding: [f32; 4],                // 0x50 - manually added padding if needed by application (optional)
 }
 
 impl Default for ShaderConstants {
     fn default() -> Self {
         Self {
+            // Sky
+            planet_radius: 6371e3,              // Earth radius in meters
+            atmosphere_radius: 6471e3,          // Earth atmosphere radius in meters
+            sky_light_samples: 6,
+
             // SSR Defaults
             ssr_coarse_steps: 160,
             ssr_binary_search_steps: 6,
@@ -436,17 +448,25 @@ impl Default for ShaderConstants {
             ssr_max_distance: 250.0,
             ssr_roughness_fade_start: 0.1,
             ssr_roughness_fade_end: 0.5,
+
             // SSGI Defaults
             ssgi_num_rays: 6,
             ssgi_num_steps: 12,
             ssgi_ray_step_size: 0.6,
             ssgi_thickness: 0.4,
             ssgi_blend_factor: 0.15,
+
             // EVSM Default
             evsm_c: 20.0,
+
             // Composite Default
             ssgi_intensity: 30.0,
-            _padding: [0.0; 2],
+
+            // Padding
+            _pad0: 0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            _padding: [0.0; 4],
         }
     }
 }

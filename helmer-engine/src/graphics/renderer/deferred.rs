@@ -1406,7 +1406,7 @@ impl DeferredRenderer {
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky Pipeline Layout"),
-            bind_group_layouts: &[&sky_bind_group_layout],
+            bind_group_layouts: &[&sky_bind_group_layout, &render_constants_bind_group_layout,],
             push_constant_ranges: &[],
         });
 
@@ -2867,6 +2867,7 @@ impl DeferredRenderer {
         pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(0, &self.sky_bind_groups[buffer_index], &[]);
+        pass.set_bind_group(1, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 

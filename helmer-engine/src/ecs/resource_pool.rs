@@ -29,6 +29,24 @@ impl ResourcePool {
         self.resources.get_mut(&type_id)
             .and_then(|boxed_resource| boxed_resource.downcast_mut::<T>())
     }
+
+    pub fn resource_scope<T: Resource, R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut T) -> R,
+    ) -> Option<R> {
+        let type_id = TypeId::of::<T>();
+
+        // temporarily take a raw pointer to the resource
+        let resource_ptr = self.resources
+            .get_mut(&type_id)?
+            .downcast_mut::<T>()? as *mut T;
+
+        // SAFETY:
+        // - `resource_ptr` points to a unique entry inside `self.resources`.
+        // - we won't remove/replace that entry while the pointer is used.
+        // - we ensure `T` is only borrowed once at a time by user convention.
+        unsafe { Some(f(self, &mut *resource_ptr)) }
+    }
     
     pub fn remove<T: Resource>(&mut self) {
         let type_id = TypeId::of::<T>();

@@ -117,7 +117,6 @@ pub struct Runtime {
 
     init_callback: fn(&mut Runtime),
 
-    performance_metrics: Arc<PerformanceMetrics>,
     last_title_update: Instant,
 }
 
@@ -148,7 +147,7 @@ impl Runtime {
 
             logic_thread: None,
             logic_thread_state: Arc::new(AtomicBool::new(true)),
-            target_tickrate: 60.0,
+            target_tickrate: 120.0,
 
             render_thread: None,
             render_thread_state: Arc::new(AtomicBool::new(true)),
@@ -161,7 +160,6 @@ impl Runtime {
 
             init_callback,
 
-            performance_metrics: Arc::new(PerformanceMetrics::default()),
             last_title_update: Instant::now(),
         }
     }
@@ -177,7 +175,6 @@ impl Runtime {
         let asset_server = Arc::clone(&self.asset_server.as_ref().unwrap());
         let state = Arc::clone(&self.logic_thread_state);
         let target_tickrate = self.target_tickrate;
-        let performance_metrics = Arc::clone(&self.performance_metrics);
 
         let sender = self.render_thread_sender.clone();
 
@@ -264,8 +261,12 @@ impl Runtime {
                 let frame_start = Instant::now();
                 let dt = (frame_start - last_time).as_secs_f32();
 
-                let tps = (1.0 / dt).round() as u32;
-                performance_metrics.tps.store(tps, Ordering::Relaxed);
+                {
+                    if let Some(metrics) = ecs.write().get_resource_mut::<PerformanceMetrics>() {
+                        let tps = (1.0 / dt).round() as u32;
+                        metrics.tps.store(tps, Ordering::Relaxed);
+                    }
+                }
 
                 //const MAX_DELTA_TIME: f32 = 1.0 / 30.0;
                 //let dt = dt.min(MAX_DELTA_TIME);
@@ -346,7 +347,7 @@ impl Runtime {
         let state = Arc::clone(&self.render_thread_state);
         let window = Arc::clone(self.window.as_ref().unwrap());
         let window_size = window.inner_size();
-        let performance_metrics = Arc::clone(&self.performance_metrics);
+        let ecs = Arc::clone(&self.ecs);
 
         let backend_str = env::var("HELMER_BACKEND").unwrap_or_else(|_| "all".to_string());
 
@@ -390,9 +391,13 @@ impl Runtime {
                 let frame_start = Instant::now();
                 let mut should_render = false;
 
-                let dt = frame_start.duration_since(last_render).as_secs_f32();
-                let fps = (1.0 / dt).round() as u32;
-                performance_metrics.fps.store(fps, Ordering::Relaxed);
+                {
+                    if let Some(metrics) = ecs.write().get_resource_mut::<PerformanceMetrics>() {
+                        let dt = frame_start.duration_since(last_render).as_secs_f32();
+                        let fps = (1.0 / dt).round() as u32;
+                        metrics.fps.store(fps, Ordering::Relaxed);
+                    }
+                }
 
                 renderer.resolve_pending_materials();
 
@@ -726,11 +731,13 @@ impl ApplicationHandler for Runtime {
 
         if now.duration_since(self.last_title_update) >= update_interval {
             if let Some(window) = &self.window {
-                let fps = self.performance_metrics.fps.load(Ordering::Relaxed);
-                let tps = self.performance_metrics.tps.load(Ordering::Relaxed);
+                if let Some(metrics) = self.ecs.read().get_resource::<PerformanceMetrics>() {
+                    let fps = metrics.fps.load(Ordering::Relaxed);
+                    let tps = metrics.tps.load(Ordering::Relaxed);
 
-                let new_title = format!("helmer engine | FPS: {} | TPS: {}", fps, tps);
-                window.set_title(&new_title);
+                    let new_title = format!("helmer engine | FPS: {} | TPS: {}", fps, tps);
+                    window.set_title(&new_title);
+                }
             }
 
             self.last_title_update = now;

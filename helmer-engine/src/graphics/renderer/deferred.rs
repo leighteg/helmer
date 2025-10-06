@@ -3484,9 +3484,10 @@ impl RenderTrait for DeferredRenderer {
                         0,
                         bytemuck::bytes_of(&render_data.render_config.shader_constants),
                     );
+                } else {
+                    self.create_shadow_resources();
+                    self.resize(self.window_size);
                 }
-                self.create_shadow_resources();
-                self.resize(self.window_size);
             }
         }
         self.current_render_data = Some(render_data);

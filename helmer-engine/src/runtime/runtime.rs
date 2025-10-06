@@ -586,6 +586,7 @@ impl ApplicationHandler for Runtime {
 
                     self.input_manager.write().window_size =
                         UVec2::new(new_size.width, new_size.height);
+                    self.input_manager.write().scale_factor = self.window.as_ref().unwrap().scale_factor();
 
                     if new_size.width > 0 && new_size.height > 0 {
                         let mut ecs_guard = self.ecs.write();
@@ -692,6 +693,8 @@ impl ApplicationHandler for Runtime {
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
 
             self.draw_splash();
+
+            self.input_manager.write().scale_factor = self.window.as_ref().unwrap().scale_factor();
 
             // --- Initialize egui-winit ---
             let egui_context = egui::Context::default();

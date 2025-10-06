@@ -94,7 +94,7 @@ impl System for EguiSystem {
                     });
 
                     let window_size = input.window_size;
-                    let pixels_per_point = ctx.pixels_per_point();
+                    let pixels_per_point = input.scale_factor as f32;
                     let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
 
                     egui_res.render_data = Some(EguiRenderData {

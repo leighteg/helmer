@@ -41,6 +41,7 @@ pub struct InputManager {
     mouse_wheel_accumulator: Vec2,
     pub cursor_position: DVec2,
     pub window_size: UVec2,
+    pub scale_factor: f64,
 
     // Controller state
     pub controller_states: HashMap<GamepadId, ControllerState>,
@@ -65,6 +66,7 @@ impl InputManager {
             mouse_wheel_accumulator: Vec2::ZERO,
             cursor_position: DVec2::ZERO,
             window_size: UVec2::ZERO,
+            scale_factor: 1.0,
             controller_states: HashMap::new(),
             egui_modifiers: Mutex::new(egui::Modifiers::default()),
             egui_pointer_pos: Mutex::new(None),
@@ -240,7 +242,7 @@ impl InputManager {
     pub fn update_egui_state_from_winit(&self, event: &WindowEvent) {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let pos = egui::pos2(position.x as f32, position.y as f32);
+                let pos = egui::pos2((position.x / self.scale_factor) as f32, (position.y / self.scale_factor) as f32);
                 *self.egui_pointer_pos.lock().unwrap() = Some(pos);
             }
             WindowEvent::MouseInput {

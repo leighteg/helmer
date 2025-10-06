@@ -1522,22 +1522,22 @@ impl RenderTrait for ForwardRendererPMU {
                 } else if current_data.render_config.shadow_pass
                     != render_data.render_config.shadow_pass
                 {
-                    self.create_shadow_resources();
-                    self.resize(self.window_size);
+                    let _ = self.initialize_resources();
+                    //self.resize(self.window_size);
                 } else if current_data.render_config.direct_lighting_pass
                     != render_data.render_config.direct_lighting_pass
                 {
-                    self.resize(self.window_size);
+                    //self.resize(self.window_size);
                 } else if current_data.render_config.sky_pass != render_data.render_config.sky_pass
                 {
-                    self.resize(self.window_size);
+                    //self.resize(self.window_size);
                 } else if current_data.render_config.ssr_pass != render_data.render_config.ssr_pass
                 {
-                    self.resize(self.window_size);
+                    //self.resize(self.window_size);
                 } else if current_data.render_config.ssgi_pass
                     != render_data.render_config.ssgi_pass
                 {
-                    self.resize(self.window_size);
+                    //self.resize(self.window_size);
                 }
             }
         }

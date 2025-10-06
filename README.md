@@ -25,7 +25,7 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] "bring your own logic" option (through logic thread hooks)
 - [ ] ecs revamp
 - [ ] custom types to relieve project reliance on engine dependencies (InputMan)
-- [ ] ui implementation or integration
+- [x] ui implementation or integration
 - [ ] editor & project cli tools
 - [ ] taskable worker pool system/api for ecs (resource based? - asynchronously taskable by systems?)
 - [ ] asset streaming

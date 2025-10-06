@@ -1,9 +1,9 @@
 use core::time;
+use egui::ViewportId;
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use resvg::{tiny_skia, usvg::Tree};
-use wgpu::{BackendOptions, Dx12BackendOptions};
 use std::{
     any::TypeId,
     collections::HashSet,
@@ -19,6 +19,7 @@ use std::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use wgpu::{BackendOptions, Dx12BackendOptions};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -36,7 +37,8 @@ use crate::{
         renderer::{
             deferred::DeferredRenderer,
             renderer::{
-                initialize_renderer, Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex
+                Aabb, Material, RenderData, RenderLight, RenderObject, RenderTrait, Vertex,
+                initialize_renderer,
             },
         },
         renderer_system::{MeshAabbMap, RenderDataSystem, RenderPacket},
@@ -52,6 +54,7 @@ use crate::{
     runtime::{
         asset_server::{AssetKind, AssetServer, MaterialGpuData},
         config::RuntimeConfig,
+        egui_integration::{EguiRenderData, EguiResource, EguiSystem},
         input_manager::{InputEvent, InputManager},
         scene_system::SceneSpawningSystem,
     },
@@ -85,6 +88,8 @@ pub enum RenderMessage {
         height: u32,
     },
     CreateMaterial(MaterialGpuData),
+
+    EguiData(EguiRenderData),
 }
 
 pub struct Runtime {
@@ -103,6 +108,9 @@ pub struct Runtime {
     render_thread_state: Arc<AtomicBool>,
     pub render_thread_sender: mpsc::Sender<RenderMessage>,
     target_fps: Option<f32>,
+
+    // --- EGUI ---
+    egui_winit_state: Option<egui_winit::State>,
 
     // Window management
     window: Option<Arc<Window>>,
@@ -147,6 +155,8 @@ impl Runtime {
             render_thread_sender: render_sender,
             target_fps: None,
 
+            egui_winit_state: None,
+
             window: None,
 
             init_callback,
@@ -181,6 +191,8 @@ impl Runtime {
                 ecs_guard.add_resource(RenderPacket::default());
                 ecs_guard.add_resource(PhysicsResource::new());
                 ecs_guard.add_resource(MeshAabbMap::default());
+                ecs_guard.add_resource(EguiResource::default());
+                ecs_guard.add_resource(PerformanceMetrics::default());
 
                 ecs_guard.system_scheduler.register_system(
                     SceneSpawningSystem {},
@@ -236,6 +248,14 @@ impl Runtime {
                     HashSet::from([TypeId::of::<Transform>()]),
                     HashSet::from([TypeId::of::<Transform>()]),
                 );
+
+                ecs_guard.system_scheduler.register_system(
+                    EguiSystem {},
+                    -10,
+                    vec![],
+                    HashSet::new(),
+                    HashSet::from([TypeId::of::<EguiResource>()]),
+                );
             }
             let mut last_time = Instant::now();
             let frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
@@ -280,6 +300,19 @@ impl Runtime {
                         warn!("render thread disconnected");
                         break;
                     }
+                }
+
+                let egui_data_to_send = {
+                    let mut ecs_guard = ecs.write();
+                    if let Some(egui_res) = ecs_guard.get_resource_mut::<EguiResource>() {
+                        egui_res.render_data.take()
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(data) = egui_data_to_send {
+                    let _ = sender.send(RenderMessage::EguiData(data));
                 }
 
                 input_manager.write().prepare_for_next_frame();
@@ -511,117 +544,137 @@ impl ApplicationHandler for Runtime {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        match event {
-            WindowEvent::CloseRequested => {
-                self.shutdown_threads();
-                event_loop.exit();
+        let event_consumed = if let Some(state) = self.egui_winit_state.as_mut() {
+            if let Some(window) = self.window.as_ref() {
+                let response = state.on_window_event(window, &event);
+                response.consumed
+            } else {
+                false
             }
-            WindowEvent::RedrawRequested => {
-                if self.render_thread.is_none() {
-                    self.draw_splash();
+        } else {
+            false
+        };
 
-                    self.window.as_ref().unwrap().request_redraw();
-                }
+        self.input_manager
+            .read()
+            .update_egui_state_from_winit(&event);
+
+        if let WindowEvent::RedrawRequested = event {
+            if self.render_thread.is_none() {
+                self.draw_splash();
+                self.window.as_ref().unwrap().request_redraw();
             }
-            WindowEvent::Resized(new_size) => {
-                let _ = self
-                    .render_thread_sender
-                    .send(RenderMessage::Resize(new_size));
+            return;
+        }
 
-                self.input_manager.write().window_size =
-                    UVec2::new(new_size.width, new_size.height);
-
-                if new_size.width > 0 && new_size.height > 0 {
-                    let mut ecs_guard = self.ecs.write();
-                    ecs_guard
-                        .component_pool
-                        .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
-                            camera.aspect_ratio = new_size.width as f32 / new_size.height as f32;
-                        });
-                }
-            }
-
-            // INPUT HANDLING
-            WindowEvent::KeyboardInput {
-                device_id,
-                event,
-                is_synthetic,
-            } => {
-                let mut key_code: Option<KeyCode> = None;
-
-                match event.physical_key {
-                    PhysicalKey::Code(code) => key_code = Some(code),
-                    _ => {}
+        if !event_consumed {
+            match event {
+                WindowEvent::CloseRequested => {
+                    self.shutdown_threads();
+                    event_loop.exit();
                 }
 
-                if key_code.is_some() {
-                    match key_code.unwrap() {
-                        KeyCode::F11 => {
-                            if event.state.is_pressed() {
-                                let window: &mut Arc<Window> = self.window.as_mut().unwrap();
+                WindowEvent::Resized(new_size) => {
+                    let _ = self
+                        .render_thread_sender
+                        .send(RenderMessage::Resize(new_size));
 
-                                if window.fullscreen().is_some() {
-                                    window.set_fullscreen(None);
-                                } else {
-                                    window.set_fullscreen(Some(
-                                        winit::window::Fullscreen::Borderless(None),
-                                    ));
+                    self.input_manager.write().window_size =
+                        UVec2::new(new_size.width, new_size.height);
+
+                    if new_size.width > 0 && new_size.height > 0 {
+                        let mut ecs_guard = self.ecs.write();
+                        ecs_guard
+                            .component_pool
+                            .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
+                                camera.aspect_ratio =
+                                    new_size.width as f32 / new_size.height as f32;
+                            });
+                    }
+                }
+
+                // INPUT HANDLING
+                WindowEvent::KeyboardInput {
+                    device_id,
+                    event,
+                    is_synthetic,
+                } => {
+                    let mut key_code: Option<KeyCode> = None;
+
+                    match event.physical_key {
+                        PhysicalKey::Code(code) => key_code = Some(code),
+                        _ => {}
+                    }
+
+                    if key_code.is_some() {
+                        match key_code.unwrap() {
+                            KeyCode::F11 => {
+                                if event.state.is_pressed() {
+                                    let window: &mut Arc<Window> = self.window.as_mut().unwrap();
+
+                                    if window.fullscreen().is_some() {
+                                        window.set_fullscreen(None);
+                                    } else {
+                                        window.set_fullscreen(Some(
+                                            winit::window::Fullscreen::Borderless(None),
+                                        ));
+                                    }
                                 }
                             }
-                        }
 
-                        key_code => {
-                            self.input_manager.read().push_event(InputEvent::Keyboard {
-                                key: key_code,
-                                pressed: event.state.is_pressed(),
-                            });
+                            key_code => {
+                                self.input_manager.read().push_event(InputEvent::Keyboard {
+                                    key: key_code,
+                                    pressed: event.state.is_pressed(),
+                                });
+                            }
                         }
                     }
                 }
-            }
-            WindowEvent::MouseInput {
-                device_id,
-                state,
-                button,
-            } => {
-                self.input_manager
-                    .read()
-                    .push_event(InputEvent::MouseButton {
-                        button,
-                        pressed: state.is_pressed(),
-                    });
-            }
-            WindowEvent::CursorMoved {
-                device_id,
-                position,
-            } => {
-                self.input_manager
-                    .read()
-                    .push_event(InputEvent::CursorMoved(DVec2::from_array([
-                        position.x, position.y,
-                    ])));
-            }
-            WindowEvent::MouseWheel {
-                device_id,
-                delta,
-                phase,
-            } => {
-                let scroll_delta = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        const PIXELS_PER_LINE: f32 = 38.0;
-                        glam::vec2(
-                            pos.x as f32 / PIXELS_PER_LINE,
-                            pos.y as f32 / PIXELS_PER_LINE,
-                        )
-                    }
-                };
+                WindowEvent::MouseInput {
+                    device_id,
+                    state,
+                    button,
+                } => {
+                    self.input_manager
+                        .read()
+                        .push_event(InputEvent::MouseButton {
+                            button,
+                            pressed: state.is_pressed(),
+                        });
+                }
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                } => {
+                    self.input_manager
+                        .read()
+                        .push_event(InputEvent::CursorMoved(DVec2::from_array([
+                            position.x, position.y,
+                        ])));
+                }
+                WindowEvent::MouseWheel {
+                    device_id,
+                    delta,
+                    phase,
+                } => {
+                    let scroll_delta = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                            const PIXELS_PER_LINE: f32 = 38.0;
+                            glam::vec2(
+                                pos.x as f32 / PIXELS_PER_LINE,
+                                pos.y as f32 / PIXELS_PER_LINE,
+                            )
+                        }
+                    };
 
-                self.input_manager
-                    .read()
-                    .push_event(InputEvent::MouseWheel(scroll_delta));
+                    self.input_manager
+                        .read()
+                        .push_event(InputEvent::MouseWheel(scroll_delta));
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -634,6 +687,17 @@ impl ApplicationHandler for Runtime {
             self.window = Some(Arc::new(event_loop.create_window(window).unwrap()));
 
             self.draw_splash();
+
+            // --- Initialize egui-winit ---
+            let egui_context = egui::Context::default();
+            self.egui_winit_state = Some(egui_winit::State::new(
+                egui_context,
+                ViewportId::default(),
+                &self.window.as_ref().unwrap(),
+                None,
+                None,
+                None,
+            ));
         }
 
         if self.render_thread.is_none() && self.logic_thread.is_none() {

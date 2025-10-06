@@ -14,10 +14,12 @@ use crate::{
     provided::components::{Camera, LightType},
     runtime::{
         asset_server::{AssetKind, MaterialGpuData},
+        egui_integration::EguiRenderData,
         runtime::RenderMessage,
     },
 };
 use bytemuck::{Pod, Zeroable};
+use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use image::{GenericImageView, ImageFormat};
 use std::{
@@ -189,6 +191,10 @@ pub struct DeferredRenderer {
     shadow_uniforms_buffer: Option<wgpu::Buffer>,
     cascade_views: Option<Vec<wgpu::TextureView>>,
 
+    // EGUI
+    egui_renderer: EguiRenderer,
+    current_egui_data: Option<EguiRenderData>,
+
     // State
     frame_index: usize,
     current_render_data: Option<RenderData>,
@@ -244,6 +250,14 @@ impl DeferredRenderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
+
+        let egui_renderer = EguiRenderer::new(
+            &device,
+            surface_config.format,
+            None,
+            1, // No MSAA
+            false,
+        );
 
         let mut renderer = Self {
             adapter,
@@ -366,6 +380,8 @@ impl DeferredRenderer {
             shadow_depth_view: None,
             shadow_uniforms_buffer: None,
             cascade_views: None,
+            egui_renderer,
+            current_egui_data: None,
             frame_index: 0,
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
@@ -3367,6 +3383,42 @@ impl RenderTrait for DeferredRenderer {
             },
         );
 
+        if let Some(egui_data) = &self.current_egui_data {
+            let screen_descriptor = &egui_data.screen_descriptor;
+
+            self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &egui_data.primitives,
+                &screen_descriptor,
+            );
+
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Egui Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &output_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                self.egui_renderer.render(
+                    &mut rpass.forget_lifetime(),
+                    &egui_data.primitives,
+                    &screen_descriptor,
+                );
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();
 
@@ -3402,6 +3454,20 @@ impl RenderTrait for DeferredRenderer {
                 self.pending_materials.push(mat_data);
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::EguiData(data) => {
+                // Upload textures immediately when message arrives
+                for (id, delta) in &data.textures_delta.set {
+                    self.egui_renderer
+                        .update_texture(&self.device, &self.queue, *id, delta);
+                }
+
+                // Free old textures
+                for id in &data.textures_delta.free {
+                    self.egui_renderer.free_texture(id);
+                }
+
+                self.current_egui_data = Some(data);
+            }
             RenderMessage::Resize(size) => self.resize(size),
             RenderMessage::Shutdown => {}
         }

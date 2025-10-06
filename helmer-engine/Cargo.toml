@@ -16,7 +16,7 @@ thiserror = "2.0.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 bytemuck = "1.23.0"
-wgpu = { version = "27.0.1", features = ["static-dxc"] }
+wgpu = { version = "27.0.0", features = ["static-dxc"] }
 pollster = "0.4.0"
 resvg = "0.45.1"
 softbuffer = "0.4.6"
@@ -34,3 +34,6 @@ image = { version = "0.25.6", features = ["png"] }
 gilrs = "0.11.0"
 meshopt = "0.6.1"
 num_cpus = "1.17.0"
+egui = { git = "https://github.com/emilk/egui.git" }
+egui-wgpu = { git = "https://github.com/emilk/egui.git" }
+egui-winit = { git = "https://github.com/emilk/egui.git" }

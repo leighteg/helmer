@@ -8,6 +8,7 @@ pub struct RenderConfig {
     pub ssgi_pass: bool,
     pub ssgi_denoise_pass: bool,
     pub ssr_pass: bool,
+    pub egui_pass: bool,
 
     pub max_lights_forward: usize,
     pub max_lights_deferred: usize,
@@ -27,8 +28,9 @@ impl Default for RenderConfig {
             ssgi_pass: true,
             ssgi_denoise_pass: true,
             ssr_pass: true,
+            egui_pass: false,
 
-            max_lights_forward: 248,
+            max_lights_forward: 256,
             max_lights_deferred: 2048,
 
             frustum_culling: true,

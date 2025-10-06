@@ -323,6 +323,7 @@ impl System for ConfigToggleSystem {
                 KeyCode::KeyR => runtime_config.render_config.ssr_pass = !runtime_config.render_config.ssr_pass,
                 KeyCode::KeyF => runtime_config.render_config.frustum_culling = !runtime_config.render_config.frustum_culling,
                 KeyCode::KeyL => runtime_config.render_config.lod = !runtime_config.render_config.lod,
+                KeyCode::KeyU => runtime_config.render_config.egui_pass = !runtime_config.render_config.egui_pass,
                 _ => {}
             }
         }

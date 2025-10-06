@@ -1406,7 +1406,7 @@ impl DeferredRenderer {
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky Pipeline Layout"),
-            bind_group_layouts: &[&sky_bind_group_layout, &render_constants_bind_group_layout,],
+            bind_group_layouts: &[&sky_bind_group_layout, &render_constants_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -3384,39 +3384,41 @@ impl RenderTrait for DeferredRenderer {
             },
         );
 
-        if let Some(egui_data) = &self.current_egui_data {
-            let screen_descriptor = &egui_data.screen_descriptor;
+        if render_data.render_config.egui_pass {
+            if let Some(egui_data) = &self.current_egui_data {
+                let screen_descriptor = &egui_data.screen_descriptor;
 
-            self.egui_renderer.update_buffers(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &egui_data.primitives,
-                &screen_descriptor,
-            );
-
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Egui Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &output_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                self.egui_renderer.render(
-                    &mut rpass.forget_lifetime(),
+                self.egui_renderer.update_buffers(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
                     &egui_data.primitives,
                     &screen_descriptor,
                 );
+
+                {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Egui Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &output_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    self.egui_renderer.render(
+                        &mut rpass.forget_lifetime(),
+                        &egui_data.primitives,
+                        &screen_descriptor,
+                    );
+                }
             }
         }
 

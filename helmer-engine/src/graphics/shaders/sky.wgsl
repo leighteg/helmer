@@ -1,29 +1,36 @@
 struct Constants {
     // sky
-    planet_radius: f32,
-    atmosphere_radius: f32,
-    sky_light_samples: u32,
-    // SSR
-    ssr_coarse_steps: u32,
-    ssr_binary_search_steps: u32,
-    ssr_linear_step_size: f32,
-    ssr_thickness: f32,
-    
-    ssr_max_distance: f32,
-    ssr_roughness_fade_start: f32,
-    ssr_roughness_fade_end: f32,
-    // SSGI
-    ssgi_num_rays: u32,
-    
-    ssgi_num_steps: u32,
-    ssgi_ray_step_size: f32,
-    ssgi_thickness: f32,
-    ssgi_blend_factor: f32,
-    
-    // EVSM
-    evsm_c: f32,
-    // Composite
-    ssgi_intensity: f32,
+    planet_radius: f32,          // 0x00
+    atmosphere_radius: f32,      // 0x04
+    sky_light_samples: u32,      // 0x08
+    _pad0: u32,                 // 0x0C - padding to 16 bytes
+
+    // SSR block 1
+    ssr_coarse_steps: u32,       // 0x10
+    ssr_binary_search_steps: u32,// 0x14
+    ssr_linear_step_size: f32,   // 0x18
+    ssr_thickness: f32,          // 0x1C
+
+    // SSR block 2
+    ssr_max_distance: f32,       // 0x20
+    ssr_roughness_fade_start: f32,// 0x24
+    ssr_roughness_fade_end: f32, // 0x28
+    _pad1: f32,                  // 0x2C - padding to 16 bytes
+
+    // SSGI block 1
+    ssgi_num_rays: u32,          // 0x30
+    ssgi_num_steps: u32,         // 0x34
+    ssgi_ray_step_size: f32,     // 0x38
+    ssgi_thickness: f32,         // 0x3C
+
+    // SSGI block 2
+    ssgi_blend_factor: f32,      // 0x40
+    evsm_c: f32,                 // 0x44
+    ssgi_intensity: f32,         // 0x48
+    _pad2: f32,                  // 0x4C - padding to 16 bytes
+
+    // Final padding to align total struct size to 16 bytes
+    _padding: vec4<f32>,         // 0x50 - 16 bytes padding
 };
 
 struct CameraUniforms {

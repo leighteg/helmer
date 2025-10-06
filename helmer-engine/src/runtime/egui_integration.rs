@@ -57,7 +57,9 @@ impl System for EguiSystem {
 
                         egui::Window::new("Render Config").show(ctx, |ui| {
                             if ui.button("default").clicked() {
-                                *render_cfg = RenderConfig::default();
+                                let mut new_cfg = RenderConfig::default();
+                                new_cfg.egui_pass = true;
+                                *render_cfg = new_cfg;
                             }
                             ui.separator();
 
@@ -111,18 +113,22 @@ impl System for EguiSystem {
 fn shader_constants_ui(ui: &mut egui::Ui, c: &mut ShaderConstants) {
     ui.collapsing("sky", |ui| {
         ui.add(egui::Slider::new(&mut c.planet_radius, 0.0..=9999e3).text("planet radius"));
-        ui.add(
-            egui::Slider::new(&mut c.atmosphere_radius, 0.0..=9999e3).text("atmosphere radius"),
-        );
-        ui.add(
-            egui::Slider::new(&mut c.sky_light_samples, 0..=64).text("light samples"),
-        );
+        ui.add(egui::Slider::new(&mut c.atmosphere_radius, 0.0..=9999e3).text("atmosphere radius"));
+        ui.add(egui::Slider::new(&mut c.sky_light_samples, 0..=64).text("light samples"));
     });
 
     ui.collapsing("SSR", |ui| {
-        ui.add(egui::Slider::new(&mut c.ssr_coarse_steps, 1..=2048).smart_aim(false).step_by(1.0).text("Coarse Steps"));
         ui.add(
-            egui::Slider::new(&mut c.ssr_binary_search_steps, 1..=2048).smart_aim(false).step_by(1.0).text("Binary Search Steps"),
+            egui::Slider::new(&mut c.ssr_coarse_steps, 1..=2048)
+                .smart_aim(false)
+                .step_by(1.0)
+                .text("Coarse Steps"),
+        );
+        ui.add(
+            egui::Slider::new(&mut c.ssr_binary_search_steps, 1..=2048)
+                .smart_aim(false)
+                .step_by(1.0)
+                .text("Binary Search Steps"),
         );
         ui.add(
             egui::DragValue::new(&mut c.ssr_linear_step_size)
@@ -155,8 +161,18 @@ fn shader_constants_ui(ui: &mut egui::Ui, c: &mut ShaderConstants) {
     });
 
     ui.collapsing("SSGI", |ui| {
-        ui.add(egui::Slider::new(&mut c.ssgi_num_rays, 1..=512).smart_aim(false).step_by(1.0).text("Num Rays"));
-        ui.add(egui::Slider::new(&mut c.ssgi_num_steps, 1..=512).smart_aim(false).step_by(1.0).text("Num Steps"));
+        ui.add(
+            egui::Slider::new(&mut c.ssgi_num_rays, 1..=512)
+                .smart_aim(false)
+                .step_by(1.0)
+                .text("Num Rays"),
+        );
+        ui.add(
+            egui::Slider::new(&mut c.ssgi_num_steps, 1..=512)
+                .smart_aim(false)
+                .step_by(1.0)
+                .text("Num Steps"),
+        );
         ui.add(
             egui::DragValue::new(&mut c.ssgi_ray_step_size)
                 .speed(0.001)

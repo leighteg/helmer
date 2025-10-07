@@ -1,6 +1,7 @@
 use crate::{
     ecs::{ecs_core::ECSCore, system::System},
     graphics::{config::RenderConfig, renderer::renderer::ShaderConstants},
+    provided::components::{Light, LightType, Transform},
     runtime::{
         config::RuntimeConfig,
         egui_integration,
@@ -31,97 +32,112 @@ impl System for EguiSystem {
     }
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, input: &InputManager) {
-        ecs.resource_pool
-            .resource_scope::<RuntimeConfig, _>(|ecs, runtime_cfg| {
-                ecs.resource_scope::<EguiResource, _>(|ecs, egui_res| {
-                    if !runtime_cfg.egui {
-                        egui_res.render_data = Some(EguiRenderData {
-                            primitives: Vec::new(),
-                            textures_delta: TexturesDelta::default(),
-                            screen_descriptor: egui_wgpu::ScreenDescriptor {
-                                size_in_pixels: [0; 2],
-                                pixels_per_point: 1.0,
-                            },
-                        });
-
-                        return;
-                    }
-
-                    let (fps, tps) = {
-                        let pm = ecs.get::<PerformanceMetrics>().unwrap();
-                        (
-                            pm.fps.load(Ordering::Relaxed),
-                            pm.tps.load(Ordering::Relaxed),
-                        )
-                    };
-
-                    let render_cfg = &mut runtime_cfg.render_config;
-
-                    let raw_input = input.build_egui_raw_input(input.window_size);
-                    let ctx = &egui_res.ctx;
-
-                    let full_output = ctx.run(raw_input, |ctx| {
-                        egui::Window::new("helmer metrics").show(ctx, |ui| {
-                            ui.label(format!("FPS: {}", fps));
-                            ui.label(format!("TPS: {}", tps));
-                        });
-
-                        egui::Window::new("Runtime Config").show(ctx, |ui| {
-                            ui.checkbox(&mut runtime_cfg.egui, "egui");
-                        });
-
-                        egui::Window::new("Render Config").show(ctx, |ui| {
-                            if ui.button("default").clicked() {
-                                let mut new_cfg = RenderConfig::default();
-                                new_cfg.egui_pass = true;
-                                *render_cfg = new_cfg;
-                            }
-                            ui.separator();
-
-                            ui.heading("Render Passes");
-                            ui.checkbox(&mut render_cfg.shadow_pass, "Shadow Pass");
-                            ui.checkbox(&mut render_cfg.direct_lighting_pass, "Direct Lighting");
-                            ui.checkbox(&mut render_cfg.sky_pass, "Sky Pass");
-                            ui.checkbox(&mut render_cfg.ssgi_pass, "SSGI Pass");
-                            ui.checkbox(&mut render_cfg.ssgi_denoise_pass, "SSGI Denoise Pass");
-                            ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
-
-                            ui.separator();
-                            ui.heading("Culling & LOD");
-                            ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
-                            ui.checkbox(&mut render_cfg.lod, "LOD");
-
-                            ui.separator();
-                            ui.heading("Lighting Limits");
-                            ui.add(
-                                egui::Slider::new(&mut render_cfg.max_lights_forward, 0..=1024)
-                                    .text("Max Lights (Forward)"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut render_cfg.max_lights_deferred, 0..=4096)
-                                    .text("Max Lights (Deferred)"),
-                            );
-
-                            ui.separator();
-                            ui.heading("Shader Constants");
-                            shader_constants_ui(ui, &mut render_cfg.shader_constants);
-                        });
-                    });
-
-                    let window_size = input.window_size;
-                    let pixels_per_point = input.scale_factor as f32;
-                    let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
-
+        ecs.resource_scope::<RuntimeConfig, _>(|ecs, runtime_cfg| {
+            ecs.resource_scope::<EguiResource, _>(|ecs, egui_res| {
+                if !runtime_cfg.egui {
                     egui_res.render_data = Some(EguiRenderData {
-                        primitives,
-                        textures_delta: full_output.textures_delta,
+                        primitives: Vec::new(),
+                        textures_delta: TexturesDelta::default(),
                         screen_descriptor: egui_wgpu::ScreenDescriptor {
-                            size_in_pixels: [window_size.x, window_size.y],
-                            pixels_per_point,
+                            size_in_pixels: [0; 2],
+                            pixels_per_point: 1.0,
                         },
                     });
+
+                    return;
+                }
+
+                let (fps, tps) = {
+                    let pm = ecs.get_resource::<PerformanceMetrics>().unwrap();
+                    (
+                        pm.fps.load(Ordering::Relaxed),
+                        pm.tps.load(Ordering::Relaxed),
+                    )
+                };
+
+                let render_cfg = &mut runtime_cfg.render_config;
+
+                let raw_input = input.build_egui_raw_input(input.window_size);
+                let ctx = &egui_res.ctx;
+
+                let full_output = ctx.run(raw_input, |ctx| {
+                    egui::Window::new("helmer metrics").show(ctx, |ui| {
+                        ui.label(format!("FPS: {}", fps));
+                        ui.label(format!("TPS: {}", tps));
+                    });
+
+                    egui::Window::new("Runtime Config").show(ctx, |ui| {
+                        ui.checkbox(&mut runtime_cfg.egui, "egui");
+                    });
+
+                    egui::Window::new("Render Config").show(ctx, |ui| {
+                        if ui.button("default").clicked() {
+                            let mut new_cfg = RenderConfig::default();
+                            new_cfg.egui_pass = true;
+                            *render_cfg = new_cfg;
+                        }
+                        ui.separator();
+
+                        ui.heading("Render Passes");
+                        ui.checkbox(&mut render_cfg.shadow_pass, "Shadow Pass");
+                        ui.checkbox(&mut render_cfg.direct_lighting_pass, "Direct Lighting");
+                        ui.checkbox(&mut render_cfg.sky_pass, "Sky Pass");
+                        ui.checkbox(&mut render_cfg.ssgi_pass, "SSGI Pass");
+                        ui.checkbox(&mut render_cfg.ssgi_denoise_pass, "SSGI Denoise Pass");
+                        ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
+
+                        ui.separator();
+                        ui.heading("Culling & LOD");
+                        ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
+                        ui.checkbox(&mut render_cfg.lod, "LOD");
+
+                        ui.separator();
+                        ui.heading("Lighting Limits");
+                        ui.add(
+                            egui::Slider::new(&mut render_cfg.max_lights_forward, 0..=1024)
+                                .text("Max Lights (Forward)"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut render_cfg.max_lights_deferred, 0..=4096)
+                                .text("Max Lights (Deferred)"),
+                        );
+
+                        ui.separator();
+                        ui.heading("Shader Constants");
+                        shader_constants_ui(ui, &mut render_cfg.shader_constants);
+                    });
+
+                    egui::Window::new("scene").show(ctx, |ui| {
+                        ecs.component_pool
+                            .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, light)| {
+                                if light.light_type != LightType::Directional {
+                                    return;
+                                }
+
+                                ui.label("directional light");
+                                ui.drag_angle(&mut transform.rotation.x);
+                                ui.drag_angle(&mut transform.rotation.y);
+                                ui.drag_angle(&mut transform.rotation.z);
+
+                                ui.separator();
+                            });
+                    });
+                });
+
+                let window_size = input.window_size;
+                let pixels_per_point = input.scale_factor as f32;
+                let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
+
+                egui_res.render_data = Some(EguiRenderData {
+                    primitives,
+                    textures_delta: full_output.textures_delta,
+                    screen_descriptor: egui_wgpu::ScreenDescriptor {
+                        size_in_pixels: [window_size.x, window_size.y],
+                        pixels_per_point,
+                    },
                 });
             });
+        });
     }
 }
 

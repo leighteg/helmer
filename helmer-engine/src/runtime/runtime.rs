@@ -565,8 +565,10 @@ impl ApplicationHandler for Runtime {
 
         if egui_enabled {
             if let Some(egui_resource) = self.ecs.read().get_resource::<EguiResource>() {
-                self.input_manager.write().egui_wants_pointer =
-                    egui_resource.ctx.wants_pointer_input();
+                if self.input_manager.read().active_mouse_buttons.len() == 0 {
+                    self.input_manager.write().egui_wants_pointer =
+                        egui_resource.ctx.wants_pointer_input();
+                }
                 self.input_manager.write().egui_wants_key =
                     egui_resource.ctx.wants_keyboard_input();
             }

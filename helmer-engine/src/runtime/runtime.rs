@@ -553,8 +553,8 @@ impl ApplicationHandler for Runtime {
             if self.render_thread.is_none() {
                 self.draw_splash();
                 self.window.as_ref().unwrap().request_redraw();
-                return;
             }
+            return;
         }
 
         let mut egui_enabled = false;
@@ -595,6 +595,15 @@ impl ApplicationHandler for Runtime {
                 let mut input = self.input_manager.write();
                 input.window_size = UVec2::new(new_size.width, new_size.height);
                 input.scale_factor = self.window.as_ref().unwrap().scale_factor();
+
+                if new_size.width > 0 && new_size.height > 0 {
+                    let mut ecs_guard = self.ecs.write();
+                    ecs_guard
+                        .component_pool
+                        .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
+                            camera.aspect_ratio = new_size.width as f32 / new_size.height as f32;
+                        });
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {

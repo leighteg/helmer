@@ -549,138 +549,91 @@ impl ApplicationHandler for Runtime {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let event_consumed = if let Some(state) = self.egui_winit_state.as_mut() {
-            if let Some(window) = self.window.as_ref() {
-                let response = state.on_window_event(window, &event);
-                response.consumed
-            } else {
-                false
+        if let WindowEvent::RedrawRequested = event {
+            if self.render_thread.is_none() {
+                self.draw_splash();
+                self.window.as_ref().unwrap().request_redraw();
+                return;
             }
-        } else {
-            false
-        };
+        }
+
+        if let Some(egui_resource) = self.ecs.read().get_resource::<EguiResource>() {
+            self.input_manager.write().egui_wants_pointer = egui_resource.ctx.wants_pointer_input();
+            self.input_manager.write().egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+        }
 
         self.input_manager
             .read()
             .update_egui_state_from_winit(&event);
 
-        if let WindowEvent::RedrawRequested = event {
-            if self.render_thread.is_none() {
-                self.draw_splash();
-                self.window.as_ref().unwrap().request_redraw();
+        match event {
+            WindowEvent::CloseRequested => {
+                self.shutdown_threads();
+                event_loop.exit();
             }
-            return;
-        }
 
-        if !event_consumed {
-            match event {
-                WindowEvent::CloseRequested => {
-                    self.shutdown_threads();
-                    event_loop.exit();
-                }
+            WindowEvent::Resized(new_size) => {
+                let _ = self
+                    .render_thread_sender
+                    .send(RenderMessage::Resize(new_size));
 
-                WindowEvent::Resized(new_size) => {
-                    let _ = self
-                        .render_thread_sender
-                        .send(RenderMessage::Resize(new_size));
+                let mut input = self.input_manager.write();
+                input.window_size = UVec2::new(new_size.width, new_size.height);
+                input.scale_factor = self.window.as_ref().unwrap().scale_factor();
+            }
 
-                    self.input_manager.write().window_size =
-                        UVec2::new(new_size.width, new_size.height);
-                    self.input_manager.write().scale_factor = self.window.as_ref().unwrap().scale_factor();
-
-                    if new_size.width > 0 && new_size.height > 0 {
-                        let mut ecs_guard = self.ecs.write();
-                        ecs_guard
-                            .component_pool
-                            .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
-                                camera.aspect_ratio =
-                                    new_size.width as f32 / new_size.height as f32;
-                            });
-                    }
-                }
-
-                // INPUT HANDLING
-                WindowEvent::KeyboardInput {
-                    device_id,
-                    event,
-                    is_synthetic,
-                } => {
-                    let mut key_code: Option<KeyCode> = None;
-
-                    match event.physical_key {
-                        PhysicalKey::Code(code) => key_code = Some(code),
-                        _ => {}
-                    }
-
-                    if key_code.is_some() {
-                        match key_code.unwrap() {
-                            KeyCode::F11 => {
-                                if event.state.is_pressed() {
-                                    let window: &mut Arc<Window> = self.window.as_mut().unwrap();
-
-                                    if window.fullscreen().is_some() {
-                                        window.set_fullscreen(None);
-                                    } else {
-                                        window.set_fullscreen(Some(
-                                            winit::window::Fullscreen::Borderless(None),
-                                        ));
-                                    }
-                                }
-                            }
-
-                            key_code => {
-                                self.input_manager.read().push_event(InputEvent::Keyboard {
-                                    key: key_code,
-                                    pressed: event.state.is_pressed(),
-                                });
-                            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if code == KeyCode::F11 && event.state.is_pressed() {
+                        let window = self.window.as_mut().unwrap();
+                        if window.fullscreen().is_some() {
+                            window.set_fullscreen(None);
+                        } else {
+                            window
+                                .set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
                         }
-                    }
-                }
-                WindowEvent::MouseInput {
-                    device_id,
-                    state,
-                    button,
-                } => {
-                    self.input_manager
-                        .read()
-                        .push_event(InputEvent::MouseButton {
-                            button,
-                            pressed: state.is_pressed(),
+                    } else {
+                        self.input_manager.read().push_event(InputEvent::Keyboard {
+                            key: code,
+                            pressed: event.state.is_pressed(),
                         });
+                    }
                 }
-                WindowEvent::CursorMoved {
-                    device_id,
-                    position,
-                } => {
-                    self.input_manager
-                        .read()
-                        .push_event(InputEvent::CursorMoved(DVec2::from_array([
-                            position.x, position.y,
-                        ])));
-                }
-                WindowEvent::MouseWheel {
-                    device_id,
-                    delta,
-                    phase,
-                } => {
-                    let scroll_delta = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
-                        winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                            const PIXELS_PER_LINE: f32 = 38.0;
-                            glam::vec2(
-                                pos.x as f32 / PIXELS_PER_LINE,
-                                pos.y as f32 / PIXELS_PER_LINE,
-                            )
-                        }
-                    };
-
-                    self.input_manager
-                        .read()
-                        .push_event(InputEvent::MouseWheel(scroll_delta));
-                }
-                _ => {}
             }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::MouseButton {
+                        button,
+                        pressed: state.is_pressed(),
+                    });
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::CursorMoved(DVec2::new(position.x, position.y)));
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll_delta = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => glam::vec2(x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        const PIXELS_PER_LINE: f32 = 38.0;
+                        glam::vec2(
+                            pos.x as f32 / PIXELS_PER_LINE,
+                            pos.y as f32 / PIXELS_PER_LINE,
+                        )
+                    }
+                };
+
+                self.input_manager
+                    .read()
+                    .push_event(InputEvent::MouseWheel(scroll_delta));
+            }
+
+            _ => {}
         }
     }
 

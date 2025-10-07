@@ -6,8 +6,8 @@ use glam::{DVec2, UVec2, Vec2};
 use hashbrown::{HashMap, HashSet};
 use tracing::{info, warn};
 use winit::{
-    event::{MouseButton, WindowEvent},
-    keyboard::{KeyCode, ModifiersState},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    keyboard::{Key, KeyCode, ModifiersState, NamedKey},
 };
 
 #[derive(Debug, Clone)]
@@ -47,11 +47,14 @@ pub struct InputManager {
     pub controller_states: HashMap<GamepadId, ControllerState>,
 
     // egui
+    pub egui_events: Mutex<Vec<egui::Event>>,
     pub egui_modifiers: Mutex<egui::Modifiers>,
     pub egui_pointer_pos: Mutex<Option<egui::Pos2>>,
     pub egui_pointer_down: Mutex<bool>,
     pub egui_last_pointer_pos: Mutex<Option<egui::Pos2>>,
     pub egui_last_pointer_down: Mutex<bool>,
+    pub egui_wants_pointer: bool,
+    pub egui_wants_key: bool,
 }
 
 impl InputManager {
@@ -68,11 +71,14 @@ impl InputManager {
             window_size: UVec2::ZERO,
             scale_factor: 1.0,
             controller_states: HashMap::new(),
+            egui_events: Mutex::new(Vec::new()),
             egui_modifiers: Mutex::new(egui::Modifiers::default()),
             egui_pointer_pos: Mutex::new(None),
             egui_pointer_down: Mutex::new(false),
             egui_last_pointer_pos: Mutex::new(None),
             egui_last_pointer_down: Mutex::new(false),
+            egui_wants_pointer: false,
+            egui_wants_key: false,
         }
     }
 
@@ -158,6 +164,10 @@ impl InputManager {
         for event in events {
             match event {
                 InputEvent::Keyboard { key, pressed } => {
+                    if self.egui_wants_key {
+                        continue;
+                    }
+
                     if pressed {
                         if !self.active_keys.contains(&key) {
                             self.just_pressed.insert(key);
@@ -168,9 +178,15 @@ impl InputManager {
                     }
                 }
                 InputEvent::CursorMoved(pos) => {
-                    self.cursor_position = pos;
+                    if !self.egui_wants_pointer {
+                        self.cursor_position = pos;
+                    }
                 }
                 InputEvent::MouseButton { button, pressed } => {
+                    if self.egui_wants_pointer {
+                        continue;
+                    }
+
                     if pressed {
                         self.active_mouse_buttons.insert(button);
                     } else {
@@ -178,6 +194,10 @@ impl InputManager {
                     }
                 }
                 InputEvent::MouseWheel(delta) => {
+                    if self.egui_wants_pointer {
+                        continue;
+                    }
+
                     self.add_scroll(delta);
                 }
             }
@@ -242,9 +262,13 @@ impl InputManager {
     pub fn update_egui_state_from_winit(&self, event: &WindowEvent) {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
-                let pos = egui::pos2((position.x / self.scale_factor) as f32, (position.y / self.scale_factor) as f32);
+                let pos = egui::pos2(
+                    (position.x / self.scale_factor) as f32,
+                    (position.y / self.scale_factor) as f32,
+                );
                 *self.egui_pointer_pos.lock().unwrap() = Some(pos);
             }
+
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
@@ -252,6 +276,7 @@ impl InputManager {
             } => {
                 *self.egui_pointer_down.lock().unwrap() = state.is_pressed();
             }
+
             WindowEvent::ModifiersChanged(new_state) => {
                 let mut mods = self.egui_modifiers.lock().unwrap();
                 mods.shift = new_state.state().contains(ModifiersState::SHIFT);
@@ -259,6 +284,63 @@ impl InputManager {
                 mods.alt = new_state.state().contains(ModifiersState::ALT);
                 mods.command = new_state.state().contains(ModifiersState::SUPER);
             }
+
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state,
+                        repeat,
+                        ..
+                    },
+                ..
+            } => {
+                let pressed = state == &ElementState::Pressed;
+
+                // Only handle physical characters and known named keys
+                if let Key::Named(named) = logical_key {
+                    if let Some(egui_key) = winit_key_to_egui(*named) {
+                        let mut events = self.egui_events.lock().unwrap();
+                        events.push(egui::Event::Key {
+                            key: egui_key,
+                            physical_key: None,
+                            pressed,
+                            repeat: *repeat,
+                            modifiers: *self.egui_modifiers.lock().unwrap(),
+                        });
+                    }
+                } else if let Key::Character(c) = logical_key {
+                    if pressed {
+                        let mut events = self.egui_events.lock().unwrap();
+                        events.push(egui::Event::Text(c.to_string()));
+                    }
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+
+                let mut events = self.egui_events.lock().unwrap();
+                let modifiers = *self.egui_modifiers.lock().unwrap();
+
+                match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        events.push(egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Line,
+                            delta: egui::vec2(*x, *y),
+                            modifiers,
+                        });
+                    }
+                    MouseScrollDelta::PixelDelta(p) => {
+                        events.push(egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(p.x as f32, p.y as f32),
+                            modifiers,
+                        });
+                    }
+                }
+            }
+
             _ => {}
         }
     }
@@ -270,16 +352,19 @@ impl InputManager {
         let last_pointer_down = *self.egui_last_pointer_down.lock().unwrap();
         let modifiers = *self.egui_modifiers.lock().unwrap();
 
-        let mut events = Vec::new();
+        let mut events = self
+            .egui_events
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
 
-        // Only send PointerMoved if position actually changed
         if pointer_pos != last_pointer_pos {
             if let Some(pos) = pointer_pos {
                 events.push(egui::Event::PointerMoved(pos));
             }
         }
 
-        // Only send button events when state changes
         if pointer_down != last_pointer_down {
             if let Some(pos) = pointer_pos {
                 events.push(egui::Event::PointerButton {
@@ -291,7 +376,6 @@ impl InputManager {
             }
         }
 
-        // Update "last" state for next frame
         *self.egui_last_pointer_pos.lock().unwrap() = pointer_pos;
         *self.egui_last_pointer_down.lock().unwrap() = pointer_down;
 
@@ -305,4 +389,40 @@ impl InputManager {
             ..Default::default()
         }
     }
+}
+
+fn winit_key_to_egui(key: winit::keyboard::NamedKey) -> Option<egui::Key> {
+    use egui::Key as EguiKey;
+    use winit::keyboard::NamedKey as WinitKey;
+
+    Some(match key {
+        WinitKey::ArrowUp => EguiKey::ArrowUp,
+        WinitKey::ArrowDown => EguiKey::ArrowDown,
+        WinitKey::ArrowLeft => EguiKey::ArrowLeft,
+        WinitKey::ArrowRight => EguiKey::ArrowRight,
+        WinitKey::Escape => EguiKey::Escape,
+        WinitKey::Tab => EguiKey::Tab,
+        WinitKey::Backspace => EguiKey::Backspace,
+        WinitKey::Enter => EguiKey::Enter,
+        WinitKey::Space => EguiKey::Space,
+        WinitKey::Delete => EguiKey::Delete,
+        WinitKey::Home => EguiKey::Home,
+        WinitKey::End => EguiKey::End,
+        WinitKey::PageUp => EguiKey::PageUp,
+        WinitKey::PageDown => EguiKey::PageDown,
+        WinitKey::Insert => EguiKey::Insert,
+        WinitKey::F1 => EguiKey::F1,
+        WinitKey::F2 => EguiKey::F2,
+        WinitKey::F3 => EguiKey::F3,
+        WinitKey::F4 => EguiKey::F4,
+        WinitKey::F5 => EguiKey::F5,
+        WinitKey::F6 => EguiKey::F6,
+        WinitKey::F7 => EguiKey::F7,
+        WinitKey::F8 => EguiKey::F8,
+        WinitKey::F9 => EguiKey::F9,
+        WinitKey::F10 => EguiKey::F10,
+        WinitKey::F11 => EguiKey::F11,
+        WinitKey::F12 => EguiKey::F12,
+        _ => return None,
+    })
 }

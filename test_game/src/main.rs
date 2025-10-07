@@ -1,5 +1,6 @@
 use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
+use egui::Ui;
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
 use helmer_engine::{
     ecs::{
@@ -22,7 +23,11 @@ use helmer_engine::{
         ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
     },
     runtime::{
-        config::RuntimeConfig, input_manager::{self, InputManager}, runtime::{RenderMessage, Runtime}, scene_system::SceneRoot
+        config::RuntimeConfig,
+        egui_integration::EguiResource,
+        input_manager::{self, InputManager},
+        runtime::{RenderMessage, Runtime},
+        scene_system::SceneRoot,
     },
 };
 use rand::Rng;
@@ -68,6 +73,14 @@ fn main() {
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        ecs_guard.system_scheduler.register_system(
+            EguiTestSystem {},
+            30,
+            vec![],
+            HashSet::from([]),
+            HashSet::from([]),
         );
 
         /*// Priority 25: General game logic that modifies transforms.
@@ -316,13 +329,30 @@ impl System for ConfigToggleSystem {
 
         for key in input_manager.just_pressed.iter() {
             match key {
-                KeyCode::KeyZ => runtime_config.render_config.shadow_pass = !runtime_config.render_config.shadow_pass,
-                KeyCode::KeyG => runtime_config.render_config.ssgi_pass = !runtime_config.render_config.ssgi_pass,
-                KeyCode::Digit0 => runtime_config.render_config.direct_lighting_pass = !runtime_config.render_config.direct_lighting_pass,
-                KeyCode::KeyH => runtime_config.render_config.sky_pass = !runtime_config.render_config.sky_pass,
-                KeyCode::KeyR => runtime_config.render_config.ssr_pass = !runtime_config.render_config.ssr_pass,
-                KeyCode::KeyF => runtime_config.render_config.frustum_culling = !runtime_config.render_config.frustum_culling,
-                KeyCode::KeyL => runtime_config.render_config.lod = !runtime_config.render_config.lod,
+                KeyCode::KeyZ => {
+                    runtime_config.render_config.shadow_pass =
+                        !runtime_config.render_config.shadow_pass
+                }
+                KeyCode::KeyG => {
+                    runtime_config.render_config.ssgi_pass = !runtime_config.render_config.ssgi_pass
+                }
+                KeyCode::Digit0 => {
+                    runtime_config.render_config.direct_lighting_pass =
+                        !runtime_config.render_config.direct_lighting_pass
+                }
+                KeyCode::KeyH => {
+                    runtime_config.render_config.sky_pass = !runtime_config.render_config.sky_pass
+                }
+                KeyCode::KeyR => {
+                    runtime_config.render_config.ssr_pass = !runtime_config.render_config.ssr_pass
+                }
+                KeyCode::KeyF => {
+                    runtime_config.render_config.frustum_culling =
+                        !runtime_config.render_config.frustum_culling
+                }
+                KeyCode::KeyL => {
+                    runtime_config.render_config.lod = !runtime_config.render_config.lod
+                }
                 KeyCode::KeyU => runtime_config.egui = !runtime_config.egui,
                 _ => {}
             }
@@ -907,5 +937,27 @@ impl System for SpawnSystem {
 
             let _ = rng.reseed();
         }
+    }
+}
+
+struct EguiTestSystem {}
+
+impl System for EguiTestSystem {
+    fn name(&self) -> &str {
+        "test system"
+    }
+
+    fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
+        ecs.resource_scope::<EguiResource, _>(|ecs, egui_resouce| {
+            egui_resouce.windows.push((
+                |ui, ecs| {
+                    ui.label(format!(
+                        "{} resources registered",
+                        ecs.resource_pool.resources.len()
+                    ));
+                },
+                "test".to_string(),
+            ));
+        });
     }
 }

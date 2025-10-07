@@ -10,3 +10,4 @@ rand = "0.9.1"
 rapier3d = "0.26.1"
 winit = "0.30.11"
 gilrs = "0.11.0"
+egui = { git = "https://github.com/emilk/egui.git" }

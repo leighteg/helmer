@@ -22,6 +22,7 @@ pub struct EguiRenderData {
 pub struct EguiResource {
     pub ctx: Context,
     pub render_data: Option<EguiRenderData>,
+    pub windows: Vec<(fn(&mut egui::Ui, &mut ECSCore), String)>,
 }
 
 pub struct EguiSystem {}
@@ -61,6 +62,13 @@ impl System for EguiSystem {
                 let ctx = &egui_res.ctx;
 
                 let full_output = ctx.run(raw_input, |ctx| {
+                    for (elements, name) in egui_res.windows.clone() {
+                        egui::Window::new(name).show(ctx, |ui| {
+                            elements(ui, ecs);
+                        });
+                    }
+                    egui_res.windows.clear();
+
                     egui::Window::new("helmer metrics").show(ctx, |ui| {
                         ui.label(format!("FPS: {}", fps));
                         ui.label(format!("TPS: {}", tps));
@@ -109,18 +117,20 @@ impl System for EguiSystem {
 
                     egui::Window::new("scene").show(ctx, |ui| {
                         ecs.component_pool
-                            .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, light)| {
-                                if light.light_type != LightType::Directional {
-                                    return;
-                                }
+                            .query_exact_mut_for_each::<(Transform, Light), _>(
+                                |(transform, light)| {
+                                    if light.light_type != LightType::Directional {
+                                        return;
+                                    }
 
-                                ui.label("directional light");
-                                ui.drag_angle(&mut transform.rotation.x);
-                                ui.drag_angle(&mut transform.rotation.y);
-                                ui.drag_angle(&mut transform.rotation.z);
+                                    ui.label("directional light");
+                                    ui.drag_angle(&mut transform.rotation.x);
+                                    ui.drag_angle(&mut transform.rotation.y);
+                                    ui.drag_angle(&mut transform.rotation.z);
 
-                                ui.separator();
-                            });
+                                    ui.separator();
+                                },
+                            );
                     });
                 });
 

@@ -28,7 +28,7 @@ impl Default for RenderConfig {
             ssgi_pass: true,
             ssgi_denoise_pass: true,
             ssr_pass: true,
-            egui_pass: false,
+            egui_pass: true,
 
             max_lights_forward: 256,
             max_lights_deferred: 2048,

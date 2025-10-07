@@ -557,9 +557,22 @@ impl ApplicationHandler for Runtime {
             }
         }
 
-        if let Some(egui_resource) = self.ecs.read().get_resource::<EguiResource>() {
-            self.input_manager.write().egui_wants_pointer = egui_resource.ctx.wants_pointer_input();
-            self.input_manager.write().egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+        let mut egui_enabled = false;
+
+        if let Some(runtime_config) = self.ecs.read().get_resource::<RuntimeConfig>() {
+            egui_enabled = runtime_config.egui;
+        }
+
+        if egui_enabled {
+            if let Some(egui_resource) = self.ecs.read().get_resource::<EguiResource>() {
+                self.input_manager.write().egui_wants_pointer =
+                    egui_resource.ctx.wants_pointer_input();
+                self.input_manager.write().egui_wants_key =
+                    egui_resource.ctx.wants_keyboard_input();
+            }
+        } else {
+            self.input_manager.write().egui_wants_pointer = false;
+            self.input_manager.write().egui_wants_key = false;
         }
 
         self.input_manager

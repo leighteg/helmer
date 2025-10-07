@@ -31,17 +31,30 @@ impl System for EguiSystem {
     }
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, input: &InputManager) {
-        let (fps, tps) = {
-            let pm = ecs.get_resource::<PerformanceMetrics>().unwrap();
-            (
-                pm.fps.load(Ordering::Relaxed),
-                pm.tps.load(Ordering::Relaxed),
-            )
-        };
-
         ecs.resource_pool
-            .resource_scope::<EguiResource, _>(|ecs, egui_res| {
-                ecs.resource_scope::<RuntimeConfig, _>(|ecs, runtime_cfg| {
+            .resource_scope::<RuntimeConfig, _>(|ecs, runtime_cfg| {
+                ecs.resource_scope::<EguiResource, _>(|ecs, egui_res| {
+                    if !runtime_cfg.egui {
+                        egui_res.render_data = Some(EguiRenderData {
+                            primitives: Vec::new(),
+                            textures_delta: TexturesDelta::default(),
+                            screen_descriptor: egui_wgpu::ScreenDescriptor {
+                                size_in_pixels: [0; 2],
+                                pixels_per_point: 1.0,
+                            },
+                        });
+
+                        return;
+                    }
+
+                    let (fps, tps) = {
+                        let pm = ecs.get::<PerformanceMetrics>().unwrap();
+                        (
+                            pm.fps.load(Ordering::Relaxed),
+                            pm.tps.load(Ordering::Relaxed),
+                        )
+                    };
+
                     let render_cfg = &mut runtime_cfg.render_config;
 
                     let raw_input = input.build_egui_raw_input(input.window_size);
@@ -53,7 +66,9 @@ impl System for EguiSystem {
                             ui.label(format!("TPS: {}", tps));
                         });
 
-                        /*egui::Window::new("Runtime Config").show(ctx, |ui| {});*/
+                        egui::Window::new("Runtime Config").show(ctx, |ui| {
+                            ui.checkbox(&mut runtime_cfg.egui, "egui");
+                        });
 
                         egui::Window::new("Render Config").show(ctx, |ui| {
                             if ui.button("default").clicked() {

@@ -1,7 +1,7 @@
 use std::{any::TypeId, collections::HashSet, env};
 
-use helmer_editor::systems::interaction::freecam::FreecamSystem;
-use helmer_engine::{provided::components::{ActiveCamera, Camera, Transform}, runtime::runtime::Runtime};
+use helmer_editor::systems::{interaction::freecam::FreecamSystem, ui::inspector::InspectorSystem};
+use helmer_engine::{provided::components::{ActiveCamera, Camera, Transform}, runtime::{egui_integration::EguiResource, runtime::Runtime}};
 
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");
@@ -19,6 +19,14 @@ fn main() {
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
+        );
+
+        ecs_guard.system_scheduler.register_system(
+            InspectorSystem {},
+            0,
+            vec![],
+            HashSet::from([]),
+            HashSet::from([TypeId::of::<EguiResource>()]),
         );
 
         let camera_entity = ecs_guard.create_entity();

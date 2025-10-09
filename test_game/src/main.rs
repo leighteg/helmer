@@ -452,7 +452,7 @@ impl System for FreecamSystem {
         input_manager: &InputManager,
     ) {
         // --- 1. Handle Rotation (Mouse and Controller Right Stick) ---
-        if input_manager.is_mouse_button_active(&MouseButton::Right) {
+        if input_manager.is_mouse_button_active(MouseButton::Right) {
             if !self.is_looking {
                 self.last_cursor_position = input_manager.cursor_position;
                 self.is_looking = true;
@@ -537,7 +537,7 @@ impl System for FreecamSystem {
             }
         }
 
-        if input_manager.is_key_active(&KeyCode::ShiftLeft) {
+        if input_manager.is_key_active(KeyCode::ShiftLeft) {
             speed *= 2.5;
         }
 
@@ -557,7 +557,7 @@ impl System for FreecamSystem {
                     }
 
                     let base_fov = self.base_fov.unwrap();
-                    let boost_active = input_manager.is_key_active(&KeyCode::ShiftLeft)
+                    let boost_active = input_manager.is_key_active(KeyCode::ShiftLeft)
                         || maybe_gamepad_id.map_or(false, |id| {
                             input_manager.is_controller_button_active(id, gilrs::Button::LeftThumb)
                         });
@@ -665,7 +665,7 @@ impl System for DragSystem {
     }
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
-        let is_active = input_manager.is_mouse_button_active(&MouseButton::Left);
+        let is_active = input_manager.is_mouse_button_active(MouseButton::Left);
         let is_pressed = is_active && !self.was_mouse_button_active_last_frame;
         let is_released = !is_active && self.was_mouse_button_active_last_frame;
 
@@ -950,7 +950,7 @@ impl System for EguiTestSystem {
     fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
         ecs.resource_scope::<EguiResource, _>(|ecs, egui_resouce| {
             egui_resouce.windows.push((
-                |ui, ecs| {
+                |ui, ecs, _| {
                     ui.label(format!(
                         "{} resources registered",
                         ecs.resource_pool.resources.len()

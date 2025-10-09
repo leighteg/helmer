@@ -48,7 +48,7 @@ impl System for FreecamSystem {
         input_manager: &InputManager,
     ) {
         // --- 1. Handle Rotation (Mouse and Controller Right Stick) ---
-        if input_manager.is_mouse_button_active(&MouseButton::Right) {
+        if input_manager.is_mouse_button_active(MouseButton::Right) {
             if !self.is_looking {
                 self.last_cursor_position = input_manager.cursor_position;
                 self.is_looking = true;
@@ -133,7 +133,7 @@ impl System for FreecamSystem {
             }
         }
 
-        if input_manager.is_key_active(&KeyCode::ShiftLeft) {
+        if input_manager.is_key_active(KeyCode::ShiftLeft) {
             speed *= 2.5;
         }
 
@@ -153,7 +153,7 @@ impl System for FreecamSystem {
                     }
 
                     let base_fov = self.base_fov.unwrap();
-                    let boost_active = input_manager.is_key_active(&KeyCode::ShiftLeft)
+                    let boost_active = input_manager.is_key_active(KeyCode::ShiftLeft)
                         || maybe_gamepad_id.map_or(false, |id| {
                             input_manager.is_controller_button_active(id, gilrs::Button::LeftThumb)
                         });

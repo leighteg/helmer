@@ -10,7 +10,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         RuntimeConfig {
-            egui: false,
+            egui: true,
             
             render_config: RenderConfig::default(),
         }

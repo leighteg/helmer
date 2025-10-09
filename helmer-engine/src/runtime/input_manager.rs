@@ -206,14 +206,14 @@ impl InputManager {
 
     // --- Query Methods ---
 
-    pub fn is_key_active(&self, keycode: &KeyCode) -> bool {
-        self.active_keys.contains(keycode)
+    pub fn is_key_active(&self, keycode: KeyCode) -> bool {
+        self.active_keys.contains(&keycode)
     }
     pub fn was_just_pressed(&self, key: KeyCode) -> bool {
         self.just_pressed.contains(&key)
     }
-    pub fn is_mouse_button_active(&self, button: &MouseButton) -> bool {
-        self.active_mouse_buttons.contains(button)
+    pub fn is_mouse_button_active(&self, button: MouseButton) -> bool {
+        self.active_mouse_buttons.contains(&button)
     }
     pub fn is_controller_button_active(&self, gamepad_id: GamepadId, button: Button) -> bool {
         self.controller_states

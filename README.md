@@ -38,6 +38,8 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] more light types
 - [ ] occlusion culling
 - [ ] soft shadows (PCSS?)
+- [ ] point light shadows
+- [ ] full gi (SDFGI, DDGI?)
 - [ ] full pbr/modern brdf
 - [ ] implement supported advanced features to forward renderers
 - [ ] gpu compute based culling?

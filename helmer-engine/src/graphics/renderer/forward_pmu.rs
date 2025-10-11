@@ -161,9 +161,7 @@ impl ForwardRendererPMU {
         let egui_renderer = EguiRenderer::new(
             &device,
             surface_config.format,
-            None,
-            1, // No MSAA
-            false,
+            egui_wgpu::RendererOptions::default(),
         );
 
         let mut renderer = Self {

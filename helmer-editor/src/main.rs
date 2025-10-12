@@ -1,7 +1,11 @@
 use std::{any::TypeId, collections::HashSet, env};
 
 use glam::Quat;
-use helmer_editor::systems::{interaction::freecam::FreecamSystem, ui::inspector::InspectorSystem};
+use helmer_editor::systems::{
+    core::state::{EditorStateResource, EditorStateSystem, WorldState},
+    interaction::freecam::FreecamSystem,
+    ui::inspector::InspectorSystem,
+};
 use helmer_engine::{
     physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
     provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
@@ -18,6 +22,20 @@ fn main() {
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
         let asset_server = app.asset_server.as_ref().unwrap().lock();
+
+        ecs_guard.add_resource(EditorStateResource {
+            world_state: WorldState::Edit,
+        });
+
+        ecs_guard.system_scheduler.register_system(
+            EditorStateSystem {
+                last_world_state: WorldState::Edit,
+            },
+            0,
+            vec![],
+            HashSet::from([TypeId::of::<EditorStateResource>()]),
+            HashSet::from([TypeId::of::<EditorStateResource>()]),
+        );
 
         ecs_guard.system_scheduler.register_system(
             FreecamSystem::new(1.0, 0.5),

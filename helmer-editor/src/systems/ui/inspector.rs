@@ -11,50 +11,80 @@ impl System for InspectorSystem {
         "inspector system"
     }
 
-    fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
-        ecs.resource_scope::<EguiResource, _>(|ecs, egui_resouce| {
-            egui_resouce.windows.push((
+    fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
+        ecs.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+            egui_resource.windows.push((
                 Box::new(move |ui, ecs, _| {
-                    for entity in ecs.get_all_entities() {
-                        ui.heading(format!("entity {} -", entity));
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            let mut entities = ecs.get_all_entities();
+                            entities.sort();
+                            
+                            for entity in entities {
+                                let header_label = format!("Entity {}", entity);
 
-                        for component in ecs.get_components_mut(entity) {
-                            ui.heading(format!("{} -", component.short_name()));
+                                egui::CollapsingHeader::new(header_label)
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        for component in ecs.get_components_mut(entity) {
+                                            let comp_label = component.short_name();
 
-                            if let Some(transform) =
-                                component.as_any_mut().downcast_mut::<Transform>()
-                            {
-                                ui.label("position");
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.position.x).prefix("x: "),
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.position.y).prefix("y: "),
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.position.z).prefix("z: "),
-                                );
+                                            egui::CollapsingHeader::new(comp_label)
+                                                .default_open(false)
+                                                .show(ui, |ui| {
+                                                    if let Some(transform) =
+                                                        component.as_any_mut().downcast_mut::<Transform>()
+                                                    {
+                                                        ui.label("Position");
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.position.x)
+                                                                .prefix("x: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.position.y)
+                                                                .prefix("y: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.position.z)
+                                                                .prefix("z: "),
+                                                        );
 
-                                ui.label("rotation");
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.rotation.x).prefix("x: "),
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.rotation.y).prefix("y: "),
-                                );
-                                ui.add(
-                                    egui::DragValue::new(&mut transform.rotation.z).prefix("z: "),
-                                );
+                                                        ui.label("Rotation");
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.rotation.x)
+                                                                .prefix("x: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.rotation.y)
+                                                                .prefix("y: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.rotation.z)
+                                                                .prefix("z: "),
+                                                        );
 
-                                ui.label("scale");
-                                ui.add(egui::DragValue::new(&mut transform.scale.x).prefix("x: "));
-                                ui.add(egui::DragValue::new(&mut transform.scale.y).prefix("y: "));
-                                ui.add(egui::DragValue::new(&mut transform.scale.z).prefix("z: "));
+                                                        ui.label("Scale");
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.scale.x)
+                                                                .prefix("x: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.scale.y)
+                                                                .prefix("y: "),
+                                                        );
+                                                        ui.add(
+                                                            egui::DragValue::new(&mut transform.scale.z)
+                                                                .prefix("z: "),
+                                                        );
+                                                    } else {
+                                                        ui.label("No inspector available for this component.");
+                                                    }
+                                                });
+                                        }
+                                    });
                             }
-                        }
-
-                        ui.separator();
-                    }
+                        });
                 }),
                 "inspector".to_string(),
             ));

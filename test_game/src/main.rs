@@ -950,12 +950,12 @@ impl System for EguiTestSystem {
     fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
         ecs.resource_scope::<EguiResource, _>(|ecs, egui_resouce| {
             egui_resouce.windows.push((
-                |ui, ecs, _| {
+                Box::new(move |ui, ecs, _| {
                     ui.label(format!(
                         "{} resources registered",
                         ecs.resource_pool.resources.len()
                     ));
-                },
+                }),
                 "test".to_string(),
             ));
         });

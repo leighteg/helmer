@@ -49,6 +49,10 @@ impl ECSCore {
         self.entities.contains(&entity)
     }
 
+    pub fn get_all_entities(&self) -> Vec<Entity> {
+        self.entities.clone().into_iter().collect()
+    }
+
     pub fn add_component<T: Component + 'static>(&mut self, entity: Entity, component: T) {
         self.component_pool.insert(entity, component);
     }

@@ -1,7 +1,10 @@
 use crate::{
     ecs::{ecs_core::ECSCore, system::System},
     graphics::{config::RenderConfig, renderer::renderer::ShaderConstants},
-    provided::{components::{Light, LightType, Transform}, ui::StatsUI},
+    provided::{
+        components::{Light, LightType, Transform},
+        ui::StatsUI,
+    },
     runtime::{
         config::RuntimeConfig,
         egui_integration,
@@ -10,8 +13,8 @@ use crate::{
     },
 };
 use egui::{ClippedPrimitive, Context, RawInput, TexturesDelta};
-use winit::keyboard::KeyCode;
 use std::sync::{Arc, atomic::Ordering, mpsc};
+use winit::keyboard::KeyCode;
 
 pub struct EguiRenderData {
     pub primitives: Vec<ClippedPrimitive>,
@@ -23,7 +26,10 @@ pub struct EguiRenderData {
 pub struct EguiResource {
     pub ctx: Context,
     pub render_data: Option<EguiRenderData>,
-    pub windows: Vec<(fn(&mut egui::Ui, &mut ECSCore, &InputManager), String)>,
+    pub windows: Vec<(
+        Box<dyn FnMut(&mut egui::Ui, &mut ECSCore, &InputManager) + Send + Sync>,
+        String,
+    )>,
     pub stats_ui: bool,
 }
 
@@ -40,12 +46,13 @@ impl System for EguiSystem {
                 if !runtime_cfg.egui {
                     runtime_cfg.render_config.egui_pass = false;
                     return;
-                }
-                else if !runtime_cfg.render_config.egui_pass {
+                } else if !runtime_cfg.render_config.egui_pass {
                     runtime_cfg.render_config.egui_pass = true;
                 }
 
-                if input.is_key_active(KeyCode::ControlLeft) && input.was_just_pressed(KeyCode::KeyI) {
+                if input.is_key_active(KeyCode::ControlLeft)
+                    && input.was_just_pressed(KeyCode::KeyI)
+                {
                     egui_res.stats_ui = !egui_res.stats_ui;
                 }
 
@@ -57,12 +64,11 @@ impl System for EguiSystem {
                         StatsUI::run(ecs);
                     }
 
-                    for (elements, name) in egui_res.windows.clone() {
+                    for (mut elements, name) in egui_res.windows.drain(..) {
                         egui::Window::new(name).show(ctx, |ui| {
                             elements(ui, ecs, input);
                         });
                     }
-                    egui_res.windows.clear();
                 });
 
                 let window_size = input.window_size;

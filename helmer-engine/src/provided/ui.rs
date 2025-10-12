@@ -20,7 +20,7 @@ impl StatsUI {
     pub fn run(ecs: &mut ECSCore) {
         ecs.resource_scope::<EguiResource, _>(|ecs, egui_res| {
             egui_res.windows.push((
-                |ui, ecs, input| {
+                Box::new(move |ui, ecs, input| {
                     let (fps, tps) = {
                         let pm = ecs.get_resource::<PerformanceMetrics>().unwrap();
                         (
@@ -31,23 +31,21 @@ impl StatsUI {
 
                     ui.label(format!("FPS: {}", fps));
                     ui.label(format!("TPS: {}", tps));
-                },
+                }),
                 "helmer metrics".to_string(),
             ));
 
             egui_res.windows.push((
-                |ui, ecs, input| {
-                    ecs.resource_scope::<EguiResource, _>(
-                        |ecs, egui_res: &mut EguiResource| {
-                            ui.checkbox(&mut egui_res.stats_ui, "stats ui");
-                        },
-                    );
-                },
+                Box::new(move |ui, ecs, input| {
+                    ecs.resource_scope::<EguiResource, _>(|ecs, egui_res: &mut EguiResource| {
+                        ui.checkbox(&mut egui_res.stats_ui, "stats ui");
+                    });
+                }),
                 "runtime config".to_string(),
             ));
 
             egui_res.windows.push((
-                |ui, ecs, input| {
+                Box::new(move |ui, ecs, input| {
                     ecs.resource_scope::<RuntimeConfig, _>(
                         |ecs, runtime_cfg: &mut RuntimeConfig| {
                             let render_cfg = &mut runtime_cfg.render_config;
@@ -88,12 +86,12 @@ impl StatsUI {
                             shader_constants_ui(ui, &mut render_cfg.shader_constants);
                         },
                     );
-                },
+                }),
                 "render config".to_string(),
             ));
 
             egui_res.windows.push((
-                |ui, ecs, input| {
+                Box::new(move |ui, ecs, input| {
                     ecs.component_pool
                         .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, light)| {
                             if light.light_type != LightType::Directional {
@@ -107,7 +105,7 @@ impl StatsUI {
 
                             ui.separator();
                         });
-                },
+                }),
                 "scene".to_string(),
             ));
         });

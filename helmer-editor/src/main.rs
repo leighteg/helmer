@@ -1,7 +1,12 @@
 use std::{any::TypeId, collections::HashSet, env};
 
+use glam::Quat;
 use helmer_editor::systems::{interaction::freecam::FreecamSystem, ui::inspector::InspectorSystem};
-use helmer_engine::{provided::components::{ActiveCamera, Camera, Transform}, runtime::{egui_integration::EguiResource, runtime::Runtime}};
+use helmer_engine::{
+    physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
+    provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
+    runtime::{egui_integration::EguiResource, runtime::Runtime},
+};
 
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");
@@ -12,6 +17,7 @@ fn main() {
 
     let mut runtime = Runtime::new(|app| {
         let mut ecs_guard = app.ecs.write();
+        let asset_server = app.asset_server.as_ref().unwrap().lock();
 
         ecs_guard.system_scheduler.register_system(
             FreecamSystem::new(1.0, 0.5),
@@ -28,6 +34,19 @@ fn main() {
             HashSet::from([]),
             HashSet::from([TypeId::of::<EguiResource>()]),
         );
+
+        let basic_material_handle =
+            asset_server.load_material("../test_game/assets/materials/basic.ron");
+        let blue_light_material_handle =
+            asset_server.load_material("../test_game/assets/materials/blue_light.ron");
+        let red_light_material_handle =
+            asset_server.load_material("../test_game/assets/materials/red_light.ron");
+
+        let cube_mesh = MeshAsset::cube("cube".to_owned());
+        let cube_handle = asset_server.add_mesh(cube_mesh.vertices.unwrap(), cube_mesh.indices);
+
+        let plane_mesh = MeshAsset::plane("plane".to_owned());
+        let plane_handle = asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
         let camera_entity = ecs_guard.create_entity();
         ecs_guard.add_component(
@@ -46,6 +65,75 @@ fn main() {
             },
         );
         ecs_guard.add_component(camera_entity, ActiveCamera {});
+
+        let sun_rotation = Quat::from_euler(
+            glam::EulerRot::YXZ,
+            20.0f32.to_radians(),
+            -50.0f32.to_radians(),
+            20.0f32.to_radians(),
+        );
+
+        let sun_entity: usize = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            sun_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, 0.0, 0.0),
+                rotation: sun_rotation,
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            sun_entity,
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
+        );
+
+        let ground_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            ground_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, -5.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::from([50.0, 0.001, 50.0]),
+            },
+        );
+        ecs_guard.add_component(
+            ground_entity,
+            MeshRenderer::new(plane_handle.id, basic_material_handle.id, false, true),
+        );
+        ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
+        ecs_guard.add_component(ground_entity, FixedCollider {});
+
+        let cube_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            cube_entity,
+            Transform {
+                position: glam::Vec3::new(0.0, 0.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::ONE,
+            },
+        );
+        ecs_guard.add_component(
+            cube_entity,
+            MeshRenderer::new(cube_handle.id, blue_light_material_handle.id, true, true),
+        );
+        ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
+        ecs_guard.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
+
+        let cube2_entity = ecs_guard.create_entity();
+        ecs_guard.add_component(
+            cube2_entity,
+            Transform {
+                position: glam::Vec3::new(3.0, 0.0, 0.0),
+                rotation: glam::Quat::default(),
+                scale: glam::Vec3::from_array([2.0; 3]),
+            },
+        );
+        ecs_guard.add_component(
+            cube2_entity,
+            MeshRenderer::new(cube_handle.id, red_light_material_handle.id, true, true),
+        );
+        ecs_guard.add_component(cube2_entity, ColliderShape::Cuboid);
+        ecs_guard.add_component(cube2_entity, DynamicRigidBody { mass: 5.0 });
     });
     runtime.init();
 }

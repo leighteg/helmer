@@ -9,7 +9,7 @@ use crate::{
         },
     },
     systems::{
-        renderer_system::{MeshAabbMap, RenderDataSystem, RenderPacket},
+        renderer_system::{RenderDataSystem, RenderPacket},
         scene_system::SceneSpawningSystem,
     },
 };
@@ -24,7 +24,7 @@ use std::{
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
-        asset_server::AssetServer,
+        asset_server::{AssetServer, MeshAabbMap},
         config::RuntimeConfig,
         runtime::{PerformanceMetrics, Runtime},
     },
@@ -99,7 +99,6 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
             ecs_core.add_resource(runtime.asset_server.as_ref().unwrap().clone());
             ecs_core.add_resource(RenderPacket::default());
             ecs_core.add_resource(PhysicsResource::new());
-            ecs_core.add_resource(MeshAabbMap::default());
             ecs_core.add_resource(EguiResource::default());
             ecs_core.add_resource(runtime.metrics.clone());
 

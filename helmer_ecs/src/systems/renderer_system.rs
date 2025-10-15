@@ -1,13 +1,19 @@
-use crate::{
-    ecs::{
-        ecs_core::{ECSCore, Entity},
-        system::System,
-    },
+use crate::ecs::{
+    ecs_core::{ECSCore, Entity},
+    system::System,
 };
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 use hashbrown::HashMap;
-use helmer::{graphics::{config::RenderConfig, renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject}}, provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform}, runtime::{config::RuntimeConfig, input_manager::InputManager}};
-use std::time::Instant;
+use helmer::{
+    graphics::{
+        config::RenderConfig,
+        renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject},
+    },
+    provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
+    runtime::{asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager},
+};
+use parking_lot::Mutex;
+use std::{sync::Arc, time::Instant};
 use tracing::warn;
 
 /// A geometric frustum defined by 6 planes, used for culling.
@@ -78,10 +84,6 @@ impl Frustum {
     }
 }
 
-/// A resource mapping Mesh Handles to their AABBs, populated by the AssetServer.
-#[derive(Default)]
-pub struct MeshAabbMap(pub HashMap<usize, Aabb>);
-
 /// An intermediate struct holding one frame's state. Now includes the selected LOD index.
 #[derive(Clone, Default)]
 pub struct ExtractedState {
@@ -124,8 +126,8 @@ impl System for RenderDataSystem {
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
         let current_state = {
-            let mesh_aabb_map = match ecs.get_resource::<MeshAabbMap>() {
-                Some(map) => map.0.clone(),
+            let mesh_aabb_map = match ecs.get_resource::<Arc<Mutex<AssetServer>>>() {
+                Some(map) => map.lock().mesh_aabb_map.read().0.clone(),
                 None => {
                     warn!("MeshAabbMap resource not found, culling will be skipped.");
                     return;

@@ -199,10 +199,14 @@ enum AssetLoadResult {
     },
 }
 
+#[derive(Default)]
+pub struct MeshAabbMap(pub HashMap<usize, Aabb>);
+
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
     scenes: Arc<RwLock<HashMap<usize, Arc<Scene>>>>,
+    pub mesh_aabb_map: Arc<RwLock<MeshAabbMap>>,
     next_id: AtomicUsize,
     request_sender: crossbeam_channel::Sender<AssetLoadRequest>,
     result_receiver: crossbeam_channel::Receiver<AssetLoadResult>,
@@ -288,6 +292,7 @@ impl AssetServer {
 
         Self {
             scenes: Arc::new(RwLock::new(HashMap::new())),
+            mesh_aabb_map: Arc::new(RwLock::new(MeshAabbMap::default())),
             next_id: AtomicUsize::new(0),
             request_sender,
             result_receiver,
@@ -388,6 +393,7 @@ impl AssetServer {
                             bounds,
                         })
                         .unwrap();
+                    self.mesh_aabb_map.write().0.insert(id, bounds);
                 }
                 AssetLoadResult::Texture {
                     id,
@@ -473,6 +479,7 @@ impl AssetServer {
                                 bounds,
                             })
                             .unwrap();
+                        self.mesh_aabb_map.write().0.insert(mesh_id, bounds);
                         mesh_map.insert(i, mesh_id);
                     }
 

@@ -1,0 +1,17 @@
+[package]
+name = "helmer_ecs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proc = { path = "proc" }
+helmer = { path = "../helmer" }
+hashbrown = { version = "0.16.0", features = ["rayon"] }
+rayon = "1.11.0"
+tracing = "0.1.41"
+parking_lot = "0.12.5"
+glam = "0.30.8"
+egui = { git = "https://github.com/emilk/egui.git" }
+egui-wgpu = { git = "https://github.com/emilk/egui.git" }
+winit = "0.30.12"
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }

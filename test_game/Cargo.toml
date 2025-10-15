@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-helmer-engine = { path = "../helmer-engine" }
+helmer = { path = "../helmer" }
+helmer_ecs = { path = "../helmer_ecs" }
 glam = "0.30.4"
 rand = "0.9.1"
 rapier3d = "0.26.1"

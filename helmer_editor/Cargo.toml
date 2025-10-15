@@ -1,0 +1,12 @@
+[package]
+name = "helmer_editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egui = { git = "https://github.com/emilk/egui.git" }
+gilrs = "0.11.0"
+glam = "0.30.8"
+helmer = { path = "../helmer" }
+helmer_ecs = { path = "../helmer_ecs" }
+winit = "0.30.12"

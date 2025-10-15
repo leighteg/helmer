@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "helmer-engine",
-    "helmer-editor",
-    "test_game",
+    "helmer",
+    "helmer_editor",
+    "test_game", "helmer_becs", "helmer_ecs",
 ]
 resolver = "2" # Use the modern feature resolver
 

@@ -1,34 +1,25 @@
 use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
-use egui::Ui;
 use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
-use helmer_engine::{
+use helmer::{
+    graphics::renderer::renderer::{Aabb, Material},
+    provided::components::{
+        ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
+    },
+    runtime::{config::RuntimeConfig, input_manager::InputManager, runtime::Runtime},
+};
+use helmer_ecs::{
     ecs::{
         ecs_core::{ECSCore, Entity},
         system::System,
     },
-    graphics::{
-        renderer::renderer::{Aabb, Material},
-        renderer_system::{RenderDataSystem, RenderPacket},
-    },
+    egui_integration::EguiResource,
+    helmer_ecs_init,
     physics::{
         components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},
         physics_resource::PhysicsResource,
-        systems::{
-            CleanupPhysicsSystem, PhysicsStepSystem, SyncEntitiesToPhysicsSystem,
-            SyncPhysicsToEntitiesSystem,
-        },
     },
-    provided::components::{
-        ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
-    },
-    runtime::{
-        config::RuntimeConfig,
-        egui_integration::EguiResource,
-        input_manager::{self, InputManager},
-        runtime::{RenderMessage, Runtime},
-        scene_system::SceneRoot,
-    },
+    systems::scene_system::SceneRoot,
 };
 use rand::Rng;
 use rapier3d::{
@@ -46,10 +37,8 @@ fn main() {
             .expect("Failed to change working directory");
     }
 
-    let mut runtime = Runtime::new(|app| {
-        let mut ecs_guard = app.ecs.write();
-
-        ecs_guard.system_scheduler.register_system(
+    helmer_ecs_init(|ecs, scheduler, asset_server| {
+        scheduler.register_system(
             ConfigToggleSystem {},
             30,
             vec![],
@@ -58,7 +47,7 @@ fn main() {
         );
 
         // Priority 30: Input and high-level camera control. Runs first.
-        ecs_guard.system_scheduler.register_system(
+        scheduler.register_system(
             FreecamSystem::new(1.0, 0.5),
             30,
             vec![],
@@ -67,7 +56,7 @@ fn main() {
         );
 
         // Priority 30: Input-based object interaction. Can run in parallel with Freecam.
-        ecs_guard.system_scheduler.register_system(
+        scheduler.register_system(
             DragSystem::new(),
             30,
             vec![],
@@ -75,7 +64,7 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        ecs_guard.system_scheduler.register_system(
+        scheduler.register_system(
             EguiTestSystem {},
             30,
             vec![],
@@ -84,7 +73,7 @@ fn main() {
         );
 
         /*// Priority 25: General game logic that modifies transforms.
-        ecs_guard.system_scheduler.register_system(
+        scheduler.register_system(
             SpinnerSystem { time_elapsed: 0.0 },
             25,
             vec![],
@@ -92,15 +81,13 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );*/
 
-        /*ecs_guard.system_scheduler.register_system(
+        /*scheduler.register_system(
             SpawnSystem::new(),
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
         );*/
-
-        let asset_server = app.asset_server.as_ref().unwrap().lock();
 
         // Load meshes from .glb files
         let box_handle = asset_server.load_mesh("assets/models/box.glb");
@@ -138,8 +125,8 @@ fn main() {
         let plane_mesh_handle =
             asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
-        let camera_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let camera_entity = ecs.create_entity();
+        ecs.add_component(
             camera_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, -3.0),
@@ -147,14 +134,14 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             camera_entity,
             Camera {
                 far_plane: 300.0,
                 ..Default::default()
             },
         );
-        ecs_guard.add_component(camera_entity, ActiveCamera {});
+        ecs.add_component(camera_entity, ActiveCamera {});
 
         let yaw = 30.0f32.to_radians();
         let pitch = 30.0f32.to_radians();
@@ -165,8 +152,8 @@ fn main() {
                glam::Quat::from_axis_angle(glam::Vec3::Z, roll); // Roll
 
         // Create some demo entities
-        let ground_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let ground_entity = ecs.create_entity();
+        ecs.add_component(
             ground_entity,
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
@@ -174,15 +161,15 @@ fn main() {
                 scale: glam::Vec3::from([500.0, 0.001, 500.0]),
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             ground_entity,
             MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, false),
         );
-        ecs_guard.add_component(ground_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(ground_entity, FixedCollider {});
+        ecs.add_component(ground_entity, ColliderShape::Cuboid);
+        ecs.add_component(ground_entity, FixedCollider {});
 
-        let city_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let city_entity = ecs.create_entity();
+        ecs.add_component(
             city_entity,
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
@@ -190,10 +177,10 @@ fn main() {
                 scale: glam::Vec3::from_array([3.0; 3]),
             },
         );
-        ecs_guard.add_component(city_entity, SceneRoot(city_handle));
+        ecs.add_component(city_entity, SceneRoot(city_handle));
 
-        let sponza_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let sponza_entity = ecs.create_entity();
+        ecs.add_component(
             sponza_entity,
             Transform {
                 position: glam::Vec3::new(25.0, -4.0, 0.0),
@@ -201,10 +188,10 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(sponza_entity, SceneRoot(sponza_handle));
+        ecs.add_component(sponza_entity, SceneRoot(sponza_handle));
 
-        let raptor_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let raptor_entity = ecs.create_entity();
+        ecs.add_component(
             raptor_entity,
             Transform {
                 position: glam::Vec3::new(0.0, -5.0, 0.0),
@@ -212,10 +199,10 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(raptor_entity, SceneRoot(raptor_handle));
+        ecs.add_component(raptor_entity, SceneRoot(raptor_handle));
 
-        let cube_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let cube_entity = ecs.create_entity();
+        ecs.add_component(
             cube_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, 0.0),
@@ -223,15 +210,15 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             cube_entity,
             MeshRenderer::new(box_handle.id, metal_material_handle.id, true, true),
         );
-        ecs_guard.add_component(cube_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
+        ecs.add_component(cube_entity, ColliderShape::Cuboid);
+        ecs.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
 
-        let sphere_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let sphere_entity = ecs.create_entity();
+        ecs.add_component(
             sphere_entity,
             Transform {
                 position: glam::Vec3::new(1.0, 0.0, 0.0),
@@ -239,7 +226,7 @@ fn main() {
                 scale: glam::Vec3::from_array([0.5; 3]),
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             sphere_entity,
             MeshRenderer::new(
                 uv_sphere_mesh_handle.id,
@@ -248,11 +235,11 @@ fn main() {
                 true,
             ),
         );
-        ecs_guard.add_component(sphere_entity, ColliderShape::Sphere);
-        ecs_guard.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
+        ecs.add_component(sphere_entity, ColliderShape::Sphere);
+        ecs.add_component(sphere_entity, DynamicRigidBody { mass: 0.5 });
 
-        let light_entity = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let light_entity = ecs.create_entity();
+        ecs.add_component(
             light_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 1.5, 2.0),
@@ -260,16 +247,16 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
-        ecs_guard.add_component(light_entity, ColliderShape::Cuboid);
-        ecs_guard.add_component(
+        ecs.add_component(light_entity, Light::point(glam::vec3(0.0, 0.0, 1.0), 10.0));
+        ecs.add_component(light_entity, ColliderShape::Cuboid);
+        ecs.add_component(
             light_entity,
             MeshRenderer::new(box_handle.id, blue_light_material_handle.id, true, true),
         );
-        ecs_guard.add_component(light_entity, DynamicRigidBody { mass: 5.0 });
+        ecs.add_component(light_entity, DynamicRigidBody { mass: 5.0 });
 
-        let light_entity_2 = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let light_entity_2 = ecs.create_entity();
+        ecs.add_component(
             light_entity_2,
             Transform {
                 position: glam::Vec3::new(-1.5, 0.0, -4.0),
@@ -277,16 +264,16 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             light_entity_2,
             Light::point(glam::vec3(1.0, 0.0, 0.0), 10.0),
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             light_entity_2,
             MeshRenderer::new(box_handle.id, red_light_material_handle.id, true, true),
         );
-        ecs_guard.add_component(light_entity_2, ColliderShape::Cuboid);
-        ecs_guard.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
+        ecs.add_component(light_entity_2, ColliderShape::Cuboid);
+        ecs.add_component(light_entity_2, DynamicRigidBody { mass: 10.0 });
 
         let sun_rotation = Quat::from_euler(
             glam::EulerRot::YXZ,
@@ -295,8 +282,8 @@ fn main() {
             20.0f32.to_radians(),  // Z rotation - no roll
         );
 
-        let sun_entity: usize = ecs_guard.create_entity();
-        ecs_guard.add_component(
+        let sun_entity: usize = ecs.create_entity();
+        ecs.add_component(
             sun_entity,
             Transform {
                 position: glam::Vec3::new(0.0, 0.0, 0.0),
@@ -304,12 +291,11 @@ fn main() {
                 scale: glam::Vec3::ONE,
             },
         );
-        ecs_guard.add_component(
+        ecs.add_component(
             sun_entity,
             Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
         );
     });
-    runtime.init();
 }
 
 struct ConfigToggleSystem {}
@@ -322,7 +308,7 @@ impl System for ConfigToggleSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
         let runtime_config = ecs.get_resource_mut::<RuntimeConfig>().unwrap();
@@ -371,7 +357,7 @@ impl System for SpinnerSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
         self.time_elapsed += dt;
@@ -448,7 +434,7 @@ impl System for FreecamSystem {
     fn run(
         &mut self,
         dt: f32,
-        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
+        ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
         // --- 1. Handle Rotation (Mouse and Controller Right Stick) ---
@@ -828,12 +814,7 @@ impl System for SpawnSystem {
         "SpawnSystem"
     }
 
-    fn run(
-        &mut self,
-        dt: f32,
-        ecs: &mut helmer_engine::ecs::ecs_core::ECSCore,
-        input_manager: &InputManager,
-    ) {
+    fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
         // CLEANUP
         const SPAWN_ITERATIONS: usize = 4;
         const MAX_CONCURRENT_ENTITIES: usize = 3000;

@@ -19,11 +19,11 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - LOD generation
 
 ## todo 😡
-- [ ] provide custom runtime hooks?
+- [x] provide custom runtime hooks?
 - [ ] provide custom renderer hooks
-- [ ] provide custom logic thread hooks
-- [ ] "bring your own logic" option (through logic thread hooks)
-- [ ] ecs revamp
+- [x] provide custom logic thread hooks
+- [x] "bring your own logic" option (through logic thread hooks)
+- [?] ecs revamp
 - [ ] custom types to relieve project reliance on engine dependencies (InputMan)
 - [x] ui implementation or integration
 - [ ] editor & project cli tools

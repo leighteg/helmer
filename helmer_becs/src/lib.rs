@@ -1,7 +1,7 @@
 use bevy_ecs::{schedule::Schedule, world::World};
 use helmer::runtime::{asset_server::AssetServer, runtime::Runtime};
 
-pub fn helmer_ecs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
+pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
     let world = World::new();
     let scheduler = Schedule::default();
 

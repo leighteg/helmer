@@ -24,7 +24,8 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] provide custom renderer hooks
 - [x] provide custom logic thread hooks
 - [x] "bring your own logic" option (through logic thread hooks)
-- [ ] ecs revamp ❓
+- [ ] provide integrations to multiple popular and custom logic architectures
+- [ ] helmer_ecs revamp ❓
 - [ ] custom types to relieve project reliance on engine dependencies (InputMan)
 - [x] ui implementation or integration
 - [ ] editor & project cli tools

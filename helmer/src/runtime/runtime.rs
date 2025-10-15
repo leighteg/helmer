@@ -57,11 +57,7 @@ pub struct PerformanceMetrics {
 pub struct RuntimeCallbacks<T: Send + 'static> {
     init: Option<Box<dyn FnOnce(&mut Runtime<T>, &mut T) + Send>>,
     tick: Arc<
-        dyn Fn(
-                f32,
-                &InputManager,
-                &mut T,
-            ) -> (Option<RenderData>, Option<EguiRenderData>)
+        dyn Fn(f32, &mut InputManager, &mut T) -> (Option<RenderData>, Option<EguiRenderData>)
             + Send
             + Sync,
     >,
@@ -104,7 +100,7 @@ impl<T: Send + 'static> Runtime<T> {
         init_callback: impl FnOnce(&mut Runtime<T>, &mut T) + Send + 'static,
         tick_callback: impl Fn(
             f32,
-            &InputManager,
+            &mut InputManager,
             &mut T,
         ) -> (Option<RenderData>, Option<EguiRenderData>)
         + Send
@@ -195,11 +191,8 @@ impl<T: Send + 'static> Runtime<T> {
 
                 // MAIN LOGIC LOOP EXECUTION
                 let mut user_state_guard = user_state.lock();
-                let (render_data, egui_render_data) = tick_callback(
-                    dt,
-                    &input_manager.read(),
-                    &mut *user_state_guard,
-                );
+                let (render_data, egui_render_data) =
+                    tick_callback(dt, &mut input_manager.write(), &mut *user_state_guard);
                 drop(user_state_guard);
 
                 if let Some(data) = render_data {

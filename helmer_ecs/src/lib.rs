@@ -172,6 +172,18 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
             );
         },
         |dt, input_manager, (ecs_core, scheduler)| {
+            ecs_core.resource_scope::<RuntimeConfig, _>(|ecs_core, runtime_config| {
+                if runtime_config.egui {
+                    ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                        if input_manager.active_mouse_buttons.len() == 0 {
+                            input_manager.egui_wants_pointer =
+                                egui_resource.ctx.wants_pointer_input();
+                        }
+                        input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+                    });
+                }
+            });
+
             scheduler.run_all(dt, ecs_core, input_manager);
 
             let render_data = {

@@ -8,7 +8,8 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - multiplatform
 - large scale hardware/driver support
 - performant multithreading
-- naive but capable full ECS implementation (rewrite or optimize todo)
+- "bring your own logic" approach providing callbacks to implement a custom logic system or ecs
+- custom (naive but flexible) ecs implementation/integration, bevy_ecs integration
 - rapier3D physics integration
 - basic pbr (full pbr todo)
 - right handed +Y-up coordinate system
@@ -23,7 +24,7 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] provide custom renderer hooks
 - [x] provide custom logic thread hooks
 - [x] "bring your own logic" option (through logic thread hooks)
-- [?] ecs revamp
+- [ ] ecs revamp ❓
 - [ ] custom types to relieve project reliance on engine dependencies (InputMan)
 - [x] ui implementation or integration
 - [ ] editor & project cli tools

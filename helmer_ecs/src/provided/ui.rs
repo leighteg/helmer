@@ -205,8 +205,27 @@ fn shader_constants_ui(ui: &mut egui::Ui, c: &mut ShaderConstants) {
         );
         ui.add(
             egui::DragValue::new(&mut c.pcf_radius)
-                .range(0..=10)
+                .speed(0.1)
+                .range(0..=100)
                 .prefix("PCF radius: "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut c.pcf_min_scale)
+                .speed(0.1)
+                .range(0..=100)
+                .prefix("PCF min scale: "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut c.pcf_max_scale)
+                .speed(0.1)
+                .range(0..=100)
+                .prefix("PCF max scale: "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut c.pcf_max_distance)
+                .speed(0.1)
+                .range(0..=10000)
+                .prefix("PCF max distance: "),
         );
     });
 }

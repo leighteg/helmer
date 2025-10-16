@@ -1,36 +1,39 @@
 struct Constants {
     // sky
-    planet_radius: f32,          // 0x00
-    atmosphere_radius: f32,      // 0x04
-    sky_light_samples: u32,      // 0x08
-    _pad0: f32,                 // 0x0C - padding to 16 bytes
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
+    _pad0: f32,
 
-    // SSR block 1
-    ssr_coarse_steps: u32,       // 0x10
-    ssr_binary_search_steps: u32,// 0x14
-    ssr_linear_step_size: f32,   // 0x18
-    ssr_thickness: f32,          // 0x1C
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
 
-    // SSR block 2
-    ssr_max_distance: f32,       // 0x20
-    ssr_roughness_fade_start: f32,// 0x24
-    ssr_roughness_fade_end: f32, // 0x28
-    _pad1: f32,                  // 0x2C - padding to 16 bytes
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    _pad1: f32,
 
-    // SSGI block 1
-    ssgi_num_rays: u32,          // 0x30
-    ssgi_num_steps: u32,         // 0x34
-    ssgi_ray_step_size: f32,     // 0x38
-    ssgi_thickness: f32,         // 0x3C
+    // SSGI
+    ssgi_num_rays: u32,
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
 
-    // SSGI block 2
-    ssgi_blend_factor: f32,      // 0x40
-    evsm_c: f32,                 // 0x44
-    pcf_radius: u32,             // 0x48
-    ssgi_intensity: f32,         // 0x4C
+    ssgi_blend_factor: f32,
+    evsm_c: f32,
+    pcf_radius: u32,
+    ssgi_intensity: f32,
 
-    // Final padding to align total struct size to 16 bytes
-    _padding: vec4<f32>,         // 0x50 - 16 bytes padding
+    // PCF distance scaling
+    pcf_min_scale: f32,
+    pcf_max_scale: f32,
+    pcf_max_distance: f32,
+    _pad2: f32,
+
+    _padding: vec4<f32>,
 };
 
 //=============== CONSTANTS ===============//
@@ -130,7 +133,12 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
     return smoothstep(0.2, 1.0, p_max);
 }
 
-fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: vec3<f32>) -> f32 {
+fn calculate_shadow_factor(
+    world_pos: vec3<f32>,
+    view_z: f32,
+    N: vec3<f32>,
+    L: vec3<f32>
+) -> f32 {
     // 1. Determine which cascade to use based on view depth
     var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
@@ -143,33 +151,46 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: v
 
     // 2. Project the world position into the light's clip space
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
-    if shadow_pos_clip.w < EPSILON { return 1.0; }
+    if shadow_pos_clip.w < EPSILON {
+        return 1.0;
+    }
+
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
 
-    // 3. Check if the coordinate is outside the cascade's bounds
+    // 3. Bounds check
     if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
         return 1.0; // Not in shadow
     }
 
-    // 4. Sample a 3x3 grid around the coordinate and average the moments
+    // 4. Compute dynamic PCF radius
+    let base_radius = f32(constants.pcf_radius);
+
+    // Scale radius based on view distance (clamped)
+    let dist_factor = clamp(view_z / constants.pcf_max_distance, 0.0, 1.0);
+    let scale = mix(constants.pcf_min_scale, constants.pcf_max_scale, dist_factor);
+    let dynamic_radius_f = base_radius * scale;
+    let dynamic_radius = clamp(i32(dynamic_radius_f), 1, 6); // Clamp for performance
+
+    // 5. Sampling setup
     let shadow_map_size = vec2<f32>(textureDimensions(shadow_map, 0u));
     let texel_size = 1.0 / shadow_map_size;
     var total_moments = vec2<f32>(0.0);
-    let pcf_radius = i32(constants.pcf_radius); // pcf_radius of 1 results in a 3x3 kernel
+    var sample_count = 0.0;
 
-    for (var y = -pcf_radius; y <= pcf_radius; y = y + 1) {
-        for (var x = -pcf_radius; x <= pcf_radius; x = x + 1) {
+    // 6. PCF kernel sampling
+    for (var y = -dynamic_radius; y <= dynamic_radius; y = y + 1) {
+        for (var x = -dynamic_radius; x <= dynamic_radius; x = x + 1) {
             let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + offset, u32(cascade_index)).rg;
+            let sample = textureSample(shadow_map, shadow_sampler, shadow_uv + offset, u32(cascade_index)).rg;
+            total_moments += sample;
+            sample_count += 1.0;
         }
     }
 
-    // Average the moments from all samples in the kernel
-    let pcf_sample_count = f32((pcf_radius * 2 + 1) * (pcf_radius * 2 + 1));
-    let avg_moments = total_moments / pcf_sample_count;
+    let avg_moments = total_moments / sample_count;
 
-    // 5. Perform the Chebyshev test with the blurred (averaged) moments
+    // 7. Final shadow value using VSM Chebyshev inequality
     return chebyshev_inequality(shadow_coord.z, avg_moments, N, L);
 }
 

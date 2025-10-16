@@ -334,43 +334,50 @@ pub struct SkyUniforms {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct ShaderConstants {
     // sky
-    pub planet_radius: f32,     // 0x00
-    pub atmosphere_radius: f32, // 0x04
-    pub sky_light_samples: u32, // 0x08
-    pub _pad0: f32,             // 0x0C - padding to 16 bytes
+    pub planet_radius: f32,
+    pub atmosphere_radius: f32,
+    pub sky_light_samples: u32,
+    pub _pad0: f32,
 
     // SSR
-    pub ssr_coarse_steps: u32,        // 0x10
-    pub ssr_binary_search_steps: u32, // 0x14
-    pub ssr_linear_step_size: f32,    // 0x18
-    pub ssr_thickness: f32,           // 0x1C
+    pub ssr_coarse_steps: u32,
+    pub ssr_binary_search_steps: u32,
+    pub ssr_linear_step_size: f32,
+    pub ssr_thickness: f32,
 
-    pub ssr_max_distance: f32,         // 0x20
-    pub ssr_roughness_fade_start: f32, // 0x24
-    pub ssr_roughness_fade_end: f32,   // 0x28
-    pub _pad1: f32,                    // 0x2C - padding to 16 bytes
+    pub ssr_max_distance: f32,
+    pub ssr_roughness_fade_start: f32,
+    pub ssr_roughness_fade_end: f32,
+    pub _pad1: f32,
 
     // SSGI
-    pub ssgi_num_rays: u32,      // 0x30
-    pub ssgi_num_steps: u32,     // 0x34
-    pub ssgi_ray_step_size: f32, // 0x38
-    pub ssgi_thickness: f32,     // 0x3C
+    pub ssgi_num_rays: u32,
+    pub ssgi_num_steps: u32,
+    pub ssgi_ray_step_size: f32,
+    pub ssgi_thickness: f32,
 
-    pub ssgi_blend_factor: f32, // 0x40
-    pub evsm_c: f32,            // 0x44
-    pub pcf_radius: u32,        // 0x48
-    pub ssgi_intensity: f32,    // 0x4C
+    pub ssgi_blend_factor: f32,
+    pub evsm_c: f32,
+    pub pcf_radius: u32,
+    pub ssgi_intensity: f32,
 
-    pub _padding: [f32; 4], // 0x50 - manually added padding if needed by application (optional)
+    // PCF distance scaling
+    pub pcf_min_scale: f32,
+    pub pcf_max_scale: f32,
+    pub pcf_max_distance: f32,
+    pub _pad2: f32,
+
+    pub _padding: [f32; 4],
 }
 
 impl Default for ShaderConstants {
     fn default() -> Self {
         Self {
             // Sky
-            planet_radius: 6371e3,     // Earth radius in meters
-            atmosphere_radius: 6471e3, // Earth atmosphere radius in meters
+            planet_radius: 6371e3,
+            atmosphere_radius: 6471e3,
             sky_light_samples: 6,
+            _pad0: 0.0,
 
             // SSR Defaults
             ssr_coarse_steps: 160,
@@ -380,6 +387,7 @@ impl Default for ShaderConstants {
             ssr_max_distance: 250.0,
             ssr_roughness_fade_start: 0.1,
             ssr_roughness_fade_end: 0.5,
+            _pad1: 0.0,
 
             // SSGI Defaults
             ssgi_num_rays: 6,
@@ -395,9 +403,12 @@ impl Default for ShaderConstants {
             // Composite Default
             ssgi_intensity: 30.0,
 
-            // Padding
-            _pad0: 0.0,
-            _pad1: 0.0,
+            // PCF scaling defaults
+            pcf_min_scale: 1.0,
+            pcf_max_scale: 3.5,
+            pcf_max_distance: 80.0,
+            _pad2: 0.0,
+
             _padding: [0.0; 4],
         }
     }

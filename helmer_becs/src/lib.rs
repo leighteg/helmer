@@ -29,6 +29,10 @@ pub struct BevyAssetServer(pub Arc<Mutex<AssetServer>>);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct BevyRuntimeConfig(pub RuntimeConfig);
 
+// resources
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct DeltaTime(pub f32);
+
 pub mod egui_integration;
 pub mod systems;
 
@@ -45,6 +49,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<BevyAssetServer>(BevyAssetServer(
                 runtime.asset_server.as_ref().unwrap().clone(),
             ));
+            world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<RenderPacket>(RenderPacket::default());
 
             schedule.add_systems(render_data_system);
@@ -56,6 +61,8 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             );
         },
         |dt, input_manager, (world, schedule)| {
+            world.resource_mut::<DeltaTime>().0 = dt;
+            
             schedule.run(world);
 
             let render_data = {

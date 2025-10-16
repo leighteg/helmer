@@ -53,6 +53,14 @@ impl Transform {
     pub fn to_matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
+
+    pub fn from_position(position: [f32; 3]) -> Self {
+        Self {
+            position: Vec3::from_array(position),
+            rotation: Quat::default(),
+            scale: Vec3::ONE,
+        }
+    }
 }
 
 // --- Mesh Rendering Component ---

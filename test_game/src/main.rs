@@ -64,14 +64,6 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        scheduler.register_system(
-            EguiTestSystem {},
-            30,
-            vec![],
-            HashSet::from([]),
-            HashSet::from([]),
-        );
-
         /*// Priority 25: General game logic that modifies transforms.
         scheduler.register_system(
             SpinnerSystem { time_elapsed: 0.0 },
@@ -918,27 +910,5 @@ impl System for SpawnSystem {
 
             let _ = rng.reseed();
         }
-    }
-}
-
-struct EguiTestSystem {}
-
-impl System for EguiTestSystem {
-    fn name(&self) -> &str {
-        "test system"
-    }
-
-    fn run(&mut self, dt: f32, ecs: &mut ECSCore, input_manager: &InputManager) {
-        ecs.resource_scope::<EguiResource, _>(|ecs, egui_resouce| {
-            egui_resouce.windows.push((
-                Box::new(move |ui, ecs, _| {
-                    ui.label(format!(
-                        "{} resources registered",
-                        ecs.resource_pool.resources.len()
-                    ));
-                }),
-                "test".to_string(),
-            ));
-        });
     }
 }

@@ -2,7 +2,7 @@
 members = [
     "helmer",
     "helmer_editor",
-    "test_game", "helmer_becs", "helmer_ecs",
+    "test_game", "helmer_becs", "helmer_ecs", "becs_bench",
 ]
 resolver = "2" # Use the modern feature resolver
 

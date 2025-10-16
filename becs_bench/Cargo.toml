@@ -1,0 +1,8 @@
+[package]
+name = "becs_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helmer = { path = "../helmer" }
+helmer_becs = { path = "../helmer_becs" }

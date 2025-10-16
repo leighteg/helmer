@@ -6,3 +6,10 @@ edition = "2024"
 [dependencies]
 helmer = { path = "../helmer" }
 bevy_ecs = "0.17.2"
+glam = "0.30.8"
+hashbrown = "0.16.0"
+tracing = "0.1.41"
+winit = "0.30.12"
+egui = { git = "https://github.com/emilk/egui.git" }
+egui-wgpu = { git = "https://github.com/emilk/egui.git" }
+parking_lot = "0.12.5"

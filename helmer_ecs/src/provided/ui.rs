@@ -196,12 +196,17 @@ fn shader_constants_ui(ui: &mut egui::Ui, c: &mut ShaderConstants) {
         );
     });
 
-    ui.collapsing("EVSM", |ui| {
+    ui.collapsing("shadows", |ui| {
         ui.add(
             egui::DragValue::new(&mut c.evsm_c)
                 .speed(0.05)
                 .range(0.0..=1000.0)
                 .prefix("EVSM C: "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut c.pcf_radius)
+                .range(0..=10)
+                .prefix("PCF radius: "),
         );
     });
 }

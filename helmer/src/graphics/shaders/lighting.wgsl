@@ -3,7 +3,7 @@ struct Constants {
     planet_radius: f32,          // 0x00
     atmosphere_radius: f32,      // 0x04
     sky_light_samples: u32,      // 0x08
-    _pad0: u32,                 // 0x0C - padding to 16 bytes
+    _pad0: f32,                 // 0x0C - padding to 16 bytes
 
     // SSR block 1
     ssr_coarse_steps: u32,       // 0x10
@@ -26,8 +26,8 @@ struct Constants {
     // SSGI block 2
     ssgi_blend_factor: f32,      // 0x40
     evsm_c: f32,                 // 0x44
-    ssgi_intensity: f32,         // 0x48
-    _pad2: f32,                  // 0x4C - padding to 16 bytes
+    pcf_radius: u32,             // 0x48
+    ssgi_intensity: f32,         // 0x4C
 
     // Final padding to align total struct size to 16 bytes
     _padding: vec4<f32>,         // 0x50 - 16 bytes padding
@@ -131,6 +131,7 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
 }
 
 fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: vec3<f32>) -> f32 {
+    // 1. Determine which cascade to use based on view depth
     var cascade_index = i32(NUM_CASCADES - 1);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         if view_z > shadow_uniforms[i].split_depth.x {
@@ -139,15 +140,37 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: v
         }
     }
     let cascade = shadow_uniforms[cascade_index];
+
+    // 2. Project the world position into the light's clip space
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
     if shadow_pos_clip.w < EPSILON { return 1.0; }
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
+
+    // 3. Check if the coordinate is outside the cascade's bounds
     if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
-        return 1.0;
+        return 1.0; // Not in shadow
     }
-    let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
-    return chebyshev_inequality(shadow_coord.z, moments, N, L);
+
+    // 4. Sample a 3x3 grid around the coordinate and average the moments
+    let shadow_map_size = vec2<f32>(textureDimensions(shadow_map, 0u));
+    let texel_size = 1.0 / shadow_map_size;
+    var total_moments = vec2<f32>(0.0);
+    let pcf_radius = i32(constants.pcf_radius); // pcf_radius of 1 results in a 3x3 kernel
+
+    for (var y = -pcf_radius; y <= pcf_radius; y = y + 1) {
+        for (var x = -pcf_radius; x <= pcf_radius; x = x + 1) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + offset, u32(cascade_index)).rg;
+        }
+    }
+
+    // Average the moments from all samples in the kernel
+    let pcf_sample_count = f32((pcf_radius * 2 + 1) * (pcf_radius * 2 + 1));
+    let avg_moments = total_moments / pcf_sample_count;
+
+    // 5. Perform the Chebyshev test with the blurred (averaged) moments
+    return chebyshev_inequality(shadow_coord.z, avg_moments, N, L);
 }
 
 //=============== SKY CALCULATION FUNCTIONS ===============//

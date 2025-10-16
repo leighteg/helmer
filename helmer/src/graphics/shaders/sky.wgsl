@@ -3,7 +3,7 @@ struct Constants {
     planet_radius: f32,          // 0x00
     atmosphere_radius: f32,      // 0x04
     sky_light_samples: u32,      // 0x08
-    _pad0: u32,                 // 0x0C - padding to 16 bytes
+    _pad0: f32,                 // 0x0C - padding to 16 bytes
 
     // SSR block 1
     ssr_coarse_steps: u32,       // 0x10
@@ -26,8 +26,8 @@ struct Constants {
     // SSGI block 2
     ssgi_blend_factor: f32,      // 0x40
     evsm_c: f32,                 // 0x44
-    ssgi_intensity: f32,         // 0x48
-    _pad2: f32,                  // 0x4C - padding to 16 bytes
+    pcf_radius: u32,             // 0x48
+    ssgi_intensity: f32,         // 0x4C
 
     // Final padding to align total struct size to 16 bytes
     _padding: vec4<f32>,         // 0x50 - 16 bytes padding

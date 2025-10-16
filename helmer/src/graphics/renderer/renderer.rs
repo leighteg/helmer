@@ -337,7 +337,7 @@ pub struct ShaderConstants {
     pub planet_radius: f32,     // 0x00
     pub atmosphere_radius: f32, // 0x04
     pub sky_light_samples: u32, // 0x08
-    pub _pad0: u32,             // 0x0C - padding to 16 bytes
+    pub _pad0: f32,             // 0x0C - padding to 16 bytes
 
     // SSR
     pub ssr_coarse_steps: u32,        // 0x10
@@ -358,8 +358,8 @@ pub struct ShaderConstants {
 
     pub ssgi_blend_factor: f32, // 0x40
     pub evsm_c: f32,            // 0x44
-    pub ssgi_intensity: f32,    // 0x48
-    pub _pad2: f32,             // 0x4C - padding to 16 bytes
+    pub pcf_radius: u32,        // 0x48
+    pub ssgi_intensity: f32,    // 0x4C
 
     pub _padding: [f32; 4], // 0x50 - manually added padding if needed by application (optional)
 }
@@ -390,14 +390,14 @@ impl Default for ShaderConstants {
 
             // EVSM Default
             evsm_c: 20.0,
+            pcf_radius: 2,
 
             // Composite Default
             ssgi_intensity: 30.0,
 
             // Padding
-            _pad0: 0,
+            _pad0: 0.0,
             _pad1: 0.0,
-            _pad2: 0.0,
             _padding: [0.0; 4],
         }
     }

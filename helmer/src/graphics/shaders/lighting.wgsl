@@ -31,7 +31,8 @@ struct Constants {
     pcf_min_scale: f32,
     pcf_max_scale: f32,
     pcf_max_distance: f32,
-    _pad2: f32,
+
+    shade_mode: u32,
 
     _padding: vec4<f32>,
 };
@@ -344,7 +345,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kS = F;
             let kD = vec3<f32>(1.0) - kS;
 
-            let final_radiance = radiance * NdotL * shadow_multiplier;
+            let is_stylized = constants.shade_mode == 2;
+            let final_radiance = select(vec3<f32>(radiance * NdotL * shadow_multiplier), vec3<f32>(radiance * shadow_multiplier), is_stylized);
 
             let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
             let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
@@ -381,7 +383,15 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     diffuse_lighting += diffuse_contribution * sky_visibility;
 
     var out: LightingOutput;
-    out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
-    out.diffuse_only = vec4(diffuse_lighting * ao + emission, 1.0);
+    
+    if constants.shade_mode == 0 { // UNLIT
+        out.full_pbr = vec4<f32>(albedo, 1.0);
+        out.diffuse_only = vec4(albedo + emission, 1.0);
+    }
+    else { // LIT
+        out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
+        out.diffuse_only = vec4(diffuse_lighting * ao + emission, 1.0);
+    }
+
     return out;
 }

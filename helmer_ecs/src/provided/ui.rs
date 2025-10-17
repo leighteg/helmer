@@ -32,14 +32,14 @@ impl StatsUI {
                 "helmer metrics".to_string(),
             ));
 
-            egui_res.windows.push((
+            /*egui_res.windows.push((
                 Box::new(move |ui, ecs, input| {
                     ecs.resource_scope::<EguiResource, _>(|ecs, egui_res: &mut EguiResource| {
                         ui.checkbox(&mut egui_res.stats_ui, "stats ui");
                     });
                 }),
                 "runtime config".to_string(),
-            ));
+            ));*/
 
             egui_res.windows.push((
                 Box::new(move |ui, ecs, input| {
@@ -61,6 +61,20 @@ impl StatsUI {
                             ui.checkbox(&mut render_cfg.ssgi_pass, "SSGI Pass");
                             ui.checkbox(&mut render_cfg.ssgi_denoise_pass, "SSGI Denoise Pass");
                             ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
+
+                            let shade_mode = match render_cfg.shader_constants.shade_mode {
+                                0 => "unlit",
+                                1 => "PBR lit",
+                                2 => "stylized lit",
+                                _ => "???",
+                            };
+
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.shader_constants.shade_mode)
+                                    .range(0..=2)
+                                    .prefix("shade mode: ")
+                                    .suffix(format!(" ({})", shade_mode)),
+                            );
 
                             ui.separator();
                             ui.heading("Culling & LOD");
@@ -99,6 +113,12 @@ impl StatsUI {
                             ui.drag_angle(&mut transform.rotation.x);
                             ui.drag_angle(&mut transform.rotation.y);
                             ui.drag_angle(&mut transform.rotation.z);
+
+                            ui.add(
+                                egui::DragValue::new(&mut light.intensity)
+                                    .speed(0.1)
+                                    .prefix("intensity: "),
+                            );
 
                             ui.separator();
                         });

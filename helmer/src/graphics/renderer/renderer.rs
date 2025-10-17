@@ -365,7 +365,8 @@ pub struct ShaderConstants {
     pub pcf_min_scale: f32,
     pub pcf_max_scale: f32,
     pub pcf_max_distance: f32,
-    pub _pad2: f32,
+
+    pub shade_mode: u32, // 0 = unlit, 1 = lit, 2 = "cel" lit
 
     pub _padding: [f32; 4],
 }
@@ -407,7 +408,8 @@ impl Default for ShaderConstants {
             pcf_min_scale: 1.0,
             pcf_max_scale: 3.5,
             pcf_max_distance: 80.0,
-            _pad2: 0.0,
+
+            shade_mode: 1,
 
             _padding: [0.0; 4],
         }

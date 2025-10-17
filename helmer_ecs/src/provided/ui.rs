@@ -9,6 +9,7 @@ use helmer::{
 use crate::{
     ecs::{ecs_core::ECSCore, system::System},
     egui_integration::EguiResource,
+    physics::physics_resource::PhysicsResource,
 };
 
 pub struct StatsUI {}
@@ -109,7 +110,9 @@ impl StatsUI {
                                 return;
                             }
 
-                            ui.label("directional light");
+                            ui.heading("directional light");
+
+                            ui.label("rotation");
                             ui.drag_angle(&mut transform.rotation.x);
                             ui.drag_angle(&mut transform.rotation.y);
                             ui.drag_angle(&mut transform.rotation.z);
@@ -122,6 +125,29 @@ impl StatsUI {
 
                             ui.separator();
                         });
+
+                    ecs.resource_scope::<PhysicsResource, _>(|ecs, physics_resource| {
+                        ui.heading("physics");
+
+                        ui.label("gravity");
+                        ui.add(
+                            egui::DragValue::new(&mut physics_resource.gravity.x)
+                                .speed(0.1)
+                                .prefix("x: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut physics_resource.gravity.y)
+                                .speed(0.1)
+                                .prefix("y: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut physics_resource.gravity.z)
+                                .speed(0.1)
+                                .prefix("z: "),
+                        );
+
+                        ui.separator();
+                    });
                 }),
                 "scene".to_string(),
             ));

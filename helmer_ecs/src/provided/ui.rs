@@ -65,17 +65,46 @@ impl StatsUI {
 
                             let shade_mode = match render_cfg.shader_constants.shade_mode {
                                 0 => "unlit",
-                                1 => "PBR lit",
-                                2 => "stylized lit",
+                                1 => "lighting",
+                                2 => "lit",
                                 _ => "???",
                             };
 
                             ui.add(
                                 egui::DragValue::new(&mut render_cfg.shader_constants.shade_mode)
                                     .range(0..=2)
+                                    .speed(0.05)
                                     .prefix("shade mode: ")
                                     .suffix(format!(" ({})", shade_mode)),
                             );
+
+                            let light_model = match render_cfg.shader_constants.light_model {
+                                0 => "PBR lit",
+                                1 => "stylized lit",
+                                _ => "???",
+                            };
+
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.shader_constants.light_model)
+                                    .range(0..=1)
+                                    .speed(0.03)
+                                    .prefix("light model: ")
+                                    .suffix(format!(" ({})", light_model)),
+                            );
+
+                            let mut is_skylight_contribution_checked =
+                                render_cfg.shader_constants.skylight_contribution != 0;
+
+                            ui.checkbox(
+                                &mut is_skylight_contribution_checked,
+                                "skylight contribution",
+                            );
+
+                            if is_skylight_contribution_checked {
+                                render_cfg.shader_constants.skylight_contribution = 1
+                            } else {
+                                render_cfg.shader_constants.skylight_contribution = 0
+                            }
 
                             ui.separator();
                             ui.heading("Culling & LOD");

@@ -1,37 +1,39 @@
 struct Constants {
+    // lighting
+    shade_mode: u32,
+    light_model: u32,
+    skylight_contribution: u32,
+
     // sky
     planet_radius: f32,
     atmosphere_radius: f32,
     sky_light_samples: u32,
-    _pad0: f32,
 
     // SSR
     ssr_coarse_steps: u32,
     ssr_binary_search_steps: u32,
     ssr_linear_step_size: f32,
     ssr_thickness: f32,
-
     ssr_max_distance: f32,
     ssr_roughness_fade_start: f32,
     ssr_roughness_fade_end: f32,
-    _pad1: f32,
 
     // SSGI
     ssgi_num_rays: u32,
     ssgi_num_steps: u32,
     ssgi_ray_step_size: f32,
     ssgi_thickness: f32,
-
     ssgi_blend_factor: f32,
+
+    // shadows
     evsm_c: f32,
     pcf_radius: u32,
-    ssgi_intensity: f32,
-
-    // PCF distance scaling
     pcf_min_scale: f32,
     pcf_max_scale: f32,
     pcf_max_distance: f32,
-    _pad2: f32,
+
+    // composite
+    ssgi_intensity: f32,
 
     _padding: vec4<f32>,
 };

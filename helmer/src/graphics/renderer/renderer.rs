@@ -333,40 +333,41 @@ pub struct SkyUniforms {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct ShaderConstants {
+    // lighting
+    pub shade_mode: u32,  // 0 = unlit, 1 = lighting, 2 = full lit
+    pub light_model: u32, // 0 = standard, 2 = stylized lit
+    pub skylight_contribution: u32,
+
     // sky
     pub planet_radius: f32,
     pub atmosphere_radius: f32,
     pub sky_light_samples: u32,
-    pub _pad0: f32,
 
     // SSR
     pub ssr_coarse_steps: u32,
     pub ssr_binary_search_steps: u32,
     pub ssr_linear_step_size: f32,
     pub ssr_thickness: f32,
-
     pub ssr_max_distance: f32,
     pub ssr_roughness_fade_start: f32,
     pub ssr_roughness_fade_end: f32,
-    pub _pad1: f32,
 
     // SSGI
     pub ssgi_num_rays: u32,
     pub ssgi_num_steps: u32,
     pub ssgi_ray_step_size: f32,
     pub ssgi_thickness: f32,
-
     pub ssgi_blend_factor: f32,
+
+    // shadows
     pub evsm_c: f32,
     pub pcf_radius: u32,
-    pub ssgi_intensity: f32,
-
-    // PCF distance scaling
     pub pcf_min_scale: f32,
     pub pcf_max_scale: f32,
     pub pcf_max_distance: f32,
 
-    pub shade_mode: u32, // 0 = unlit, 1 = lit, 2 = "cel" lit
+    // composite
+    pub ssgi_intensity: f32,
 
     pub _padding: [f32; 4],
 }
@@ -374,11 +375,15 @@ pub struct ShaderConstants {
 impl Default for ShaderConstants {
     fn default() -> Self {
         Self {
+            // lighting
+            shade_mode: 2,
+            light_model: 0,
+            skylight_contribution: 1,
+
             // Sky
             planet_radius: 6371e3,
             atmosphere_radius: 6471e3,
             sky_light_samples: 6,
-            _pad0: 0.0,
 
             // SSR Defaults
             ssr_coarse_steps: 160,
@@ -388,7 +393,6 @@ impl Default for ShaderConstants {
             ssr_max_distance: 250.0,
             ssr_roughness_fade_start: 0.1,
             ssr_roughness_fade_end: 0.5,
-            _pad1: 0.0,
 
             // SSGI Defaults
             ssgi_num_rays: 6,
@@ -397,19 +401,15 @@ impl Default for ShaderConstants {
             ssgi_thickness: 0.4,
             ssgi_blend_factor: 0.15,
 
-            // EVSM Default
+            // shadows Default
             evsm_c: 20.0,
             pcf_radius: 2,
-
-            // Composite Default
-            ssgi_intensity: 30.0,
-
-            // PCF scaling defaults
             pcf_min_scale: 1.0,
             pcf_max_scale: 3.5,
             pcf_max_distance: 80.0,
 
-            shade_mode: 1,
+            // Composite Default
+            ssgi_intensity: 30.0,
 
             _padding: [0.0; 4],
         }

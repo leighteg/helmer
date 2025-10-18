@@ -1,39 +1,40 @@
 struct Constants {
+    // lighting
+    shade_mode: u32,
+    light_model: u32,
+    skylight_contribution: u32,
+
     // sky
     planet_radius: f32,
     atmosphere_radius: f32,
     sky_light_samples: u32,
-    _pad0: f32,
 
     // SSR
     ssr_coarse_steps: u32,
     ssr_binary_search_steps: u32,
     ssr_linear_step_size: f32,
     ssr_thickness: f32,
-
     ssr_max_distance: f32,
     ssr_roughness_fade_start: f32,
     ssr_roughness_fade_end: f32,
-    _pad1: f32,
 
     // SSGI
     ssgi_num_rays: u32,
     ssgi_num_steps: u32,
     ssgi_ray_step_size: f32,
     ssgi_thickness: f32,
-
     ssgi_blend_factor: f32,
+
+    // shadows
     evsm_c: f32,
     pcf_radius: u32,
-    ssgi_intensity: f32,
-
-    // PCF distance scaling
     pcf_min_scale: f32,
     pcf_max_scale: f32,
     pcf_max_distance: f32,
 
-    shade_mode: u32,
-
+    // composite
+    ssgi_intensity: f32,
+    
     _padding: vec4<f32>,
 };
 
@@ -345,50 +346,57 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kS = F;
             let kD = vec3<f32>(1.0) - kS;
 
-            let is_stylized = constants.shade_mode == 2u;
+            let is_stylized = constants.light_model == 1u;
             let final_radiance = select(radiance * NdotL * shadow_multiplier, radiance * shadow_multiplier, is_stylized);
 
-            let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
-            let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
+            if constants.shade_mode == 2u { // FULL LIT
+                let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
+                let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
 
-            direct_lighting += current_pbr;
-            diffuse_lighting += current_diffuse_only;
+                direct_lighting += current_pbr;
+                diffuse_lighting += current_diffuse_only;
+            } else {
+                direct_lighting += final_radiance;
+                diffuse_lighting += final_radiance;
+            }
         }
     }
 
-    // --- SKY AMBIENT LIGHTING ---
-    // Use basic AO as the only practical occlusion method
-    let sky_visibility = ao;
+    if bool(constants.skylight_contribution) {
+        // --- SKY AMBIENT LIGHTING ---
+        // Use basic AO as the only practical occlusion method
+        let sky_visibility = ao;
 
-    // Fix grit: gentle bias for rough surfaces
-    let up_bias = mix(0.25, 0.0, 1.0 - roughness);
-    let smoothed_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), up_bias));
+        // Fix grit: gentle bias for rough surfaces
+        let up_bias = mix(0.25, 0.0, 1.0 - roughness);
+        let smoothed_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), up_bias));
 
-    // Sky color sampling
-    let diffuse_sky_color = get_sky_color(smoothed_normal, normalize(sky.sun_direction));
-    let R = reflect(-V, N);
-    let reflection_sky_color = get_sky_color(R, normalize(sky.sun_direction));
+        // Sky color sampling
+        let diffuse_sky_color = get_sky_color(smoothed_normal, normalize(sky.sun_direction));
+        let R = reflect(-V, N);
+        let reflection_sky_color = get_sky_color(R, normalize(sky.sun_direction));
 
-    // PBR calculations
-    let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
-    let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
-    let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
+        // PBR calculations
+        let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
+        let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
+        let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
 
-    // Final contributions
-    let diffuse_contribution = kD_ambient * albedo * diffuse_sky_color;
-    let reflection_contribution = kS_ambient * reflection_sky_color;
-    let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+        // Final contributions
+        let is_lit = constants.shade_mode == 2u;
+        let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
+        let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
+        let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
 
-    direct_lighting += total_contribution;
-    diffuse_lighting += diffuse_contribution * sky_visibility;
+        direct_lighting += total_contribution;
+        diffuse_lighting += diffuse_contribution * sky_visibility;
+    }
 
     var out: LightingOutput;
-    
+
     if constants.shade_mode == 0u { // UNLIT
         out.full_pbr = vec4<f32>(albedo, 1.0);
         out.diffuse_only = vec4(albedo + emission, 1.0);
-    }
-    else { // LIT
+    } else { // LIT
         out.full_pbr = vec4<f32>(direct_lighting * ao, 1.0);
         out.diffuse_only = vec4(diffuse_lighting * ao + emission, 1.0);
     }

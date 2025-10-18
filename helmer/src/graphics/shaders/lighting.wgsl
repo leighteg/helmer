@@ -141,7 +141,7 @@ fn calculate_shadow_factor(
     L: vec3<f32>
 ) -> f32 {
     // 1. Determine which cascade to use based on view depth
-    var cascade_index = i32(NUM_CASCADES - 1);
+    var cascade_index = i32(NUM_CASCADES - 1u);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         if view_z > shadow_uniforms[i].split_depth.x {
             cascade_index = i;
@@ -345,8 +345,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kS = F;
             let kD = vec3<f32>(1.0) - kS;
 
-            let is_stylized = constants.shade_mode == 2;
-            let final_radiance = select(vec3<f32>(radiance * NdotL * shadow_multiplier), vec3<f32>(radiance * shadow_multiplier), is_stylized);
+            let is_stylized = constants.shade_mode == 2u;
+            let final_radiance = select(radiance * NdotL * shadow_multiplier, radiance * shadow_multiplier, is_stylized);
 
             let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
             let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
@@ -384,7 +384,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     var out: LightingOutput;
     
-    if constants.shade_mode == 0 { // UNLIT
+    if constants.shade_mode == 0u { // UNLIT
         out.full_pbr = vec4<f32>(albedo, 1.0);
         out.diffuse_only = vec4(albedo + emission, 1.0);
     }

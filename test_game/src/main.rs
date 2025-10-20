@@ -48,7 +48,7 @@ fn main() {
 
         // Priority 30: Input and high-level camera control. Runs first.
         scheduler.register_system(
-            FreecamSystem::new(1.0, 0.5),
+            FreecamSystem::new(1.0, 0.3),
             30,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
@@ -386,19 +386,25 @@ impl System for SpinnerSystem {
     }
 }
 
-struct FreecamSystem {
-    speed: f32,
-    sensitivity: f32,
+/// Extracts yaw and pitch from a quaternion assuming Y-up, Z-forward.
+fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
+    let forward = rot * Vec3::Z;
 
+    let yaw = forward.x.atan2(forward.z);
+    let pitch = (-forward.y).asin();
+
+    (yaw, pitch)
+}
+
+struct FreecamSystem {
     yaw: f32,
     pitch: f32,
-
-    last_cursor_position: DVec2,
-    is_looking: bool,
-
-    base_fov: Option<f32>,
-    target_fov: f32,
+    speed: f32,
+    sensitivity: f32,
     fov_lerp_speed: f32,
+    is_looking: bool,
+    last_cursor_position: DVec2,
+    current_fov_multiplier: f32,
 }
 
 impl FreecamSystem {
@@ -410,10 +416,8 @@ impl FreecamSystem {
             pitch: 0.0,
             last_cursor_position: DVec2::ZERO,
             is_looking: false,
-
-            base_fov: None,
-            target_fov: 0.0,
             fov_lerp_speed: 8.0,
+            current_fov_multiplier: 1.0,
         }
     }
 }
@@ -429,7 +433,16 @@ impl System for FreecamSystem {
         ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
-        // --- 1. Handle Rotation (Mouse and Controller Right Stick) ---
+        const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
+        const BOOST_AMOUNT: f32 = 1.15;
+        const CONTROLLER_SENSITIVITY: f32 = 2.0;
+
+        let maybe_gamepad_id = input_manager.first_gamepad_id();
+
+        // Rotation input deltas
+        let mut yaw_delta = 0.0;
+        let mut pitch_delta = 0.0;
+
         if input_manager.is_mouse_button_active(MouseButton::Right) {
             if !self.is_looking {
                 self.last_cursor_position = input_manager.cursor_position;
@@ -437,31 +450,26 @@ impl System for FreecamSystem {
             } else {
                 let cursor_delta = input_manager.cursor_position - self.last_cursor_position;
                 self.last_cursor_position = input_manager.cursor_position;
-                if cursor_delta.length_squared() > 0.0 {
-                    self.yaw -= cursor_delta.x as f32 * self.sensitivity / 100.0;
-                    self.pitch += cursor_delta.y as f32 * self.sensitivity / 100.0;
-                }
+
+                yaw_delta -= cursor_delta.x as f32 * self.sensitivity / 100.0;
+                pitch_delta += cursor_delta.y as f32 * self.sensitivity / 100.0;
             }
         } else {
             self.is_looking = false;
         }
 
-        let maybe_gamepad_id = input_manager.first_gamepad_id();
         if let Some(gamepad_id) = maybe_gamepad_id {
-            const CONTROLLER_SENSITIVITY: f32 = 2.0;
-            let right_stick_x =
-                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX);
-            let right_stick_y =
-                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY);
-            self.yaw -= right_stick_x * CONTROLLER_SENSITIVITY * dt;
-            self.pitch -= right_stick_y * CONTROLLER_SENSITIVITY * dt;
+            yaw_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX)
+                * CONTROLLER_SENSITIVITY
+                * dt;
+            pitch_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY)
+                * CONTROLLER_SENSITIVITY
+                * dt;
         }
 
-        let pitch_limit = FRAC_PI_2 - 0.01;
-        self.pitch = self.pitch.clamp(-pitch_limit, pitch_limit);
-
-        // --- 2. Handle Speed Adjustment (Mouse Wheel and D-Pad) ---
+        // Adjust movement speed
         self.speed += input_manager.mouse_wheel.y * 2.0;
+
         if let Some(gamepad_id) = maybe_gamepad_id {
             if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::RightTrigger) {
                 self.speed += 10.0 * dt;
@@ -470,86 +478,87 @@ impl System for FreecamSystem {
                 self.speed -= 10.0 * dt;
             }
         }
+
         self.speed = self.speed.max(0.5);
         let mut speed = self.speed;
 
-        // --- 3. Calculate Final Orientation & Direction Vectors ---
-        let yaw_rotation = Quat::from_axis_angle(Vec3::Y, self.yaw);
-        let pitch_rotation = Quat::from_axis_angle(Vec3::X, self.pitch);
-        let orientation = yaw_rotation * pitch_rotation;
-        let forward = orientation * Vec3::Z;
-        let right = orientation * -Vec3::X;
+        // Sprint boost check
+        let mut boost_active = input_manager.is_key_active(KeyCode::ShiftLeft);
 
-        // --- 4. Handle Movement Input ---
-        let mut velocity = Vec3::ZERO;
-
-        // A. From Keyboard
-        for key in input_manager.active_keys.iter() {
-            match key {
-                KeyCode::KeyW => velocity += forward,
-                KeyCode::KeyS => velocity -= forward,
-                KeyCode::KeyA => velocity -= right,
-                KeyCode::KeyD => velocity += right,
-                KeyCode::Space => velocity += Vec3::Y,
-                KeyCode::KeyC => velocity -= Vec3::Y,
-                _ => {}
-            }
-        }
-
-        // B. From Controller
         if let Some(gamepad_id) = maybe_gamepad_id {
-            let left_stick_y =
-                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
-            let left_stick_x =
-                input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
-            velocity += forward * left_stick_y;
-            velocity += right * left_stick_x;
-
-            let move_up_amount = input_manager.get_right_trigger_value(gamepad_id);
-            let move_down_amount = input_manager.get_left_trigger_value(gamepad_id);
-            velocity += Vec3::Y * move_up_amount;
-            velocity -= Vec3::Y * move_down_amount;
-
             if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftThumb) {
+                boost_active = true;
                 speed *= 2.5;
             }
         }
 
-        if input_manager.is_key_active(KeyCode::ShiftLeft) {
+        if boost_active {
             speed *= 2.5;
         }
 
-        // --- 5. Apply Updates to ECS Components ---
         ecs.component_pool
             .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
                 |(transform, camera, _)| {
+                    // Extract current yaw & pitch from rotation
+                    let (mut yaw, mut pitch) = extract_yaw_pitch(transform.rotation);
+
+                    // Apply rotation deltas
+                    yaw += yaw_delta;
+                    pitch += pitch_delta;
+
+                    pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+
+                    // Rebuild rotation
+                    let yaw_rot = Quat::from_axis_angle(Vec3::Y, yaw);
+                    let pitch_rot = Quat::from_axis_angle(Vec3::X, pitch);
+                    let orientation = yaw_rot * pitch_rot;
+
                     transform.rotation = orientation;
-                    if velocity.length_squared() > 0.0 {
-                        transform.position += velocity.normalize() * speed * dt;
+
+                    // Movement vectors
+                    let forward = orientation * Vec3::Z;
+                    let right = orientation * -Vec3::X;
+
+                    let mut velocity = Vec3::ZERO;
+
+                    for key in &input_manager.active_keys {
+                        match key {
+                            KeyCode::KeyW => velocity += forward,
+                            KeyCode::KeyS => velocity -= forward,
+                            KeyCode::KeyA => velocity -= right,
+                            KeyCode::KeyD => velocity += right,
+                            KeyCode::Space => velocity += Vec3::Y,
+                            KeyCode::KeyC => velocity -= Vec3::Y,
+                            _ => {}
+                        }
                     }
 
-                    // --- FOV handling ---
-                    if self.base_fov.is_none() {
-                        self.base_fov = Some(camera.fov_y_rad);
-                        self.target_fov = camera.fov_y_rad;
+                    if let Some(gamepad_id) = maybe_gamepad_id {
+                        let lx =
+                            input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
+                        let ly =
+                            input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
+                        velocity += right * lx;
+                        velocity += forward * ly;
+
+                        let up = input_manager.get_right_trigger_value(gamepad_id);
+                        let down = input_manager.get_left_trigger_value(gamepad_id);
+                        velocity += Vec3::Y * up;
+                        velocity -= Vec3::Y * down;
                     }
 
-                    let base_fov = self.base_fov.unwrap();
-                    let boost_active = input_manager.is_key_active(KeyCode::ShiftLeft)
-                        || maybe_gamepad_id.map_or(false, |id| {
-                            input_manager.is_controller_button_active(id, gilrs::Button::LeftThumb)
-                        });
+                    if let Some(norm_velocity) = velocity.try_normalize() {
+                        transform.position += norm_velocity * speed * dt;
+                    }
 
-                    // Pick target fov
-                    self.target_fov = if boost_active {
-                        base_fov * 1.15
-                    } else {
-                        base_fov
-                    };
-
-                    // Smoothly interpolate camera.fov_y_rad -> target_fov
+                    // FOV boost handling
+                    let target_multiplier = if boost_active { BOOST_AMOUNT } else { 1.0 };
+                    let safe_multiplier = self.current_fov_multiplier.clamp(0.01, BOOST_AMOUNT);
+                    let base_fov = camera.fov_y_rad / safe_multiplier;
                     let t = 1.0 - (-self.fov_lerp_speed * dt).exp();
-                    camera.fov_y_rad = camera.fov_y_rad + (self.target_fov - camera.fov_y_rad) * t;
+                    self.current_fov_multiplier +=
+                        (target_multiplier - self.current_fov_multiplier) * t;
+                    camera.fov_y_rad = base_fov * self.current_fov_multiplier;
                 },
             );
     }

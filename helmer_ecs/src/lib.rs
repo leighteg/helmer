@@ -148,6 +148,14 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 HashSet::from([TypeId::of::<Transform>()]),
             );
 
+            scheduler.register_system(
+                EguiSystem {},
+                1,
+                vec![],
+                HashSet::new(),
+                HashSet::from([TypeId::of::<EguiResource>()]),
+            );
+
             // Priority 0: Rendering. Runs last to ensure it uses the final state of all transforms.
             scheduler.register_system(
                 RenderDataSystem::new(),
@@ -155,14 +163,6 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 vec![],
                 HashSet::from([TypeId::of::<Transform>()]),
                 HashSet::from([TypeId::of::<Transform>()]),
-            );
-
-            scheduler.register_system(
-                EguiSystem {},
-                -10,
-                vec![],
-                HashSet::new(),
-                HashSet::from([TypeId::of::<EguiResource>()]),
             );
 
             init_callback(

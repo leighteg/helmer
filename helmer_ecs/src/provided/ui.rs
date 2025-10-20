@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::Ordering};
 
 use helmer::{
     graphics::{config::RenderConfig, renderer::renderer::ShaderConstants},
-    provided::components::{Light, LightType, Transform},
+    provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
     runtime::{config::RuntimeConfig, runtime::PerformanceMetrics},
 };
 
@@ -133,6 +133,41 @@ impl StatsUI {
 
             egui_res.windows.push((
                 Box::new(move |ui, ecs, input| {
+                    ecs.component_pool
+                        .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(|(transform, camera, _)| {
+                            ui.heading("active camera");
+                            
+                            ui.label("position");
+                            ui.add(
+                                egui::DragValue::new(&mut transform.position.x)
+                                    .speed(0.1)
+                                    .prefix("x: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut transform.position.y)
+                                    .speed(0.1)
+                                    .prefix("y: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut transform.position.z)
+                                    .speed(0.1)
+                                    .prefix("z: "),
+                            );
+
+                            ui.label("rotation");
+                            ui.drag_angle(&mut transform.rotation.x);
+                            ui.drag_angle(&mut transform.rotation.y);
+                            ui.drag_angle(&mut transform.rotation.z);
+
+                            ui.add(
+                                egui::DragValue::new(&mut camera.fov_y_rad)
+                                    .speed(0.1)
+                                    .prefix("fov: "),
+                            );
+
+                            ui.separator();
+                        });
+
                     ecs.component_pool
                         .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, light)| {
                             if light.light_type != LightType::Directional {

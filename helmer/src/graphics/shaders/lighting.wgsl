@@ -349,7 +349,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let is_stylized = constants.light_model == 1u;
             let final_radiance = select(radiance * NdotL * shadow_multiplier, radiance * shadow_multiplier, is_stylized);
 
-            if constants.shade_mode == 2u { // FULL LIT
+            if constants.shade_mode == 0u { // FULL LIT
                 let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
                 let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
 
@@ -382,7 +382,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
 
         // Final contributions
-        let is_lit = constants.shade_mode == 2u;
+        let is_lit = constants.shade_mode == 0u;
         let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
         let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
         let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
@@ -393,7 +393,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     var out: LightingOutput;
 
-    if constants.shade_mode == 0u { // UNLIT
+    if constants.shade_mode == 1u { // UNLIT
         out.full_pbr = vec4<f32>(albedo, 1.0);
         out.diffuse_only = vec4(albedo + emission, 1.0);
     } else { // LIT

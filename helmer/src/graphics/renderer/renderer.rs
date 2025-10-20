@@ -334,7 +334,7 @@ pub struct SkyUniforms {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct ShaderConstants {
     // lighting
-    pub shade_mode: u32,  // 0 = unlit, 1 = lighting, 2 = full lit
+    pub shade_mode: u32,  // 0 = full lit, 1 = unlit, 2 = lighting
     pub light_model: u32, // 0 = standard, 2 = stylized lit
     pub skylight_contribution: u32,
 
@@ -376,7 +376,7 @@ impl Default for ShaderConstants {
     fn default() -> Self {
         Self {
             // lighting
-            shade_mode: 2,
+            shade_mode: 0,
             light_model: 0,
             skylight_contribution: 1,
 

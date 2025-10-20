@@ -64,9 +64,9 @@ impl StatsUI {
                             ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
 
                             let shade_mode = match render_cfg.shader_constants.shade_mode {
-                                0 => "unlit",
-                                1 => "lighting",
-                                2 => "lit",
+                                0 => "lit",
+                                1 => "unlit",
+                                2 => "lighting",
                                 _ => "???",
                             };
 

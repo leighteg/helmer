@@ -165,7 +165,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Final Combination ---
     let total_incoming_indirect_diffuse = (indirect_diffuse_ssgi * constants.ssgi_intensity) + irradiance;
 
-    let indirect_diffuse_contribution = select(total_incoming_indirect_diffuse, total_incoming_indirect_diffuse * albedo, constants.shade_mode != 1u) * kD_ibl * ao;
+    let indirect_diffuse_contribution = select(total_incoming_indirect_diffuse, total_incoming_indirect_diffuse * albedo, constants.shade_mode != 2u) * kD_ibl * ao;
 
     let total_indirect_specular = mix(specular_ibl * ao, indirect_specular_ssr, ssr_confidence);
 

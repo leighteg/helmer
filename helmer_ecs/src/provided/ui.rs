@@ -98,8 +98,8 @@ impl StatsUI {
                                     }
                                 });
 
-                            let sky_light_contribution_model_labels = ["none", "full contribution", "simple contribution", "stylized full contribution"];
-                            ComboBox::from_label("sky light contribution model")
+                            let sky_light_contribution_model_labels = ["none", "full", "stylized full", "simple"];
+                            ComboBox::from_label("sky light contribution")
                                 .selected_text(
                                     *sky_light_contribution_model_labels
                                         .get(render_cfg.shader_constants.skylight_contribution as usize)

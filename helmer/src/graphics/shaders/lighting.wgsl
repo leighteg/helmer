@@ -364,7 +364,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     // --- SKY AMBIENT LIGHTING ---
     let is_lit = constants.shade_mode == 0u;
 
-    if constants.skylight_contribution == 1u { // FULL contribution
+    if constants.skylight_contribution == 1u { // FULL
         // Use basic AO as the only practical occlusion method
         let sky_visibility = ao;
 
@@ -389,34 +389,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
         direct_lighting += total_contribution;
         diffuse_lighting += diffuse_contribution * sky_visibility;
-    } else if constants.skylight_contribution == 2u { // STYLIZED SIMPLE
-        // Flat ambient sky visibility (still modulated by AO)
-        var sky_visibility = ao;
-
-        // Optional: bias AO to prevent hard shadows
-        sky_visibility = mix(1.0, sky_visibility, 0.5); // soften AO
-
-        // FLATTENED sky color (sample straight up or constant)
-        var flat_sky_color = get_sky_color(vec3(0.0, 1.0, 0.0), normalize(sky.sun_direction));
-
-        // Optionally clamp or remap sky color to control saturation or contrast
-        flat_sky_color = pow(flat_sky_color, vec3(0.8)); // optional soft contrast boost
-
-        // Flatten BRDF response
-        let flat_kD = vec3(1.0) - metallic;     // Remove Fresnel dependency
-        let flat_kS = vec3(0.0);                // Kill specular if you want a cel/toon look
-
-        // Optional: hardcode reflection contribution or remove it
-        let reflection_contribution = vec3(0.0); // remove reflection
-
-        // Stylized flat contribution
-        let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
-        let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
-
-        // Add to lighting
-        direct_lighting += total_contribution;
-        diffuse_lighting += diffuse_contribution * sky_visibility;
-    } else if constants.skylight_contribution == 3u { // STYLIZED FULL
+    } else if constants.skylight_contribution == 2u { // STYLIZED FULL
         // Occlusion (you can keep AO if it's soft)
         var sky_visibility = ao;
         sky_visibility = mix(1.0, sky_visibility, 0.5); // soften the crevice AO
@@ -447,6 +420,33 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         let total_contribution = (diffuse_contribution + specular_contribution) * sky_visibility;
 
         // Accumulate
+        direct_lighting += total_contribution;
+        diffuse_lighting += diffuse_contribution * sky_visibility;
+    } else if constants.skylight_contribution == 3u { // SIMPLE
+        // Flat ambient sky visibility (still modulated by AO)
+        var sky_visibility = ao;
+
+        // Optional: bias AO to prevent hard shadows
+        sky_visibility = mix(1.0, sky_visibility, 0.5); // soften AO
+
+        // FLATTENED sky color (sample straight up or constant)
+        var flat_sky_color = get_sky_color(vec3(0.0, 1.0, 0.0), normalize(sky.sun_direction));
+
+        // Optionally clamp or remap sky color to control saturation or contrast
+        flat_sky_color = pow(flat_sky_color, vec3(0.8)); // optional soft contrast boost
+
+        // Flatten BRDF response
+        let flat_kD = vec3(1.0) - metallic;     // Remove Fresnel dependency
+        let flat_kS = vec3(0.0);                // Kill specular if you want a cel/toon look
+
+        // Optional: hardcode reflection contribution or remove it
+        let reflection_contribution = vec3(0.0); // remove reflection
+
+        // Stylized flat contribution
+        let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
+        let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+
+        // Add to lighting
         direct_lighting += total_contribution;
         diffuse_lighting += diffuse_contribution * sky_visibility;
     }

@@ -1,6 +1,6 @@
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 
 use super::{component::Component, ecs_core::Entity};
 

@@ -1,7 +1,7 @@
 use crate::graphics::renderer::renderer::{Aabb, RenderMessage, Vertex};
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
-use glam::{Mat4, Vec3};
-use gltf::{Material as GltfMaterial, Texture as GltfTexture};
+use glam::Mat4;
+use gltf::Texture as GltfTexture;
 use hashbrown::HashMap;
 use ktx2::Reader;
 use meshopt::{SimplifyOptions, VertexDataAdapter, optimize_vertex_cache, simplify};

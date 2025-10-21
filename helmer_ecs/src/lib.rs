@@ -13,20 +13,18 @@ use crate::{
         scene_system::SceneSpawningSystem,
     },
 };
-use proc::Component;
 
 use std::{
     any::TypeId,
     collections::HashSet,
-    sync::{Arc, Mutex},
 };
 
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
-        asset_server::{AssetServer, MeshAabbMap},
+        asset_server::AssetServer,
         config::RuntimeConfig,
-        runtime::{PerformanceMetrics, Runtime},
+        runtime::Runtime,
     },
 };
 

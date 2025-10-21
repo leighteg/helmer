@@ -1,23 +1,18 @@
 use crate::{
-    graphics::{
-        config::RenderConfig,
-        renderer::{
+    graphics::renderer::{
             error::RendererError,
             renderer::{
                 Aabb, CameraUniforms, CascadeUniform, EguiRenderData, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, PbrConstants, RenderData, RenderMessage, RenderTrait, ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms, TextureManager, Vertex, CASCADE_SPLITS, FRAMES_IN_FLIGHT, NUM_CASCADES, SHADOW_MAP_RESOLUTION
             },
         },
-    },
     provided::components::{Camera, LightType},
     runtime::asset_server::{AssetKind, MaterialGpuData},
 };
-use bytemuck::{Pod, Zeroable};
 use egui_wgpu::Renderer as EguiRenderer;
-use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use image::{GenericImageView, ImageFormat};
 use std::{
     collections::HashMap,
-    num::NonZeroU32,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -3388,7 +3383,7 @@ impl RenderTrait for DeferredRenderer {
                 );
 
                 {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Egui Render Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &output_view,

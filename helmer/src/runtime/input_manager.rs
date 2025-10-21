@@ -1,12 +1,11 @@
-use egui::Pos2;
 use gilrs::{Axis, Button, GamepadId, Gilrs};
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
-    keyboard::{Key, KeyCode, ModifiersState, NamedKey},
+    keyboard::{Key, KeyCode, ModifiersState},
 };
 
 #[derive(Debug, Clone)]

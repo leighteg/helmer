@@ -1,8 +1,6 @@
 use bevy_ecs::{resource::Resource, world::World};
-use egui::{ClippedPrimitive, Context, RawInput, TexturesDelta};
-use helmer::{graphics::renderer::renderer::EguiRenderData, runtime::{config::RuntimeConfig, input_manager::InputManager}};
-use std::sync::{Arc, atomic::Ordering, mpsc};
-use winit::keyboard::KeyCode;
+use egui::Context;
+use helmer::{graphics::renderer::renderer::EguiRenderData, runtime::input_manager::InputManager};
 
 #[derive(Default, Resource)]
 pub struct EguiResource {

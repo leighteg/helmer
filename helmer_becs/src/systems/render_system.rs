@@ -1,19 +1,17 @@
 use bevy_ecs::{
-    prelude::{Component, Entity, Query, Res, ResMut, Resource, With},
+    prelude::{Entity, Query, Res, ResMut, Resource, With},
     system::Local,
 };
-use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, Vec4, Vec4Swizzles};
 use hashbrown::HashMap;
 use helmer::{
     graphics::{
         config::RenderConfig,
         renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject},
     },
-    provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
-    runtime::{asset_server::AssetServer, config::RuntimeConfig},
+    provided::components::{Camera, Light, Transform},
 };
-use parking_lot::Mutex;
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 use tracing::warn;
 
 use crate::{

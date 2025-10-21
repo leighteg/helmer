@@ -10,12 +10,11 @@ use crate::{
     runtime::asset_server::{AssetKind, MaterialGpuData},
 };
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
+use glam::Vec3;
 use std::{
     collections::HashMap,
     env,
-    sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tracing::info;
 use winit::dpi::PhysicalSize;

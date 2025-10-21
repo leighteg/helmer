@@ -1,9 +1,8 @@
 use crate::{
     ecs::{ecs_core::ECSCore, system::System}, provided::ui::StatsUI,
 };
-use egui::{ClippedPrimitive, Context, RawInput, TexturesDelta};
+use egui::Context;
 use helmer::{graphics::renderer::renderer::EguiRenderData, runtime::{config::RuntimeConfig, input_manager::InputManager}};
-use std::sync::{Arc, atomic::Ordering, mpsc};
 use winit::keyboard::KeyCode;
 
 #[derive(Default)]

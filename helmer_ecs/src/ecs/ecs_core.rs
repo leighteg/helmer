@@ -5,7 +5,7 @@ use tracing::info;
 use crate::ecs::{resource::Resource, resource_pool::ResourcePool};
 
 use super::{
-    component::Component, component_pool::ComponentPool, system_scheduler::SystemScheduler,
+    component::Component, component_pool::ComponentPool,
 };
 
 pub type Entity = usize;

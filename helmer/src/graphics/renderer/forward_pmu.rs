@@ -1,13 +1,11 @@
-use crate::graphics::config::RenderConfig;
 use crate::graphics::renderer::error::RendererError;
 use crate::graphics::renderer::renderer::{
     Aabb, CameraUniforms, CascadeUniform, EguiRenderData, LightData, Mesh, MeshLod, ModelPushConstant, PbrConstants, RenderData, RenderMessage, RenderObject, RenderTrait, ShaderConstants, ShadowPipeline, ShadowUniforms, Vertex, CASCADE_SPLITS, FRAMES_IN_FLIGHT, NUM_CASCADES, SHADOW_MAP_RESOLUTION
 };
 use crate::provided::components::{Camera, LightType};
 use crate::runtime::asset_server::MaterialGpuData;
-use egui_wgpu::Renderer;
 use egui_wgpu::Renderer as EguiRenderer;
-use glam::{Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -1410,7 +1408,7 @@ impl RenderTrait for ForwardRendererPMU {
                 );
 
                 {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Egui Render Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &output_view,

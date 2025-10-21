@@ -7,10 +7,7 @@ use helmer_editor::systems::{
     interaction::freecam::FreecamSystem,
     ui::inspector::InspectorSystem,
 };
-use helmer::{
-    provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
-    runtime::runtime::Runtime,
-};
+use helmer::provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform};
 
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");

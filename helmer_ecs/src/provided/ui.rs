@@ -8,7 +8,7 @@ use helmer::{
 };
 
 use crate::{
-    ecs::{ecs_core::ECSCore, system::System},
+    ecs::ecs_core::ECSCore,
     egui_integration::EguiResource,
     physics::physics_resource::PhysicsResource,
 };

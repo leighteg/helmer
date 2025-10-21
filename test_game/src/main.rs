@@ -1,19 +1,17 @@
 use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
-use glam::{DVec2, Mat4, Quat, Vec3, Vec4, Vec4Swizzles};
+use glam::{DVec2, Mat4, Quat, Vec3, Vec4};
 use helmer::{
-    graphics::renderer::renderer::{Aabb, Material},
     provided::components::{
-        ActiveCamera, Camera, Light, LightType, MeshAsset, MeshRenderer, Transform,
+        ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform,
     },
-    runtime::{config::RuntimeConfig, input_manager::InputManager, runtime::Runtime},
+    runtime::{config::RuntimeConfig, input_manager::InputManager},
 };
 use helmer_ecs::{
     ecs::{
         ecs_core::{ECSCore, Entity},
         system::System,
     },
-    egui_integration::EguiResource,
     helmer_ecs_init,
     physics::{
         components::{ColliderShape, DynamicRigidBody, FixedCollider, PhysicsHandle},

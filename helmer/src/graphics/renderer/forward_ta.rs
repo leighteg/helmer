@@ -1,15 +1,12 @@
 //! src/graphics/renderer/forward_renderer.rs
 
 use crate::{
-    graphics::{
-        config::RenderConfig,
-        renderer::{
+    graphics::renderer::{
             error::RendererError,
             renderer::{
                 Aabb, CameraUniforms, CascadeUniform, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, PbrConstants, RenderData, RenderMessage, RenderTrait, ShadowPipeline, ShadowUniforms, Vertex, CASCADE_SPLITS, FRAMES_IN_FLIGHT, NUM_CASCADES
             },
         },
-    },
     provided::components::{Camera, LightType},
     runtime::asset_server::{AssetKind, MaterialGpuData},
 };

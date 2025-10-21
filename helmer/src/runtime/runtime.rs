@@ -1,16 +1,12 @@
-use core::time;
 use egui::ViewportId;
-use glam::{DVec2, UVec2, Vec2};
-use hashbrown::HashMap;
+use glam::{DVec2, UVec2};
 use parking_lot::{Mutex, RwLock};
-use resvg::{tiny_skia, usvg::Tree};
+use resvg::tiny_skia;
 use std::{
-    any::TypeId,
-    collections::HashSet,
     env,
     num::NonZeroU32,
     sync::{
-        Arc, Barrier,
+        Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc,
     },
@@ -23,26 +19,18 @@ use wgpu::{BackendOptions, Dx12BackendOptions};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
-    event::{MouseScrollDelta, TouchPhase, WindowEvent},
+    event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    platform::modifier_supplement::KeyEventExtModifierSupplement,
     window::{Window, WindowId},
 };
 
 use crate::{
-    graphics::{
-        config::RenderConfig,
-        renderer::{
-            deferred::DeferredRenderer,
-            renderer::{
-                Aabb, EguiRenderData, Material, RenderData, RenderLight, RenderMessage,
-                RenderObject, RenderTrait, Vertex, initialize_renderer,
+    graphics::renderer::renderer::{
+                EguiRenderData, RenderData, RenderMessage, RenderTrait, initialize_renderer,
             },
-        },
-    },
     runtime::{
-        asset_server::{AssetKind, AssetServer, MaterialGpuData},
+        asset_server::AssetServer,
         config::RuntimeConfig,
         input_manager::{InputEvent, InputManager},
     },

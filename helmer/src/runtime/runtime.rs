@@ -92,6 +92,8 @@ pub struct Runtime<T: Send + 'static = ()> {
 
     pub metrics: Arc<PerformanceMetrics>,
     pub config: Arc<RuntimeConfig>,
+
+    has_init: Arc<AtomicBool>,
 }
 
 impl<T: Send + 'static> Runtime<T> {
@@ -153,6 +155,8 @@ impl<T: Send + 'static> Runtime<T> {
 
             metrics: Arc::new(PerformanceMetrics::default()),
             config: Arc::new(RuntimeConfig::default()),
+
+            has_init: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -169,6 +173,7 @@ impl<T: Send + 'static> Runtime<T> {
         let metrics = Arc::clone(&self.metrics);
         let tick_callback = Arc::clone(&self.callbacks.tick);
         let user_state = Arc::clone(self.user_state.as_ref().unwrap());
+        let has_init = Arc::clone(&self.has_init);
 
         let sender = self.render_thread_sender.clone();
 
@@ -189,23 +194,25 @@ impl<T: Send + 'static> Runtime<T> {
                 asset_server.lock().update();
                 input_manager.write().process_events();
 
-                // MAIN LOGIC LOOP EXECUTION
-                let mut user_state_guard = user_state.lock();
-                let (render_data, egui_render_data) =
-                    tick_callback(dt, &mut input_manager.write(), &mut *user_state_guard);
-                drop(user_state_guard);
+                if has_init.load(Ordering::Relaxed) {
+                    // MAIN LOGIC LOOP EXECUTION
+                    let mut user_state_guard = user_state.lock();
+                    let (render_data, egui_render_data) =
+                        tick_callback(dt, &mut input_manager.write(), &mut *user_state_guard);
+                    drop(user_state_guard);
 
-                if let Some(data) = render_data {
-                    if sender.send(RenderMessage::RenderData(data)).is_err() {
-                        warn!("render thread disconnected");
-                        break;
+                    if let Some(data) = render_data {
+                        if sender.send(RenderMessage::RenderData(data)).is_err() {
+                            warn!("render thread disconnected");
+                            break;
+                        }
                     }
-                }
 
-                if let Some(data) = egui_render_data {
-                    if sender.send(RenderMessage::EguiData(data)).is_err() {
-                        warn!("render thread disconnected");
-                        break;
+                    if let Some(data) = egui_render_data {
+                        if sender.send(RenderMessage::EguiData(data)).is_err() {
+                            warn!("render thread disconnected");
+                            break;
+                        }
                     }
                 }
 
@@ -573,6 +580,8 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                     let user_state_clone = Arc::clone(user_state);
                     let mut state = user_state_clone.lock();
                     init_fn(self, &mut *state);
+
+                    self.has_init.store(true, Ordering::Relaxed);
                 }
             }
         }

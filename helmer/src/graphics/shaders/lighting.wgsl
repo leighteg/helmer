@@ -413,7 +413,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         let kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
         // Apply lighting
-        let diffuse_contribution = kD * albedo * sky_diffuse;
+        let diffuse_contribution = select(kD * sky_diffuse, kD * albedo * sky_diffuse, is_lit);
         let specular_contribution = kS * sky_specular;
 
         // Combine with AO

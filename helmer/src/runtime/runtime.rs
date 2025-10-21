@@ -458,11 +458,8 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
 
                 let mut input = self.input_manager.write();
                 input.window_size = UVec2::new(new_size.width, new_size.height);
-                input.scale_factor = if cfg!(target_os = "macos") {
-                    self.window.as_ref().unwrap().scale_factor() / 1.2
-                } else {
-                    self.window.as_ref().unwrap().scale_factor()
-                };
+                input.scale_factor = self.window.as_ref().unwrap().scale_factor();
+                drop(input);
 
                 if new_size.width > 0 && new_size.height > 0 {
                     if let Some(user_state) = &self.user_state {

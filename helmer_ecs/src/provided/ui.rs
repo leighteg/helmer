@@ -1,5 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
+use egui::ComboBox;
 use helmer::{
     graphics::{config::RenderConfig, renderer::renderer::ShaderConstants},
     provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
@@ -63,34 +64,39 @@ impl StatsUI {
                             ui.checkbox(&mut render_cfg.ssgi_denoise_pass, "SSGI Denoise Pass");
                             ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
 
-                            let shade_mode = match render_cfg.shader_constants.shade_mode {
-                                0 => "lit",
-                                1 => "unlit",
-                                2 => "lighting",
-                                _ => "???",
-                            };
+                            let shade_mode_labels = ["lit", "unlit", "lighting"];
+                            ComboBox::from_label("shade mode")
+                                .selected_text(
+                                    *shade_mode_labels
+                                        .get(render_cfg.shader_constants.shade_mode as usize)
+                                        .unwrap_or(&"???"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in shade_mode_labels.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut render_cfg.shader_constants.shade_mode,
+                                            i as u32,
+                                            *label,
+                                        );
+                                    }
+                                });
 
-                            ui.add(
-                                egui::DragValue::new(&mut render_cfg.shader_constants.shade_mode)
-                                    .range(0..=2)
-                                    .speed(0.05)
-                                    .prefix("shade mode: ")
-                                    .suffix(format!(" ({})", shade_mode)),
-                            );
-
-                            let light_model = match render_cfg.shader_constants.light_model {
-                                0 => "PBR lit",
-                                1 => "stylized lit",
-                                _ => "???",
-                            };
-
-                            ui.add(
-                                egui::DragValue::new(&mut render_cfg.shader_constants.light_model)
-                                    .range(0..=1)
-                                    .speed(0.03)
-                                    .prefix("light model: ")
-                                    .suffix(format!(" ({})", light_model)),
-                            );
+                            let light_model_labels = ["PBR lit", "stylized lit"];
+                            ComboBox::from_label("lighting model")
+                                .selected_text(
+                                    *light_model_labels
+                                        .get(render_cfg.shader_constants.light_model as usize)
+                                        .unwrap_or(&"???"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in light_model_labels.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut render_cfg.shader_constants.light_model,
+                                            i as u32,
+                                            *label,
+                                        );
+                                    }
+                                });
 
                             let mut is_skylight_contribution_checked =
                                 render_cfg.shader_constants.skylight_contribution != 0;
@@ -134,39 +140,41 @@ impl StatsUI {
             egui_res.windows.push((
                 Box::new(move |ui, ecs, input| {
                     ecs.component_pool
-                        .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(|(transform, camera, _)| {
-                            ui.heading("active camera");
-                            
-                            ui.label("position");
-                            ui.add(
-                                egui::DragValue::new(&mut transform.position.x)
-                                    .speed(0.1)
-                                    .prefix("x: "),
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut transform.position.y)
-                                    .speed(0.1)
-                                    .prefix("y: "),
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut transform.position.z)
-                                    .speed(0.1)
-                                    .prefix("z: "),
-                            );
+                        .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
+                            |(transform, camera, _)| {
+                                ui.heading("active camera");
 
-                            ui.label("rotation");
-                            ui.drag_angle(&mut transform.rotation.x);
-                            ui.drag_angle(&mut transform.rotation.y);
-                            ui.drag_angle(&mut transform.rotation.z);
+                                ui.label("position");
+                                ui.add(
+                                    egui::DragValue::new(&mut transform.position.x)
+                                        .speed(0.1)
+                                        .prefix("x: "),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut transform.position.y)
+                                        .speed(0.1)
+                                        .prefix("y: "),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut transform.position.z)
+                                        .speed(0.1)
+                                        .prefix("z: "),
+                                );
 
-                            ui.add(
-                                egui::DragValue::new(&mut camera.fov_y_rad)
-                                    .speed(0.1)
-                                    .prefix("fov: "),
-                            );
+                                ui.label("rotation");
+                                ui.drag_angle(&mut transform.rotation.x);
+                                ui.drag_angle(&mut transform.rotation.y);
+                                ui.drag_angle(&mut transform.rotation.z);
 
-                            ui.separator();
-                        });
+                                ui.add(
+                                    egui::DragValue::new(&mut camera.fov_y_rad)
+                                        .speed(0.1)
+                                        .prefix("fov: "),
+                                );
+
+                                ui.separator();
+                            },
+                        );
 
                     ecs.component_pool
                         .query_exact_mut_for_each::<(Transform, Light), _>(|(transform, light)| {

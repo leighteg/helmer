@@ -364,6 +364,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     // --- SKY AMBIENT LIGHTING ---
     if bool(constants.skylight_contribution) {
+        let is_lit = constants.shade_mode == 0u;
+
         if constants.light_model == 0u { // FULL PBR
             // Use basic AO as the only practical occlusion method
             let sky_visibility = ao;
@@ -383,7 +385,6 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
 
             // Final contributions
-            let is_lit = constants.shade_mode == 0u;
             let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
             let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
             let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
@@ -411,7 +412,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let reflection_contribution = vec3(0.0); // remove reflection
 
             // Stylized flat contribution
-            let diffuse_contribution = flat_kD * albedo * flat_sky_color;
+            let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
             let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
 
             // Add to lighting

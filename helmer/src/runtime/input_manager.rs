@@ -1,9 +1,8 @@
-use std::sync::Mutex;
-
 use egui::Pos2;
 use gilrs::{Axis, Button, GamepadId, Gilrs};
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::{HashMap, HashSet};
+use parking_lot::Mutex;
 use tracing::{info, warn};
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
@@ -84,7 +83,7 @@ impl InputManager {
 
     /// Called by the main/window thread to queue keyboard and mouse events.
     pub fn push_event(&self, event: InputEvent) {
-        self.event_queue.lock().unwrap().push(event);
+        self.event_queue.lock().push(event);
     }
 
     /// Called by the logic thread once per tick to process all pending input.
@@ -93,7 +92,7 @@ impl InputManager {
 
         // --- 1. Poll gilrs for controller events and update state directly ---
         {
-            let mut gilrs = self.gilrs.lock().unwrap();
+            let mut gilrs = self.gilrs.lock();
             while let Some(gilrs::Event { id, event, .. }) = gilrs.next_event() {
                 match event {
                     // Handle analog triggers reported as `ButtonChanged` events.
@@ -157,7 +156,7 @@ impl InputManager {
 
         // --- 2. Process winit events (keyboard/mouse) from the queue ---
         let events = {
-            let mut queue = self.event_queue.lock().unwrap();
+            let mut queue = self.event_queue.lock();
             std::mem::take(&mut *queue)
         };
 
@@ -266,7 +265,7 @@ impl InputManager {
                     (position.x / self.scale_factor) as f32,
                     (position.y / self.scale_factor) as f32,
                 );
-                *self.egui_pointer_pos.lock().unwrap() = Some(pos);
+                *self.egui_pointer_pos.lock() = Some(pos);
             }
 
             WindowEvent::MouseInput {
@@ -274,11 +273,11 @@ impl InputManager {
                 button: MouseButton::Left,
                 ..
             } => {
-                *self.egui_pointer_down.lock().unwrap() = state.is_pressed();
+                *self.egui_pointer_down.lock() = state.is_pressed();
             }
 
             WindowEvent::ModifiersChanged(new_state) => {
-                let mut mods = self.egui_modifiers.lock().unwrap();
+                let mut mods = self.egui_modifiers.lock();
                 mods.shift = new_state.state().contains(ModifiersState::SHIFT);
                 mods.ctrl = new_state.state().contains(ModifiersState::CONTROL);
                 mods.alt = new_state.state().contains(ModifiersState::ALT);
@@ -300,18 +299,18 @@ impl InputManager {
                 // Only handle physical characters and known named keys
                 if let Key::Named(named) = logical_key {
                     if let Some(egui_key) = winit_key_to_egui(*named) {
-                        let mut events = self.egui_events.lock().unwrap();
+                        let mut events = self.egui_events.lock();
                         events.push(egui::Event::Key {
                             key: egui_key,
                             physical_key: None,
                             pressed,
                             repeat: *repeat,
-                            modifiers: *self.egui_modifiers.lock().unwrap(),
+                            modifiers: *self.egui_modifiers.lock(),
                         });
                     }
                 } else if let Key::Character(c) = logical_key {
                     if pressed {
-                        let mut events = self.egui_events.lock().unwrap();
+                        let mut events = self.egui_events.lock();
                         events.push(egui::Event::Text(c.to_string()));
                     }
                 }
@@ -320,8 +319,8 @@ impl InputManager {
             WindowEvent::MouseWheel { delta, .. } => {
                 use winit::event::MouseScrollDelta;
 
-                let mut events = self.egui_events.lock().unwrap();
-                let modifiers = *self.egui_modifiers.lock().unwrap();
+                let mut events = self.egui_events.lock();
+                let modifiers = *self.egui_modifiers.lock();
 
                 match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
@@ -346,18 +345,13 @@ impl InputManager {
     }
 
     pub fn build_egui_raw_input(&self, screen_size: UVec2) -> egui::RawInput {
-        let pointer_pos = *self.egui_pointer_pos.lock().unwrap();
-        let pointer_down = *self.egui_pointer_down.lock().unwrap();
-        let last_pointer_pos = *self.egui_last_pointer_pos.lock().unwrap();
-        let last_pointer_down = *self.egui_last_pointer_down.lock().unwrap();
-        let modifiers = *self.egui_modifiers.lock().unwrap();
+        let pointer_pos = *self.egui_pointer_pos.lock();
+        let pointer_down = *self.egui_pointer_down.lock();
+        let last_pointer_pos = *self.egui_last_pointer_pos.lock();
+        let last_pointer_down = *self.egui_last_pointer_down.lock();
+        let modifiers = *self.egui_modifiers.lock();
 
-        let mut events = self
-            .egui_events
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect::<Vec<_>>();
+        let mut events = self.egui_events.lock().drain(..).collect::<Vec<_>>();
 
         if pointer_pos != last_pointer_pos {
             if let Some(pos) = pointer_pos {
@@ -376,8 +370,8 @@ impl InputManager {
             }
         }
 
-        *self.egui_last_pointer_pos.lock().unwrap() = pointer_pos;
-        *self.egui_last_pointer_down.lock().unwrap() = pointer_down;
+        *self.egui_last_pointer_pos.lock() = pointer_pos;
+        *self.egui_last_pointer_down.lock() = pointer_down;
 
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(

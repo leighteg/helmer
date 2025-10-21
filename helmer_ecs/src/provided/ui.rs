@@ -98,19 +98,22 @@ impl StatsUI {
                                     }
                                 });
 
-                            let mut is_skylight_contribution_checked =
-                                render_cfg.shader_constants.skylight_contribution != 0;
-
-                            ui.checkbox(
-                                &mut is_skylight_contribution_checked,
-                                "skylight contribution",
-                            );
-
-                            if is_skylight_contribution_checked {
-                                render_cfg.shader_constants.skylight_contribution = 1
-                            } else {
-                                render_cfg.shader_constants.skylight_contribution = 0
-                            }
+                            let sky_light_contribution_model_labels = ["none", "full contribution", "simple contribution", "stylized full contribution"];
+                            ComboBox::from_label("sky light contribution model")
+                                .selected_text(
+                                    *sky_light_contribution_model_labels
+                                        .get(render_cfg.shader_constants.skylight_contribution as usize)
+                                        .unwrap_or(&"???"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, label) in sky_light_contribution_model_labels.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut render_cfg.shader_constants.skylight_contribution,
+                                            i as u32,
+                                            *label,
+                                        );
+                                    }
+                                });
 
                             ui.separator();
                             ui.heading("Culling & LOD");

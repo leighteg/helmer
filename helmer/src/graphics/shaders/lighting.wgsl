@@ -34,7 +34,6 @@ struct Constants {
 
     // composite
     ssgi_intensity: f32,
-
     _padding: vec4<f32>,
 };
 
@@ -363,62 +362,93 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
     }
 
     // --- SKY AMBIENT LIGHTING ---
-    if bool(constants.skylight_contribution) {
-        let is_lit = constants.shade_mode == 0u;
+    let is_lit = constants.shade_mode == 0u;
 
-        if constants.light_model == 0u { // FULL PBR
-            // Use basic AO as the only practical occlusion method
-            let sky_visibility = ao;
+    if constants.skylight_contribution == 1u { // FULL contribution
+        // Use basic AO as the only practical occlusion method
+        let sky_visibility = ao;
 
-            // Fix grit: gentle bias for rough surfaces
-            let up_bias = mix(0.25, 0.0, 1.0 - roughness);
-            let smoothed_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), up_bias));
+        // Fix grit: gentle bias for rough surfaces
+        let up_bias = mix(0.25, 0.0, 1.0 - roughness);
+        let smoothed_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), up_bias));
 
-            // Sky color sampling
-            let diffuse_sky_color = get_sky_color(smoothed_normal, normalize(sky.sun_direction));
-            let R = reflect(-V, N);
-            let reflection_sky_color = get_sky_color(R, normalize(sky.sun_direction));
+        // Sky color sampling
+        let diffuse_sky_color = get_sky_color(smoothed_normal, normalize(sky.sun_direction));
+        let R = reflect(-V, N);
+        let reflection_sky_color = get_sky_color(R, normalize(sky.sun_direction));
 
-            // PBR calculations
-            let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
-            let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
-            let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
+        // PBR calculations
+        let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
+        let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
+        let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
 
-            // Final contributions
-            let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
-            let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
-            let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+        // Final contributions
+        let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
+        let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
+        let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
 
-            direct_lighting += total_contribution;
-            diffuse_lighting += diffuse_contribution * sky_visibility;
-        } else { // STYLIZED
-            // Flat ambient sky visibility (still modulated by AO)
-            var sky_visibility = ao;
+        direct_lighting += total_contribution;
+        diffuse_lighting += diffuse_contribution * sky_visibility;
+    } else if constants.skylight_contribution == 2u { // STYLIZED SIMPLE
+        // Flat ambient sky visibility (still modulated by AO)
+        var sky_visibility = ao;
 
-            // Optional: bias AO to prevent hard shadows
-            sky_visibility = mix(1.0, sky_visibility, 0.5); // soften AO
+        // Optional: bias AO to prevent hard shadows
+        sky_visibility = mix(1.0, sky_visibility, 0.5); // soften AO
 
-            // FLATTENED sky color (sample straight up or constant)
-            var flat_sky_color = get_sky_color(vec3(0.0, 1.0, 0.0), normalize(sky.sun_direction));
+        // FLATTENED sky color (sample straight up or constant)
+        var flat_sky_color = get_sky_color(vec3(0.0, 1.0, 0.0), normalize(sky.sun_direction));
 
-            // Optionally clamp or remap sky color to control saturation or contrast
-            flat_sky_color = pow(flat_sky_color, vec3(0.8)); // optional soft contrast boost
+        // Optionally clamp or remap sky color to control saturation or contrast
+        flat_sky_color = pow(flat_sky_color, vec3(0.8)); // optional soft contrast boost
 
-            // Flatten BRDF response
-            let flat_kD = vec3(1.0) - metallic;     // Remove Fresnel dependency
-            let flat_kS = vec3(0.0);                // Kill specular if you want a cel/toon look
+        // Flatten BRDF response
+        let flat_kD = vec3(1.0) - metallic;     // Remove Fresnel dependency
+        let flat_kS = vec3(0.0);                // Kill specular if you want a cel/toon look
 
-            // Optional: hardcode reflection contribution or remove it
-            let reflection_contribution = vec3(0.0); // remove reflection
+        // Optional: hardcode reflection contribution or remove it
+        let reflection_contribution = vec3(0.0); // remove reflection
 
-            // Stylized flat contribution
-            let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
-            let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+        // Stylized flat contribution
+        let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
+        let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
 
-            // Add to lighting
-            direct_lighting += total_contribution;
-            diffuse_lighting += diffuse_contribution * sky_visibility;
-        }
+        // Add to lighting
+        direct_lighting += total_contribution;
+        diffuse_lighting += diffuse_contribution * sky_visibility;
+    } else if constants.skylight_contribution == 3u { // STYLIZED FULL
+        // Occlusion (you can keep AO if it's soft)
+        var sky_visibility = ao;
+        sky_visibility = mix(1.0, sky_visibility, 0.5); // soften the crevice AO
+
+        // Normal for sky sampling: strongly biased upward (stylized)
+        let biased_normal = normalize(mix(N, vec3(0.0, 1.0, 0.0), 0.85)); // mostly up
+
+        // Reflection direction: fake but stable (stylized)
+        let biased_reflection = normalize(mix(reflect(-V, N), reflect(-V, vec3(0.0, 1.0, 0.0)), 0.7));
+
+        // Sky sampling (flattened)
+        let sky_diffuse = get_sky_color(biased_normal, sky.sun_direction);
+        let sky_specular = get_sky_color(biased_reflection, sky.sun_direction);
+
+        // Fresnel (flattened or soft)
+        var F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
+        F_ambient = mix(F_ambient, vec3(0.04), 0.5); // soften the view dependency
+
+        // Energy-conserving mix (preserve PBR material response)
+        let kS = F_ambient * (1.0 - roughness * 0.7);
+        let kD = (vec3(1.0) - kS) * (1.0 - metallic);
+
+        // Apply lighting
+        let diffuse_contribution = kD * albedo * sky_diffuse;
+        let specular_contribution = kS * sky_specular;
+
+        // Combine with AO
+        let total_contribution = (diffuse_contribution + specular_contribution) * sky_visibility;
+
+        // Accumulate
+        direct_lighting += total_contribution;
+        diffuse_lighting += diffuse_contribution * sky_visibility;
     }
 
     var out: LightingOutput;

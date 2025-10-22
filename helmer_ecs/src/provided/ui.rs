@@ -8,8 +8,7 @@ use helmer::{
 };
 
 use crate::{
-    ecs::ecs_core::ECSCore,
-    egui_integration::EguiResource,
+    ecs::ecs_core::ECSCore, egui_integration::EguiResource,
     physics::physics_resource::PhysicsResource,
 };
 
@@ -81,39 +80,49 @@ impl StatsUI {
                                     }
                                 });
 
-                            let light_model_labels = ["PBR lit", "stylized lit"];
-                            ComboBox::from_label("lighting model")
-                                .selected_text(
-                                    *light_model_labels
-                                        .get(render_cfg.shader_constants.light_model as usize)
-                                        .unwrap_or(&"???"),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for (i, label) in light_model_labels.iter().enumerate() {
-                                        ui.selectable_value(
-                                            &mut render_cfg.shader_constants.light_model,
-                                            i as u32,
-                                            *label,
-                                        );
-                                    }
-                                });
+                            if render_cfg.shader_constants.shade_mode != 1 {
+                                let light_model_labels = ["PBR lit", "stylized lit"];
+                                ComboBox::from_label("lighting model")
+                                    .selected_text(
+                                        *light_model_labels
+                                            .get(render_cfg.shader_constants.light_model as usize)
+                                            .unwrap_or(&"???"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, label) in light_model_labels.iter().enumerate() {
+                                            ui.selectable_value(
+                                                &mut render_cfg.shader_constants.light_model,
+                                                i as u32,
+                                                *label,
+                                            );
+                                        }
+                                    });
 
-                            let sky_light_contribution_model_labels = ["none", "full", "stylized full", "simple"];
-                            ComboBox::from_label("sky light contribution")
-                                .selected_text(
-                                    *sky_light_contribution_model_labels
-                                        .get(render_cfg.shader_constants.skylight_contribution as usize)
-                                        .unwrap_or(&"???"),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for (i, label) in sky_light_contribution_model_labels.iter().enumerate() {
-                                        ui.selectable_value(
-                                            &mut render_cfg.shader_constants.skylight_contribution,
-                                            i as u32,
-                                            *label,
-                                        );
-                                    }
-                                });
+                                let sky_light_contribution_model_labels =
+                                    ["none", "full", "stylized full", "simple"];
+                                ComboBox::from_label("sky light contribution")
+                                    .selected_text(
+                                        *sky_light_contribution_model_labels
+                                            .get(
+                                                render_cfg.shader_constants.skylight_contribution
+                                                    as usize,
+                                            )
+                                            .unwrap_or(&"???"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, label) in
+                                            sky_light_contribution_model_labels.iter().enumerate()
+                                        {
+                                            ui.selectable_value(
+                                                &mut render_cfg
+                                                    .shader_constants
+                                                    .skylight_contribution,
+                                                i as u32,
+                                                *label,
+                                            );
+                                        }
+                                    });
+                            }
 
                             ui.separator();
                             ui.heading("Culling & LOD");

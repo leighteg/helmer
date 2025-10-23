@@ -303,6 +303,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
     let view_pos = camera.view_matrix * vec4<f32>(world_position, 1.0);
 
+    let is_lit = constants.shade_mode == 0u;
+
     if constants.shade_mode != 1u {
         for (var i = 0u; i < camera.light_count; i = i + 1u) {
             let light = lights_buffer[i];
@@ -349,22 +351,15 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
                 let is_stylized = constants.light_model == 1u;
                 let final_radiance = select(radiance * NdotL * shadow_multiplier, radiance * shadow_multiplier, is_stylized);
 
-                if constants.shade_mode == 0u { // FULL LIT
-                    let current_pbr = (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf) * final_radiance;
-                    let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
+                let current_pbr = select((kD * (1.0 - metallic) * PI + specular_brdf), (kD * (1.0 - metallic) * diffuse_brdf + specular_brdf), is_lit) * final_radiance;
+                let current_diffuse_only = (kD * (1.0 - metallic) * diffuse_brdf) * final_radiance;
 
-                    direct_lighting += current_pbr;
-                    diffuse_lighting += current_diffuse_only;
-                } else {
-                    direct_lighting += final_radiance;
-                    diffuse_lighting += final_radiance;
-                }
+                direct_lighting += current_pbr;
+                diffuse_lighting += current_diffuse_only;
             }
         }
 
         // --- SKY AMBIENT LIGHTING ---
-        let is_lit = constants.shade_mode == 0u;
-
         if constants.skylight_contribution == 1u { // FULL
             // Use basic AO as the only practical occlusion method
             let sky_visibility = ao;

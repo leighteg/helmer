@@ -312,10 +312,6 @@ impl System for ConfigToggleSystem {
                 KeyCode::KeyG => {
                     runtime_config.render_config.ssgi_pass = !runtime_config.render_config.ssgi_pass
                 }
-                KeyCode::Digit0 => {
-                    runtime_config.render_config.direct_lighting_pass =
-                        !runtime_config.render_config.direct_lighting_pass
-                }
                 KeyCode::KeyH => {
                     runtime_config.render_config.sky_pass = !runtime_config.render_config.sky_pass
                 }
@@ -330,6 +326,11 @@ impl System for ConfigToggleSystem {
                     runtime_config.render_config.lod = !runtime_config.render_config.lod
                 }
                 KeyCode::KeyU => runtime_config.egui = !runtime_config.egui,
+
+                KeyCode::Digit0 => runtime_config.render_config.shader_constants.shade_mode = 1,
+                KeyCode::Digit1 => runtime_config.render_config.shader_constants.shade_mode = 0,
+                KeyCode::Digit2 => runtime_config.render_config.shader_constants.shade_mode = 2,
+
                 _ => {}
             }
         }

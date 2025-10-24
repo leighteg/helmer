@@ -1,8 +1,15 @@
+use std::sync::Arc;
+
 use crate::{
-    ecs::{ecs_core::ECSCore, system::System}, provided::ui::StatsUI,
+    ecs::{ecs_core::ECSCore, system::System},
+    provided::ui::StatsUI,
 };
 use egui::Context;
-use helmer::{graphics::renderer::renderer::EguiRenderData, runtime::{config::RuntimeConfig, input_manager::InputManager}};
+use helmer::{
+    graphics::renderer::renderer::EguiRenderData,
+    runtime::{config::RuntimeConfig, input_manager::InputManager},
+};
+use parking_lot::RwLock;
 use winit::keyboard::KeyCode;
 
 #[derive(Default)]
@@ -13,6 +20,7 @@ pub struct EguiResource {
         Box<dyn FnMut(&mut egui::Ui, &mut ECSCore, &InputManager) + Send + Sync>,
         String,
     )>,
+    pub accepting_input: bool,
     pub stats_ui: bool,
 }
 
@@ -28,10 +36,12 @@ impl System for EguiSystem {
             ecs.resource_scope::<EguiResource, _>(|ecs, egui_res| {
                 if !runtime_cfg.egui {
                     runtime_cfg.render_config.egui_pass = false;
+
                     return;
-                } else if !runtime_cfg.render_config.egui_pass {
-                    runtime_cfg.render_config.egui_pass = true;
                 }
+
+                runtime_cfg.render_config.egui_pass = true;
+                egui_res.accepting_input = true;
 
                 if input.is_key_active(KeyCode::ControlLeft)
                     && input.was_just_pressed(KeyCode::KeyI)

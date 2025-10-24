@@ -14,18 +14,11 @@ use crate::{
     },
 };
 
-use std::{
-    any::TypeId,
-    collections::HashSet,
-};
+use std::{any::TypeId, collections::HashSet};
 
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
-    runtime::{
-        asset_server::AssetServer,
-        config::RuntimeConfig,
-        runtime::Runtime,
-    },
+    runtime::{asset_server::AssetServer, config::RuntimeConfig, runtime::Runtime},
 };
 
 use crate::ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler};
@@ -171,15 +164,17 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
         },
         |dt, input_manager, (ecs_core, scheduler)| {
             ecs_core.resource_scope::<RuntimeConfig, _>(|ecs_core, runtime_config| {
-                if runtime_config.egui {
-                    ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                    if runtime_config.egui {
                         if input_manager.active_mouse_buttons.len() == 0 {
                             input_manager.egui_wants_pointer =
                                 egui_resource.ctx.wants_pointer_input();
                         }
                         input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
-                    });
-                }
+                    } else if egui_resource.accepting_input {
+                        input_manager.clear_egui_state();
+                    }
+                });
             });
 
             scheduler.run_all(dt, ecs_core, input_manager);

@@ -524,17 +524,9 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             WindowEvent::Focused(is_focused) => {
                 if !is_focused { // clear InputManager's state when we unfocus the window
                     let mut input_manager_guard = self.input_manager.write();
-
-                    input_manager_guard.egui_events.lock().clear();
-                    input_manager_guard.egui_wants_key = false;
-                    input_manager_guard.egui_wants_pointer = false;
-                    *input_manager_guard.egui_last_pointer_down.lock() = false;
-                    *input_manager_guard.egui_last_pointer_pos.lock() = None;
-                    *input_manager_guard.egui_modifiers.lock() = egui::Modifiers::NONE;
-
-                    input_manager_guard.active_keys.clear();
-                    input_manager_guard.active_mouse_buttons.clear();
-                    input_manager_guard.just_pressed.clear();
+                    
+                    input_manager_guard.clear_egui_state();
+                    input_manager_guard.clear_queues();
                 }
             }
 

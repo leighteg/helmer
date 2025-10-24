@@ -382,6 +382,21 @@ impl InputManager {
             ..Default::default()
         }
     }
+
+    pub fn clear_queues(&mut self) {
+        self.active_keys.clear();
+        self.active_mouse_buttons.clear();
+        self.just_pressed.clear();
+    }
+
+    pub fn clear_egui_state(&mut self) {
+        self.egui_events.lock().clear();
+        self.egui_wants_key = false;
+        self.egui_wants_pointer = false;
+        *self.egui_last_pointer_down.lock() = false;
+        *self.egui_last_pointer_pos.lock() = None;
+        *self.egui_modifiers.lock() = egui::Modifiers::NONE;
+    }
 }
 
 fn winit_key_to_egui(key: winit::keyboard::NamedKey) -> Option<egui::Key> {

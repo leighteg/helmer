@@ -379,9 +379,17 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - metallic);
 
             // Final contributions
-            let diffuse_contribution = select(kD_ambient * diffuse_sky_color, kD_ambient * albedo * diffuse_sky_color, is_lit);
-            let reflection_contribution = select(kS_ambient * reflection_sky_color, kS_ambient * reflection_sky_color, is_lit);
-            let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+            let diffuse_contribution = kD_ambient * albedo * diffuse_sky_color;
+            let reflection_contribution = kS_ambient * reflection_sky_color;
+
+            // Direct lighting excludes albedo when not lit
+            let direct_diffuse_contribution = select(
+                kD_ambient * diffuse_sky_color,
+                diffuse_contribution,
+                is_lit
+            );
+
+            let total_contribution = (direct_diffuse_contribution + reflection_contribution) * sky_visibility;
 
             direct_lighting += total_contribution;
             diffuse_lighting += diffuse_contribution * sky_visibility;
@@ -408,14 +416,19 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let kS = F_ambient * (1.0 - roughness * 0.7);
             let kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
-            // Apply lighting
-            let diffuse_contribution = select(kD * sky_diffuse, kD * albedo * sky_diffuse, is_lit);
+            // Final contributions
+            let diffuse_contribution = kD * albedo * sky_diffuse;
             let specular_contribution = kS * sky_specular;
 
-            // Combine with AO
-            let total_contribution = (diffuse_contribution + specular_contribution) * sky_visibility;
+            // Direct lighting excludes albedo when not lit
+            let direct_diffuse_contribution = select(
+                kD * sky_diffuse,
+                diffuse_contribution,
+                is_lit
+            );
 
-            // Accumulate
+            let total_contribution = (direct_diffuse_contribution + specular_contribution) * sky_visibility;
+
             direct_lighting += total_contribution;
             diffuse_lighting += diffuse_contribution * sky_visibility;
         } else if constants.skylight_contribution == 3u { // SIMPLE
@@ -439,8 +452,16 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let reflection_contribution = vec3(0.0); // remove reflection
 
             // Stylized flat contribution
-            let diffuse_contribution = select(flat_kD * flat_sky_color, flat_kD * albedo * flat_sky_color, is_lit);
-            let total_contribution = (diffuse_contribution + reflection_contribution) * sky_visibility;
+            let diffuse_contribution = flat_kD * albedo * flat_sky_color;
+
+            // Direct lighting excludes albedo when not lit
+            let direct_diffuse_contribution = select(
+                flat_kD * flat_sky_color,
+                diffuse_contribution,
+                is_lit
+            );
+
+            let total_contribution = (direct_diffuse_contribution + reflection_contribution) * sky_visibility;
 
             // Add to lighting
             direct_lighting += total_contribution;

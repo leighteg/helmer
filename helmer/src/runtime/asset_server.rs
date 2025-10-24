@@ -1,4 +1,4 @@
-use crate::graphics::renderer::renderer::{Aabb, RenderMessage, Vertex};
+use crate::graphics::renderer_common::common::{Aabb, RenderMessage, Vertex};
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
 use glam::Mat4;
 use gltf::Texture as GltfTexture;

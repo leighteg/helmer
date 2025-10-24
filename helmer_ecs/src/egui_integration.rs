@@ -6,7 +6,7 @@ use crate::{
 };
 use egui::Context;
 use helmer::{
-    graphics::renderer::renderer::EguiRenderData,
+    graphics::renderer_common::common::EguiRenderData,
     runtime::{config::RuntimeConfig, input_manager::InputManager},
 };
 use parking_lot::RwLock;

@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum RendererError {
-    #[error("MEV specific error: {0}")]
-    MevError(String), // For errors originating from the mev library itself
-
     #[error("Device initialization failed: {0}")]
     DeviceInitialization(String),
 

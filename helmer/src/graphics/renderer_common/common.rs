@@ -1,8 +1,9 @@
 use crate::{
     graphics::{
         config::RenderConfig,
-        renderer::{
-            deferred::DeferredRenderer, error::RendererError, forward_pmu::ForwardRendererPMU,
+        renderer_common::error::RendererError,
+        renderers::{
+            deferred::DeferredRenderer, forward_pmu::ForwardRendererPMU,
             forward_ta::ForwardRendererTA,
         },
     },
@@ -11,11 +12,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
-use std::{
-    collections::HashMap,
-    env,
-    time::Instant,
-};
+use std::{collections::HashMap, env, time::Instant};
 use tracing::info;
 use winit::dpi::PhysicalSize;
 

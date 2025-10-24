@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::Ordering};
 
 use egui::ComboBox;
 use helmer::{
-    graphics::{config::RenderConfig, renderer::renderer::ShaderConstants},
+    graphics::{config::RenderConfig, renderer_common::common::ShaderConstants},
     provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
     runtime::{config::RuntimeConfig, runtime::PerformanceMetrics},
 };

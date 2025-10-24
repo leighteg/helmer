@@ -1,4 +1,4 @@
-use crate::graphics::renderer::renderer::ShaderConstants;
+use crate::graphics::renderer_common::common::ShaderConstants;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderConfig {

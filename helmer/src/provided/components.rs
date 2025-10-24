@@ -1,4 +1,4 @@
-use crate::graphics::renderer::renderer::Vertex;
+use crate::graphics::renderer_common::common::Vertex;
 use glam::{Mat4, Quat, Vec2, Vec3};
 
 // --- Core Transform Component ---

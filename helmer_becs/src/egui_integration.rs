@@ -1,6 +1,6 @@
 use bevy_ecs::{resource::Resource, world::World};
 use egui::Context;
-use helmer::{graphics::renderer::renderer::EguiRenderData, runtime::input_manager::InputManager};
+use helmer::{graphics::renderer_common::common::EguiRenderData, runtime::input_manager::InputManager};
 
 #[derive(Default, Resource)]
 pub struct EguiResource {

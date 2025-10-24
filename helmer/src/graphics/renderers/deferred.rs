@@ -1,10 +1,14 @@
 use crate::{
-    graphics::renderer::{
-            error::RendererError,
-            renderer::{
-                Aabb, CameraUniforms, CascadeUniform, EguiRenderData, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, PbrConstants, RenderData, RenderMessage, RenderTrait, ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms, TextureManager, Vertex, CASCADE_SPLITS, FRAMES_IN_FLIGHT, NUM_CASCADES, SHADOW_MAP_RESOLUTION
-            },
+    graphics::renderer_common::{
+        common::{
+            Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
+            LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
+            NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait,
+            SHADOW_MAP_RESOLUTION, ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms,
+            TextureManager, Vertex,
         },
+        error::RendererError,
+    },
     provided::components::{Camera, LightType},
     runtime::asset_server::{AssetKind, MaterialGpuData},
 };
@@ -500,7 +504,7 @@ impl DeferredRenderer {
     fn create_blue_noise_texture(&mut self) {
         let device = &self.device;
 
-        let blue_noise_bytes = include_bytes!("assets/LDR_LLL1_0.png");
+        let blue_noise_bytes = include_bytes!("../assets/LDR_LLL1_0.png");
         let blue_noise_image =
             image::load_from_memory_with_format(blue_noise_bytes, ImageFormat::Png)
                 .expect("Failed to load blue noise texture");

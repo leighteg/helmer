@@ -1,9 +1,3 @@
-use crate::graphics::renderer::error::RendererError;
-use crate::graphics::renderer::renderer::{
-    Aabb, CameraUniforms, CascadeUniform, EguiRenderData, LightData, Mesh, MeshLod, ModelPushConstant, PbrConstants, RenderData, RenderMessage, RenderObject, RenderTrait, ShaderConstants, ShadowPipeline, ShadowUniforms, Vertex, CASCADE_SPLITS, FRAMES_IN_FLIGHT, NUM_CASCADES, SHADOW_MAP_RESOLUTION
-};
-use crate::provided::components::{Camera, LightType};
-use crate::runtime::asset_server::MaterialGpuData;
 use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use std::{
@@ -14,6 +8,20 @@ use std::{
 use tracing::info;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
+
+use crate::{
+    graphics::renderer_common::{
+        common::{
+            Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
+            LightData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData,
+            RenderMessage, RenderObject, RenderTrait, SHADOW_MAP_RESOLUTION, ShaderConstants,
+            ShadowPipeline, ShadowUniforms, Vertex,
+        },
+        error::RendererError,
+    },
+    provided::components::{Camera, LightType},
+    runtime::asset_server::MaterialGpuData,
+};
 
 // --- CONSTANTS ---
 pub const MAX_LIGHTS: usize = 248;

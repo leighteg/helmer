@@ -26,9 +26,9 @@ use winit::{
 };
 
 use crate::{
-    graphics::renderer::renderer::{
-                EguiRenderData, RenderData, RenderMessage, RenderTrait, initialize_renderer,
-            },
+    graphics::renderer_common::common::{
+        EguiRenderData, RenderData, RenderMessage, RenderTrait, initialize_renderer,
+    },
     runtime::{
         asset_server::AssetServer,
         config::RuntimeConfig,
@@ -522,9 +522,10 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             }
 
             WindowEvent::Focused(is_focused) => {
-                if !is_focused { // clear InputManager's state when we unfocus the window
+                if !is_focused {
+                    // clear InputManager's state when we unfocus the window
                     let mut input_manager_guard = self.input_manager.write();
-                    
+
                     input_manager_guard.clear_egui_state();
                     input_manager_guard.clear_queues();
                 }

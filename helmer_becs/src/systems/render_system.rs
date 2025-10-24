@@ -7,7 +7,7 @@ use hashbrown::HashMap;
 use helmer::{
     graphics::{
         config::RenderConfig,
-        renderer::renderer::{Aabb, RenderData, RenderLight, RenderObject},
+        renderer_common::common::{Aabb, RenderData, RenderLight, RenderObject},
     },
     provided::components::{Camera, Light, Transform},
 };

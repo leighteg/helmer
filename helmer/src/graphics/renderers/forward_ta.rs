@@ -1,16 +1,17 @@
 use crate::{
     graphics::renderer_common::{
         common::{
-            Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, FRAMES_IN_FLIGHT, LightData,
-            Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES,
-            PbrConstants, RenderData, RenderMessage, RenderTrait, ShadowPipeline, ShadowUniforms,
-            Vertex,
+            Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
+            LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
+            NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait, ShaderConstants,
+            ShadowPipeline, ShadowUniforms, Vertex,
         },
         error::RendererError,
     },
     provided::components::{Camera, LightType},
     runtime::asset_server::{AssetKind, MaterialGpuData},
 };
+use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use std::{
     collections::HashMap,
@@ -93,6 +94,15 @@ pub struct ForwardRendererTA {
     shadow_uniforms_buffer: Option<wgpu::Buffer>,
     cascade_views: Option<Vec<wgpu::TextureView>>,
 
+    // render constants
+    render_constants_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    render_constants_bind_group: Option<wgpu::BindGroup>,
+    render_constants_buffer: Option<wgpu::Buffer>,
+
+    // EGUI
+    egui_renderer: EguiRenderer,
+    current_egui_data: Option<EguiRenderData>,
+
     // State
     frame_index: usize,
     current_render_data: Option<RenderData>,
@@ -162,6 +172,12 @@ impl ForwardRendererTA {
         };
         surface.configure(&device, &surface_config);
 
+        let egui_renderer = EguiRenderer::new(
+            &device,
+            surface_config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
         let mut renderer = Self {
             adapter,
             instance,
@@ -201,6 +217,11 @@ impl ForwardRendererTA {
             shadow_depth_view: None,
             shadow_uniforms_buffer: None,
             cascade_views: None,
+            render_constants_bind_group_layout: None,
+            render_constants_bind_group: None,
+            render_constants_buffer: None,
+            egui_renderer,
+            current_egui_data: None,
             frame_index: 0,
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
@@ -237,6 +258,18 @@ impl ForwardRendererTA {
             })
             .collect();
 
+        self.render_constants_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Render Constants Uniform Buffer"),
+            size: std::mem::size_of::<ShaderConstants>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.queue.write_buffer(
+            self.render_constants_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::bytes_of(&ShaderConstants::default()),
+        );
+
         // --- Create Sampler ---
         self.texture_sampler = Some(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Texture Sampler"),
@@ -248,6 +281,18 @@ impl ForwardRendererTA {
             mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
+
+        // --- Render constants resources ---
+        self.render_constants_bind_group_layout = Some(self.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Render Constants Bind Group Layout"),
+                entries: &[buffer_binding(
+                    0,
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    wgpu::BufferBindingType::Uniform,
+                )],
+            },
+        ));
 
         self.create_texture_arrays();
         self.upload_default_textures();
@@ -554,7 +599,10 @@ impl ForwardRendererTA {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[
+                &bind_group_layout,
+                self.render_constants_bind_group_layout.as_ref().unwrap(),
+            ],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX,
                 range: 0..std::mem::size_of::<ModelPushConstant>() as u32,
@@ -827,6 +875,21 @@ impl ForwardRendererTA {
                 })
             })
             .collect();
+
+        self.render_constants_bind_group = Some(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Constants Bind Group"),
+                layout: self.render_constants_bind_group_layout.as_ref().unwrap(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self
+                        .render_constants_buffer
+                        .as_ref()
+                        .unwrap()
+                        .as_entire_binding(),
+                }],
+            }),
+        );
     }
 
     fn create_depth_texture(&mut self) {
@@ -1207,6 +1270,11 @@ impl ForwardRendererTA {
 
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
+                shadow_pass.set_bind_group(
+                    1,
+                    self.render_constants_bind_group.as_ref().unwrap(),
+                    &[],
+                );
 
                 for object in &render_data.objects {
                     if object.casts_shadow {
@@ -1491,6 +1559,44 @@ impl RenderTrait for ForwardRendererTA {
 
         drop(render_pass);
 
+        if render_data.render_config.egui_pass {
+            if let Some(egui_data) = &self.current_egui_data {
+                let screen_descriptor = &egui_data.screen_descriptor;
+
+                self.egui_renderer.update_buffers(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &egui_data.primitives,
+                    &screen_descriptor,
+                );
+
+                {
+                    let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Egui Render Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &output_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    self.egui_renderer.render(
+                        &mut rpass.forget_lifetime(),
+                        &egui_data.primitives,
+                        &screen_descriptor,
+                    );
+                }
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();
 
@@ -1543,6 +1649,20 @@ impl RenderTrait for ForwardRendererTA {
                 self.pending_materials.push(mat_data);
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::EguiData(data) => {
+                // Upload textures immediately when message arrives
+                for (id, delta) in &data.textures_delta.set {
+                    self.egui_renderer
+                        .update_texture(&self.device, &self.queue, *id, delta);
+                }
+
+                // Free old textures
+                for id in &data.textures_delta.free {
+                    self.egui_renderer.free_texture(id);
+                }
+
+                self.current_egui_data = Some(data);
+            }
             RenderMessage::Resize(size) => self.resize(size),
             RenderMessage::Shutdown => {}
             _ => {}
@@ -1552,7 +1672,17 @@ impl RenderTrait for ForwardRendererTA {
     fn update_render_data(&mut self, render_data: RenderData) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
-                let _ = self.initialize_resources();
+                if current_data.render_config.shader_constants
+                    != render_data.render_config.shader_constants
+                {
+                    self.queue.write_buffer(
+                        self.render_constants_buffer.as_ref().unwrap(),
+                        0,
+                        bytemuck::bytes_of(&render_data.render_config.shader_constants),
+                    );
+                } else {
+                    let _ = self.initialize_resources();
+                }
             }
         }
         self.current_render_data = Some(render_data);
@@ -1622,5 +1752,22 @@ impl RenderTrait for ForwardRendererTA {
                 warn!("Failed to add material {}: {}", id, e);
             }
         }
+    }
+}
+
+fn buffer_binding(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BufferBindingType,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
     }
 }

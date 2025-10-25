@@ -20,6 +20,8 @@ use std::{
 };
 use tracing::{info, warn};
 
+const FORWARD_TA_TARGET_RES: u32 = 512;
+
 #[derive(Debug, Clone, Copy)]
 pub enum AssetKind {
     Albedo,
@@ -583,9 +585,7 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
         let mut data = level_data.data.to_vec();
 
         if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
-            const TARGET_WIDTH: u32 = 512;
-            const TARGET_HEIGHT: u32 = 512;
-            if dimensions.0 != TARGET_WIDTH || dimensions.1 != TARGET_HEIGHT {
+            if dimensions.0 != FORWARD_TA_TARGET_RES || dimensions.1 != FORWARD_TA_TARGET_RES {
                 // We assume R8G8B8A8 format here, which is 4 bytes per pixel.
                 if let Some(image_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
                     dimensions.0,
@@ -594,12 +594,12 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
                 ) {
                     let resized = image::imageops::resize(
                         &image_buffer,
-                        TARGET_WIDTH,
-                        TARGET_HEIGHT,
+                        FORWARD_TA_TARGET_RES,
+                        FORWARD_TA_TARGET_RES,
                         image::imageops::FilterType::Lanczos3,
                     );
                     data = resized.into_raw();
-                    dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+                    dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
                 } else {
                     warn!(
                         "Failed to create image buffer for resizing KTX2 texture. Data length mismatch."
@@ -623,9 +623,6 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
 
     if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
         // Resize path: transcode to RGBA, resize, then use as uncompressed texture
-        const TARGET_WIDTH: u32 = 512;
-        const TARGET_HEIGHT: u32 = 512;
-
         match transcoder.transcode_image_level(
             bytes,
             TranscoderTextureFormat::RGBA32,
@@ -643,12 +640,12 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
 
                 let resized = image::imageops::resize(
                     &image_buffer,
-                    TARGET_WIDTH,
-                    TARGET_HEIGHT,
+                    FORWARD_TA_TARGET_RES,
+                    FORWARD_TA_TARGET_RES,
                     image::imageops::FilterType::Lanczos3,
                 );
                 let final_data = resized.into_raw();
-                dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+                dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
 
                 // Assuming sRGB for color textures, which is a reasonable default.
                 let final_format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -984,16 +981,14 @@ fn process_texture(
                     let mut dimensions = rgba.dimensions();
 
                     if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
-                        const TARGET_WIDTH: u32 = 512;
-                        const TARGET_HEIGHT: u32 = 512;
-                        if dimensions.0 != TARGET_WIDTH || dimensions.1 != TARGET_HEIGHT {
+                        if dimensions.0 != FORWARD_TA_TARGET_RES || dimensions.1 != FORWARD_TA_TARGET_RES {
                             rgba = image::imageops::resize(
                                 &rgba,
-                                TARGET_WIDTH,
-                                TARGET_HEIGHT,
+                                FORWARD_TA_TARGET_RES,
+                                FORWARD_TA_TARGET_RES,
                                 image::imageops::FilterType::Lanczos3,
                             );
-                            dimensions = (TARGET_WIDTH, TARGET_HEIGHT);
+                            dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
                         }
                     }
 

@@ -196,11 +196,11 @@ fn calculate_shadow_factor(
 }
 
 //=============== SKY CALCULATION FUNCTIONS ===============//
-const rayleigh_scattering_coeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
+const rayleigh_scattering_coeff = vec3(5.8e-6, 13.5e-6, 33.1e-6);
 const rayleigh_scale_height = 8e3;
 const mie_scattering_coeff = 21e-6;
 const mie_scale_height = 1.2e3;
-const mie_preferred_scattering_dir = 0.76;
+const mie_preferred_scattering_dir = 0.758;
 
 fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius: f32) -> vec2<f32> {
     let b = dot(ray_origin, ray_dir);

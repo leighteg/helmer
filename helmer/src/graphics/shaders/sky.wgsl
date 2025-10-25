@@ -34,7 +34,6 @@ struct Constants {
 
     // composite
     ssgi_intensity: f32,
-
     _padding: vec4<f32>,
 };
 
@@ -67,25 +66,34 @@ struct VertexOutput {
 const PI = 3.14159265;
 
 // Atmospheric scattering parameters
-const rayleigh_scattering_coeff = vec3(5.5e-6, 13.0e-6, 22.4e-6);
+const rayleigh_scattering_coeff = vec3(5.8e-6, 13.5e-6, 33.1e-6);
 const rayleigh_scale_height = 8e3;
 
 const mie_scattering_coeff = 21e-6;
+const mie_extinction_coeff = 4.4e-6;
 const mie_scale_height = 1.2e3;
-const mie_preferred_scattering_dir = 0.76;
+const mie_preferred_scattering_dir = 0.758;
+
+// Ozone absorption
+const ozone_absorption_coeff = vec3(0.65e-6, 1.881e-6, 0.085e-6);
+const ozone_center_height = 25e3;
+const ozone_falloff = 15e3;
+
+// Ground albedo
+const ground_albedo = vec3(0.05);
 
 fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius: f32) -> vec2<f32> {
     let b = dot(ray_origin, ray_dir);
     let c = dot(ray_origin, ray_origin) - sphere_radius * sphere_radius;
     var delta = b * b - c;
-    if (delta < 0.0) {
+    if delta < 0.0 {
         return vec2(-1.0);
     }
     delta = sqrt(delta);
     return vec2(-b - delta, -b + delta);
 }
 
-// Calculates transmittance (how much light is NOT scattered) from a point to the sun
+// transmittance calculation with ozone absorption
 fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     let dist_to_atmosphere = ray_sphere_intersect(sample_pos, sun_dir, constants.atmosphere_radius).y;
     let num_light_samples = i32(constants.sky_light_samples);
@@ -95,47 +103,70 @@ fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f
     for (var j = 0; j < num_light_samples; j = j + 1) {
         let light_pos = sample_pos + sun_dir * (f32(j) + 0.5) * light_step_size;
         let height = length(light_pos) - constants.planet_radius;
-        if (height < 0.0) { // Below ground
+        if height < 0.0 {
             return vec3(0.0);
         }
 
         let rayleigh_density = exp(-height / rayleigh_scale_height);
         let mie_density = exp(-height / mie_scale_height);
         
-        optical_depth += (rayleigh_scattering_coeff * rayleigh_density + mie_scattering_coeff * mie_density) * light_step_size;
+        // Add ozone absorption for better sunset/sunrise colors
+        let ozone_density = max(0.0, 1.0 - abs(height - ozone_center_height) / ozone_falloff);
+
+        optical_depth += (rayleigh_scattering_coeff * rayleigh_density + (mie_scattering_coeff + mie_extinction_coeff) * mie_density + ozone_absorption_coeff * ozone_density) * light_step_size;
     }
     return exp(-optical_depth);
 }
 
+// Cornette-Shanks phase function for Mie scattering
+fn mie_phase_function(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+    return (3.0 / (8.0 * PI)) * ((1.0 - g2) * (1.0 + cos_theta * cos_theta)) / ((2.0 + g2) * pow(denom, 1.5));
+}
+
+// Rayleigh phase function
+fn rayleigh_phase_function(cos_theta: f32) -> f32 {
+    return (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta);
+}
+
 fn get_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
     let camera_pos = vec3(0.0, constants.planet_radius + 1.0, 0.0);
-    let dist_to_atmosphere = ray_sphere_intersect(camera_pos, view_dir, constants.atmosphere_radius).y;
     
+    // Check if ray hits ground
+    let ground_intersection = ray_sphere_intersect(camera_pos, view_dir, constants.planet_radius);
+    let hits_ground = ground_intersection.x > 0.0;
+
+    let dist_to_atmosphere = ray_sphere_intersect(camera_pos, view_dir, constants.atmosphere_radius).y;
+
     let num_samples = i32(constants.sky_light_samples);
-    let step_size = dist_to_atmosphere / f32(num_samples);
+    let ray_length = select(dist_to_atmosphere, ground_intersection.x, hits_ground);
+    let step_size = ray_length / f32(num_samples);
 
     var transmittance_to_camera = vec3(1.0);
     var scattered_light = vec3(0.0);
+
+    let cos_theta = dot(view_dir, sun_dir);
+    let rayleigh_phase = rayleigh_phase_function(cos_theta);
+    let mie_phase = mie_phase_function(cos_theta, mie_preferred_scattering_dir);
 
     for (var i = 0; i < num_samples; i = i + 1) {
         let sample_pos = camera_pos + view_dir * (f32(i) + 0.5) * step_size;
         let height = length(sample_pos) - constants.planet_radius;
 
-        if (height < 0.0) { break; }
+        if height < 0.0 { break; }
 
         let rayleigh_density = exp(-height / rayleigh_scale_height);
         let mie_density = exp(-height / mie_scale_height);
         
-        let optical_depth_step = (rayleigh_scattering_coeff * rayleigh_density + mie_scattering_coeff * mie_density) * step_size;
+        // Include ozone in camera transmittance
+        let ozone_density = max(0.0, 1.0 - abs(height - ozone_center_height) / ozone_falloff);
+
+        let optical_depth_step = (rayleigh_scattering_coeff * rayleigh_density + (mie_scattering_coeff + mie_extinction_coeff) * mie_density + ozone_absorption_coeff * ozone_density) * step_size;
         transmittance_to_camera *= exp(-optical_depth_step);
 
         let transmittance_to_sun = get_transmittance_to_sun(sample_pos, sun_dir);
 
-        let cos_theta = dot(view_dir, sun_dir);
-        let rayleigh_phase = 3.0 / (16.0 * PI) * (1.0 + cos_theta * cos_theta);
-        let g = mie_preferred_scattering_dir;
-        let mie_phase = 3.0 / (8.0 * PI) * ((1.0 - g * g) * (1.0 + cos_theta * cos_theta)) / ((2.0 + g * g) * pow(1.0 + g * g - 2.0 * g * cos_theta, 1.5));
-        
         let in_scattered_r = rayleigh_scattering_coeff * rayleigh_density * rayleigh_phase;
         let in_scattered_m = mie_scattering_coeff * mie_density * mie_phase;
 
@@ -144,13 +175,43 @@ fn get_sky_color(view_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
 
     let sun_radiance = sky.sun_color * sky.sun_intensity;
     var final_color = scattered_light * sun_radiance;
+    
+    // ground contribution
+    if hits_ground {
+        let ground_point = camera_pos + view_dir * ground_intersection.x;
+        let ground_normal = normalize(ground_point);
+        let ground_ndotl = max(0.0, dot(ground_normal, sun_dir));
+        
+        // Direct sun on ground
+        let sun_transmittance = get_transmittance_to_sun(ground_point, sun_dir);
+        let ground_direct = ground_albedo * sun_radiance * sun_transmittance * ground_ndotl * 0.03;
+        
+        // Use actual scattered light as ambient
+        // If sky has color, ground should have color
+        let sky_ambient = ground_albedo * scattered_light * sun_radiance * 20.0;
+        
+        // Horizon glow during sunrise/sunset
+        let horizon_factor = exp(-abs(sun_dir.y) * 4.0);
+        let horizon_glow = ground_albedo * scattered_light * sun_radiance * horizon_factor * 15.0;
+        
+        // Combine ground lighting
+        let ground_color = ground_direct + sky_ambient + horizon_glow;
+        final_color = ground_color * transmittance_to_camera + scattered_light * sun_radiance;
+    }
 
     // Sun disk
     let sun_cos_theta = dot(view_dir, sun_dir);
-    if (sun_cos_theta > 0.9998) {
-        final_color += sun_radiance * transmittance_to_camera;
+    if sun_cos_theta > 0.9998 {
+        // Limb darkening effect for more realistic sun
+        let limb = 1.0 - 0.3 * (1.0 - sqrt(sun_cos_theta / 0.9998));
+        final_color += sun_radiance * transmittance_to_camera * limb;
     }
     
+    // Add subtle night sky ambient for twilight (when sun is below horizon)
+    let sun_height_factor = smoothstep(-0.2, 0.0, sun_dir.y);
+    let night_ambient = vec3(0.0002, 0.0004, 0.0008) * (1.0 - sun_height_factor);
+    final_color += night_ambient;
+
     return final_color;
 }
 
@@ -168,7 +229,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let world_pos_h = camera.inverse_view_projection_matrix * clip_pos;
     let world_pos = world_pos_h.xyz / world_pos_h.w;
     let view_dir = normalize(world_pos - camera.view_position);
-    
+
     let color = get_sky_color(view_dir, sky.sun_direction);
     return vec4(color, 1.0);
 }

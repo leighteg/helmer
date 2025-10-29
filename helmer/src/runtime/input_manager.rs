@@ -315,17 +315,25 @@ impl InputManager {
                 }
             }
 
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
                 use winit::event::MouseScrollDelta;
 
                 let mut events = self.egui_events.lock();
                 let modifiers = *self.egui_modifiers.lock();
+
+                let phase = match phase {
+                    winit::event::TouchPhase::Started => egui::TouchPhase::Start,
+                    winit::event::TouchPhase::Moved => egui::TouchPhase::Move,
+                    winit::event::TouchPhase::Ended => egui::TouchPhase::End,
+                    winit::event::TouchPhase::Cancelled => egui::TouchPhase::Cancel,
+                };
 
                 match delta {
                     MouseScrollDelta::LineDelta(x, y) => {
                         events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Line,
                             delta: egui::vec2(*x, *y),
+                            phase,
                             modifiers,
                         });
                     }
@@ -333,6 +341,7 @@ impl InputManager {
                         events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: egui::vec2(p.x as f32, p.y as f32),
+                            phase,
                             modifiers,
                         });
                     }

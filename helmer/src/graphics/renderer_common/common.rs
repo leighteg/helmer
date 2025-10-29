@@ -316,7 +316,7 @@ pub struct ModelPushConstant {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq, Default)]
 pub struct SkyUniforms {
     pub sun_direction: [f32; 3],
     pub _padding: f32,

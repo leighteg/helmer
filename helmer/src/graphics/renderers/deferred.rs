@@ -1,5 +1,6 @@
 use crate::{
     graphics::renderer_common::{
+        atmosphere::AtmosphereRenderer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
             LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
@@ -183,6 +184,9 @@ pub struct DeferredRenderer {
     shadow_uniforms_buffer: Option<wgpu::Buffer>,
     cascade_views: Option<Vec<wgpu::TextureView>>,
 
+    // atmosphere
+    atmosphere: Option<AtmosphereRenderer>,
+
     // EGUI
     egui_renderer: EguiRenderer,
     current_egui_data: Option<EguiRenderData>,
@@ -193,6 +197,8 @@ pub struct DeferredRenderer {
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
     prev_view_proj: Mat4,
+    prev_sky_uniforms: SkyUniforms,
+    needs_atmosphere_precompute: bool,
 }
 
 impl DeferredRenderer {
@@ -370,6 +376,7 @@ impl DeferredRenderer {
             shadow_depth_view: None,
             shadow_uniforms_buffer: None,
             cascade_views: None,
+            atmosphere: None,
             egui_renderer,
             current_egui_data: None,
             frame_index: 0,
@@ -377,6 +384,8 @@ impl DeferredRenderer {
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
             prev_view_proj: Mat4::IDENTITY,
+            prev_sky_uniforms: SkyUniforms::default(),
+            needs_atmosphere_precompute: true,
         };
 
         renderer.initialize_resources()?;
@@ -486,6 +495,8 @@ impl DeferredRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         }));
+
+        self.atmosphere = Some(AtmosphereRenderer::new(&self.device));
 
         self.create_blue_noise_texture();
         self.upload_default_textures();
@@ -1350,7 +1361,8 @@ impl DeferredRenderer {
 
         let g_buffer_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/g_buffer.wgsl"));
-        let sky_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/sky.wgsl"));
+        let sky_shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled.wgsl"));
         let downsample_shader =
             device.create_shader_module(wgpu::include_wgsl!("../shaders/downsample.wgsl"));
         let ssr_shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/ssr.wgsl"));
@@ -1381,6 +1393,9 @@ impl DeferredRenderer {
             render_constants_bind_group_layout,
         ) = self.create_bind_group_layouts();
 
+        let atmosphere_lut_bind_group_layout =
+            &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout;
+
         let geometry_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Geometry Pipeline Layout"),
@@ -1396,7 +1411,11 @@ impl DeferredRenderer {
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky Pipeline Layout"),
-            bind_group_layouts: &[&sky_bind_group_layout, &render_constants_bind_group_layout],
+            bind_group_layouts: &[
+                &sky_bind_group_layout,
+                atmosphere_lut_bind_group_layout,
+                &render_constants_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -1451,6 +1470,7 @@ impl DeferredRenderer {
                 bind_group_layouts: &[
                     &lighting_inputs_bind_group_layout,
                     &scene_data_bind_group_layout,
+                    atmosphere_lut_bind_group_layout,
                     &render_constants_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
@@ -1928,6 +1948,8 @@ impl DeferredRenderer {
                         wgpu::ShaderStages::FRAGMENT,
                         wgpu::BufferBindingType::Uniform,
                     ),
+                    sampler_binding(2, true, wgpu::SamplerBindingType::Filtering), // scene sampler
+                    texture_binding(3, false, wgpu::TextureViewDimension::D2, true), // depth,
                 ],
             });
 
@@ -2101,6 +2123,18 @@ impl DeferredRenderer {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: self.sky_uniforms_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(
+                                self.scene_sampler.as_ref().unwrap(),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(
+                                self.main_depth_texture_view.as_ref().unwrap(),
+                            ),
                         },
                     ],
                 })
@@ -2857,7 +2891,12 @@ impl DeferredRenderer {
         pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(0, &self.sky_bind_groups[buffer_index], &[]);
-        pass.set_bind_group(1, self.render_constants_bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(
+            1,
+            &self.atmosphere.as_ref().unwrap().sampling_bind_group,
+            &[],
+        );
+        pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -2891,7 +2930,12 @@ impl DeferredRenderer {
         pass.set_bind_group(0, self.lighting_inputs_bind_group.as_ref().unwrap(), &[]);
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         pass.set_bind_group(1, &self.scene_data_bind_groups[buffer_index], &[]);
-        pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(
+            2,
+            &self.atmosphere.as_ref().unwrap().sampling_bind_group,
+            &[],
+        );
+        pass.set_bind_group(3, self.render_constants_bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
     }
 
@@ -3281,11 +3325,18 @@ impl RenderTrait for DeferredRenderer {
             ground_albedo: [0.3, 0.25, 0.2], // Brownish ground
             ground_brightness: 1.0,
         };
+
         self.queue.write_buffer(
             &self.sky_uniforms_buffers[buffer_index],
             0,
             bytemuck::bytes_of(&sky_uniforms),
         );
+
+        if sky_uniforms != self.prev_sky_uniforms {
+            self.prev_sky_uniforms = sky_uniforms;
+
+            self.needs_atmosphere_precompute = true;
+        }
 
         self.prev_view_proj = new_view_proj;
 
@@ -3310,6 +3361,21 @@ impl RenderTrait for DeferredRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Main Command Encoder"),
             });
+
+        // --- ATMOSPHERE PRECOMPUTATION PASS ---
+        if self.needs_atmosphere_precompute {
+            self.needs_atmosphere_precompute = false;
+
+            if let (Some(atmo), Some(data)) = (self.atmosphere.as_ref(), &self.current_render_data)
+            {
+                atmo.precompute(
+                    &mut encoder,
+                    &self.queue,
+                    &sky_uniforms,
+                    &data.render_config.shader_constants,
+                );
+            }
+        }
 
         let camera_transform = &render_data.current_camera_transform;
         let eye = camera_transform.position;
@@ -3477,6 +3543,22 @@ impl RenderTrait for DeferredRenderer {
                         0,
                         bytemuck::bytes_of(&render_data.render_config.shader_constants),
                     );
+
+                    if current_data
+                        .render_config
+                        .shader_constants
+                        .sky_light_samples
+                        != render_data.render_config.shader_constants.sky_light_samples
+                        || current_data.render_config.shader_constants.planet_radius
+                            != render_data.render_config.shader_constants.planet_radius
+                        || current_data
+                            .render_config
+                            .shader_constants
+                            .atmosphere_radius
+                            != render_data.render_config.shader_constants.atmosphere_radius
+                    {
+                        self.needs_atmosphere_precompute = true;
+                    }
                 } else if current_data.render_config.shadow_pass
                     != render_data.render_config.shadow_pass
                 {

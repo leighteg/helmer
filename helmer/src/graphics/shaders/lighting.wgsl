@@ -375,7 +375,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
         if constants.skylight_contribution == 1u { // FULL (PBR)
             let sky_visibility = ao;
             let up = vec3<f32>(0.0, 1.0, 0.0);
-    
+
             // Sample precomputed irradiance (incident light)
             let diffuse_sky_color = get_irradiance(world_position, N);
     
@@ -393,7 +393,13 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
 
             let total_contribution = diffuse_contribution + specular_contribution;
 
-            direct_lighting += total_contribution * sky_visibility;
+            let direct_diffuse_contribution = select(
+                kD_ambient * diffuse_sky_color / PI,
+                diffuse_contribution,
+                is_lit
+            );
+
+            direct_lighting += (direct_diffuse_contribution + specular_contribution) * sky_visibility;
             diffuse_lighting += diffuse_contribution * sky_visibility;
 
         } else if constants.skylight_contribution == 2u { // STYLIZED FULL
@@ -406,7 +412,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let biased_normal = normalize(mix(N, up, 0.5));
             let biased_reflection = reflect(-V, biased_normal);
 
-            // --- FIX: Blend between sun scattering and general sky irradiance ---
+            // --- Blend between sun scattering and general sky irradiance ---
             let sun_scatter = get_scattering_color(world_position, atmosphere.sun_direction);
             let sky_reflection = get_irradiance(world_position, biased_reflection);
 
@@ -425,7 +431,14 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let specular_contribution = kS * sky_specular;
 
             let total_contribution = diffuse_contribution + specular_contribution;
-            direct_lighting += total_contribution * sky_visibility;
+
+            let direct_diffuse_contribution = select(
+                kD * sky_diffuse,
+                diffuse_contribution,
+                is_lit
+            );
+
+            direct_lighting += (direct_diffuse_contribution + specular_contribution) * sky_visibility;
             diffuse_lighting += diffuse_contribution * sky_visibility;
         } else if constants.skylight_contribution == 3u { // SIMPLE
             var sky_visibility = mix(1.0, ao, 0.5);
@@ -438,7 +451,14 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> LightingOutput {
             let diffuse_contribution = flat_kD * albedo * flat_sky_color;
 
             let total_contribution = diffuse_contribution * sky_visibility;
-            direct_lighting += total_contribution;
+
+            let direct_diffuse_contribution = select(
+                flat_kD * flat_sky_color,
+                diffuse_contribution,
+                is_lit
+            );
+
+            direct_lighting += direct_diffuse_contribution * sky_visibility;
             diffuse_lighting += diffuse_contribution * sky_visibility;
         }
     }

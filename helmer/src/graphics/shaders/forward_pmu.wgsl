@@ -2,11 +2,79 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 20.0;
 const EPSILON: f32 = 0.0001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
+const EMISSIVE_THRESHOLD: f32 = 0.01;
+
+// --- Atmospheric Scattering ---
+const rayleigh_scattering_coeff: vec3<f32> = vec3(5.8e-6, 13.5e-6, 33.1e-6);
+const rayleigh_scale_height: f32 = 8e3;
+
+const mie_scattering_coeff: f32 = 21e-6;
+const mie_absorption_coeff: f32 = 4.4e-6;
+const mie_extinction_coeff: f32 = mie_scattering_coeff + mie_absorption_coeff;
+const mie_scale_height: f32 = 1.2e3;
+const mie_preferred_scattering_dir: f32 = 0.758;
+
+// --- Ozone ---
+const ozone_absorption_coeff: vec3<f32> = vec3(0.65e-6, 1.881e-6, 0.085e-6);
+const ozone_center_height: f32 = 25e3;
+const ozone_falloff: f32 = 15e3;
+
+// --- Ground ---
+const ground_albedo: vec3<f32> = vec3(0.05);
+
+// --- Sun Disk ---
+const SUN_ANGULAR_RADIUS_COS: f32 = 0.9998;
+
+// --- Sun Disk ---
+const SUN_ANGULAR_RADIUS: f32 = 0.00465;
+const SUN_DISK_THRESHOLD: f32 = 0.99996;
+
+
+// --- Night Sky ---
+const night_ambient_color: vec3<f32> = vec3(0.0002, 0.0004, 0.0008);
 
 //=============== STRUCTS ===============//
+
+struct Constants {
+    // lighting
+    shade_mode: u32,
+    light_model: u32,
+    skylight_contribution: u32,
+
+    // sky
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
+
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+
+    // SSGI
+    ssgi_num_rays: u32,
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+
+    // shadows
+    evsm_c: f32,
+    pcf_radius: u32,
+    pcf_min_scale: f32,
+    pcf_max_scale: f32,
+    pcf_max_distance: f32,
+
+    // composite
+    ssgi_intensity: f32,
+    _padding: vec4<f32>,
+};
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -64,6 +132,22 @@ struct PbrConstants {
     _p: vec3<u32>,
 }
 
+struct SkyUniforms {
+    sun_direction: vec3<f32>,
+    _padding: f32,
+    sun_color: vec3<f32>,
+    sun_intensity: f32,
+};
+
+struct AtmosphereParams {
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sun_intensity: f32,
+    _padding: f32,
+    sun_direction: vec3<f32>,
+    _padding2: f32,
+};
+
 //=============== BINDINGS ===============//
 
 // GROUP 0: Scene-wide data
@@ -72,6 +156,10 @@ struct PbrConstants {
 @group(0) @binding(2) var shadow_map: texture_2d_array<f32>;
 @group(0) @binding(3) var shadow_sampler: sampler;
 @group(0) @binding(4) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
+@group(0) @binding(5) var<uniform> sky: SkyUniforms;
+@group(0) @binding(6) var<uniform> render_constants: Constants;
+@group(0) @binding(7) var depth_tex: texture_depth_2d;
+@group(0) @binding(8) var scene_sampler: sampler;
 
 // GROUP 1: Per-Material data
 @group(1) @binding(0) var pbr_sampler: sampler;
@@ -81,12 +169,19 @@ struct PbrConstants {
 @group(1) @binding(4) var emission_texture: texture_2d<f32>;
 @group(1) @binding(5) var<uniform> material: MaterialUniforms;
 
-// GROUP 2 for Image-Based Lighting
-@group(2) @binding(0) var brdf_lut: texture_2d<f32>;
-@group(2) @binding(1) var irradiance_map: texture_cube<f32>;
-@group(2) @binding(2) var prefiltered_env_map: texture_cube<f32>;
-@group(2) @binding(3) var env_map_sampler: sampler; 
-@group(2) @binding(4) var brdf_lut_sampler: sampler;
+// GROUP 2: Atmosphere
+@group(2) @binding(0) var transmittance_lut: texture_2d<f32>;
+@group(2) @binding(1) var scattering_lut: texture_3d<f32>;
+@group(2) @binding(2) var irradiance_lut: texture_2d<f32>;
+@group(2) @binding(3) var atmosphere_sampler: sampler;
+@group(2) @binding(4) var<uniform> atmosphere: AtmosphereParams;
+
+// GROUP 3: Image-Based Lighting
+@group(3) @binding(0) var brdf_lut: texture_2d<f32>;
+@group(3) @binding(1) var irradiance_map: texture_cube<f32>;
+@group(3) @binding(2) var prefiltered_env_map: texture_cube<f32>;
+@group(3) @binding(3) var env_map_sampler: sampler; 
+@group(3) @binding(4) var brdf_lut_sampler: sampler;
 
 @vertex
 var<push_constant> constants: PbrConstants;
@@ -149,7 +244,7 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
     var current_depth = depth;
 
     // Warp the depth value
-    current_depth = exp(EVSM_C * (current_depth - 1.0));
+    current_depth = exp(render_constants.evsm_c * (current_depth - 1.0));
 
     // Chebyshev test
     if current_depth <= moments.x {
@@ -165,8 +260,14 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
     return smoothstep(0.2, 1.0, p_max);
 }
 
-fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: vec3<f32>) -> f32 {
-    var cascade_index = i32(NUM_CASCADES - 1);
+fn calculate_shadow_factor(
+    world_pos: vec3<f32>,
+    view_z: f32,
+    N: vec3<f32>,
+    L: vec3<f32>
+) -> f32 {
+    // 1. Determine which cascade to use based on view depth
+    var cascade_index = i32(NUM_CASCADES - 1u);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         if view_z > shadow_uniforms[i].split_depth.x {
             cascade_index = i;
@@ -174,15 +275,200 @@ fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: v
         }
     }
     let cascade = shadow_uniforms[cascade_index];
+
+    // 2. Project the world position into the light's clip space
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
-    if shadow_pos_clip.w < EPSILON { return 1.0; }
-    let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
-    let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
-    if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
+    if shadow_pos_clip.w < EPSILON {
         return 1.0;
     }
-    let moments = textureSample(shadow_map, shadow_sampler, shadow_uv, u32(cascade_index)).rg;
-    return chebyshev_inequality(shadow_coord.z, moments, N, L);
+
+    let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
+    let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);
+
+    // 3. Bounds check
+    if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
+        return 1.0; // Not in shadow
+    }
+
+    // 4. Compute dynamic PCF radius
+    let base_radius = f32(render_constants.pcf_radius);
+
+    // Scale radius based on view distance (clamped)
+    let dist_factor = clamp(view_z / render_constants.pcf_max_distance, 0.0, 1.0);
+    let scale = mix(render_constants.pcf_min_scale, render_constants.pcf_max_scale, dist_factor);
+    let dynamic_radius_f = base_radius * scale;
+    let dynamic_radius = clamp(i32(dynamic_radius_f), 1, 6); // Clamp for performance
+
+    // 5. Sampling setup
+    let shadow_map_size = vec2<f32>(textureDimensions(shadow_map, 0u));
+    let texel_size = 1.0 / shadow_map_size;
+    var total_moments = vec2<f32>(0.0);
+    var sample_count = 0.0;
+
+    // 6. PCF kernel sampling
+    for (var y = -dynamic_radius; y <= dynamic_radius; y = y + 1) {
+        for (var x = -dynamic_radius; x <= dynamic_radius; x = x + 1) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            let sample = textureSample(shadow_map, shadow_sampler, shadow_uv + offset, u32(cascade_index)).rg;
+            total_moments += sample;
+            sample_count += 1.0;
+        }
+    }
+
+    let avg_moments = total_moments / sample_count;
+
+    // 7. Final shadow value using VSM Chebyshev inequality
+    return chebyshev_inequality(shadow_coord.z, avg_moments, N, L);
+}
+
+// --- SKY SAMPLING FUNCTIONS ---
+fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius: f32) -> vec2<f32> {
+    let b = dot(ray_origin, ray_dir);
+    let c = dot(ray_origin, ray_origin) - sphere_radius * sphere_radius;
+    var delta = b * b - c;
+    if delta < 0.0 { return vec2<f32>(-1.0); }
+    delta = sqrt(delta);
+    return vec2<f32>(-b - delta, -b + delta);
+}
+
+fn altitude_mu_to_uv(altitude: f32, mu: f32, radius: f32, atmos_radius: f32) -> vec2<f32> {
+    let alt_range = atmos_radius - radius;
+    let u = (altitude - radius) / alt_range;
+    let v = (mu + 1.0) * 0.5;
+    return saturate(vec2<f32>(u, v));
+}
+
+fn scattering_lut_coords(altitude: f32, mu_s: f32, mu_v_s: f32, radius: f32, atmos_radius: f32) -> vec3<f32> {
+    let alt_range = atmos_radius - radius;
+    let u = (altitude - radius) / alt_range;
+    let v = (mu_s + 1.0) * 0.5;
+    let w = (mu_v_s + 1.0) * 0.5;
+    return saturate(vec3<f32>(u, v, w));
+}
+
+fn ozone_density(height: f32) -> f32 {
+    return max(0.0, 1.0 - abs(height - ozone_center_height) / ozone_falloff);
+}
+
+// =============== TRANSMITTANCE TO SUN (Raymarched) ===============
+fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let intersect = ray_sphere_intersect(sample_pos, sun_dir, atmosphere.atmosphere_radius);
+    if intersect.y <= 0.0 { return vec3<f32>(0.0); }
+
+    let ray_len = intersect.y;
+    let samples = 16;
+    let step = ray_len / f32(samples);
+    var od = vec3<f32>(0.0);
+
+    for (var i = 0; i < samples; i = i + 1) {
+        let p = sample_pos + sun_dir * (f32(i) + 0.5) * step;
+        let h = length(p) - atmosphere.planet_radius;
+        if h < 0.0 { return vec3<f32>(0.0); }
+
+        let rd = exp(-h / rayleigh_scale_height);
+        let md = exp(-h / mie_scale_height);
+        let odens = ozone_density(h);
+
+        od += (rayleigh_scattering_coeff * rd + vec3<f32>(mie_extinction_coeff) * md + ozone_absorption_coeff * odens) * step;
+    }
+    return exp(-od);
+}
+
+fn get_transmittance(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
+    let altitude = atmosphere.planet_radius; // Flat approximation, ground level
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let mu = dot(view_dir, up);
+    let uv = altitude_mu_to_uv(altitude, mu, atmosphere.planet_radius, atmosphere.atmosphere_radius);
+    return textureSample(transmittance_lut, atmosphere_sampler, uv).rgb;
+}
+
+fn get_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let altitude = atmosphere.planet_radius; // Flat approximation, ground level
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let mu_s = dot(atmosphere.sun_direction, up);
+    let uv = altitude_mu_to_uv(altitude, mu_s, atmosphere.planet_radius, atmosphere.atmosphere_radius);
+    let sky_irradiance = textureSample(irradiance_lut, atmosphere_sampler, uv).rgb;
+    // Removed dot(normal, up) to apply sky light uniformly and avoid pitch black areas
+    return sky_irradiance;
+}
+
+fn get_scattering_color(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
+    let altitude = atmosphere.planet_radius; // Flat approximation, ground level
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let mu_s = dot(atmosphere.sun_direction, up);
+    let mu_v = dot(view_dir, up);
+    let mu_v_s = dot(view_dir, atmosphere.sun_direction);
+
+    let coords = scattering_lut_coords(altitude, mu_s, mu_v_s, atmosphere.planet_radius, atmosphere.atmosphere_radius);
+    let scatter = textureSample(scattering_lut, atmosphere_sampler, coords).rgb;
+
+    return scatter;
+}
+
+// =============== MAIN SKY FUNCTION ===============
+fn get_sky_color(camera_pos_world: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
+    let cam_alt = length(camera_pos_world);
+    let up = camera_pos_world / cam_alt;
+
+    let atm_int = ray_sphere_intersect(camera_pos_world, view_dir, atmosphere.atmosphere_radius);
+    if atm_int.y < 0.0 { return vec3<f32>(0.0); }
+
+    let planet_int = ray_sphere_intersect(camera_pos_world, view_dir, atmosphere.planet_radius);
+    var ray_len = atm_int.y;
+    var hit_ground = false;
+    if planet_int.y > 0.0 {
+        ray_len = planet_int.x;
+        hit_ground = true;
+    }
+
+    // ==================== GROUND ====================
+    if hit_ground {
+        let ground_pos = camera_pos_world + view_dir * ray_len;
+        let ground_norm = normalize(ground_pos);
+        let mu_s = dot(ground_norm, atmosphere.sun_direction);
+        if mu_s < -0.1 { return vec3<f32>(0.0); }
+
+        // --- Direct Sun (ozone-aware) ---
+        let sun_trans = get_transmittance_to_sun(ground_pos, atmosphere.sun_direction);
+        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
+        let direct = ground_albedo * sun_rad * sun_trans * max(0.0, mu_s);
+
+        // --- Sky Ambient: Use scattering LUT as irradiance ---
+        // LUT already includes sun_intensity → treat as incoming radiance
+        let view_up = -view_dir; // from ground to sky
+        let scattered_incoming = get_scattering_color(ground_pos, view_up);
+
+        // Lambertian diffuse: albedo * incoming / π
+        let ambient = ground_albedo * scattered_incoming / PI * 1.5;
+
+        // --- Sunset Horizon Glow (boost only near horizon) ---
+        let horizon_factor = exp(-abs(atmosphere.sun_direction.y) * 5.0);
+        let glow = ground_albedo * scattered_incoming * horizon_factor * 5.0; // no /π here — artistic
+
+        let fade = smoothstep(-0.15, 0.0, mu_s);
+        return (direct + ambient + glow) * fade;
+    }
+    // ==================== SKY ====================
+    var color = get_scattering_color(camera_pos_world, view_dir);
+
+    // SUN DISK
+    let sun_cos = dot(view_dir, atmosphere.sun_direction);
+    if sun_cos > SUN_ANGULAR_RADIUS_COS {
+        let trans = get_transmittance(camera_pos_world, view_dir);
+        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
+
+        // Limb darkening (brighter center)
+        let t = (sun_cos - SUN_ANGULAR_RADIUS_COS) / (1.0 - SUN_ANGULAR_RADIUS_COS);
+        let limb = 1.0 - 0.3 * (1.0 - sqrt(t));
+
+        return sun_rad * trans * limb;
+    }
+
+    // Night ambient
+    let night_factor = 1.0 - smoothstep(-0.2, 0.0, atmosphere.sun_direction.y);
+    color += night_ambient_color * night_factor;
+
+    return color;
 }
 
 //=============== VERTEX SHADER ===============//
@@ -214,10 +500,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mr_sample = textureSample(mr_texture, pbr_sampler, in.tex_coord);
     let metallic = mr_sample.b * material.metallic;
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
-    let ao = mr_sample.r * material.ao;
+    var ao = mr_sample.r * material.ao;
+    ao = mix(ao, 1.0, 1.0 - smoothstep(0.0, 0.1, ao));
 
     var emission = material.emission_color * material.emission_strength;
     emission *= textureSample(emission_texture, pbr_sampler, in.tex_coord).rgb;
+
+    let emissive_intensity = max(max(emission.r, emission.g), emission.b);
+    if emissive_intensity > EMISSIVE_THRESHOLD {
+        var color = albedo + emission;
+        let tonemapped = color / (color + vec3(1.0));
+        let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
+        return vec4(gamma_corrected, alpha);
+    }
+
+    let shade_mode = render_constants.shade_mode;
+    if shade_mode == 1u {
+        var color = albedo + emission;
+        let tonemapped = color / (color + vec3(1.0));
+        let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
+        return vec4(gamma_corrected, alpha);
+    }
+
+    let is_lighting_only = shade_mode == 2u;
+    let effective_albedo = select(albedo, vec3(1.0), is_lighting_only);
+    let effective_metallic = metallic;
 
     let tangent_space_normal = textureSample(normal_texture, pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
     let N_geom = normalize(in.world_normal);
@@ -228,10 +535,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let V = normalize(camera.view_position - in.world_position);
     let R = reflect(-V, N);
-    let F0 = mix(vec3<f32>(0.04), albedo, metallic);
-    
+    let F0 = mix(vec3<f32>(0.04), effective_albedo, effective_metallic);
+
     // --- 1. DIRECT LIGHTING ---
     var Lo = vec3<f32>(0.0);
+
+    let sun_height_factor = max(sky.sun_direction.y, 0.0);
+    let sun_fade = pow(sun_height_factor, 1.5);
+
+    let light_model = render_constants.light_model;
+    let is_stylized = light_model == 1u;
+    let is_simple = light_model == 2u;
 
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
@@ -241,10 +555,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         if light.light_type == 0u { // Directional
             L = normalize(-light.direction);
-            radiance = light.color * light.intensity;
+            radiance = light.color * light.intensity * sun_fade;
 
             let NdotL = max(dot(N, L), 0.0);
-            let bias_amount = 0.5 + 1.0 * (1.0 - NdotL);
+            let bias_amount = 0.001 + 0.005 * (1.0 - NdotL);
             let biased_world_position = in.world_position + N * bias_amount;
             shadow_multiplier = calculate_shadow_factor(biased_world_position, in.view_space_depth, N, L);
         } else { // Point
@@ -257,42 +571,144 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let H = normalize(V + L);
         let NdotL = max(dot(N, L), 0.0);
-        if NdotL > 0.0 {
-            let NDF = distribution_ggx(max(dot(N, H), 0.0), roughness);
+        if NdotL > 0.0 || is_stylized {
+            let NdotH = max(dot(N, H), 0.0);
+            let NDF = distribution_ggx(NdotH, roughness);
             let G = geometry_smith(N, V, L, roughness);
             let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
             let numerator = NDF * G * F;
             let denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + EPSILON;
-            let specular = numerator / denominator;
+            var specular = numerator / denominator;
+            specular = select(specular, vec3(0.0), is_simple);
             let kS = F;
             var kD = vec3<f32>(1.0) - kS;
-            kD *= (1.0 - metallic);
-            Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
+            kD *= (1.0 - effective_metallic);
+            let n_dot_l_factor = select(NdotL, 1.0, is_stylized);
+            let final_radiance = radiance * n_dot_l_factor * shadow_multiplier;
+            let diffuse_brdf = effective_albedo / PI;
+            Lo += (kD * diffuse_brdf + specular) * final_radiance;
         }
     }
-    
-    // --- 2. INDIRECT (IMAGE-BASED) LIGHTING ---
-    let F_ibl = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
-    let kS_ibl = F_ibl;
-    var kD_ibl = vec3(1.0) - kS_ibl;
-    kD_ibl *= (1.0 - metallic);
 
-    let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
-    let diffuse_indirect = irradiance * albedo;
+    // --- 2. INDIRECT LIGHTING ---
+    var ambient = vec3<f32>(0.0);
+    var specular_indirect_occluded = vec3<f32>(0.0);
 
-    let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
-    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
-    let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
+    let skylight_contribution = render_constants.skylight_contribution;
 
-    let ambient = kD_ibl * diffuse_indirect * ao;
+    if skylight_contribution == 0u {
+        let F_ibl = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
+        let kS_ibl = F_ibl;
+        var kD_ibl = vec3(1.0) - kS_ibl;
+        kD_ibl *= (1.0 - effective_metallic);
 
-    let specular_indirect_occluded = specular_indirect * ao;
+        let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
+        let diffuse_indirect = irradiance * effective_albedo;
+
+        let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
+        let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+        let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
+
+        ambient = kD_ibl * diffuse_indirect * ao;
+        specular_indirect_occluded = specular_indirect * ao;
+    } else if skylight_contribution == 1u { // FULL
+        let sky_visibility = ao;
+        let up = vec3<f32>(0.0, 1.0, 0.0);
+
+        // Sample precomputed irradiance (incident light)
+        let diffuse_sky_color = get_irradiance(in.world_position, N);
+
+        // Sample sky color for reflections
+        var reflection_sky_color = get_sky_color(in.world_position, R);
+
+        let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
+        let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
+        let kD_ambient = (vec3<f32>(1.0) - kS_ambient) * (1.0 - effective_metallic);
+
+        // Energy-conserving ambient (added / PI for correct diffuse energy, fixes grey/washed-out look)
+        let diffuse_contribution = kD_ambient * effective_albedo * diffuse_sky_color / PI;
+        let specular_contribution = kS_ambient * reflection_sky_color;
+
+        ambient = diffuse_contribution * sky_visibility;
+        specular_indirect_occluded = specular_contribution * sky_visibility;
+    } else if skylight_contribution == 2u { // STYLIZED FULL
+        var sky_visibility = ao;
+        sky_visibility = mix(1.0, sky_visibility, 0.5);
+
+        let up = vec3<f32>(0.0, 1.0, 0.0);
+
+        // Slightly bias normals upward for a dreamy, painterly look
+        let biased_normal = normalize(mix(N, up, 0.5));
+        let biased_reflection = reflect(-V, biased_normal);
+
+        // --- Blend between sun scattering and general sky irradiance ---
+        let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
+
+        // Use sky color for specular
+        var sky_specular = get_sky_color(in.world_position, biased_reflection);
+
+        // Fresnel & energy conservation
+        var F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
+        F_ambient = mix(F_ambient, vec3<f32>(0.04), 0.5);
+
+        let kS = F_ambient * (1.0 - roughness * 0.7);
+        let kD = (vec3<f32>(1.0) - kS) * (1.0 - effective_metallic);
+
+        let diffuse_contribution = kD * effective_albedo * sky_diffuse;
+        let specular_contribution = kS * sky_specular;
+
+        ambient = diffuse_contribution * sky_visibility;
+        specular_indirect_occluded = specular_contribution * sky_visibility;
+    } else if skylight_contribution == 3u { // SIMPLE
+        var sky_visibility = mix(1.0, ao, 0.5);
+        let up = vec3<f32>(0.0, 1.0, 0.0);
+
+        let flat_sky_color = get_irradiance(in.world_position, up) / PI; // Sample irradiance straight up
+
+        let flat_kD = vec3(1.0) - effective_metallic;
+
+        let diffuse_contribution = flat_kD * effective_albedo * flat_sky_color;
+
+        ambient = diffuse_contribution * sky_visibility;
+        specular_indirect_occluded = vec3(0.0);
+    }
 
     // --- 3. FINAL COMPOSITION ---
-    var final_hdr_color = ambient + Lo + specular_indirect_occluded + emission;
+    var final_hdr_color = ambient + Lo + specular_indirect_occluded + select(emission, vec3<f32>(0.0), is_lighting_only);
 
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));
     let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
 
     return vec4<f32>(gamma_corrected, alpha);
+}
+
+struct VertexOutputSky {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) screen_uv: vec2<f32>,
+};
+
+@vertex
+fn vs_sky_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutputSky {
+    var out: VertexOutputSky;
+    out.screen_uv = vec2<f32>(f32((in_vertex_index << 1u) & 2u), f32(in_vertex_index & 2u));
+    out.clip_position = vec4<f32>(out.screen_uv.x * 2.0 - 1.0, out.screen_uv.y * -2.0 + 1.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_sky_main(in: VertexOutputSky) -> @location(0) vec4<f32> {
+    let depth = textureSample(depth_tex, scene_sampler, in.screen_uv);
+    if depth <= 0.0 {
+        let clip_pos = vec4(in.screen_uv.x * 2.0 - 1.0, (1.0 - in.screen_uv.y) * 2.0 - 1.0, 1.0, 1.0);
+        let world_pos_h = camera.inverse_view_projection_matrix * clip_pos;
+        let world_pos = world_pos_h.xyz / world_pos_h.w;
+        let view_dir = normalize(world_pos - camera.view_position);
+
+        let camera_world_pos = vec3(0.0, atmosphere.planet_radius + 1.0, 0.0);
+        let sky_color = get_sky_color(camera_world_pos, view_dir);
+
+        return vec4(sky_color, 1.0);
+    } else {
+        return vec4(0.0);
+    }
 }

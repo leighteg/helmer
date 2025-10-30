@@ -1,10 +1,8 @@
 use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
-use glam::{DVec2, Mat4, Quat, Vec3, Vec4};
+use glam::{DVec2, Mat3, Mat4, Quat, Vec3, Vec4};
 use helmer::{
-    provided::components::{
-        ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform,
-    },
+    provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
     runtime::{config::RuntimeConfig, input_manager::InputManager},
 };
 use helmer_ecs::{
@@ -44,9 +42,22 @@ fn main() {
             HashSet::from([]),
         );
 
-        // Priority 30: Input and high-level camera control. Runs first.
+        /*// Priority 30: Input and high-level camera control. Runs first.
         scheduler.register_system(
             FreecamSystem::new(1.0, 0.3),
+            30,
+            vec![],
+            HashSet::from([TypeId::of::<Transform>()]),
+            HashSet::from([TypeId::of::<Transform>()]),
+        );*/
+
+        // Priority 30: Input and high-level camera control. Runs first.
+        scheduler.register_system(
+            OrbitcamSystem::new(
+                10.0,                         // radius
+                std::f32::consts::PI / -24.0, // pitch (radians)
+                0.8,                          // spin speed (rad/s)
+            ),
             30,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
@@ -211,7 +222,7 @@ fn main() {
         ecs.add_component(
             sphere_entity,
             Transform {
-                position: glam::Vec3::new(1.0, 0.0, 0.0),
+                position: glam::Vec3::new(3.0, -4.7, -3.0),
                 rotation,
                 scale: glam::Vec3::from_array([0.5; 3]),
             },
@@ -558,6 +569,67 @@ impl System for FreecamSystem {
                     self.current_fov_multiplier +=
                         (target_multiplier - self.current_fov_multiplier) * t;
                     camera.fov_y_rad = base_fov * self.current_fov_multiplier;
+                },
+            );
+    }
+}
+
+struct OrbitcamSystem {
+    // ---- orbit constants (set once in new()) ----
+    radius: f32,
+    pitch: f32,      // fixed pitch, -π/2 … π/2
+    spin_speed: f32, // rad/s, positive = CCW when looking down Y
+
+    // ---- runtime state ----
+    yaw: f32,
+}
+
+impl OrbitcamSystem {
+    /// All orbit parameters are supplied here – no other setters.
+    pub fn new(radius: f32, pitch: f32, spin_speed: f32) -> Self {
+        Self {
+            radius: radius.max(0.1),
+            pitch: pitch.clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01),
+            spin_speed,
+            yaw: 0.0,
+        }
+    }
+}
+
+impl System for OrbitcamSystem {
+    fn name(&self) -> &str {
+        "OrbitcamSystem"
+    }
+
+    fn run(
+        &mut self,
+        dt: f32,
+        ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
+        _input_manager: &InputManager, // kept for trait compatibility
+    ) {
+        // ---- advance yaw (auto-spin) ----
+        self.yaw += self.spin_speed * dt;
+
+        // ---- update every active camera ----
+        ecs.component_pool
+            .query_exact_mut_for_each::<(Transform, Camera, ActiveCamera), _>(
+                |(transform, _camera, _)| {
+                    // ---- position on sphere ----
+                    let cos_p = self.pitch.cos();
+                    let sin_p = self.pitch.sin();
+                    let cos_y = self.yaw.cos();
+                    let sin_y = self.yaw.sin();
+
+                    transform.position = Vec3::new(
+                        sin_y * cos_p * self.radius, // X
+                        sin_p * self.radius,         // Y
+                        cos_y * cos_p * self.radius, // Z
+                    );
+
+                    // ---- look at origin without flipping ----
+                    let yaw_rot = Quat::from_axis_angle(Vec3::Y, self.yaw + std::f32::consts::PI);
+                    let pitch_rot = Quat::from_axis_angle(Vec3::X, -self.pitch);
+                    transform.rotation = yaw_rot * pitch_rot;
                 },
             );
     }

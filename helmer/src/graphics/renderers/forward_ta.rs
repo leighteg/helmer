@@ -1,10 +1,11 @@
 use crate::{
     graphics::renderer_common::{
+        atmosphere::AtmosphereRenderer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
             LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
             NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait, ShaderConstants,
-            ShadowPipeline, ShadowUniforms, Vertex,
+            ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
         },
         error::RendererError,
     },
@@ -94,6 +95,10 @@ pub struct ForwardRendererTA {
     shadow_uniforms_buffer: Option<wgpu::Buffer>,
     cascade_views: Option<Vec<wgpu::TextureView>>,
 
+    // atmosphere
+    sky_uniforms_buffers: Vec<wgpu::Buffer>,
+    atmosphere: Option<AtmosphereRenderer>,
+
     // render constants
     render_constants_bind_group_layout: Option<wgpu::BindGroupLayout>,
     render_constants_bind_group: Option<wgpu::BindGroup>,
@@ -108,6 +113,8 @@ pub struct ForwardRendererTA {
     current_render_data: Option<RenderData>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
+    prev_sky_uniforms: SkyUniforms,
+    needs_atmosphere_precompute: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +224,8 @@ impl ForwardRendererTA {
             shadow_depth_view: None,
             shadow_uniforms_buffer: None,
             cascade_views: None,
+            sky_uniforms_buffers: Vec::new(),
+            atmosphere: None,
             render_constants_bind_group_layout: None,
             render_constants_bind_group: None,
             render_constants_buffer: None,
@@ -226,6 +235,8 @@ impl ForwardRendererTA {
             current_render_data: None,
             logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate),
             last_timestamp: None,
+            prev_sky_uniforms: SkyUniforms::default(),
+            needs_atmosphere_precompute: true,
         };
 
         renderer.initialize_resources()?;
@@ -293,6 +304,19 @@ impl ForwardRendererTA {
                 )],
             },
         ));
+
+        self.sky_uniforms_buffers = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("sky-uniforms-{}", i)),
+                    size: std::mem::size_of::<SkyUniforms>() as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+
+        self.atmosphere = Some(AtmosphereRenderer::new(&self.device));
 
         self.create_texture_arrays();
         self.upload_default_textures();
@@ -717,6 +741,26 @@ impl ForwardRendererTA {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             },
         ));
@@ -787,6 +831,7 @@ impl ForwardRendererTA {
             bind_group_layouts: &[
                 self.scene_data_bind_group_layout.as_ref().unwrap(),
                 self.material_bind_group_layout.as_ref().unwrap(),
+                &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout,
             ],
             push_constant_ranges: &[wgpu::PushConstantRange {
                 stages: wgpu::ShaderStages::VERTEX,
@@ -867,6 +912,18 @@ impl ForwardRendererTA {
                             binding: 4,
                             resource: self
                                 .shadow_uniforms_buffer
+                                .as_ref()
+                                .unwrap()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.sky_uniforms_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self
+                                .render_constants_buffer
                                 .as_ref()
                                 .unwrap()
                                 .as_entire_binding(),
@@ -1454,11 +1511,69 @@ impl RenderTrait for ForwardRendererTA {
 
         self.update_uniforms(render_data, alpha);
 
+        let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
+
+        let directional_light = render_data
+            .lights
+            .iter()
+            .find(|l| matches!(l.light_type, LightType::Directional));
+
+        let (sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
+            (
+                (light.current_transform.rotation * Vec3::Z).normalize_or_zero(),
+                light.color,
+                light.intensity,
+            )
+        } else {
+            (
+                // Default sun
+                Vec3::new(0.2, 0.8, 0.1).normalize(),
+                Vec3::ONE.to_array(),
+                100.0,
+            )
+        };
+
+        let sky_uniforms = SkyUniforms {
+            sun_direction: sun_dir.to_array(),
+            _padding: 0.0,
+            sun_color: sun_color,
+            sun_intensity,
+            ground_albedo: [0.3, 0.25, 0.2], // Brownish ground
+            ground_brightness: 1.0,
+        };
+
+        self.queue.write_buffer(
+            &self.sky_uniforms_buffers[buffer_index],
+            0,
+            bytemuck::bytes_of(&sky_uniforms),
+        );
+
+        if sky_uniforms != self.prev_sky_uniforms {
+            self.prev_sky_uniforms = sky_uniforms;
+
+            self.needs_atmosphere_precompute = true;
+        }
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Main Command Encoder"),
             });
+
+        // --- ATMOSPHERE PRECOMPUTATION PASS ---
+        if self.needs_atmosphere_precompute {
+            self.needs_atmosphere_precompute = false;
+
+            if let (Some(atmo), Some(data)) = (self.atmosphere.as_ref(), &self.current_render_data)
+            {
+                atmo.precompute(
+                    &mut encoder,
+                    &self.queue,
+                    &sky_uniforms,
+                    &data.render_config.shader_constants,
+                );
+            }
+        }
 
         let camera_transform = &render_data.current_camera_transform;
         let eye = camera_transform.position;
@@ -1502,6 +1617,11 @@ impl RenderTrait for ForwardRendererTA {
 
         render_pass.set_pipeline(self.forward_pipeline.as_ref().unwrap());
         render_pass.set_bind_group(0, &self.scene_data_bind_groups[self.frame_index], &[]);
+        render_pass.set_bind_group(
+            2,
+            &self.atmosphere.as_ref().unwrap().sampling_bind_group,
+            &[],
+        );
 
         // Sort objects by material for better batching
         let mut sorted_objects = render_data.objects.clone();

@@ -537,7 +537,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let R = reflect(-V, N);
     let F0 = mix(vec3<f32>(0.04), effective_albedo, effective_metallic);
 
-    // --- 1. DIRECT LIGHTING ---
+    // --- DIRECT LIGHTING ---
     var Lo = vec3<f32>(0.0);
 
     let sun_height_factor = max(sky.sun_direction.y, 0.0);
@@ -590,28 +590,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // --- 2. INDIRECT LIGHTING ---
+    // --- INDIRECT LIGHTING ---
     var ambient = vec3<f32>(0.0);
     var specular_indirect_occluded = vec3<f32>(0.0);
 
     let skylight_contribution = render_constants.skylight_contribution;
 
-    if skylight_contribution == 0u {
-        let F_ibl = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
-        let kS_ibl = F_ibl;
-        var kD_ibl = vec3(1.0) - kS_ibl;
-        kD_ibl *= (1.0 - effective_metallic);
-
-        let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
-        let diffuse_indirect = irradiance * effective_albedo;
-
-        let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
-        let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
-        let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
-
-        ambient = kD_ibl * diffuse_indirect * ao;
-        specular_indirect_occluded = specular_indirect * ao;
-    } else if skylight_contribution == 1u { // FULL
+    if skylight_contribution == 1u { // FULL
         let sky_visibility = ao;
         let up = vec3<f32>(0.0, 1.0, 0.0);
 
@@ -673,42 +658,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         specular_indirect_occluded = vec3(0.0);
     }
 
-    // --- 3. FINAL COMPOSITION ---
+    // --- IBL ---
+    let F_ibl = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness);
+    let kS_ibl = F_ibl;
+    var kD_ibl = vec3(1.0) - kS_ibl;
+    kD_ibl *= (1.0 - effective_metallic);
+
+    let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
+    let diffuse_indirect = irradiance * effective_albedo;
+
+    let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
+    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+    let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
+
+    ambient += kD_ibl * diffuse_indirect * ao;
+    specular_indirect_occluded += specular_indirect * ao;
+
+    // --- FINAL COMPOSITION ---
     var final_hdr_color = ambient + Lo + specular_indirect_occluded + select(emission, vec3<f32>(0.0), is_lighting_only);
 
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));
     let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
 
     return vec4<f32>(gamma_corrected, alpha);
-}
-
-struct VertexOutputSky {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) screen_uv: vec2<f32>,
-};
-
-@vertex
-fn vs_sky_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutputSky {
-    var out: VertexOutputSky;
-    out.screen_uv = vec2<f32>(f32((in_vertex_index << 1u) & 2u), f32(in_vertex_index & 2u));
-    out.clip_position = vec4<f32>(out.screen_uv.x * 2.0 - 1.0, out.screen_uv.y * -2.0 + 1.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_sky_main(in: VertexOutputSky) -> @location(0) vec4<f32> {
-    let depth = textureSample(depth_tex, scene_sampler, in.screen_uv);
-    if depth <= 0.0 {
-        let clip_pos = vec4(in.screen_uv.x * 2.0 - 1.0, (1.0 - in.screen_uv.y) * 2.0 - 1.0, 1.0, 1.0);
-        let world_pos_h = camera.inverse_view_projection_matrix * clip_pos;
-        let world_pos = world_pos_h.xyz / world_pos_h.w;
-        let view_dir = normalize(world_pos - camera.view_position);
-
-        let camera_world_pos = vec3(0.0, atmosphere.planet_radius + 1.0, 0.0);
-        let sky_color = get_sky_color(camera_world_pos, view_dir);
-
-        return vec4(sky_color, 1.0);
-    } else {
-        return vec4(0.0);
-    }
 }

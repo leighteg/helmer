@@ -42,16 +42,16 @@ fn main() {
             HashSet::from([]),
         );
 
-        /*// Priority 30: Input and high-level camera control. Runs first.
+        // Priority 30: Input and high-level camera control. Runs first.
         scheduler.register_system(
             FreecamSystem::new(1.0, 0.3),
             30,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
-        // Priority 30: Input and high-level camera control. Runs first.
+        /*// Priority 30: Input and high-level camera control. Runs first.
         scheduler.register_system(
             OrbitcamSystem::new(
                 10.0,                         // radius
@@ -62,7 +62,7 @@ fn main() {
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );
+        );*/
 
         // Priority 30: Input-based object interaction. Can run in parallel with Freecam.
         scheduler.register_system(

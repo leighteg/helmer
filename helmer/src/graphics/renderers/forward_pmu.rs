@@ -119,6 +119,12 @@ pub struct ForwardRendererPMU {
     last_timestamp: Option<Instant>,
     prev_sky_uniforms: SkyUniforms,
     needs_atmosphere_precompute: bool,
+
+    // Sky Resources
+    sky_pipeline: Option<wgpu::RenderPipeline>,
+    sky_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    sky_bind_groups: Vec<wgpu::BindGroup>,
+    scene_sampler: Option<wgpu::Sampler>,
 }
 
 impl ForwardRendererPMU {
@@ -225,6 +231,10 @@ impl ForwardRendererPMU {
             last_timestamp: None,
             prev_sky_uniforms: SkyUniforms::default(),
             needs_atmosphere_precompute: true,
+            sky_pipeline: None,
+            sky_bind_group_layout: None,
+            sky_bind_groups: Vec::new(),
+            scene_sampler: None,
         };
 
         renderer.initialize_resources()?;
@@ -269,6 +279,15 @@ impl ForwardRendererPMU {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        }));
+        self.scene_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Scene Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         }));
     }
@@ -575,6 +594,39 @@ impl ForwardRendererPMU {
                 )],
             },
         ));
+        self.sky_bind_group_layout = Some(self.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("Sky Scene BGL"),
+                entries: &[
+                    buffer_binding(
+                        0,
+                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        wgpu::BufferBindingType::Uniform,
+                    ),
+                    buffer_binding(
+                        1,
+                        wgpu::ShaderStages::FRAGMENT,
+                        wgpu::BufferBindingType::Uniform,
+                    ),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        ));
     }
 
     fn create_pipelines(&mut self) {
@@ -629,6 +681,51 @@ impl ForwardRendererPMU {
             },
         ));
         self.create_shadow_pipeline();
+        self.create_sky_pipeline();
+    }
+
+    fn create_sky_pipeline(&mut self) {
+        let shader = self
+            .device
+            .create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled.wgsl"));
+        let layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Sky Pipeline Layout"),
+                bind_group_layouts: &[
+                    self.sky_bind_group_layout.as_ref().unwrap(),
+                    &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout,
+                    self.render_constants_bind_group_layout.as_ref().unwrap(),
+                ],
+                push_constant_ranges: &[],
+            });
+        self.sky_pipeline = Some(self.device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some("Sky Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.surface_config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
     }
 
     fn create_bind_groups(&mut self) {
@@ -699,7 +796,7 @@ impl ForwardRendererPMU {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
         let texture = device.create_texture(&desc);
@@ -799,6 +896,38 @@ impl ForwardRendererPMU {
                                 .as_ref()
                                 .unwrap()
                                 .as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect();
+    }
+
+    fn create_sky_bind_groups(&mut self) {
+        let depth_view = self.main_depth_texture_view.as_ref().unwrap();
+        self.sky_bind_groups = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("Sky Scene BG {}", i)),
+                    layout: self.sky_bind_group_layout.as_ref().unwrap(),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.camera_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.sky_uniforms_buffers[i].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(
+                                self.scene_sampler.as_ref().unwrap(),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(depth_view),
                         },
                     ],
                 })
@@ -1324,6 +1453,7 @@ impl RenderTrait for ForwardRendererPMU {
             let (tex, view) = Self::create_depth_texture(&self.device, &self.surface_config);
             self.main_depth_texture = Some(tex);
             self.main_depth_texture_view = Some(view);
+            self.create_sky_bind_groups();
         }
     }
 
@@ -1522,6 +1652,33 @@ impl RenderTrait for ForwardRendererPMU {
             }
         }
 
+        if render_data.render_config.sky_pass {
+            let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sky Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            sky_pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
+            sky_pass.set_bind_group(0, &self.sky_bind_groups[buffer_index], &[]);
+            sky_pass.set_bind_group(
+                1,
+                &self.atmosphere.as_ref().unwrap().sampling_bind_group,
+                &[],
+            );
+            sky_pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
+            sky_pass.draw(0..3, 0..1);
+        }
+
         if render_data.render_config.egui_pass {
             if let Some(egui_data) = &self.current_egui_data {
                 let screen_descriptor = &egui_data.screen_descriptor;
@@ -1630,6 +1787,8 @@ impl RenderTrait for ForwardRendererPMU {
     fn update_render_data(&mut self, render_data: RenderData) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
+                self.needs_atmosphere_precompute = true;
+
                 if current_data.render_config.shader_constants
                     != render_data.render_config.shader_constants
                 {

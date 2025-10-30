@@ -103,18 +103,8 @@ const ground_albedo: vec3<f32> = vec3(0.05);
 // --- Sun Disk ---
 const SUN_ANGULAR_RADIUS_COS: f32 = 0.9998;
 
-// --- Sun Disk ---
-const SUN_ANGULAR_RADIUS: f32 = 0.00465;
-const SUN_DISK_THRESHOLD: f32 = 0.99996;
-
-
 // --- Night Sky ---
 const night_ambient_color: vec3<f32> = vec3(0.0002, 0.0004, 0.0008);
-
-// --- Sampling ---
-const transmittance_samples: i32 = 64;
-const scattering_samples: i32 = 32;
-const irradiance_samples: i32 = 16;
 
 // =============== HELPER FUNCTIONS ===============
 fn ray_sphere_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, sphere_radius: f32) -> vec2<f32> {
@@ -181,7 +171,7 @@ fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f
     return exp(-od);
 }
 
-// =============== LUT SAMPLING (with horizon fade) ===============
+// =============== LUT SAMPLING ===============
 fn get_transmittance(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
     let altitude = length(world_pos);
     let up = world_pos / altitude;
@@ -199,24 +189,52 @@ fn get_scattering_color(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> 
     let coords = scattering_lut_coords(altitude, mu_s, mu_v, atmosphere.planet_radius, atmosphere.atmosphere_radius);
 
     var scatter = textureSample(scattering_lut, atmosphere_sampler, coords).rgb;
-    let horizon_fade = smoothstep(-0.15, 0.0, mu_s);
-    scatter *= horizon_fade;
 
     return scatter;
 }
 
-fn get_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let altitude = length(world_pos);
-    let up = world_pos / altitude;
-    let mu_s = dot(atmosphere.sun_direction, up);
+// =============== RAYMARCH FOR GROUND (creates atmospheric bands) ===============
+struct RaymarchResult {
+    scattered_light: vec3<f32>,
+    transmittance: vec3<f32>,
+};
 
-    let uv = altitude_mu_to_uv(altitude, mu_s, atmosphere.planet_radius, atmosphere.atmosphere_radius);
-    var irr = textureSample(irradiance_lut, atmosphere_sampler, uv).rgb;
+fn raymarch_to_ground(camera_pos: vec3<f32>, view_dir: vec3<f32>, ray_len: f32, sun_dir: vec3<f32>) -> RaymarchResult {
+    let num_samples = i32(constants.sky_light_samples);
+    let step_size = ray_len / f32(num_samples);
 
-    let fade = smoothstep(-0.15, 0.0, mu_s);
-    irr *= fade;
+    var transmittance_to_camera = vec3<f32>(1.0);
+    var scattered_light = vec3<f32>(0.0);
 
-    return irr * saturate(dot(normal, up));
+    let cos_theta = dot(view_dir, sun_dir);
+    let rayleigh_phase = rayleigh_phase_function(cos_theta);
+    let mie_phase = mie_phase_function(cos_theta, mie_preferred_scattering_dir);
+
+    for (var i = 0; i < num_samples; i = i + 1) {
+        let sample_pos = camera_pos + view_dir * (f32(i) + 0.5) * step_size;
+        let height = length(sample_pos) - atmosphere.planet_radius;
+
+        if height < 0.0 { break; }
+
+        let rayleigh_density = exp(-height / rayleigh_scale_height);
+        let mie_density = exp(-height / mie_scale_height);
+        let ozone_dens = ozone_density(height);
+
+        let optical_depth_step = (rayleigh_scattering_coeff * rayleigh_density + vec3<f32>(mie_extinction_coeff) * mie_density + ozone_absorption_coeff * ozone_dens) * step_size;
+        transmittance_to_camera *= exp(-optical_depth_step);
+
+        let transmittance_to_sun = get_transmittance_to_sun(sample_pos, sun_dir);
+
+        let in_scattered_r = rayleigh_scattering_coeff * rayleigh_density * rayleigh_phase;
+        let in_scattered_m = mie_scattering_coeff * mie_density * mie_phase;
+
+        scattered_light += (in_scattered_r + in_scattered_m) * transmittance_to_sun * transmittance_to_camera * step_size;
+    }
+
+    var result: RaymarchResult;
+    result.scattered_light = scattered_light;
+    result.transmittance = transmittance_to_camera;
+    return result;
 }
 
 // =============== MAIN SKY FUNCTION ===============
@@ -235,43 +253,44 @@ fn get_sky_color(camera_pos_world: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> 
         hit_ground = true;
     }
 
-    // ==================== GROUND ====================
+    let sun_rad = sky.sun_color * atmosphere.sun_intensity;
+
+    // ==================== GROUND (raymarch for atmospheric bands) ====================
     if hit_ground {
         let ground_pos = camera_pos_world + view_dir * ray_len;
         let ground_norm = normalize(ground_pos);
-        let mu_s = dot(ground_norm, atmosphere.sun_direction);
-        if mu_s < -0.1 { return vec3<f32>(0.0); }
+        let ground_ndotl = max(0.0, dot(ground_norm, atmosphere.sun_direction));
 
-        // --- Direct Sun (ozone-aware) ---
+        // Raymarch
+        let march = raymarch_to_ground(camera_pos_world, view_dir, ray_len, atmosphere.sun_direction);
+
+        // Direct sun on ground
         let sun_trans = get_transmittance_to_sun(ground_pos, atmosphere.sun_direction);
-        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
-        let direct = ground_albedo * sun_rad * sun_trans * max(0.0, mu_s);
+        let direct = ground_albedo * sun_rad * sun_trans * ground_ndotl * 0.03;
 
-        // --- Sky Ambient: Use scattering LUT as irradiance ---
-        // LUT already includes sun_intensity → treat as incoming radiance
-        let view_up = -view_dir; // from ground to sky
-        let scattered_incoming = get_scattering_color(ground_pos, view_up);
+        // Use scattered light as sky ambient
+        let sky_ambient = ground_albedo * march.scattered_light * sun_rad * 20.0;
 
-        // Lambertian diffuse: albedo * incoming / π
-        let ambient = ground_albedo * scattered_incoming / PI * 1.5;
+        // Horizon glow
+        let horizon_factor = exp(-abs(atmosphere.sun_direction.y) * 4.0);
+        let horizon_glow = ground_albedo * march.scattered_light * sun_rad * horizon_factor * 15.0;
 
-        // --- Sunset Horizon Glow (boost only near horizon) ---
-        let horizon_factor = exp(-abs(atmosphere.sun_direction.y) * 5.0);
-        let glow = ground_albedo * scattered_incoming * horizon_factor * 5.0; // no /π here — artistic
+        // Combine ground lighting
+        let ground_color = direct + sky_ambient + horizon_glow;
 
-        let fade = smoothstep(-0.15, 0.0, mu_s);
-        return (direct + ambient + glow) * fade;
+        // Final: ground color + in-scattered light (scattered_light already has correct transmittance)
+        return ground_color + march.scattered_light * sun_rad;
     }
-    // ==================== SKY ====================
+
+    // ==================== SKY (use LUT for performance) ====================
     var color = get_scattering_color(camera_pos_world, view_dir);
 
     // SUN DISK
     let sun_cos = dot(view_dir, atmosphere.sun_direction);
     if sun_cos > SUN_ANGULAR_RADIUS_COS {
         let trans = get_transmittance(camera_pos_world, view_dir);
-        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
 
-        // Limb darkening (brighter center)
+        // Limb darkening
         let t = (sun_cos - SUN_ANGULAR_RADIUS_COS) / (1.0 - SUN_ANGULAR_RADIUS_COS);
         let limb = 1.0 - 0.3 * (1.0 - sqrt(t));
 
@@ -280,7 +299,7 @@ fn get_sky_color(camera_pos_world: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> 
 
     // Night ambient
     let night_factor = 1.0 - smoothstep(-0.2, 0.0, atmosphere.sun_direction.y);
-    color += vec3(0.0002, 0.0004, 0.0008) * night_factor;
+    color += night_ambient_color * night_factor;
 
     return color;
 }

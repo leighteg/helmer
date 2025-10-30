@@ -62,7 +62,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
         },
         |dt, input_manager, (world, schedule)| {
             world.resource_mut::<DeltaTime>().0 = dt;
-            
+
             schedule.run(world);
 
             let render_data = {
@@ -83,7 +83,14 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
 
             (render_data, egui_data)
         },
-        |new_size, (world, schedule)| {},
+        |new_size, (world, _schedule)| {
+            for (mut camera, _) in world
+                .query::<(&mut BevyCamera, &BevyActiveCamera)>()
+                .iter_mut(world)
+            {
+                camera.0.aspect_ratio = new_size.width as f32 / new_size.height as f32;
+            }
+        },
     );
     runtime.init();
 }

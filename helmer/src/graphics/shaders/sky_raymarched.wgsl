@@ -60,6 +60,8 @@ struct VertexOutput {
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<uniform> sky: SkyUniforms;
+@group(0) @binding(2) var scene_sampler: sampler;
+@group(0) @binding(3) var depth_tex: texture_depth_2d;
 
 @group(2) @binding(0) var<uniform> constants: Constants;
 
@@ -225,11 +227,16 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let clip_pos = vec4(in.screen_uv.x * 2.0 - 1.0, (1.0 - in.screen_uv.y) * 2.0 - 1.0, 1.0, 1.0);
-    let world_pos_h = camera.inverse_view_projection_matrix * clip_pos;
-    let world_pos = world_pos_h.xyz / world_pos_h.w;
-    let view_dir = normalize(world_pos - camera.view_position);
+    let depth = textureSample(depth_tex, scene_sampler, in.screen_uv);
+    if depth <= 0.0 {
+        let clip_pos = vec4(in.screen_uv.x * 2.0 - 1.0, (1.0 - in.screen_uv.y) * 2.0 - 1.0, 1.0, 1.0);
+        let world_pos_h = camera.inverse_view_projection_matrix * clip_pos;
+        let world_pos = world_pos_h.xyz / world_pos_h.w;
+        let view_dir = normalize(world_pos - camera.view_position);
 
-    let color = get_sky_color(view_dir, sky.sun_direction);
-    return vec4(color, 1.0);
+        let color = get_sky_color(view_dir, sky.sun_direction);
+        return vec4(color, 1.0);
+    } else {
+        return vec4(0.0);
+    }
 }

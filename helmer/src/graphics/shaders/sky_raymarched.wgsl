@@ -61,7 +61,7 @@ struct VertexOutput {
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(0) @binding(1) var<uniform> sky: SkyUniforms;
 
-@group(1) @binding(0) var<uniform> constants: Constants;
+@group(2) @binding(0) var<uniform> constants: Constants;
 
 const PI = 3.14159265;
 

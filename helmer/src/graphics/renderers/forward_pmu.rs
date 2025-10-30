@@ -1680,8 +1680,10 @@ impl RenderTrait for ForwardRendererPMU {
         }
 
         if render_data.render_config.egui_pass {
-            if let Some(egui_data) = &self.current_egui_data {
-                let screen_descriptor = &egui_data.screen_descriptor;
+            if let Some(egui_data) = &mut self.current_egui_data {
+                let screen_descriptor = &mut egui_data.screen_descriptor;
+                screen_descriptor.size_in_pixels =
+                    [self.window_size.width, self.window_size.height];
 
                 self.egui_renderer.update_buffers(
                     &self.device,

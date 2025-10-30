@@ -82,6 +82,9 @@ pub struct Runtime<T: Send + 'static = ()> {
     pub config: Arc<RuntimeConfig>,
 
     has_init: Arc<AtomicBool>,
+
+    new_window_size: Option<PhysicalSize<u32>>,
+    resize_triggered: bool,
 }
 
 impl<T: Send + 'static> Runtime<T> {
@@ -145,6 +148,9 @@ impl<T: Send + 'static> Runtime<T> {
             config: Arc::new(RuntimeConfig::default()),
 
             has_init: Arc::new(AtomicBool::new(false)),
+
+            new_window_size: None,
+            resize_triggered: false,
         }
     }
 
@@ -441,6 +447,30 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             return;
         }
 
+        if let Some(new_size) = self.new_window_size {
+            if !self.resize_triggered {
+                // --- RESIZE LOGIC ---
+                let _ = self
+                    .render_thread_sender
+                    .send(RenderMessage::Resize(new_size));
+
+                let mut input = self.input_manager.write();
+                input.window_size = UVec2::new(new_size.width, new_size.height);
+                input.scale_factor = self.window.as_ref().unwrap().scale_factor();
+                drop(input);
+
+                if let Some(user_state) = &self.user_state {
+                    let user_state_clone = Arc::clone(user_state);
+                    let mut state = user_state_clone.lock();
+                    (self.callbacks.resize)(new_size, &mut state);
+                }
+
+                self.new_window_size = None;
+            }
+
+            self.resize_triggered = false;
+        }
+
         self.input_manager
             .read()
             .update_egui_state_from_winit(&event);
@@ -452,21 +482,9 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             }
 
             WindowEvent::Resized(new_size) => {
-                let _ = self
-                    .render_thread_sender
-                    .send(RenderMessage::Resize(new_size));
-
-                let mut input = self.input_manager.write();
-                input.window_size = UVec2::new(new_size.width, new_size.height);
-                input.scale_factor = self.window.as_ref().unwrap().scale_factor();
-                drop(input);
-
                 if new_size.width > 0 && new_size.height > 0 {
-                    if let Some(user_state) = &self.user_state {
-                        let user_state_clone = Arc::clone(user_state);
-                        let mut state = user_state_clone.lock();
-                        (self.callbacks.resize)(new_size, &mut state);
-                    }
+                    self.new_window_size = Some(new_size);
+                    self.resize_triggered = true;
                 }
             }
 

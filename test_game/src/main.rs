@@ -73,14 +73,17 @@ fn main() {
             HashSet::from([TypeId::of::<Transform>()]),
         );
 
-        /*// Priority 25: General game logic that modifies transforms.
+        // Priority 25: General game logic that modifies transforms.
         scheduler.register_system(
-            SpinnerSystem { time_elapsed: 0.0 },
+            SpinnerSystem {
+                enabled: false,
+                time_elapsed: -40.0,
+            },
             25,
             vec![],
             HashSet::from([TypeId::of::<Transform>()]),
             HashSet::from([TypeId::of::<Transform>()]),
-        );*/
+        );
 
         /*scheduler.register_system(
             SpawnSystem::new(),
@@ -349,6 +352,7 @@ impl System for ConfigToggleSystem {
 }
 
 struct SpinnerSystem {
+    enabled: bool,
     time_elapsed: f32,
 }
 impl System for SpinnerSystem {
@@ -362,6 +366,14 @@ impl System for SpinnerSystem {
         ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
         input_manager: &InputManager,
     ) {
+        if input_manager.was_just_pressed(KeyCode::Backslash) {
+            self.enabled = !self.enabled;
+        }
+
+        if !self.enabled {
+            return;
+        }
+
         self.time_elapsed += dt;
 
         // Rotation speeds

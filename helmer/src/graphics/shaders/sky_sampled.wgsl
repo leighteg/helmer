@@ -324,7 +324,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let camera_world_pos = vec3(0.0, atmosphere.planet_radius + 1.0, 0.0);
         let sky_color = get_sky_color(camera_world_pos, view_dir);
 
-        return vec4(sky_color, 1.0);
+        let tonemapped = sky_color / (sky_color + vec3<f32>(1.0));
+        let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
+        
+        return vec4<f32>(gamma_corrected, 1.0);
     } else {
         return vec4(0.0);
     }

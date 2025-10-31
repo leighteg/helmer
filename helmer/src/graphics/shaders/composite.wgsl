@@ -113,10 +113,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let depth = textureSample(depth_tex, scene_sampler, in.tex_coords);
     if (depth <= 0.0) {
         let sky_color = textureSample(sky_tex, scene_sampler, in.tex_coords).rgb;
-        // Tonemap and gamma correct the sky before outputting
-        let tonemapped = sky_color / (sky_color + vec3<f32>(1.0));
-        let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
-        return vec4<f32>(gamma_corrected, 1.0);
+        return vec4<f32>(sky_color, 1.0);
     }
 
     let albedo_sample = textureSample(albedo_tex, scene_sampler, in.tex_coords);

@@ -14,12 +14,16 @@ use crate::{
     },
 };
 
-use std::{any::TypeId, collections::HashSet};
+use std::{any::TypeId, collections::HashSet, sync::Arc};
 
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
-    runtime::{asset_server::AssetServer, config::RuntimeConfig, runtime::Runtime},
+    runtime::{
+        asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager,
+        runtime::Runtime,
+    },
 };
+use parking_lot::RwLock;
 
 use crate::ecs::{ecs_core::ECSCore, system_scheduler::SystemScheduler};
 
@@ -88,6 +92,7 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
         move |runtime, (ecs_core, scheduler)| {
             ecs_core.add_resource(runtime.config.as_ref().clone());
             ecs_core.add_resource(runtime.asset_server.as_ref().unwrap().clone());
+            ecs_core.add_resource(runtime.input_manager.clone());
             ecs_core.add_resource(RenderPacket::default());
             ecs_core.add_resource(PhysicsResource::new());
             ecs_core.add_resource(EguiResource::default());
@@ -162,22 +167,25 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 &runtime.asset_server.as_ref().unwrap().lock(),
             );
         },
-        |dt, input_manager, (ecs_core, scheduler)| {
-            ecs_core.resource_scope::<RuntimeConfig, _>(|ecs_core, runtime_config| {
-                ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
-                    if runtime_config.egui {
-                        if input_manager.active_mouse_buttons.len() == 0 {
-                            input_manager.egui_wants_pointer =
-                                egui_resource.ctx.wants_pointer_input();
+        |dt, (ecs_core, scheduler)| {
+            ecs_core.resource_scope::<Arc<RwLock<InputManager>>, _>(|ecs_core, input_manager| {
+                let mut input_manager = input_manager.write();
+                ecs_core.resource_scope::<RuntimeConfig, _>(|ecs_core, runtime_config| {
+                    ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                        if runtime_config.egui {
+                            if input_manager.active_mouse_buttons.len() == 0 {
+                                input_manager.egui_wants_pointer =
+                                    egui_resource.ctx.wants_pointer_input();
+                            }
+                            input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+                        } else if egui_resource.accepting_input {
+                            input_manager.clear_egui_state();
                         }
-                        input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
-                    } else if egui_resource.accepting_input {
-                        input_manager.clear_egui_state();
-                    }
+                    });
                 });
-            });
 
-            scheduler.run_all(dt, ecs_core, input_manager);
+                scheduler.run_all(dt, ecs_core, &input_manager);
+            });
 
             let render_data = {
                 if let Some(packet) = ecs_core.get_resource_mut::<RenderPacket>() {

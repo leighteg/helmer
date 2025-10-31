@@ -44,16 +44,12 @@ pub struct PerformanceMetrics {
 
 pub struct RuntimeCallbacks<T: Send + 'static> {
     init: Option<Box<dyn FnOnce(&mut Runtime<T>, &mut T) + Send>>,
-    tick: Arc<
-        dyn Fn(f32, &mut InputManager, &mut T) -> (Option<RenderData>, Option<EguiRenderData>)
-            + Send
-            + Sync,
-    >,
+    tick: Arc<dyn Fn(f32, &mut T) -> (Option<RenderData>, Option<EguiRenderData>) + Send + Sync>,
     resize: Arc<dyn Fn(PhysicalSize<u32>, &mut T) + Send + Sync>,
 }
 
 pub struct Runtime<T: Send + 'static = ()> {
-    input_manager: Arc<RwLock<InputManager>>,
+    pub input_manager: Arc<RwLock<InputManager>>,
     pub asset_server: Option<Arc<Mutex<AssetServer>>>,
 
     // logic thread
@@ -91,11 +87,7 @@ impl<T: Send + 'static> Runtime<T> {
     pub fn new(
         user_state: T,
         init_callback: impl FnOnce(&mut Runtime<T>, &mut T) + Send + 'static,
-        tick_callback: impl Fn(
-            f32,
-            &mut InputManager,
-            &mut T,
-        ) -> (Option<RenderData>, Option<EguiRenderData>)
+        tick_callback: impl Fn(f32, &mut T) -> (Option<RenderData>, Option<EguiRenderData>)
         + Send
         + Sync
         + 'static,
@@ -191,8 +183,7 @@ impl<T: Send + 'static> Runtime<T> {
                 if has_init.load(Ordering::Relaxed) {
                     // MAIN LOGIC LOOP EXECUTION
                     let mut user_state_guard = user_state.lock();
-                    let (render_data, egui_render_data) =
-                        tick_callback(dt, &mut input_manager.write(), &mut *user_state_guard);
+                    let (render_data, egui_render_data) = tick_callback(dt, &mut *user_state_guard);
                     drop(user_state_guard);
 
                     if let Some(data) = render_data {

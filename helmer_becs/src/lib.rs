@@ -60,7 +60,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
                 &runtime.asset_server.as_ref().unwrap().lock(),
             );
         },
-        |dt, input_manager, (world, schedule)| {
+        |dt, (world, schedule)| {
             world.resource_mut::<DeltaTime>().0 = dt;
 
             schedule.run(world);

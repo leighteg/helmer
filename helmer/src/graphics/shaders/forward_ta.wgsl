@@ -7,34 +7,6 @@ const EPSILON: f32 = 0.00001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
 
-// --- Atmospheric Scattering ---
-const rayleigh_scattering_coeff: vec3<f32> = vec3(5.8e-6, 13.5e-6, 33.1e-6);
-const rayleigh_scale_height: f32 = 8e3;
-
-const mie_scattering_coeff: f32 = 21e-6;
-const mie_absorption_coeff: f32 = 4.4e-6;
-const mie_extinction_coeff: f32 = mie_scattering_coeff + mie_absorption_coeff;
-const mie_scale_height: f32 = 1.2e3;
-const mie_preferred_scattering_dir: f32 = 0.758;
-
-// --- Ozone ---
-const ozone_absorption_coeff: vec3<f32> = vec3(0.65e-6, 1.881e-6, 0.085e-6);
-const ozone_center_height: f32 = 25e3;
-const ozone_falloff: f32 = 15e3;
-
-// --- Ground ---
-const ground_albedo: vec3<f32> = vec3(0.05);
-
-// --- Sun Disk ---
-const SUN_ANGULAR_RADIUS_COS: f32 = 0.9998;
-
-// --- Sun Disk ---
-const SUN_ANGULAR_RADIUS: f32 = 0.00465;
-const SUN_DISK_THRESHOLD: f32 = 0.99996;
-
-// --- Night Sky ---
-const night_ambient_color: vec3<f32> = vec3(0.0002, 0.0004, 0.0008);
-
 //=============== STRUCTS ===============//
 struct Constants {
     // lighting
@@ -294,34 +266,6 @@ fn scattering_lut_coords(altitude: f32, mu_s: f32, mu_v_s: f32, radius: f32, atm
     return saturate(vec3<f32>(u, v, w));
 }
 
-fn ozone_density(height: f32) -> f32 {
-    return max(0.0, 1.0 - abs(height - ozone_center_height) / ozone_falloff);
-}
-
-// =============== TRANSMITTANCE TO SUN (Raymarched) ===============
-fn get_transmittance_to_sun(sample_pos: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
-    let intersect = ray_sphere_intersect(sample_pos, sun_dir, atmosphere.atmosphere_radius);
-    if intersect.y <= 0.0 { return vec3<f32>(0.0); }
-
-    let ray_len = intersect.y;
-    let samples = 16;
-    let step = ray_len / f32(samples);
-    var od = vec3<f32>(0.0);
-
-    for (var i = 0; i < samples; i = i + 1) {
-        let p = sample_pos + sun_dir * (f32(i) + 0.5) * step;
-        let h = length(p) - atmosphere.planet_radius;
-        if h < 0.0 { return vec3<f32>(0.0); }
-
-        let rd = exp(-h / rayleigh_scale_height);
-        let md = exp(-h / mie_scale_height);
-        let odens = ozone_density(h);
-
-        od += (rayleigh_scattering_coeff * rd + vec3<f32>(mie_extinction_coeff) * md + ozone_absorption_coeff * odens) * step;
-    }
-    return exp(-od);
-}
-
 fn get_transmittance(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
     let altitude = atmosphere.planet_radius; // Flat approximation, ground level
     let up = vec3<f32>(0.0, 1.0, 0.0);
@@ -352,72 +296,7 @@ fn get_scattering_color(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> 
 
     return scatter;
 }
-
-// =============== MAIN SKY FUNCTION ===============
-fn get_sky_color(camera_pos_world: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
-    let cam_alt = length(camera_pos_world);
-    let up = camera_pos_world / cam_alt;
-
-    let atm_int = ray_sphere_intersect(camera_pos_world, view_dir, atmosphere.atmosphere_radius);
-    if atm_int.y < 0.0 { return vec3<f32>(0.0); }
-
-    let planet_int = ray_sphere_intersect(camera_pos_world, view_dir, atmosphere.planet_radius);
-    var ray_len = atm_int.y;
-    var hit_ground = false;
-    if planet_int.y > 0.0 {
-        ray_len = planet_int.x;
-        hit_ground = true;
-    }
-
-    // ==================== GROUND ====================
-    if hit_ground {
-        let ground_pos = camera_pos_world + view_dir * ray_len;
-        let ground_norm = normalize(ground_pos);
-        let mu_s = dot(ground_norm, atmosphere.sun_direction);
-        if mu_s < -0.1 { return vec3<f32>(0.0); }
-
-        // --- Direct Sun (ozone-aware) ---
-        let sun_trans = get_transmittance_to_sun(ground_pos, atmosphere.sun_direction);
-        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
-        let direct = ground_albedo * sun_rad * sun_trans * max(0.0, mu_s);
-
-        // --- Sky Ambient: Use scattering LUT as irradiance ---
-        // LUT already includes sun_intensity → treat as incoming radiance
-        let view_up = -view_dir; // from ground to sky
-        let scattered_incoming = get_scattering_color(ground_pos, view_up);
-
-        // Lambertian diffuse: albedo * incoming / π
-        let ambient = ground_albedo * scattered_incoming / PI * 1.5;
-
-        // --- Sunset Horizon Glow (boost only near horizon) ---
-        let horizon_factor = exp(-abs(atmosphere.sun_direction.y) * 5.0);
-        let glow = ground_albedo * scattered_incoming * horizon_factor * 5.0; // no /π here — artistic
-
-        let fade = smoothstep(-0.15, 0.0, mu_s);
-        return (direct + ambient + glow) * fade;
-    }
-    // ==================== SKY ====================
-    var color = get_scattering_color(camera_pos_world, view_dir);
-
-    // SUN DISK
-    let sun_cos = dot(view_dir, atmosphere.sun_direction);
-    if sun_cos > SUN_ANGULAR_RADIUS_COS {
-        let trans = get_transmittance(camera_pos_world, view_dir);
-        let sun_rad = sky.sun_color * atmosphere.sun_intensity;
-
-        // Limb darkening (brighter center)
-        let t = (sun_cos - SUN_ANGULAR_RADIUS_COS) / (1.0 - SUN_ANGULAR_RADIUS_COS);
-        let limb = 1.0 - 0.3 * (1.0 - sqrt(t));
-
-        return sun_rad * trans * limb;
-    }
-
-    // Night ambient
-    let night_factor = 1.0 - smoothstep(-0.2, 0.0, atmosphere.sun_direction.y);
-    color += night_ambient_color * night_factor;
-
-    return color;
-}
+//=============== END SKY SAMPLING ===============//
 
 //=============== VERTEX SHADER ===============//
 @vertex
@@ -584,8 +463,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sample precomputed irradiance (incident light)
         let diffuse_sky_color = get_irradiance(in.world_position, N);
 
-        // Sample sky color for reflections
-        var reflection_sky_color = get_sky_color(in.world_position, R);
+        // Sample precomputed scattering for reflections
+        let reflection_sky_color = get_irradiance(in.world_position, R) * 0.5 + get_transmittance(in.world_position, R) * 0.5;
 
         let F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
         let kS_ambient = F_ambient * (1.0 - roughness * 0.7);
@@ -608,10 +487,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let biased_reflection = reflect(-V, biased_normal);
 
         // --- Blend between sun scattering and general sky irradiance ---
-        let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
+        let sun_scatter = get_scattering_color(in.world_position, atmosphere.sun_direction);
+            let sky_reflection = get_irradiance(in.world_position, biased_reflection);
 
-        // Use sky color for specular
-        var sky_specular = get_sky_color(in.world_position, biased_reflection);
+        // Blend — 0.5 gives balanced, stylized but not sun-locked look
+            let sky_specular = mix(sun_scatter, sky_reflection, 0.5);
+            let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
 
         // Fresnel & energy conservation
         var F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);
@@ -643,7 +524,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_hdr_color = ambient + Lo + specular_indirect_occluded + select(emission, vec3<f32>(0.0), is_lighting_only);
 
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));
-    let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
+    //let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
 
-    return vec4<f32>(gamma_corrected, alpha);
+    return vec4<f32>(tonemapped, alpha);
 }

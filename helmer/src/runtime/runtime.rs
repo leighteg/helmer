@@ -81,6 +81,7 @@ pub struct Runtime<T: Send + 'static = ()> {
 
     new_window_size: Option<PhysicalSize<u32>>,
     resize_triggered: bool,
+    last_resize: Instant,
 }
 
 impl<T: Send + 'static> Runtime<T> {
@@ -143,6 +144,7 @@ impl<T: Send + 'static> Runtime<T> {
 
             new_window_size: None,
             resize_triggered: false,
+            last_resize: Instant::now(),
         }
     }
 
@@ -438,30 +440,6 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             return;
         }
 
-        if let Some(new_size) = self.new_window_size {
-            if !self.resize_triggered {
-                // --- RESIZE LOGIC ---
-                let _ = self
-                    .render_thread_sender
-                    .send(RenderMessage::Resize(new_size));
-
-                let mut input = self.input_manager.write();
-                input.window_size = UVec2::new(new_size.width, new_size.height);
-                input.scale_factor = self.window.as_ref().unwrap().scale_factor();
-                drop(input);
-
-                if let Some(user_state) = &self.user_state {
-                    let user_state_clone = Arc::clone(user_state);
-                    let mut state = user_state_clone.lock();
-                    (self.callbacks.resize)(new_size, &mut state);
-                }
-
-                self.new_window_size = None;
-            }
-
-            self.resize_triggered = false;
-        }
-
         self.input_manager
             .read()
             .update_egui_state_from_winit(&event);
@@ -609,6 +587,33 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
             }
 
             self.last_title_update = now;
+        }
+
+        if let Some(new_size) = self.new_window_size {
+            if self.last_resize.elapsed() > Duration::from_millis(500) {
+                if !self.resize_triggered {
+                    // --- RESIZE LOGIC ---
+                    let _ = self
+                        .render_thread_sender
+                        .send(RenderMessage::Resize(new_size));
+
+                    let mut input = self.input_manager.write();
+                    input.window_size = UVec2::new(new_size.width, new_size.height);
+                    input.scale_factor = self.window.as_ref().unwrap().scale_factor();
+                    drop(input);
+
+                    if let Some(user_state) = &self.user_state {
+                        let user_state_clone = Arc::clone(user_state);
+                        let mut state = user_state_clone.lock();
+                        (self.callbacks.resize)(new_size, &mut state);
+                    }
+
+                    self.new_window_size = None;
+                    self.last_resize = now;
+                }
+
+                self.resize_triggered = false;
+            }
         }
     }
 }

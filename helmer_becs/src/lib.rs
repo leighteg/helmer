@@ -14,7 +14,10 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     egui_integration::{EguiResource, egui_system},
-    systems::render_system::{RenderPacket, render_data_system},
+    systems::{
+        render_system::{RenderPacket, render_data_system},
+        scene_system::scene_spawning_system,
+    },
 };
 
 /// A generic wrapper to turn existing data structures into Bevy Components or Resources.
@@ -71,6 +74,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
 
             schedule.add_systems(render_data_system);
             schedule.add_systems(egui_system);
+            schedule.add_systems(scene_spawning_system);
 
             init_callback(
                 world,

@@ -5,6 +5,7 @@ use glam::Quat;
 use helmer::provided::components::{ActiveCamera, MeshAsset, MeshRenderer, Transform};
 use helmer_becs::{
     BevyActiveCamera, BevyCamera, BevyMeshRenderer, BevyTransform, DeltaTime, helmer_becs_init,
+    systems::scene_system::SceneRoot,
 };
 
 use crate::systems::freecam::{FreecamState, freecam_system};
@@ -25,6 +26,8 @@ fn main() {
             asset_server.load_material("../test_game/assets/materials/blue_light.ron");
         let red_light_material_handle =
             asset_server.load_material("../test_game/assets/materials/red_light.ron");
+
+        let city_scene_handle = asset_server.load_scene("../test_game/assets/models/city.glb");
 
         let cube_mesh = MeshAsset::cube("cube".to_owned());
         let cube_handle = asset_server.add_mesh(cube_mesh.vertices.unwrap(), cube_mesh.indices);
@@ -50,6 +53,13 @@ fn main() {
                     visible: true,
                 },
             },
+        ));
+
+        let city_entity = world.spawn((
+            BevyTransform {
+                0: Transform::from_position([0.0, -5.0, 0.0]),
+            },
+            SceneRoot(city_scene_handle),
         ));
 
         schedule.add_systems(spinner_system);

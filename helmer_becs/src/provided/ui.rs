@@ -149,8 +149,8 @@ impl StatsUI {
                     world.query::<(&mut BevyTransform, &mut BevyCamera, &BevyActiveCamera)>();
 
                 for (mut transform, mut camera, _) in camera_query.iter_mut(world) {
-                    let mut transform = transform.0;
-                    let mut camera = camera.0;
+                    let transform = &mut transform.0;
+                    let camera = &mut camera.0;
 
                     ui.heading("active camera");
 
@@ -188,8 +188,8 @@ impl StatsUI {
                 let mut light_query = world.query::<(&mut BevyTransform, &mut BevyLight)>();
 
                 for (mut transform, mut light) in light_query.iter_mut(world) {
-                    let mut transform = transform.0;
-                    let mut light = light.0;
+                    let transform = &mut transform.0;
+                    let light = &mut light.0;
 
                     if light.light_type != LightType::Directional {
                         continue;

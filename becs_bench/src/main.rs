@@ -6,10 +6,10 @@ use bevy_ecs::{
     system::{Query, Res},
 };
 use glam::Quat;
-use helmer::provided::components::{ActiveCamera, MeshAsset, MeshRenderer, Transform};
+use helmer::provided::components::{ActiveCamera, Light, MeshAsset, MeshRenderer, Transform};
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyMeshRenderer, BevyTransform, DeltaTime, helmer_becs_init,
-    systems::scene_system::SceneRoot,
+    BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform, DeltaTime,
+    helmer_becs_init, systems::scene_system::SceneRoot,
 };
 
 use crate::systems::freecam::{FreecamState, freecam_system};
@@ -26,23 +26,62 @@ fn main() {
     helmer_becs_init(|world, schedule, asset_server| {
         let basic_material_handle =
             asset_server.load_material("../test_game/assets/materials/basic.ron");
+        let metal_material_handle =
+            asset_server.load_material("../test_game/assets/materials/shiny_metal.ron");
         let blue_light_material_handle =
             asset_server.load_material("../test_game/assets/materials/blue_light.ron");
         let red_light_material_handle =
             asset_server.load_material("../test_game/assets/materials/red_light.ron");
 
         let city_scene_handle = asset_server.load_scene("../test_game/assets/models/city.glb");
+        let sponza_scene_handle = asset_server.load_scene("../test_game/assets/models/sponza.glb");
+        let ford_raptor_scene_handle =
+            asset_server.load_scene("../test_game/assets/models/ford_raptor.glb");
 
         let cube_mesh = MeshAsset::cube("cube".to_owned());
         let cube_handle = asset_server.add_mesh(cube_mesh.vertices.unwrap(), cube_mesh.indices);
 
         let plane_mesh = MeshAsset::plane("plane".to_owned());
-        let plane_handle = asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
+        let plane_mesh_handle =
+            asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
         let camera_entity = world.spawn((
             BevyTransform::default(),
             BevyCamera::default(),
             BevyActiveCamera { 0: ActiveCamera {} },
+        ));
+
+        let ground_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::from([500.0, 0.001, 500.0]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, false),
+            },
+        ));
+
+        let sun_rotation = Quat::from_euler(
+            glam::EulerRot::YXZ,
+            20.0f32.to_radians(),  // Y rotation - very slight side angle
+            -50.0f32.to_radians(), // X rotation - steeper downward angle
+            20.0f32.to_radians(),  // Z rotation - no roll
+        );
+
+        let sun_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    rotation: sun_rotation,
+                    scale: glam::Vec3::ONE,
+                },
+            },
+            BevyLight {
+                0: Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
+            },
         ));
 
         let cube_entity = world.spawn((
@@ -69,6 +108,28 @@ fn main() {
                 },
             },
             SceneRoot(city_scene_handle),
+        ));
+
+        let sponza_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: glam::Vec3::new(25.0, -4.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::ONE,
+                },
+            },
+            SceneRoot(sponza_scene_handle),
+        ));
+
+        let raptor_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    rotation: glam::Quat::from_rotation_y(90.0),
+                    scale: glam::Vec3::ONE,
+                },
+            },
+            SceneRoot(ford_raptor_scene_handle),
         ));
 
         schedule.add_systems(spinner_system);

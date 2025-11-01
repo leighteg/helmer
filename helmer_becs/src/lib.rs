@@ -4,14 +4,16 @@ use bevy_ecs::{component::Component, resource::Resource, schedule::Schedule, wor
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
-        asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager,
-        runtime::Runtime,
+        asset_server::AssetServer,
+        config::RuntimeConfig,
+        input_manager::InputManager,
+        runtime::{PerformanceMetrics, Runtime},
     },
 };
 use parking_lot::{Mutex, RwLock};
 
 use crate::{
-    egui_integration::EguiResource,
+    egui_integration::{EguiResource, egui_system},
     systems::render_system::{RenderPacket, render_data_system},
 };
 
@@ -31,6 +33,8 @@ pub type BevyLight = BevyWrapper<Light>;
 pub struct BevyAssetServer(pub Arc<Mutex<AssetServer>>);
 #[derive(Resource)]
 pub struct BevyInputManager(pub Arc<RwLock<InputManager>>);
+#[derive(Resource)]
+pub struct BevyPerformanceMetrics(pub Arc<PerformanceMetrics>);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct BevyRuntimeConfig(pub RuntimeConfig);
 
@@ -39,6 +43,7 @@ pub struct BevyRuntimeConfig(pub RuntimeConfig);
 pub struct DeltaTime(pub f32);
 
 pub mod egui_integration;
+pub mod provided;
 pub mod systems;
 
 pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
@@ -57,10 +62,15 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<BevyInputManager>(BevyInputManager(
                 runtime.input_manager.clone(),
             ));
+            world.insert_resource::<BevyPerformanceMetrics>(BevyPerformanceMetrics(
+                runtime.metrics.clone(),
+            ));
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<RenderPacket>(RenderPacket::default());
+            world.insert_resource::<EguiResource>(EguiResource::default());
 
             schedule.add_systems(render_data_system);
+            schedule.add_systems(egui_system);
 
             init_callback(
                 world,

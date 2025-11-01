@@ -1,6 +1,10 @@
 use std::env;
 
-use bevy_ecs::system::{Query, Res};
+use bevy_ecs::{
+    component::Component,
+    query::With,
+    system::{Query, Res},
+};
 use glam::Quat;
 use helmer::provided::components::{ActiveCamera, MeshAsset, MeshRenderer, Transform};
 use helmer_becs::{
@@ -53,11 +57,16 @@ fn main() {
                     visible: true,
                 },
             },
+            SpinnerObject {},
         ));
 
         let city_entity = world.spawn((
             BevyTransform {
-                0: Transform::from_position([0.0, -5.0, 0.0]),
+                0: Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::from_array([3.0; 3]),
+                },
             },
             SceneRoot(city_scene_handle),
         ));
@@ -68,9 +77,12 @@ fn main() {
     });
 }
 
+#[derive(Component)]
+struct SpinnerObject {}
+
 fn spinner_system(
     dt: Res<DeltaTime>,
-    objects_query: Query<(&mut BevyTransform, &BevyMeshRenderer)>,
+    objects_query: Query<(&mut BevyTransform, &BevyMeshRenderer), With<SpinnerObject>>,
 ) {
     let rotation_speed = 0.50 * dt.0;
     let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, rotation_speed);

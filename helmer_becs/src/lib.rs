@@ -3,9 +3,12 @@ use std::sync::Arc;
 use bevy_ecs::{component::Component, resource::Resource, schedule::Schedule, world::World};
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
-    runtime::{asset_server::AssetServer, config::RuntimeConfig, runtime::Runtime},
+    runtime::{
+        asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager,
+        runtime::Runtime,
+    },
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::{
     egui_integration::EguiResource,
@@ -26,6 +29,8 @@ pub type BevyLight = BevyWrapper<Light>;
 // Resource Wrappers
 #[derive(Resource)]
 pub struct BevyAssetServer(pub Arc<Mutex<AssetServer>>);
+#[derive(Resource)]
+pub struct BevyInputManager(pub Arc<RwLock<InputManager>>);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct BevyRuntimeConfig(pub RuntimeConfig);
 
@@ -48,6 +53,9 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             ));
             world.insert_resource::<BevyAssetServer>(BevyAssetServer(
                 runtime.asset_server.as_ref().unwrap().clone(),
+            ));
+            world.insert_resource::<BevyInputManager>(BevyInputManager(
+                runtime.input_manager.clone(),
             ));
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<RenderPacket>(RenderPacket::default());

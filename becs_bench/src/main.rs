@@ -7,6 +7,10 @@ use helmer_becs::{
     BevyActiveCamera, BevyCamera, BevyMeshRenderer, BevyTransform, DeltaTime, helmer_becs_init,
 };
 
+use crate::systems::freecam::{FreecamState, freecam_system};
+
+pub mod systems;
+
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");
     if current_path.ends_with("helmer-rs") {
@@ -49,6 +53,8 @@ fn main() {
         ));
 
         schedule.add_systems(spinner_system);
+
+        schedule.add_systems(freecam_system);
     });
 }
 

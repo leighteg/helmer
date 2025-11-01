@@ -509,8 +509,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let sky_reflection = get_irradiance(in.world_position, biased_reflection);
 
         // Blend — 0.5 gives balanced, stylized but not sun-locked look
-         let sky_specular = mix(sun_scatter, sky_reflection, 0.5);
-            let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
+        let sky_specular = mix(sun_scatter, sky_reflection, 0.5);
+        let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
 
         // Fresnel & energy conservation
         var F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);

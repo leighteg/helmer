@@ -2,7 +2,6 @@
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
 const NUM_CASCADES: u32 = 4u;
-const EVSM_C = 20.0;
 const EPSILON: f32 = 0.00001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
@@ -147,14 +146,6 @@ struct AtmosphereParams {
 @vertex var<push_constant> model: ModelPushConstant;
 
 //=============== UTILITY FUNCTIONS ===============//
-fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
-    let len = length(v);
-    if len < EPSILON {
-        return vec3<f32>(0.0, 0.0, 1.0);
-    }
-    return v / len;
-}
-
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
@@ -205,7 +196,7 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
     var current_depth = depth;
 
     // Warp the depth value
-    current_depth = exp(EVSM_C * (current_depth - 1.0));
+    current_depth = exp(render_constants.evsm_c * (current_depth - 1.0));
 
     // Chebyshev test
     if current_depth <= moments.x {
@@ -314,8 +305,8 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
 
-    let N = safe_normalize(normal_matrix * vertex.normal);
-    let T = safe_normalize(normal_matrix * vertex.tangent.xyz);
+    let N = normalize(normal_matrix * vertex.normal);
+    let T = normalize(normal_matrix * vertex.tangent.xyz);
     let B = cross(N, T) * vertex.tangent.w;
 
     out.world_normal = N;
@@ -334,44 +325,26 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Albedo Calculation (FIXED) ---
-    var albedo_color: vec3<f32>;
-    var alpha: f32;
-    if material.albedo_idx >= 0i {
-        let albedo_sample = textureSample(albedo_textures, texture_sampler, in.tex_coord, u32(material.albedo_idx));
-        albedo_color = albedo_sample.rgb * material.albedo.rgb;
-        alpha = albedo_sample.a * material.albedo.a;
-    } else {
-        albedo_color = material.albedo.rgb;
-        alpha = material.albedo.a;
-    }
 
+    let albedo_sample = textureSample(albedo_textures, texture_sampler, in.tex_coord, u32(material.albedo_idx));
+    let albedo_color = albedo_sample.rgb * material.albedo.rgb;
+    let alpha = albedo_sample.a * material.albedo.a;
     // --- Metallic/Roughness/AO Calculation (FIXED) ---
-    var ao: f32;
-    var metallic: f32;
-    var roughness: f32;
-    if material.metallic_roughness_idx >= 0i {
-        let mr_sample = textureSample(mr_textures, texture_sampler, in.tex_coord, u32(material.metallic_roughness_idx));
-        ao = mr_sample.r * material.ao;
-        metallic = mr_sample.b * material.metallic;
-        roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
-    } else {
-        ao = material.ao;
-        metallic = material.metallic;
-        roughness = max(material.roughness, MIN_ROUGHNESS);
-    }
+
+    let mr_sample = textureSample(mr_textures, texture_sampler, in.tex_coord, u32(material.metallic_roughness_idx));
+    let ao = mr_sample.r * material.ao;
+    let metallic = mr_sample.b * material.metallic;
+    let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
+
 
     // --- Normal Calculation (Correct as-is) ---
-    var N: vec3<f32>;
-    if material.normal_idx >= 0i {
-        let tangent_space_normal = textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz * 2.0 - 1.0;
-        let T = safe_normalize(in.world_tangent);
-        let B = safe_normalize(in.world_bitangent);
-        let N_geom = safe_normalize(in.world_normal);
-        let tbn = mat3x3<f32>(T, B, N_geom);
-        N = safe_normalize(tbn * tangent_space_normal);
-    } else {
-        N = safe_normalize(in.world_normal);
-    }
+
+    let tangent_space_normal = textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz * 2.0 - 1.0;
+    let N_geom = normalize(in.world_normal);
+    let T = normalize(in.world_tangent);
+    let B = normalize(in.world_bitangent);
+    let tbn = mat3x3<f32>(T, B, N_geom);
+    let N = normalize(tbn * tangent_space_normal);
 
     // Add emission
     let emission = material.emission_color * material.emission_strength;
@@ -397,9 +370,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let effective_metallic = metallic;
 
     // Basic material properties
-    let V = safe_normalize(camera.view_position - in.world_position);
+    let V = normalize(camera.view_position - in.world_position);
     let R = reflect(-V, N);
-    let F0 = mix(vec3<f32>(0.04), albedo_color, metallic);
+    let F0 = mix(vec3<f32>(0.04), effective_albedo, effective_metallic);
 
     // Calculate lighting
     var Lo = vec3<f32>(0.0);
@@ -411,7 +384,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         var shadow_multiplier = 1.0;
 
         if light.light_type == 0u { // Directional
-            L = safe_normalize(-light.direction);
+            L = normalize(-light.direction);
             radiance = light.color * light.intensity;
 
             let NdotL = max(dot(N, L), 0.0);
@@ -429,7 +402,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let NdotL = max(dot(N, L), 0.0);
         if NdotL > 0.0 {
-            let H = safe_normalize(V + L);
+            let H = normalize(V + L);
             let NdotH = max(dot(N, H), 0.0);
             let HdotV = max(dot(H, V), 0.0);
 
@@ -488,11 +461,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         // --- Blend between sun scattering and general sky irradiance ---
         let sun_scatter = get_scattering_color(in.world_position, atmosphere.sun_direction);
-            let sky_reflection = get_irradiance(in.world_position, biased_reflection);
+        let sky_reflection = get_irradiance(in.world_position, biased_reflection);
 
         // Blend — 0.5 gives balanced, stylized but not sun-locked look
-            let sky_specular = mix(sun_scatter, sky_reflection, 0.5);
-            let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
+        let sky_specular = mix(sun_scatter, sky_reflection, 0.5);
+        let sky_diffuse = get_irradiance(in.world_position, biased_normal) / PI;
 
         // Fresnel & energy conservation
         var F_ambient = fresnel_schlick(max(dot(N, V), 0.0), F0);

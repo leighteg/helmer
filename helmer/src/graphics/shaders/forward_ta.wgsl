@@ -304,9 +304,10 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
         model.model_matrix[2].xyz
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
+    let tangent_world = normalize(model_mat3 * vertex.tangent.xyz);
 
     let N = normalize(normal_matrix * vertex.normal);
-    let T = normalize(normal_matrix * vertex.tangent.xyz);
+    let T = normalize(tangent_world - dot(tangent_world, N) * N);
     let B = cross(N, T) * vertex.tangent.w;
 
     out.world_normal = N;
@@ -377,6 +378,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Calculate lighting
     var Lo = vec3<f32>(0.0);
 
+    let sun_height_factor = max(sky.sun_direction.y, 0.0);
+    let sun_fade = pow(sun_height_factor, 1.5);
+
+    let light_model = render_constants.light_model;
+    let is_stylized = light_model == 1u;
+    let is_simple = light_model == 2u;
+
     for (var i = 0u; i < camera.light_count; i = i + 1u) {
         let light = lights_buffer[i];
         var L: vec3<f32>;
@@ -385,7 +393,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         if light.light_type == 0u { // Directional
             L = normalize(-light.direction);
-            radiance = light.color * light.intensity;
+            radiance = light.color * light.intensity * sun_fade;
 
             let NdotL = max(dot(N, L), 0.0);
             let bias_amount = 0.5 + 1.0 * (1.0 - NdotL);
@@ -401,7 +409,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         let NdotL = max(dot(N, L), 0.0);
-        if NdotL > 0.0 {
+        if NdotL > 0.0 || is_stylized {
             let H = normalize(V + L);
             let NdotH = max(dot(N, H), 0.0);
             let HdotV = max(dot(H, V), 0.0);
@@ -413,13 +421,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             let numerator = NDF * G * F;
             let denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + EPSILON;
-            let specular = numerator / denominator;
+            let specular = select(numerator / denominator, vec3(0.0), is_simple);
 
             // Diffuse
             let kS = F;
             let kD = (vec3<f32>(1.0) - kS) * (1.0 - metallic);
 
-            Lo += (kD * effective_albedo / PI + specular) * radiance * NdotL * shadow_multiplier;
+            Lo += (kD * effective_albedo / PI + specular) * radiance * select(NdotL, 1.0, is_stylized) * shadow_multiplier;
         }
     }
 

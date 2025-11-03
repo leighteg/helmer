@@ -5,15 +5,18 @@ use bevy_ecs::{
     query::With,
     system::{Query, Res},
 };
-use glam::Quat;
+use glam::{Quat, Vec3};
 use helmer::provided::components::{ActiveCamera, Light, MeshAsset, MeshRenderer, Transform};
 use helmer_becs::{
     BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform, DeltaTime,
-    helmer_becs_init, systems::scene_system::SceneRoot,
+    helmer_becs_init,
+    physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
+    systems::scene_system::SceneRoot,
 };
 
 use crate::systems::{
     freecam::{FreecamState, freecam_system},
+    spawner::{MeshRendererStore, SpawnerSystemResource, spawner_system},
     spinner::{SpinnerObject, spinner_system},
 };
 
@@ -65,6 +68,8 @@ fn main() {
             BevyMeshRenderer {
                 0: MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, false),
             },
+            ColliderShape::Cuboid,
+            FixedCollider {},
         ));
 
         let sun_rotation = Quat::from_euler(
@@ -87,6 +92,27 @@ fn main() {
             },
         ));
 
+        let spin_cube_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: Vec3::from_array([0.0, 0.0, 5.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([2.0; 3]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
+                },
+            },
+            SpinnerObject {},
+            ColliderShape::Cuboid,
+            FixedCollider {},
+        ));
+
         let cube_entity = world.spawn((
             BevyTransform {
                 0: Transform::from_position([0.0, 0.0, 5.0]),
@@ -99,7 +125,8 @@ fn main() {
                     visible: true,
                 },
             },
-            SpinnerObject {},
+            ColliderShape::Cuboid,
+            DynamicRigidBody { mass: 1.0 },
         ));
 
         let city_entity = world.spawn((
@@ -138,5 +165,20 @@ fn main() {
         schedule.add_systems(spinner_system);
 
         schedule.add_systems(freecam_system);
+
+        let mut mesh_renderer_store = MeshRendererStore::default();
+        mesh_renderer_store.mesh_renderers.insert(
+            "default".to_string(),
+            MeshRenderer {
+                mesh_id: cube_handle.id,
+                material_id: basic_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        world.insert_resource(mesh_renderer_store);
+
+        world.insert_resource(SpawnerSystemResource::default());
+        schedule.add_systems(spawner_system);
     });
 }

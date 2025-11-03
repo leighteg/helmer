@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use bevy_ecs::{component::Component, resource::Resource, schedule::Schedule, world::World};
+use bevy_ecs::{
+    component::Component,
+    resource::Resource,
+    schedule::{IntoScheduleConfigs, Schedule},
+    world::World,
+};
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
@@ -14,6 +19,13 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     egui_integration::{EguiResource, egui_system},
+    physics::{
+        physics_resource::PhysicsResource,
+        systems::{
+            cleanup_physics_system, physics_step_system, sync_entities_to_physics_system,
+            sync_physics_to_entities_system,
+        },
+    },
     systems::{
         render_system::{RenderPacket, render_data_system},
         scene_system::scene_spawning_system,
@@ -46,6 +58,7 @@ pub struct BevyRuntimeConfig(pub RuntimeConfig);
 pub struct DeltaTime(pub f32);
 
 pub mod egui_integration;
+pub mod physics;
 pub mod provided;
 pub mod systems;
 
@@ -71,10 +84,23 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<RenderPacket>(RenderPacket::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
+            world.insert_resource::<PhysicsResource>(PhysicsResource::default());
 
+            // core systems
             schedule.add_systems(render_data_system);
             schedule.add_systems(egui_system);
             schedule.add_systems(scene_spawning_system);
+
+            // physics systems
+            schedule.add_systems(
+                (
+                    cleanup_physics_system,
+                    sync_entities_to_physics_system,
+                    physics_step_system,
+                    sync_physics_to_entities_system,
+                )
+                    .chain(),
+            );
 
             init_callback(
                 world,

@@ -13,3 +13,4 @@ winit = "0.30.12"
 egui = { git = "https://github.com/emilk/egui.git" }
 egui-wgpu = { git = "https://github.com/emilk/egui.git" }
 parking_lot = "0.12.5"
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }

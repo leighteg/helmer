@@ -16,7 +16,8 @@ use crate::{
     BevyPerformanceMetrics,
     BevyRuntimeConfig,
     BevyTransform,
-    egui_integration::EguiResource, //physics::physics_resource::PhysicsResource,
+    egui_integration::EguiResource,
+    physics::physics_resource::PhysicsResource, //physics::physics_resource::PhysicsResource,
 };
 
 pub struct StatsUI {}
@@ -211,7 +212,7 @@ impl StatsUI {
                     ui.separator();
                 }
 
-                /*let mut physics_resource = world
+                let mut physics_resource = world
                     .get_resource_mut::<PhysicsResource>()
                     .expect("PhysicsResource resource not found");
 
@@ -234,7 +235,7 @@ impl StatsUI {
                         .prefix("z: "),
                 );
 
-                ui.separator();*/
+                ui.separator();
             }),
             "scene".to_string(),
         ));

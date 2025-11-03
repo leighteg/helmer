@@ -10,3 +10,4 @@ glam = "0.30.8"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 winit = "0.30.12"
+egui = { git = "https://github.com/emilk/egui.git" }

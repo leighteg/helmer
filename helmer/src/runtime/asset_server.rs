@@ -9,6 +9,7 @@ use mikktspace::Geometry;
 use parking_lot::RwLock;
 use serde::Deserialize;
 use std::{
+    collections::VecDeque,
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::{
@@ -19,6 +20,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 use tracing::{info, warn};
+
+// limit for how many assets to create per frame to avoid stutter
+const ASSET_CREATION_LIMIT_PER_FRAME: usize = 4;
 
 const FORWARD_TA_TARGET_RES: u32 = 512;
 
@@ -204,6 +208,147 @@ enum AssetLoadResult {
 #[derive(Default)]
 pub struct MeshAabbMap(pub HashMap<usize, Aabb>);
 
+// --- DEFERRED SCENE LOADER ---
+
+/// Represents the state of a scene being incrementally loaded onto the GPU.
+struct ActiveSceneLoader {
+    scene_id: usize,
+    // Asset buffers, wrapped in Option to allow .take() for moving to render thread
+    textures: Vec<Option<(String, AssetKind, Vec<u8>, wgpu::TextureFormat, (u32, u32))>>,
+    materials: Vec<Option<IntermediateMaterial>>,
+    meshes: Vec<Option<(Vec<Vertex>, Vec<Vec<u32>>, Aabb)>>,
+    nodes: Vec<GltfNode>, // Kept for final scene construction
+    // State counters
+    next_texture_index: usize,
+    next_material_index: usize,
+    next_mesh_index: usize,
+    // ID maps to translate from scene-local index to global asset ID
+    texture_map: HashMap<usize, usize>,
+    material_map: HashMap<usize, usize>,
+    mesh_map: HashMap<usize, usize>,
+}
+
+/// Result of processing one asset from the ActiveSceneLoader.
+enum ProcessResult {
+    /// A message was successfully sent to the renderer.
+    SentMessage,
+    /// All assets for this scene have been processed.
+    Finished,
+}
+
+impl ActiveSceneLoader {
+    /// Creates a new loader state from parsed scene data.
+    fn new(scene_id: usize, data: ParsedGltfScene) -> Self {
+        Self {
+            scene_id,
+            // Convert Vec<T> to Vec<Option<T>> to allow taking ownership of data
+            textures: data.textures.into_iter().map(Some).collect(),
+            materials: data.materials.into_iter().map(Some).collect(),
+            meshes: data.meshes.into_iter().map(Some).collect(),
+            nodes: data.nodes,
+            next_texture_index: 0,
+            next_material_index: 0,
+            next_mesh_index: 0,
+            texture_map: HashMap::new(),
+            material_map: HashMap::new(),
+            mesh_map: HashMap::new(),
+        }
+    }
+
+    /// Processes the next asset in the queue (Texture > Material > Mesh).
+    /// Moves data out of its buffers and sends it to the render thread.
+    fn process_next_asset(
+        &mut self,
+        render_sender: &mpsc::Sender<RenderMessage>,
+        next_id: &AtomicUsize,
+        mesh_aabb_map: &Arc<RwLock<MeshAabbMap>>,
+    ) -> ProcessResult {
+        // --- 1. Process Textures ---
+        if self.next_texture_index < self.textures.len() {
+            // Take the texture data, leaving None in its place
+            if let Some((name, kind, tex_data, format, (width, height))) =
+                self.textures[self.next_texture_index].take()
+            {
+                let tex_id = next_id.fetch_add(1, Ordering::Relaxed);
+                render_sender
+                    .send(RenderMessage::CreateTexture {
+                        id: tex_id,
+                        name,
+                        kind,
+                        data: tex_data,
+                        format,
+                        width,
+                        height,
+                    })
+                    .unwrap_or_else(|e| warn!("Failed to send CreateTexture message: {}", e));
+
+                self.texture_map.insert(self.next_texture_index, tex_id);
+            }
+            self.next_texture_index += 1;
+            return ProcessResult::SentMessage;
+        }
+
+        // --- 2. Process Materials ---
+        if self.next_material_index < self.materials.len() {
+            if let Some(mat) = self.materials[self.next_material_index].take() {
+                let mat_id = next_id.fetch_add(1, Ordering::Relaxed);
+
+                let resolve_tex = |local_idx_opt: Option<usize>| {
+                    local_idx_opt.and_then(|idx| self.texture_map.get(&idx).copied())
+                };
+
+                let gpu_data = MaterialGpuData {
+                    id: mat_id,
+                    albedo: mat.albedo,
+                    metallic: mat.metallic,
+                    roughness: mat.roughness,
+                    ao: mat.ao,
+                    emission_strength: mat.emission_strength,
+                    emission_color: mat.emission_color,
+                    albedo_texture_id: resolve_tex(mat.albedo_texture_index),
+                    normal_texture_id: resolve_tex(mat.normal_texture_index),
+                    metallic_roughness_texture_id: resolve_tex(
+                        mat.metallic_roughness_texture_index,
+                    ),
+                    emission_texture_id: resolve_tex(mat.emission_texture_index),
+                };
+
+                render_sender
+                    .send(RenderMessage::CreateMaterial(gpu_data))
+                    .unwrap_or_else(|e| warn!("Failed to send CreateMaterial message: {}", e));
+
+                self.material_map.insert(self.next_material_index, mat_id);
+            }
+            self.next_material_index += 1;
+            return ProcessResult::SentMessage;
+        }
+
+        // --- 3. Process Meshes ---
+        if self.next_mesh_index < self.meshes.len() {
+            if let Some((vertices, lod_indices, bounds)) = self.meshes[self.next_mesh_index].take()
+            {
+                let mesh_id = next_id.fetch_add(1, Ordering::Relaxed);
+                render_sender
+                    .send(RenderMessage::CreateMesh {
+                        id: mesh_id,
+                        vertices,
+                        lod_indices,
+                        bounds,
+                    })
+                    .unwrap_or_else(|e| warn!("Failed to send CreateMesh message: {}", e));
+
+                mesh_aabb_map.write().0.insert(mesh_id, bounds);
+                self.mesh_map.insert(self.next_mesh_index, mesh_id);
+            }
+            self.next_mesh_index += 1;
+            return ProcessResult::SentMessage;
+        }
+
+        // --- 4. All assets processed ---
+        ProcessResult::Finished
+    }
+}
+
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
@@ -214,6 +359,9 @@ pub struct AssetServer {
     result_receiver: crossbeam_channel::Receiver<AssetLoadResult>,
     render_sender: mpsc::Sender<RenderMessage>,
     _worker_handles: Vec<JoinHandle<()>>,
+
+    pending_scenes: RwLock<VecDeque<(usize, ParsedGltfScene)>>,
+    active_loader_state: RwLock<Option<ActiveSceneLoader>>,
 }
 
 impl AssetServer {
@@ -300,6 +448,8 @@ impl AssetServer {
             result_receiver,
             render_sender,
             _worker_handles: worker_handles,
+            pending_scenes: RwLock::new(VecDeque::new()),
+            active_loader_state: RwLock::new(None),
         }
     }
 
@@ -379,6 +529,7 @@ impl AssetServer {
     }
 
     pub fn update(&self) {
+        // --- 1. Drain all completed load results from workers ---
         while let Ok(result) = self.result_receiver.try_recv() {
             match result {
                 AssetLoadResult::Mesh {
@@ -422,87 +573,83 @@ impl AssetServer {
                         .send(RenderMessage::CreateMaterial(material_gpu_data))
                         .unwrap();
                 }
+                // --- MODIFIED ---
+                // Instead of processing here, queue it for deferred loading
                 AssetLoadResult::Scene { id: scene_id, data } => {
-                    let mut texture_map = HashMap::new();
-                    for (i, (name, kind, tex_data, format, (width, height))) in
-                        data.textures.into_iter().enumerate()
-                    {
-                        let tex_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                        self.render_sender
-                            .send(RenderMessage::CreateTexture {
-                                id: tex_id,
-                                name,
-                                kind,
-                                data: tex_data,
-                                format,
-                                width,
-                                height,
-                            })
-                            .unwrap();
-                        texture_map.insert(i, tex_id);
-                    }
-
-                    let mut material_map = HashMap::new();
-                    for (i, mat) in data.materials.into_iter().enumerate() {
-                        let mat_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                        let resolve_tex = |local_idx_opt: Option<usize>| {
-                            local_idx_opt.and_then(|idx| texture_map.get(&idx).copied())
-                        };
-                        let gpu_data = MaterialGpuData {
-                            id: mat_id,
-                            albedo: mat.albedo,
-                            metallic: mat.metallic,
-                            roughness: mat.roughness,
-                            ao: mat.ao,
-                            emission_strength: mat.emission_strength,
-                            emission_color: mat.emission_color,
-                            albedo_texture_id: resolve_tex(mat.albedo_texture_index),
-                            normal_texture_id: resolve_tex(mat.normal_texture_index),
-                            metallic_roughness_texture_id: resolve_tex(
-                                mat.metallic_roughness_texture_index,
-                            ),
-                            emission_texture_id: resolve_tex(mat.emission_texture_index),
-                        };
-                        self.render_sender
-                            .send(RenderMessage::CreateMaterial(gpu_data))
-                            .unwrap();
-                        material_map.insert(i, mat_id);
-                    }
-
-                    let mut mesh_map = HashMap::new();
-                    for (i, (vertices, lod_indices, bounds)) in data.meshes.into_iter().enumerate()
-                    {
-                        let mesh_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                        self.render_sender
-                            .send(RenderMessage::CreateMesh {
-                                id: mesh_id,
-                                vertices,
-                                lod_indices,
-                                bounds,
-                            })
-                            .unwrap();
-                        self.mesh_aabb_map.write().0.insert(mesh_id, bounds);
-                        mesh_map.insert(i, mesh_id);
-                    }
-
-                    let scene_nodes = data
-                        .nodes
-                        .into_iter()
-                        .filter_map(|node| {
-                            let mesh_id = mesh_map.get(&node.mesh_index)?;
-                            let material_id = material_map.get(&node.material_index)?;
-                            Some(SceneNode {
-                                mesh: Handle::new(*mesh_id),
-                                material: Handle::new(*material_id),
-                                transform: node.transform,
-                            })
-                        })
-                        .collect();
-
-                    let scene = Arc::new(Scene { nodes: scene_nodes });
-                    self.scenes.write().insert(scene_id, scene);
-                    info!("Successfully loaded scene with handle {}", scene_id);
+                    info!(
+                        "Scene {} finished loading, queueing for deferred processing.",
+                        scene_id
+                    );
+                    self.pending_scenes.write().push_back((scene_id, data));
                 }
+            }
+        }
+
+        // --- 2. Process the scene queue incrementally ---
+        self.process_scene_queue(ASSET_CREATION_LIMIT_PER_FRAME);
+    }
+
+    /// Incrementally processes the queue of loaded scenes, sending a limited
+    /// number of creation messages to the renderer per call.
+    fn process_scene_queue(&self, limit: usize) {
+        let mut messages_sent = 0;
+        let mut active_loader_guard = self.active_loader_state.write();
+
+        while messages_sent < limit {
+            // Step 1: Ensure we have an active loader if scenes are pending
+            if active_loader_guard.is_none() {
+                if let Some((scene_id, data)) = self.pending_scenes.write().pop_front() {
+                    info!("Starting deferred processing for scene {}", scene_id);
+                    *active_loader_guard = Some(ActiveSceneLoader::new(scene_id, data));
+                } else {
+                    // No pending scenes and no active loader, we're done
+                    break;
+                }
+            }
+
+            // Step 2: Process the active loader
+            if let Some(loader) = active_loader_guard.as_mut() {
+                match loader.process_next_asset(
+                    &self.render_sender,
+                    &self.next_id,
+                    &self.mesh_aabb_map,
+                ) {
+                    ProcessResult::SentMessage => {
+                        messages_sent += 1;
+                    }
+                    ProcessResult::Finished => {
+                        // All assets for this scene are loaded, build final Scene
+                        let scene_nodes = loader
+                            .nodes
+                            .iter()
+                            .filter_map(|node| {
+                                // Re-map local indices to global asset handles
+                                let mesh_id = loader.mesh_map.get(&node.mesh_index)?;
+                                let material_id = loader.material_map.get(&node.material_index)?;
+                                Some(SceneNode {
+                                    mesh: Handle::new(*mesh_id),
+                                    material: Handle::new(*material_id),
+                                    transform: node.transform,
+                                })
+                            })
+                            .collect();
+
+                        let scene = Arc::new(Scene { nodes: scene_nodes });
+                        self.scenes.write().insert(loader.scene_id, scene);
+                        info!(
+                            "Successfully finished deferred load of scene {}",
+                            loader.scene_id
+                        );
+
+                        // Clear the active loader so the next pending scene can start
+                        *active_loader_guard = None;
+                        // We don't increment messages_sent here, but loop again
+                        // to immediately check for a new pending scene.
+                    }
+                }
+            } else {
+                // Should be impossible due to check at start of loop, but break just in case
+                break;
             }
         }
     }
@@ -981,7 +1128,9 @@ fn process_texture(
                     let mut dimensions = rgba.dimensions();
 
                     if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
-                        if dimensions.0 != FORWARD_TA_TARGET_RES || dimensions.1 != FORWARD_TA_TARGET_RES {
+                        if dimensions.0 != FORWARD_TA_TARGET_RES
+                            || dimensions.1 != FORWARD_TA_TARGET_RES
+                        {
                             rgba = image::imageops::resize(
                                 &rgba,
                                 FORWARD_TA_TARGET_RES,

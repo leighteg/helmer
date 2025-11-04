@@ -15,6 +15,7 @@ use helmer_becs::{
 };
 
 use crate::systems::{
+    config_toggle::config_toggle_system,
     freecam::{FreecamState, freecam_system},
     spawner::{MeshRendererStore, SpawnerSystemResource, spawner_system},
     spinner::{SpinnerObject, spinner_system},
@@ -180,5 +181,7 @@ fn main() {
 
         world.insert_resource(SpawnerSystemResource::default());
         schedule.add_systems(spawner_system);
+
+        schedule.add_systems(config_toggle_system);
     });
 }

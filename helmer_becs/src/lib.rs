@@ -109,6 +109,25 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             );
         },
         |dt, (world, schedule)| {
+            // egui input interception
+            world.resource_scope::<BevyInputManager, _>(|world, input_manager| {
+                let mut input_manager = input_manager.0.write();
+                world.resource_scope::<BevyRuntimeConfig, _>(|ecs_core, runtime_config| {
+                    let runtime_config = runtime_config.0;
+                    ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                        if runtime_config.egui {
+                            if input_manager.active_mouse_buttons.len() == 0 {
+                                input_manager.egui_wants_pointer =
+                                    egui_resource.ctx.wants_pointer_input();
+                            }
+                            input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+                        } else if egui_resource.accepting_input {
+                            input_manager.clear_egui_state();
+                        }
+                    });
+                });
+            });
+
             world.resource_mut::<DeltaTime>().0 = dt;
 
             schedule.run(world);

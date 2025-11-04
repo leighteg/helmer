@@ -33,17 +33,21 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] asset streaming
 - [ ] AssetServer improved worker pool usage (scene parsing)
 - [ ] skinned mesh & animation system/support
-- [ ] precomputed atmospheric scattering
-- [ ] fix sky light contribution
-- [ ] account for atmosphere ground
-- [ ] SSR cubemap fallback?
+- [x] precomputed atmospheric scattering
+- [x] fix sky light contribution (generally fixed)
+- [x] account for atmosphere ground (we sorta do)
+- [ ] modular cubemap generics
+- [ ] SSR cubemap fallback
 - [ ] more light types
 - [ ] occlusion culling
-- [ ] soft shadows (PCSS?)
+- [x] soft shadows (PCSS?) [basic pcf for now]
 - [ ] point light shadows
 - [ ] full gi (SDFGI, DDGI?)
 - [ ] full pbr/modern brdf
-- [ ] implement supported advanced features to forward renderers
+~~- [ ] implement supported advanced features to forward renderers~~
+- [ ] replace forward renderer(s) shadow pipeline with a simpler implementation
+- [ ] add indirect lighting to forward renderer(s)? (Simplified Light Propagation Volumes?)
+- [ ] cubemap-based reflections in forward renderers
 - [ ] gpu compute based culling?
 - [ ] hardware RT path/pipeline or acceleration?
 - [ ] touch support

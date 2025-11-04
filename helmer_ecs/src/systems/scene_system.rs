@@ -1,17 +1,18 @@
-use crate::{
-    ecs::{
-        component::Component,
-        ecs_core::{ECSCore, Entity},
-        system::System,
+use crate::ecs::{
+    component::Component,
+    ecs_core::{ECSCore, Entity},
+    system::System,
+};
+use helmer::{
+    provided::components::{MeshRenderer, Transform},
+    runtime::{
+        asset_server::{AssetServer, Handle, Scene},
+        input_manager::InputManager,
     },
 };
-use helmer::{provided::components::{MeshRenderer, Transform}, runtime::{asset_server::{AssetServer, Handle, Scene}, input_manager::InputManager}};
 use parking_lot::Mutex;
 use proc::Component as ComponentDerive;
-use std::{
-    any::TypeId,
-    sync::Arc,
-};
+use std::{any::TypeId, sync::Arc};
 use tracing::info;
 
 /// Add to an entity to request a scene to be loaded and spawned.
@@ -38,7 +39,10 @@ impl System for SceneSpawningSystem {
     }
 
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
-        let asset_server = ecs.get_resource::<Arc<Mutex<AssetServer>>>().unwrap().clone();
+        let asset_server = ecs
+            .get_resource::<Arc<Mutex<AssetServer>>>()
+            .unwrap()
+            .clone();
         let mut spawn_commands = Vec::new();
 
         // Step 1: Get a list of all entities that could potentially be spawned.
@@ -54,7 +58,7 @@ impl System for SceneSpawningSystem {
                 if let Some(scene_root) = ecs.component_pool.get::<SceneRoot>(entity) {
                     // Check if the scene asset is finished loading.
                     if let Some(scene) = asset_server.lock().get_scene(&scene_root.0) {
-                        spawn_commands.push((entity, scene));
+                        spawn_commands.push((entity, (scene, scene_root.0.id)));
                     }
                 }
             }
@@ -62,18 +66,14 @@ impl System for SceneSpawningSystem {
 
         // Step 3: Execute the collected spawn commands.
         for (root_entity, scene) in spawn_commands {
-            info!(
-                "Spawning scene with {} nodes for entity {}",
-                scene.nodes.len(),
-                root_entity
-            );
+            info!("Spawning scene {} for entity {}", scene.1, root_entity);
 
             let root_transform = ecs
                 .get_component::<Transform>(root_entity)
                 .cloned()
                 .unwrap_or_default();
 
-            for node in &scene.nodes {
+            for node in &scene.0.nodes {
                 let child_entity = ecs.create_entity();
                 let final_matrix = root_transform.to_matrix() * node.transform;
                 ecs.add_component(child_entity, Transform::from_matrix(final_matrix));
@@ -81,17 +81,16 @@ impl System for SceneSpawningSystem {
                     child_entity,
                     MeshRenderer::new(node.mesh.id, node.material.id, true, true),
                 );
-                ecs.add_component(child_entity, SceneChild {
-                    scene_root: root_entity,
-                });
+                ecs.add_component(
+                    child_entity,
+                    SceneChild {
+                        scene_root: root_entity,
+                    },
+                );
             }
             ecs.add_component(root_entity, SpawnedScene {});
 
-            info!(
-                "Spawned scene with {} nodes for entity {}",
-                scene.nodes.len(),
-                root_entity
-            );
+            info!("Spawned scene {} for entity {}", scene.1, root_entity);
         }
     }
 }

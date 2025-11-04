@@ -44,9 +44,8 @@ pub fn scene_spawning_system(
     for (root_entity, scene_root) in query.iter() {
         if let Some(scene) = asset_server.0.lock().get_scene(&scene_root.0) {
             info!(
-                "Spawning scene with {} nodes for entity {}",
-                scene.nodes.len(),
-                root_entity
+                "Spawning scene {} for entity {}",
+                scene_root.0.id, root_entity
             );
 
             let root_transform = transforms.get(root_entity).map(|t| t.0).unwrap_or_default();
@@ -67,9 +66,8 @@ pub fn scene_spawning_system(
             commands.entity(root_entity).insert(SpawnedScene);
 
             info!(
-                "Spawned scene with {} nodes for entity {}",
-                scene.nodes.len(),
-                root_entity
+                "Spawned scene {} for entity {}",
+                scene_root.0.id, root_entity
             );
         }
     }

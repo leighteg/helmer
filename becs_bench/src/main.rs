@@ -67,7 +67,7 @@ fn main() {
                 },
             },
             BevyMeshRenderer {
-                0: MeshRenderer::new(plane_mesh_handle.id, metal_material_handle.id, false, false),
+                0: MeshRenderer::new(plane_mesh_handle.id, basic_material_handle.id, false, false),
             },
             ColliderShape::Cuboid,
             FixedCollider {},

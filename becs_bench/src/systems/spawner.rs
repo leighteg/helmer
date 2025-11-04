@@ -13,6 +13,8 @@ use helmer_becs::{
     physics::components::{ColliderShape, DynamicRigidBody},
 };
 
+use crate::systems::config_toggle::HideToggleProof;
+
 #[derive(Resource, Default)]
 pub struct MeshRendererStore {
     pub mesh_renderers: HashMap<String, MeshRenderer>,
@@ -109,6 +111,7 @@ pub fn spawner_system(
                 BevyMeshRenderer { 0: *mesh_renderer },
                 ColliderShape::Cuboid,
                 DynamicRigidBody { mass: 1.0 },
+                HideToggleProof {},
             ));
             spawner_system_resource
                 .spawned_entities

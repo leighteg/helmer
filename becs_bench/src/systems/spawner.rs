@@ -5,9 +5,10 @@ use bevy_ecs::{
     resource::Resource,
     system::{Commands, Res, ResMut},
 };
+use glam::Vec3;
 use helmer::provided::components::{MeshRenderer, Transform};
 use helmer_becs::{
-    BevyMeshRenderer, BevyTransform,
+    BevyMeshRenderer, BevyTransform, DeltaTime,
     egui_integration::EguiResource,
     physics::components::{ColliderShape, DynamicRigidBody},
 };
@@ -23,6 +24,7 @@ pub struct SpawnerSystemResource {
     pub spawn_iters: usize,
     pub spawned_entities: HashSet<Entity>,
     pub despawn_all: bool,
+    pub cube_scale: f32,
 }
 
 pub fn spawner_system(
@@ -48,6 +50,10 @@ pub fn spawner_system(
                 ui.add(
                     egui::DragValue::new(&mut spawner_system_resource.spawn_iters)
                         .prefix("spawn iters: "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut spawner_system_resource.cube_scale)
+                        .prefix("cube scale: "),
                 );
 
                 if ui.button("destroy spawned entities").clicked() {
@@ -94,7 +100,11 @@ pub fn spawner_system(
         for i in 0..spawner_system_resource.spawn_iters {
             let new_entity = commands.spawn((
                 BevyTransform {
-                    0: Transform::from_position([0.0, 10.0, 5.0]),
+                    0: Transform {
+                        position: Vec3::from_array([0.0, 10.0, 5.0]),
+                        scale: Vec3::from_array([spawner_system_resource.cube_scale; 3]),
+                        ..Default::default()
+                    },
                 },
                 BevyMeshRenderer { 0: *mesh_renderer },
                 ColliderShape::Cuboid,

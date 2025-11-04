@@ -28,6 +28,14 @@ struct VertexInput {
     @location(3) tangent: vec4<f32>,
 }
 
+struct InstanceInput {
+    @location(5) model_matrix_col_0: vec4<f32>,
+    @location(6) model_matrix_col_1: vec4<f32>,
+    @location(7) model_matrix_col_2: vec4<f32>,
+    @location(8) model_matrix_col_3: vec4<f32>,
+    @location(9) material_id: u32,
+}
+
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
     projection_matrix: mat4x4<f32>,
@@ -51,19 +59,11 @@ struct MaterialData {
     _padding: f32,
 }
 
-struct PbrConstants {
-    model_matrix: mat4x4<f32>,
-    material_id: u32,
-}
-
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
 @group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
 @group(1) @binding(2) var pbr_sampler: sampler;
-
-@vertex
-var<push_constant> constants: PbrConstants;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
@@ -76,8 +76,6 @@ fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     let det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
 
-    // If the determinant is zero or very close to it, the matrix is not invertible.
-    // Return the identity matrix as a safe fallback to prevent division by zero.
     if abs(det) < EPSILON {
         return mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
     }
@@ -97,17 +95,25 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
 }
 
 @vertex
-fn vs_main(vertex: VertexInput) -> GBufferInput {
+fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
     var out: GBufferInput;
 
-    let world_position_vec4 = constants.model_matrix * vec4<f32>(vertex.position, 1.0);
+    // Reconstruct model_matrix from instance input
+    let model_matrix = mat4x4<f32>(
+        instance.model_matrix_col_0,
+        instance.model_matrix_col_1,
+        instance.model_matrix_col_2,
+        instance.model_matrix_col_3
+    );
+
+    let world_position_vec4 = model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
 
     let model_mat3 = mat3x3<f32>(
-        constants.model_matrix[0].xyz,
-        constants.model_matrix[1].xyz,
-        constants.model_matrix[2].xyz
+        model_matrix[0].xyz,
+        model_matrix[1].xyz,
+        model_matrix[2].xyz
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
 
@@ -120,7 +126,7 @@ fn vs_main(vertex: VertexInput) -> GBufferInput {
     out.world_bitangent = B;
 
     out.tex_coord = vertex.tex_coord;
-    out.material_id = constants.material_id;
+    out.material_id = instance.material_id;
 
     return out;
 }

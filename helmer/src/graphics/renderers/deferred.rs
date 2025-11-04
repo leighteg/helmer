@@ -3,7 +3,7 @@ use crate::{
         atmosphere::AtmosphereRenderer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
-            LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
+            InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
             NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait,
             SHADOW_MAP_RESOLUTION, ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms,
             TextureManager, Vertex,
@@ -17,6 +17,7 @@ use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use image::{GenericImageView, ImageFormat};
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
@@ -30,6 +31,53 @@ pub const MAX_LIGHTS: usize = 2048;
 const MAX_TOTAL_TEXTURES: u32 = 4096;
 const MAX_TOTAL_MATERIALS: usize = 4096;
 const DEFAULT_TEXTURE_RESOLUTION: u32 = 1024;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GeometryInstanceRaw {
+    model_matrix: [[f32; 4]; 4],
+    material_id: u32,
+}
+
+impl GeometryInstanceRaw {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<GeometryInstanceRaw>() as wgpu::BufferAddress,
+            // This buffer steps forward once per *instance*, not per vertex.
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                // model_matrix (col 0-3) at locations 5-8
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5, // 0-4 are for Vertex
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                // material_id at location 9
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Uint32, // Note: Uint32
+                },
+            ],
+        }
+    }
+}
 
 /// The high-end renderer using a deferred pipeline and bindless textures.
 pub struct DeferredRenderer {
@@ -148,6 +196,12 @@ pub struct DeferredRenderer {
     prefiltered_env_map_texture: Option<wgpu::Texture>,
     prefiltered_env_map_view: Option<wgpu::TextureView>,
 
+    // instancing
+    geometry_instance_buffer: RefCell<Option<wgpu::Buffer>>,
+    geometry_instance_capacity: RefCell<usize>,
+    shadow_instance_buffer: RefCell<Option<wgpu::Buffer>>,
+    shadow_instance_capacity: RefCell<usize>,
+
     // Buffers
     camera_buffers: Vec<wgpu::Buffer>,
     lights_buffers: Vec<wgpu::Buffer>,
@@ -212,13 +266,12 @@ impl DeferredRenderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Primary Device"),
-                required_features: wgpu::Features::PUSH_CONSTANTS
-                    | wgpu::Features::FLOAT32_FILTERABLE
+                required_features: wgpu::Features::FLOAT32_FILTERABLE
                     | wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
                     | wgpu::Features::TEXTURE_BINDING_ARRAY
                     | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
                 required_limits: wgpu::Limits {
-                    max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
+                    max_push_constant_size: 0,
                     max_binding_array_elements_per_shader_stage: MAX_TOTAL_TEXTURES,
                     ..Default::default()
                 },
@@ -350,6 +403,10 @@ impl DeferredRenderer {
             irradiance_map_view: None,
             prefiltered_env_map_texture: None,
             prefiltered_env_map_view: None,
+            geometry_instance_buffer: RefCell::new(None),
+            geometry_instance_capacity: RefCell::new(0),
+            shadow_instance_buffer: RefCell::new(None),
+            shadow_instance_capacity: RefCell::new(0),
             camera_buffers: Vec::new(),
             lights_buffers: Vec::new(),
             sky_uniforms_buffers: Vec::new(),
@@ -776,10 +833,7 @@ impl DeferredRenderer {
                 &bind_group_layout,
                 self.render_constants_bind_group_layout.as_ref().unwrap(),
             ],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..std::mem::size_of::<ModelPushConstant>() as u32,
-            }],
+            push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -788,7 +842,7 @@ impl DeferredRenderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceRaw::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1403,10 +1457,7 @@ impl DeferredRenderer {
                     &scene_data_bind_group_layout,
                     &object_data_bind_group_layout,
                 ],
-                push_constant_ranges: &[wgpu::PushConstantRange {
-                    stages: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    range: 0..std::mem::size_of::<PbrConstants>() as u32,
-                }],
+                push_constant_ranges: &[],
             });
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1495,7 +1546,7 @@ impl DeferredRenderer {
                 vertex: wgpu::VertexState {
                     module: &g_buffer_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[Vertex::desc()],
+                    buffers: &[Vertex::desc(), GeometryInstanceRaw::desc()],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -2613,8 +2664,14 @@ impl DeferredRenderer {
 
         if let (Some(light), Some(shadow_pipeline)) = (shadow_light, self.shadow_pipeline.as_ref())
         {
+            // --- 1. Culling and Scene Bounds Calculation ---
             let camera_pos = render_data.current_camera_transform.position;
             let mut culled_objects = HashMap::new();
+            let mut scene_bounds_min = Vec3::splat(f32::MAX);
+            let mut scene_bounds_max = Vec3::splat(f32::MIN);
+
+            let mut shadow_casters = Vec::new();
+
             for object in &render_data.objects {
                 if object.casts_shadow {
                     let distance_sq = object
@@ -2623,37 +2680,30 @@ impl DeferredRenderer {
                         .distance_squared(camera_pos);
                     let is_culled = distance_sq > MAX_SHADOW_CASTING_DISTANCE_SQ;
                     culled_objects.insert(object.id, is_culled);
-                }
-            }
 
-            let mut scene_bounds_min = Vec3::splat(f32::MAX);
-            let mut scene_bounds_max = Vec3::splat(f32::MIN);
-            for object in &render_data.objects {
-                if object.casts_shadow {
-                    if *culled_objects.get(&object.id).unwrap_or(&true) {
-                        continue;
-                    }
-
-                    if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                        let model_matrix = Mat4::from_scale_rotation_translation(
-                            object.current_transform.scale,
-                            object.current_transform.rotation,
-                            object.current_transform.position,
-                        );
-                        for &corner in &mesh.bounds.get_corners() {
-                            let world_corner = (model_matrix * corner.extend(1.0)).xyz();
-                            scene_bounds_min = scene_bounds_min.min(world_corner);
-                            scene_bounds_max = scene_bounds_max.max(world_corner);
+                    if !is_culled {
+                        shadow_casters.push(object); // Add to a list for sorting
+                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            let model_matrix = Mat4::from_scale_rotation_translation(
+                                object.current_transform.scale,
+                                object.current_transform.rotation,
+                                object.current_transform.position,
+                            );
+                            for &corner in &mesh.bounds.get_corners() {
+                                let world_corner = (model_matrix * corner.extend(1.0)).xyz();
+                                scene_bounds_min = scene_bounds_min.min(world_corner);
+                                scene_bounds_max = scene_bounds_max.max(world_corner);
+                            }
                         }
                     }
                 }
             }
-
             let dynamic_scene_bounds = Aabb {
                 min: scene_bounds_min,
                 max: scene_bounds_max,
             };
 
+            // --- 2. Cascade Calculation and Uniform Uploads ---
             let camera = &render_data.camera_component;
             let shadow_uniforms = self.calculate_cascades(
                 camera,
@@ -2661,7 +2711,6 @@ impl DeferredRenderer {
                 light.current_transform.rotation,
                 &dynamic_scene_bounds,
             );
-
             self.queue.write_buffer(
                 self.shadow_uniforms_buffer.as_ref().unwrap(),
                 0,
@@ -2681,10 +2730,84 @@ impl DeferredRenderer {
                 );
             }
 
+            // --- 3. Build CPU-side instance data and batch info ---
+            // (Key is (mesh_id, lod_index))
+            // (Value is (instance_offset, instance_count))
+            let mut batch_info: HashMap<(usize, usize), (u32, u32)> = HashMap::new();
+            let mut all_instances: Vec<InstanceRaw> = Vec::new();
+
+            // Sort objects by mesh/lod to create contiguous batches
+            shadow_casters.sort_by_key(|obj| (obj.mesh_id, obj.lod_index));
+
+            for object in shadow_casters {
+                if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                    if mesh.lods.is_empty() {
+                        continue;
+                    }
+                    let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                    let key = (object.mesh_id, lod_index);
+
+                    let position = object
+                        .previous_transform
+                        .position
+                        .lerp(object.current_transform.position, alpha);
+                    let rotation = Quat::from(object.previous_transform.rotation)
+                        .slerp(object.current_transform.rotation, alpha);
+                    let scale = object
+                        .previous_transform
+                        .scale
+                        .lerp(object.current_transform.scale, alpha);
+                    let model_matrix =
+                        Mat4::from_scale_rotation_translation(scale, rotation, position);
+
+                    let instance_data = InstanceRaw {
+                        model_matrix: model_matrix.to_cols_array_2d(),
+                    };
+
+                    let current_offset = all_instances.len() as u32;
+                    all_instances.push(instance_data);
+
+                    let entry = batch_info.entry(key).or_insert((current_offset, 0));
+                    entry.1 += 1;
+                }
+            }
+
+            let total_instances = all_instances.len();
+            if total_instances == 0 {
+                return; // No shadows to cast
+            }
+
+            // --- 4. Check and resize the GPU buffer if needed ---
+            let mut capacity = self.shadow_instance_capacity.borrow_mut();
+            let mut buffer = self.shadow_instance_buffer.borrow_mut();
+
+            if total_instances > *capacity || buffer.is_none() {
+                if let Some(old_buffer) = buffer.take() {
+                    old_buffer.destroy();
+                }
+                let new_capacity = (total_instances as f32 * 1.5).ceil() as usize;
+
+                *buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Shadow Instance Buffer"),
+                    size: (new_capacity * std::mem::size_of::<InstanceRaw>())
+                        as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                *capacity = new_capacity;
+            }
+
+            // --- 5. Upload all instance data in one go ---
+            self.queue.write_buffer(
+                buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&all_instances),
+            );
+
+            // --- 6. Run Render Pass ---
             for i in 0..NUM_CASCADES {
                 let offset = (i as u32) * (aligned_mat4_size as u32);
                 let cascade_view = &self.cascade_views.as_ref().unwrap()[i];
-
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(&format!("Shadow Pass {}", i)),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2709,10 +2832,8 @@ impl DeferredRenderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+                    ..Default::default()
                 });
-
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
                 shadow_pass.set_bind_group(
@@ -2721,49 +2842,22 @@ impl DeferredRenderer {
                     &[],
                 );
 
-                for object in &render_data.objects {
-                    if object.casts_shadow {
-                        if *culled_objects.get(&object.id).unwrap_or(&true) {
-                            continue;
-                        }
+                // Bind the one persistent buffer
+                shadow_pass.set_vertex_buffer(1, buffer.as_ref().unwrap().slice(..));
 
-                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            if mesh.lods.is_empty() {
-                                continue;
-                            }
+                // Draw all batches
+                for ((mesh_id, lod_index), (instance_offset, instance_count)) in &batch_info {
+                    if let Some(mesh) = self.meshes.get(mesh_id) {
+                        let lod = &mesh.lods[*lod_index];
 
-                            // Ensure the lod_index is valid to prevent a panic
-                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
-                            let lod = &mesh.lods[lod_index];
+                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            lod.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
 
-                            let position = object
-                                .previous_transform
-                                .position
-                                .lerp(object.current_transform.position, alpha);
-                            let rotation = Quat::from(object.previous_transform.rotation)
-                                .slerp(object.current_transform.rotation, alpha);
-                            let scale = object
-                                .previous_transform
-                                .scale
-                                .lerp(object.current_transform.scale, alpha);
-
-                            let model_matrix =
-                                Mat4::from_scale_rotation_translation(scale, rotation, position);
-                            let push_constants = ModelPushConstant {
-                                model_matrix: model_matrix.to_cols_array_2d(),
-                            };
-                            shadow_pass.set_push_constants(
-                                wgpu::ShaderStages::VERTEX,
-                                0,
-                                bytemuck::bytes_of(&push_constants),
-                            );
-                            shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            shadow_pass.set_index_buffer(
-                                lod.index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            shadow_pass.draw_indexed(0..lod.index_count, 0, 0..1);
-                        }
+                        let instance_range = *instance_offset..(*instance_offset + *instance_count);
+                        shadow_pass.draw_indexed(0..lod.index_count, 0, instance_range);
                     }
                 }
             }
@@ -2776,6 +2870,88 @@ impl DeferredRenderer {
         render_data: &RenderData,
         alpha: f32,
     ) {
+        // --- 1. Build CPU-side instance data and batch info ---
+
+        // (Key is (mesh_id, lod_index))
+        // (Value is (instance_offset, instance_count))
+        let mut batch_info: HashMap<(usize, usize), (u32, u32)> = HashMap::new();
+        let mut all_instances: Vec<GeometryInstanceRaw> = Vec::new();
+
+        let mut sorted_objects = render_data.objects.iter().collect::<Vec<_>>();
+        sorted_objects.sort_by_key(|obj| (obj.mesh_id, obj.lod_index, obj.material_id));
+
+        for object in sorted_objects {
+            if let (Some(mesh), true) = (
+                self.meshes.get(&object.mesh_id),
+                self.materials.contains_key(&object.material_id),
+            ) {
+                if mesh.lods.is_empty() {
+                    continue;
+                }
+                let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                let key = (object.mesh_id, lod_index);
+
+                // Calculate interpolated transform
+                let position = object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, alpha);
+                let rotation = Quat::from(object.previous_transform.rotation)
+                    .slerp(object.current_transform.rotation, alpha);
+                let scale = object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, alpha);
+                let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
+
+                let instance_data = GeometryInstanceRaw {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    material_id: object.material_id as u32,
+                };
+
+                let current_offset = all_instances.len() as u32;
+                all_instances.push(instance_data);
+
+                let entry = batch_info.entry(key).or_insert((current_offset, 0));
+                entry.1 += 1;
+            }
+        }
+
+        let total_instances = all_instances.len();
+        if total_instances == 0 {
+            return;
+        }
+
+        // --- 2. Check and resize the GPU buffer if needed ---
+
+        let mut capacity = self.geometry_instance_capacity.borrow_mut();
+        let mut buffer = self.geometry_instance_buffer.borrow_mut();
+
+        if total_instances > *capacity || buffer.is_none() {
+            if let Some(old_buffer) = buffer.take() {
+                old_buffer.destroy();
+            }
+
+            let new_capacity = (total_instances as f32 * 1.5).ceil() as usize;
+
+            *buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Geometry Instance Buffer"),
+                size: (new_capacity * std::mem::size_of::<GeometryInstanceRaw>())
+                    as wgpu::BufferAddress,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            *capacity = new_capacity;
+        }
+
+        // --- 3. Upload all instance data in one go ---
+        self.queue.write_buffer(
+            buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&all_instances),
+        );
+
+        // --- 4. Run Geometry Pass ---
         let gbuffer_attachments = [
             Some(wgpu::RenderPassColorAttachment {
                 view: self.gbuf_normal_texture_view.as_ref().unwrap(),
@@ -2814,6 +2990,7 @@ impl DeferredRenderer {
                 },
             }),
         ];
+
         let mut geometry_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Geometry Pass"),
             color_attachments: &gbuffer_attachments,
@@ -2827,48 +3004,26 @@ impl DeferredRenderer {
             }),
             ..Default::default()
         });
+
         geometry_pass.set_pipeline(self.geometry_pipeline.as_ref().unwrap());
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         geometry_pass.set_bind_group(0, &self.scene_data_bind_groups[buffer_index], &[]);
         geometry_pass.set_bind_group(1, self.object_data_bind_group.as_ref().unwrap(), &[]);
-        for object in &render_data.objects {
-            if let (Some(mesh), true) = (
-                self.meshes.get(&object.mesh_id),
-                self.materials.contains_key(&object.material_id),
-            ) {
-                if mesh.lods.is_empty() {
-                    continue;
-                }
 
-                // Ensure the lod_index is valid to prevent a panic
-                let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+        // **Bind the one persistent buffer**
+        geometry_pass.set_vertex_buffer(1, buffer.as_ref().unwrap().slice(..));
+
+        // --- 5. Draw all batches ---
+        for ((mesh_id, lod_index), (instance_offset, instance_count)) in batch_info {
+            if let Some(mesh) = self.meshes.get(&mesh_id) {
                 let lod = &mesh.lods[lod_index];
 
-                let position = object
-                    .previous_transform
-                    .position
-                    .lerp(object.current_transform.position, alpha);
-                let rotation = Quat::from(object.previous_transform.rotation)
-                    .slerp(object.current_transform.rotation, alpha);
-                let scale = object
-                    .previous_transform
-                    .scale
-                    .lerp(object.current_transform.scale, alpha);
-                let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
-                let push_constants = PbrConstants {
-                    model_matrix: model_matrix.to_cols_array_2d(),
-                    material_id: object.material_id as u32,
-                    _p: [0; 3],
-                };
-                geometry_pass.set_push_constants(
-                    wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    0,
-                    bytemuck::bytes_of(&push_constants),
-                );
                 geometry_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 geometry_pass
                     .set_index_buffer(lod.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                geometry_pass.draw_indexed(0..lod.index_count, 0, 0..1);
+
+                let instance_range = instance_offset..(instance_offset + instance_count);
+                geometry_pass.draw_indexed(0..lod.index_count, 0, instance_range);
             }
         }
     }

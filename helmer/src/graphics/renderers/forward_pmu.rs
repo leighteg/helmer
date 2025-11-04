@@ -1,6 +1,7 @@
 use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
@@ -14,9 +15,9 @@ use crate::{
         atmosphere::AtmosphereRenderer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
-            LightData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData,
-            RenderMessage, RenderObject, RenderTrait, SHADOW_MAP_RESOLUTION, ShaderConstants,
-            ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
+            InstanceRaw, LightData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants,
+            RenderData, RenderMessage, RenderObject, RenderTrait, SHADOW_MAP_RESOLUTION,
+            ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
         },
         error::RendererError,
     },
@@ -85,6 +86,12 @@ pub struct ForwardRendererPMU {
     scene_data_bind_groups: Vec<wgpu::BindGroup>,
     materials: HashMap<usize, MaterialLowEnd>,
 
+    // instancing
+    shadow_instance_buffer: RefCell<Option<wgpu::Buffer>>,
+    shadow_instance_capacity: RefCell<usize>,
+    forward_instance_buffer: RefCell<Option<wgpu::Buffer>>,
+    forward_instance_capacity: RefCell<usize>,
+
     // IBL Resources
     ibl_bind_group_layout: Option<wgpu::BindGroupLayout>,
     ibl_bind_group: Option<wgpu::BindGroup>,
@@ -135,14 +142,14 @@ impl ForwardRendererPMU {
         size: PhysicalSize<u32>,
         target_tickrate: f32,
     ) -> Result<Self, RendererError> {
-        let required_features = wgpu::Features::PUSH_CONSTANTS;
+        let required_features = wgpu::Features::empty();
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Forward Renderer Device"),
                 required_features,
                 required_limits: wgpu::Limits {
-                    max_push_constant_size: std::mem::size_of::<PbrConstants>() as u32,
+                    max_push_constant_size: 0,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -203,6 +210,10 @@ impl ForwardRendererPMU {
             sky_uniforms_buffers: Vec::new(),
             atmosphere: None,
             materials: HashMap::new(),
+            shadow_instance_buffer: RefCell::new(None),
+            shadow_instance_capacity: RefCell::new(0),
+            forward_instance_buffer: RefCell::new(None),
+            forward_instance_capacity: RefCell::new(0),
             forward_pipeline: None,
             scene_data_bind_group_layout: None,
             material_bind_group_layout: None,
@@ -643,10 +654,7 @@ impl ForwardRendererPMU {
                     &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout,
                     self.ibl_bind_group_layout.as_ref().unwrap(),
                 ],
-                push_constant_ranges: &[wgpu::PushConstantRange {
-                    stages: wgpu::ShaderStages::VERTEX,
-                    range: 0..std::mem::size_of::<PbrConstants>() as u32,
-                }],
+                push_constant_ranges: &[],
             });
         self.forward_pipeline = Some(self.device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
@@ -655,7 +663,7 @@ impl ForwardRendererPMU {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[Vertex::desc()],
+                    buffers: &[Vertex::desc(), InstanceRaw::desc()],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -1056,10 +1064,7 @@ impl ForwardRendererPMU {
                 &bind_group_layout,
                 self.render_constants_bind_group_layout.as_ref().unwrap(),
             ],
-            push_constant_ranges: &[wgpu::PushConstantRange {
-                stages: wgpu::ShaderStages::VERTEX,
-                range: 0..std::mem::size_of::<ModelPushConstant>() as u32,
-            }],
+            push_constant_ranges: &[],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Shadow Pipeline"),
@@ -1067,7 +1072,7 @@ impl ForwardRendererPMU {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceRaw::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1166,32 +1171,36 @@ impl ForwardRendererPMU {
 
         if let (Some(light), Some(shadow_pipeline)) = (shadow_light, self.shadow_pipeline.as_ref())
         {
+            // --- 1. Culling and Scene Bounds Calculation ---
             let camera_pos = render_data.current_camera_transform.position;
             let mut culled_objects = HashMap::new();
+            let mut scene_bounds_min = Vec3::splat(f32::MAX);
+            let mut scene_bounds_max = Vec3::splat(f32::MIN);
+
+            let mut shadow_casters = Vec::new();
+
             for object in &render_data.objects {
                 if object.casts_shadow {
                     let distance_sq = object
                         .current_transform
                         .position
                         .distance_squared(camera_pos);
-                    culled_objects.insert(object.id, distance_sq > MAX_SHADOW_CASTING_DISTANCE_SQ);
-                }
-            }
+                    let is_culled = distance_sq > MAX_SHADOW_CASTING_DISTANCE_SQ;
+                    culled_objects.insert(object.id, is_culled);
 
-            let mut scene_bounds_min = Vec3::splat(f32::MAX);
-            let mut scene_bounds_max = Vec3::splat(f32::MIN);
-            for object in &render_data.objects {
-                if object.casts_shadow && !*culled_objects.get(&object.id).unwrap_or(&true) {
-                    if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                        let model_matrix = Mat4::from_scale_rotation_translation(
-                            object.current_transform.scale,
-                            object.current_transform.rotation,
-                            object.current_transform.position,
-                        );
-                        for &corner in &mesh.bounds.get_corners() {
-                            let world_corner = (model_matrix * corner.extend(1.0)).xyz();
-                            scene_bounds_min = scene_bounds_min.min(world_corner);
-                            scene_bounds_max = scene_bounds_max.max(world_corner);
+                    if !is_culled {
+                        shadow_casters.push(object); // Add to a list for sorting
+                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                            let model_matrix = Mat4::from_scale_rotation_translation(
+                                object.current_transform.scale,
+                                object.current_transform.rotation,
+                                object.current_transform.position,
+                            );
+                            for &corner in &mesh.bounds.get_corners() {
+                                let world_corner = (model_matrix * corner.extend(1.0)).xyz();
+                                scene_bounds_min = scene_bounds_min.min(world_corner);
+                                scene_bounds_max = scene_bounds_max.max(world_corner);
+                            }
                         }
                     }
                 }
@@ -1201,6 +1210,7 @@ impl ForwardRendererPMU {
                 max: scene_bounds_max,
             };
 
+            // --- 2. Cascade Calculation and Uniform Uploads ---
             let camera = &render_data.camera_component;
             let shadow_uniforms = self.calculate_cascades(
                 camera,
@@ -1227,6 +1237,81 @@ impl ForwardRendererPMU {
                 );
             }
 
+            // --- 3. Build CPU-side instance data and batch info ---
+            // (Key is (mesh_id, lod_index))
+            // (Value is (instance_offset, instance_count))
+            let mut batch_info: HashMap<(usize, usize), (u32, u32)> = HashMap::new();
+            let mut all_instances: Vec<InstanceRaw> = Vec::new();
+
+            // Sort objects by mesh/lod to create contiguous batches
+            shadow_casters.sort_by_key(|obj| (obj.mesh_id, obj.lod_index));
+
+            for object in shadow_casters {
+                if let Some(mesh) = self.meshes.get(&object.mesh_id) {
+                    if mesh.lods.is_empty() {
+                        continue;
+                    }
+                    let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                    let key = (object.mesh_id, lod_index);
+
+                    let position = object
+                        .previous_transform
+                        .position
+                        .lerp(object.current_transform.position, alpha);
+                    let rotation = Quat::from(object.previous_transform.rotation)
+                        .slerp(object.current_transform.rotation, alpha);
+                    let scale = object
+                        .previous_transform
+                        .scale
+                        .lerp(object.current_transform.scale, alpha);
+                    let model_matrix =
+                        Mat4::from_scale_rotation_translation(scale, rotation, position);
+
+                    let instance_data = InstanceRaw {
+                        model_matrix: model_matrix.to_cols_array_2d(),
+                    };
+
+                    let current_offset = all_instances.len() as u32;
+                    all_instances.push(instance_data);
+
+                    let entry = batch_info.entry(key).or_insert((current_offset, 0));
+                    entry.1 += 1;
+                }
+            }
+
+            let total_instances = all_instances.len();
+            if total_instances == 0 {
+                return; // No shadows to cast
+            }
+
+            // --- 4. Check and resize the GPU buffer if needed ---
+            let mut capacity = self.shadow_instance_capacity.borrow_mut();
+            let mut buffer = self.shadow_instance_buffer.borrow_mut();
+
+            if total_instances > *capacity || buffer.is_none() {
+                if let Some(old_buffer) = buffer.take() {
+                    old_buffer.destroy();
+                }
+                let new_capacity = (total_instances as f32 * 1.5).ceil() as usize;
+
+                *buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Shadow Instance Buffer"),
+                    size: (new_capacity * std::mem::size_of::<InstanceRaw>())
+                        as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                *capacity = new_capacity;
+            }
+
+            // --- 5. Upload all instance data in one go ---
+            self.queue.write_buffer(
+                buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&all_instances),
+            );
+
+            // --- 6. Run Render Pass ---
             for i in 0..NUM_CASCADES {
                 let offset = (i as u32) * (aligned_mat4_size as u32);
                 let cascade_view = &self.cascade_views.as_ref().unwrap()[i];
@@ -1254,8 +1339,7 @@ impl ForwardRendererPMU {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+                    ..Default::default()
                 });
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
@@ -1264,44 +1348,23 @@ impl ForwardRendererPMU {
                     self.render_constants_bind_group.as_ref().unwrap(),
                     &[],
                 );
-                for object in &render_data.objects {
-                    if object.casts_shadow && !*culled_objects.get(&object.id).unwrap_or(&true) {
-                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            if mesh.lods.is_empty() {
-                                continue;
-                            }
 
-                            // Ensure the lod_index is valid to prevent a panic
-                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
-                            let lod = &mesh.lods[lod_index];
+                // Bind the one persistent buffer
+                shadow_pass.set_vertex_buffer(1, buffer.as_ref().unwrap().slice(..));
 
-                            let position = object
-                                .previous_transform
-                                .position
-                                .lerp(object.current_transform.position, alpha);
-                            let rotation = Quat::from(object.previous_transform.rotation)
-                                .slerp(object.current_transform.rotation, alpha);
-                            let scale = object
-                                .previous_transform
-                                .scale
-                                .lerp(object.current_transform.scale, alpha);
-                            let model_matrix =
-                                Mat4::from_scale_rotation_translation(scale, rotation, position);
-                            let push_constants = ModelPushConstant {
-                                model_matrix: model_matrix.to_cols_array_2d(),
-                            };
-                            shadow_pass.set_push_constants(
-                                wgpu::ShaderStages::VERTEX,
-                                0,
-                                bytemuck::bytes_of(&push_constants),
-                            );
-                            shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            shadow_pass.set_index_buffer(
-                                lod.index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            shadow_pass.draw_indexed(0..lod.index_count, 0, 0..1);
-                        }
+                // Draw all batches
+                for ((mesh_id, lod_index), (instance_offset, instance_count)) in &batch_info {
+                    if let Some(mesh) = self.meshes.get(mesh_id) {
+                        let lod = &mesh.lods[*lod_index];
+
+                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_index_buffer(
+                            lod.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+
+                        let instance_range = *instance_offset..(*instance_offset + *instance_count);
+                        shadow_pass.draw_indexed(0..lod.index_count, 0, instance_range);
                     }
                 }
             }
@@ -1472,6 +1535,7 @@ impl RenderTrait for ForwardRendererPMU {
         };
         let output_view = output_frame.texture.create_view(&Default::default());
 
+        // --- Alpha Calculation for Interpolation ---
         let now = Instant::now();
         let actual_logic_duration =
             self.last_timestamp
@@ -1488,10 +1552,12 @@ impl RenderTrait for ForwardRendererPMU {
             .clamp(0.0, 1.0);
         self.last_timestamp = Some(render_data.timestamp);
 
+        // --- Update Shared Buffers (Camera, Lights) ---
         self.update_uniforms(render_data, alpha);
 
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
 
+        // --- Sky and Atmosphere ---
         let directional_light = render_data
             .lights
             .iter()
@@ -1554,6 +1620,7 @@ impl RenderTrait for ForwardRendererPMU {
             }
         }
 
+        // --- SHADOW PASS ---
         let camera_transform = &render_data.current_camera_transform;
         let eye = camera_transform.position;
         let forward = camera_transform.forward();
@@ -1564,6 +1631,82 @@ impl RenderTrait for ForwardRendererPMU {
             self.run_shadow_pass(&mut encoder, render_data, &static_camera_view, alpha);
         }
 
+        // --- 1. Build CPU-side instance data and batch info ---
+        // (Key is (mesh_id, lod_index, material_id))
+        // (Value is (instance_offset, instance_count))
+        let mut batch_info: HashMap<(usize, usize, usize), (u32, u32)> = HashMap::new();
+        let mut all_instances: Vec<InstanceRaw> = Vec::new();
+
+        let mut sorted_objects = render_data.objects.iter().collect::<Vec<_>>();
+        sorted_objects.sort_by_key(|obj| (obj.mesh_id, obj.lod_index, obj.material_id));
+
+        for object in sorted_objects {
+            if let (Some(mesh), true) = (
+                self.meshes.get(&object.mesh_id),
+                self.materials.contains_key(&object.material_id),
+            ) {
+                if mesh.lods.is_empty() {
+                    continue;
+                }
+                let lod_index = object.lod_index.min(mesh.lods.len() - 1);
+                let key = (object.mesh_id, lod_index, object.material_id);
+
+                let position = object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, alpha);
+                let rotation = Quat::from(object.previous_transform.rotation)
+                    .slerp(object.current_transform.rotation, alpha);
+                let scale = object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, alpha);
+                let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
+
+                let instance_data = InstanceRaw {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                };
+
+                let current_offset = all_instances.len() as u32;
+                all_instances.push(instance_data);
+
+                let entry = batch_info.entry(key).or_insert((current_offset, 0));
+                entry.1 += 1;
+            }
+        }
+
+        let total_instances = all_instances.len();
+
+        if total_instances > 0 {
+            // --- 2. Check and resize the GPU buffer if needed ---
+            let mut capacity = self.forward_instance_capacity.borrow_mut();
+            let mut buffer = self.forward_instance_buffer.borrow_mut();
+
+            if total_instances > *capacity || buffer.is_none() {
+                if let Some(old_buffer) = buffer.take() {
+                    old_buffer.destroy();
+                }
+                let new_capacity = (total_instances as f32 * 1.5).ceil() as usize;
+
+                *buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Forward Instance Buffer"),
+                    size: (new_capacity * std::mem::size_of::<InstanceRaw>())
+                        as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                *capacity = new_capacity;
+            }
+
+            // --- 3. Upload all instance data in one go ---
+            self.queue.write_buffer(
+                buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&all_instances),
+            );
+        }
+
+        // --- 4. MAIN FORWARD PASS ---
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Forward Pass"),
@@ -1584,74 +1727,53 @@ impl RenderTrait for ForwardRendererPMU {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
+                ..Default::default()
             });
 
-            pass.set_pipeline(self.forward_pipeline.as_ref().unwrap());
-            pass.set_bind_group(0, &self.scene_data_bind_groups[self.frame_index], &[]);
-            pass.set_bind_group(
-                2,
-                &self.atmosphere.as_ref().unwrap().sampling_bind_group,
-                &[],
-            );
-            pass.set_bind_group(3, self.ibl_bind_group.as_ref().unwrap(), &[]);
+            if total_instances > 0 {
+                pass.set_pipeline(self.forward_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, &self.scene_data_bind_groups[self.frame_index], &[]);
+                pass.set_bind_group(
+                    2,
+                    &self.atmosphere.as_ref().unwrap().sampling_bind_group,
+                    &[],
+                );
+                pass.set_bind_group(3, self.ibl_bind_group.as_ref().unwrap(), &[]);
 
-            let mut batched_objects: HashMap<usize, Vec<&RenderObject>> = HashMap::new();
-            for object in &render_data.objects {
-                batched_objects
-                    .entry(object.material_id)
-                    .or_default()
-                    .push(object);
-            }
+                // Bind the one persistent buffer
+                pass.set_vertex_buffer(
+                    1,
+                    self.forward_instance_buffer
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .slice(..),
+                );
 
-            for (material_id, objects) in &batched_objects {
-                if let Some(material) = self.materials.get(material_id) {
-                    pass.set_bind_group(1, &material.bind_group, &[]);
-                    for object in objects {
-                        if let Some(mesh) = self.meshes.get(&object.mesh_id) {
-                            if mesh.lods.is_empty() {
-                                continue;
-                            }
+                // --- 5. Draw all batches ---
+                for ((mesh_id, lod_index, material_id), (instance_offset, instance_count)) in
+                    batch_info
+                {
+                    if let (Some(mesh), Some(material)) =
+                        (self.meshes.get(&mesh_id), self.materials.get(&material_id))
+                    {
+                        let lod = &mesh.lods[lod_index];
 
-                            // Ensure the lod_index is valid to prevent a panic
-                            let lod_index = object.lod_index.min(mesh.lods.len() - 1);
-                            let lod = &mesh.lods[lod_index];
+                        pass.set_bind_group(1, &material.bind_group, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        pass.set_index_buffer(
+                            lod.index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
 
-                            let position = object
-                                .previous_transform
-                                .position
-                                .lerp(object.current_transform.position, alpha);
-                            let rotation = Quat::from(object.previous_transform.rotation)
-                                .slerp(object.current_transform.rotation, alpha);
-                            let scale = object
-                                .previous_transform
-                                .scale
-                                .lerp(object.current_transform.scale, alpha);
-                            let model_matrix =
-                                Mat4::from_scale_rotation_translation(scale, rotation, position);
-                            let push_constants = PbrConstants {
-                                model_matrix: model_matrix.to_cols_array_2d(),
-                                material_id: *material_id as u32,
-                                _p: [0; 3],
-                            };
-                            pass.set_push_constants(
-                                wgpu::ShaderStages::VERTEX,
-                                0,
-                                bytemuck::bytes_of(&push_constants),
-                            );
-                            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                            pass.set_index_buffer(
-                                lod.index_buffer.slice(..),
-                                wgpu::IndexFormat::Uint32,
-                            );
-                            pass.draw_indexed(0..lod.index_count, 0, 0..1);
-                        }
+                        let instance_range = instance_offset..(instance_offset + instance_count);
+                        pass.draw_indexed(0..lod.index_count, 0, instance_range);
                     }
                 }
             }
         }
 
+        // --- SKY PASS ---
         if render_data.render_config.sky_pass {
             let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Sky Pass"),
@@ -1679,6 +1801,7 @@ impl RenderTrait for ForwardRendererPMU {
             sky_pass.draw(0..3, 0..1);
         }
 
+        // --- EGUI PASS ---
         if render_data.render_config.egui_pass {
             if let Some(egui_data) = &mut self.current_egui_data {
                 let screen_descriptor = &mut egui_data.screen_descriptor;
@@ -1719,6 +1842,7 @@ impl RenderTrait for ForwardRendererPMU {
             }
         }
 
+        // --- Submit and Present ---
         self.queue.submit(std::iter::once(encoder.finish()));
         output_frame.present();
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;

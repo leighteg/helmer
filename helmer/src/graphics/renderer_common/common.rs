@@ -210,6 +210,50 @@ impl Vertex {
     }
 }
 
+/// Holds the per-instance data (model matrix) to be sent to the GPU.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct InstanceRaw {
+    pub model_matrix: [[f32; 4]; 4],
+}
+
+impl InstanceRaw {
+    /// Describes the layout of the instance buffer for the wgpu pipeline.
+    /// Shader locations 5-8 are used (0-4 are taken by Vertex).
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
+            // This buffer steps forward once per *instance*, not per vertex.
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                // model_matrix (takes 4 slots)
+                // A mat4f is four vec4f
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5, // 0-4 are for Vertex
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
 pub struct MeshLod {
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,

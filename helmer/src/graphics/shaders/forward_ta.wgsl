@@ -53,6 +53,13 @@ struct VertexInput {
     @location(3) tangent: vec4<f32>,
 }
 
+struct InstanceInput {
+    @location(5) model_matrix_col_0: vec4<f32>,
+    @location(6) model_matrix_col_1: vec4<f32>,
+    @location(7) model_matrix_col_2: vec4<f32>,
+    @location(8) model_matrix_col_3: vec4<f32>,
+}
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -100,10 +107,6 @@ struct MaterialData {
     _padding: f32,
 }
 
-struct ModelPushConstant {
-    model_matrix: mat4x4<f32>,
-}
-
 struct SkyUniforms {
     sun_direction: vec3<f32>,
     _padding: f32,
@@ -137,13 +140,12 @@ struct AtmosphereParams {
 @group(1) @binding(3) var mr_textures: texture_2d_array<f32>;
 @group(1) @binding(4) var texture_sampler: sampler;
 
+// Atmosphere data
 @group(2) @binding(0) var transmittance_lut: texture_2d<f32>;
 @group(2) @binding(1) var scattering_lut: texture_3d<f32>;
 @group(2) @binding(2) var irradiance_lut: texture_2d<f32>;
 @group(2) @binding(3) var atmosphere_sampler: sampler;
 @group(2) @binding(4) var<uniform> atmosphere: AtmosphereParams;
-
-@vertex var<push_constant> model: ModelPushConstant;
 
 //=============== UTILITY FUNCTIONS ===============//
 fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
@@ -291,17 +293,25 @@ fn get_scattering_color(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> 
 
 //=============== VERTEX SHADER ===============//
 @vertex
-fn vs_main(vertex: VertexInput) -> VertexOutput {
+fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
 
-    let world_position_vec4 = model.model_matrix * vec4<f32>(vertex.position, 1.0);
+    // Reconstruct model_matrix from instance input
+    let model_matrix = mat4x4<f32>(
+        instance.model_matrix_col_0,
+        instance.model_matrix_col_1,
+        instance.model_matrix_col_2,
+        instance.model_matrix_col_3
+    );
+
+    let world_position_vec4 = model_matrix * vec4<f32>(vertex.position, 1.0);
     out.world_position = world_position_vec4.xyz;
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
 
     let model_mat3 = mat3x3<f32>(
-        model.model_matrix[0].xyz,
-        model.model_matrix[1].xyz,
-        model.model_matrix[2].xyz
+        model_matrix[0].xyz,
+        model_matrix[1].xyz,
+        model_matrix[2].xyz
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
     let tangent_world = normalize(model_mat3 * vertex.tangent.xyz);
@@ -325,21 +335,18 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 //=============== FRAGMENT SHADER ===============//
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // --- Albedo Calculation (FIXED) ---
-
+    // --- Albedo Calculation ---
     let albedo_sample = textureSample(albedo_textures, texture_sampler, in.tex_coord, u32(material.albedo_idx));
     let albedo_color = albedo_sample.rgb * material.albedo.rgb;
     let alpha = albedo_sample.a * material.albedo.a;
-    // --- Metallic/Roughness/AO Calculation (FIXED) ---
 
+    // --- Metallic/Roughness/AO Calculation ---
     let mr_sample = textureSample(mr_textures, texture_sampler, in.tex_coord, u32(material.metallic_roughness_idx));
     let ao = mr_sample.r * material.ao;
     let metallic = mr_sample.b * material.metallic;
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
 
-
-    // --- Normal Calculation (Correct as-is) ---
-
+    // --- Normal Calculation ---
     let tangent_space_normal = textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz * 2.0 - 1.0;
     let N_geom = normalize(in.world_normal);
     let T = normalize(in.world_tangent);
@@ -354,16 +361,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if emissive_intensity > EMISSIVE_THRESHOLD {
         var color = albedo_color + emission;
         let tonemapped = color / (color + vec3(1.0));
-        let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
-        return vec4(gamma_corrected, alpha);
+        // let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2)); // Handled by sRGB output
+        return vec4(tonemapped, alpha);
     }
 
     let shade_mode = render_constants.shade_mode;
     if shade_mode == 1u {
         var color = albedo_color + emission;
         let tonemapped = color / (color + vec3(1.0));
-        let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
-        return vec4(gamma_corrected, alpha);
+        // let gamma_corrected = pow(tonemapped, vec3(1.0 / 2.2));
+        return vec4(tonemapped, alpha);
     }
 
     let is_lighting_only = shade_mode == 2u;
@@ -505,7 +512,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var final_hdr_color = ambient + Lo + specular_indirect_occluded + select(emission, vec3<f32>(0.0), is_lighting_only);
 
     let tonemapped = final_hdr_color / (final_hdr_color + vec3<f32>(1.0));
-    //let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2));
+    //let gamma_corrected = pow(tonemapped, vec3<f32>(1.0 / 2.2)); // Handled by sRGB output
 
     return vec4<f32>(tonemapped, alpha);
 }

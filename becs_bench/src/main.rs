@@ -49,6 +49,10 @@ fn main() {
         let cube_mesh = MeshAsset::cube("cube".to_owned());
         let cube_handle = asset_server.add_mesh(cube_mesh.vertices.unwrap(), cube_mesh.indices);
 
+        let uv_sphere_mesh = MeshAsset::uv_sphere("uv sphere".to_owned(), 32, 32);
+        let uv_sphere_mesh_handle =
+            asset_server.add_mesh(uv_sphere_mesh.vertices.unwrap(), uv_sphere_mesh.indices);
+
         let plane_mesh = MeshAsset::plane("plane".to_owned());
         let plane_mesh_handle =
             asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
@@ -170,9 +174,18 @@ fn main() {
 
         let mut mesh_renderer_store = MeshRendererStore::default();
         mesh_renderer_store.mesh_renderers.insert(
-            "default".to_string(),
+            "default cube".to_string(),
             MeshRenderer {
                 mesh_id: cube_handle.id,
+                material_id: basic_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        mesh_renderer_store.mesh_renderers.insert(
+            "default sphere".to_string(),
+            MeshRenderer {
+                mesh_id: uv_sphere_mesh_handle.id,
                 material_id: basic_material_handle.id,
                 casts_shadow: true,
                 visible: true,

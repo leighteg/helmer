@@ -106,6 +106,10 @@ pub fn sync_entities_to_physics_system(
         (With<FixedCollider>, Without<PhysicsHandle>),
     >,
 ) {
+    if !phys.running {
+        return;
+    }
+    
     // Pre-calculate sizes for batch allocation
     let dynamic_count = dynamic_query.iter().len();
     let fixed_count = fixed_query.iter().len();
@@ -217,6 +221,10 @@ pub fn sync_physics_to_entities_system(
     phys: Res<PhysicsResource>,
     mut query: Query<(&PhysicsHandle, &mut BevyTransform)>,
 ) {
+    if !phys.running {
+        return;
+    }
+
     let rigid_body_set = &phys.rigid_body_set;
 
     // Iterate and update transforms
@@ -248,6 +256,10 @@ pub fn cleanup_physics_system(
     query: Query<Entity, With<PhysicsHandle>>,
     mut local_state: Local<CleanupState>,
 ) {
+    if !phys.running {
+        return;
+    }
+
     // Clear reusable buffers
     local_state.dead_entities.clear();
     local_state.out_of_bounds_entities.clear();

@@ -55,6 +55,7 @@ pub fn spawner_system(
                 );
                 ui.add(
                     egui::DragValue::new(&mut spawner_system_resource.cube_scale)
+                    .range(1..=100)
                         .prefix("cube scale: "),
                 );
 

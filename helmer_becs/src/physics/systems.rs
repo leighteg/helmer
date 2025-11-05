@@ -179,6 +179,10 @@ pub fn sync_entities_to_physics_system(
 
 #[inline]
 pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTime>) {
+    if !phys.running {
+        return;
+    }
+    
     let dt = time.0;
     let phys_data = &mut *phys;
 

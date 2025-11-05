@@ -22,6 +22,7 @@ pub struct PhysicsResource {
     pub rigid_body_set: RigidBodySet,
     pub collider_set: ColliderSet,
     pub physics_entities: HashMap<Entity, PhysicsHandle>,
+    pub running: bool,
 }
 
 impl PhysicsResource {
@@ -41,6 +42,7 @@ impl PhysicsResource {
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             physics_entities: HashMap::new(),
+            running: true,
         }
     }
 }

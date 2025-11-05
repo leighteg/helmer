@@ -226,6 +226,10 @@ impl StatsUI {
 
                     ui.separator();
 
+                    ui.checkbox(&mut physics_resource.running, "running");
+
+                    ui.separator();
+
                     ui.label("gravity");
                     ui.add(
                         egui::DragValue::new(&mut physics_resource.gravity.x)

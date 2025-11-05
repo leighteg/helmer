@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
 
 use bevy_ecs::{
     entity::Entity,
@@ -12,6 +15,7 @@ use helmer_becs::{
     egui_integration::EguiResource,
     physics::components::{ColliderShape, DynamicRigidBody},
 };
+use rand::Rng;
 
 use crate::systems::config_toggle::HideToggleProof;
 
@@ -27,6 +31,8 @@ pub struct SpawnerSystemResource {
     pub spawned_entities: HashSet<Entity>,
     pub despawn_all: bool,
     pub cube_scale: f32,
+    pub rand_xz_range: Range<f32>,
+    pub rand_y_range: Range<f32>,
 }
 
 pub fn spawner_system(
@@ -55,9 +61,31 @@ pub fn spawner_system(
                 );
                 ui.add(
                     egui::DragValue::new(&mut spawner_system_resource.cube_scale)
-                    .range(1..=100)
+                        .range(1..=100)
                         .prefix("cube scale: "),
                 );
+
+                ui.separator();
+
+                ui.add(
+                    egui::DragValue::new(&mut spawner_system_resource.rand_xz_range.start)
+                        .prefix("spawn x/z min: "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut spawner_system_resource.rand_xz_range.end)
+                        .prefix("spawn x/z max: "),
+                );
+
+                ui.add(
+                    egui::DragValue::new(&mut spawner_system_resource.rand_y_range.start)
+                        .prefix("spawn y min: "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut spawner_system_resource.rand_y_range.end)
+                        .prefix("spawn y max: "),
+                );
+
+                ui.separator();
 
                 if ui.button("destroy spawned entities").clicked() {
                     spawner_system_resource.despawn_all = true;
@@ -100,11 +128,26 @@ pub fn spawner_system(
     }
 
     if let Some(mesh_renderer) = mesh_renderer_store.mesh_renderers.get("default") {
+        let mut rng = rand::rng();
         for i in 0..spawner_system_resource.spawn_iters {
+            let (x, y, z) = if (spawner_system_resource.rand_xz_range.start == 0.0
+                && spawner_system_resource.rand_xz_range.end == 0.0)
+                || (spawner_system_resource.rand_y_range.start == 0.0
+                    && spawner_system_resource.rand_y_range.end == 0.0)
+            {
+                (0.0, 0.0, 0.0)
+            } else {
+                (
+                    rng.random_range(spawner_system_resource.rand_xz_range.clone()),
+                    rng.random_range(spawner_system_resource.rand_y_range.clone()),
+                    rng.random_range(spawner_system_resource.rand_xz_range.clone()),
+                )
+            };
+
             let new_entity = commands.spawn((
                 BevyTransform {
                     0: Transform {
-                        position: Vec3::from_array([0.0, 10.0, 5.0]),
+                        position: Vec3::from_array([x, y, z]),
                         scale: Vec3::from_array([spawner_system_resource.cube_scale; 3]),
                         ..Default::default()
                     },
@@ -117,6 +160,8 @@ pub fn spawner_system(
             spawner_system_resource
                 .spawned_entities
                 .insert(new_entity.id());
+
+            rng.reseed();
         }
     }
 }

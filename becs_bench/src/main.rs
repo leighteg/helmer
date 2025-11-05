@@ -183,10 +183,46 @@ fn main() {
             },
         );
         mesh_renderer_store.mesh_renderers.insert(
+            "blue cube".to_string(),
+            MeshRenderer {
+                mesh_id: cube_handle.id,
+                material_id: blue_light_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        mesh_renderer_store.mesh_renderers.insert(
+            "red cube".to_string(),
+            MeshRenderer {
+                mesh_id: cube_handle.id,
+                material_id: red_light_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        mesh_renderer_store.mesh_renderers.insert(
             "default sphere".to_string(),
             MeshRenderer {
                 mesh_id: uv_sphere_mesh_handle.id,
                 material_id: basic_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        mesh_renderer_store.mesh_renderers.insert(
+            "blue sphere".to_string(),
+            MeshRenderer {
+                mesh_id: uv_sphere_mesh_handle.id,
+                material_id: blue_light_material_handle.id,
+                casts_shadow: true,
+                visible: true,
+            },
+        );
+        mesh_renderer_store.mesh_renderers.insert(
+            "red sphere".to_string(),
+            MeshRenderer {
+                mesh_id: uv_sphere_mesh_handle.id,
+                material_id: red_light_material_handle.id,
                 casts_shadow: true,
                 visible: true,
             },

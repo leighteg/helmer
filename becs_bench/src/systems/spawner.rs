@@ -131,55 +131,65 @@ pub fn spawner_system(
 
     let mut collider = ColliderShape::Cuboid;
 
-    let mesh_renderer = if rng.random_bool(0.5) {
-        if let Some(mesh_renderer) = mesh_renderer_store.mesh_renderers.get("default cube") {
-            mesh_renderer
-        } else {
-            return;
-        }
-    } else {
-        if let Some(mesh_renderer) = mesh_renderer_store.mesh_renderers.get("default sphere") {
+    let object_rnd: u32 = rng.random_range(..5);
+    let mesh_renderer = match object_rnd {
+        0 => "default cube",
+        1 => "blue cube",
+        2 => "red cube",
+        3 => {
             collider = ColliderShape::Sphere;
-            mesh_renderer
-        } else {
+            "default sphere"
+        }
+        4 => {
+            collider = ColliderShape::Sphere;
+            "blue sphere"
+        }
+        5 => {
+            collider = ColliderShape::Sphere;
+            "red sphere"
+        }
+
+        _ => {
             return;
         }
     };
 
-    for i in 0..spawner_system_resource.spawn_iters {
-        let (x, y, z) = if (spawner_system_resource.rand_xz_range.start == 0.0
-            && spawner_system_resource.rand_xz_range.end == 0.0)
-            || (spawner_system_resource.rand_y_range.start == 0.0
-                && spawner_system_resource.rand_y_range.end == 0.0)
-        {
-            (0.0, 0.0, 0.0)
-        } else {
-            (
-                rng.random_range(spawner_system_resource.rand_xz_range.clone()),
-                rng.random_range(spawner_system_resource.rand_y_range.clone()),
-                rng.random_range(spawner_system_resource.rand_xz_range.clone()),
-            )
-        };
+    if let Some(mesh_renderer) = mesh_renderer_store.mesh_renderers.get(mesh_renderer) {
+        for i in 0..spawner_system_resource.spawn_iters {
+            let (x, y, z) = if (spawner_system_resource.rand_xz_range.start == 0.0
+                && spawner_system_resource.rand_xz_range.end == 0.0)
+                || (spawner_system_resource.rand_y_range.start == 0.0
+                    && spawner_system_resource.rand_y_range.end == 0.0)
+            {
+                (0.0, 0.0, 0.0)
+            } else {
+                (
+                    rng.random_range(spawner_system_resource.rand_xz_range.clone()),
+                    rng.random_range(spawner_system_resource.rand_y_range.clone()),
+                    rng.random_range(spawner_system_resource.rand_xz_range.clone()),
+                )
+            };
 
-        let new_entity = commands.spawn((
-            BevyTransform {
-                0: Transform {
-                    position: Vec3::from_array([x, y, z]),
-                    scale: Vec3::from_array([spawner_system_resource.mesh_scale; 3]),
-                    ..Default::default()
+            let new_entity = commands.spawn((
+                BevyTransform {
+                    0: Transform {
+                        position: Vec3::from_array([x, y, z]),
+                        scale: Vec3::from_array([spawner_system_resource.mesh_scale; 3]),
+                        ..Default::default()
+                    },
                 },
-            },
-            BevyMeshRenderer { 0: *mesh_renderer },
-            collider,
-            DynamicRigidBody {
-                mass: spawner_system_resource.mesh_scale * 10.0,
-            },
-            HideToggleProof {},
-        ));
-        spawner_system_resource
-            .spawned_entities
-            .insert(new_entity.id());
+                BevyMeshRenderer { 0: *mesh_renderer },
+                collider,
+                DynamicRigidBody {
+                    mass: spawner_system_resource.mesh_scale * 10.0,
+                },
+                HideToggleProof {},
+            ));
+            spawner_system_resource
+                .spawned_entities
+                .insert(new_entity.id());
 
-        rng.reseed();
+            rng.reseed();
+        }
     }
 }

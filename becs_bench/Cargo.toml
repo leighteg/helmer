@@ -11,3 +11,5 @@ helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 winit = "0.30.12"
 egui = { git = "https://github.com/emilk/egui.git" }
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+parking_lot = "0.12.3"

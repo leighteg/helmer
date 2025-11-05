@@ -216,26 +216,95 @@ impl StatsUI {
                     .get_resource_mut::<PhysicsResource>()
                     .expect("PhysicsResource resource not found");
 
-                ui.heading("physics");
+                ui.collapsing("physics", |ui| {
+                    if ui.button("default").clicked() {
+                        *physics_resource = PhysicsResource::default();
+                    }
 
-                ui.label("gravity");
-                ui.add(
-                    egui::DragValue::new(&mut physics_resource.gravity.x)
-                        .speed(0.1)
-                        .prefix("x: "),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut physics_resource.gravity.y)
-                        .speed(0.1)
-                        .prefix("y: "),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut physics_resource.gravity.z)
-                        .speed(0.1)
-                        .prefix("z: "),
-                );
+                    ui.separator();
 
-                ui.separator();
+                    ui.label("gravity");
+                    ui.add(
+                        egui::DragValue::new(&mut physics_resource.gravity.x)
+                            .speed(0.1)
+                            .prefix("x: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut physics_resource.gravity.y)
+                            .speed(0.1)
+                            .prefix("y: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut physics_resource.gravity.z)
+                            .speed(0.1)
+                            .prefix("z: "),
+                    );
+
+                    ui.separator();
+
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource.integration_parameters.max_ccd_substeps,
+                        )
+                        .prefix("max_ccd_substeps: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .num_additional_friction_iterations,
+                        )
+                        .prefix("num_additional_friction_iterations: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .num_internal_pgs_iterations,
+                        )
+                        .prefix("num_internal_pgs_iterations: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .num_internal_stabilization_iterations,
+                        )
+                        .prefix("num_internal_stabilization_iterations: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .num_solver_iterations,
+                        )
+                        .prefix("num_solver_iterations: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .contact_damping_ratio,
+                        )
+                        .prefix("contact_damping_ratio: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .contact_natural_frequency,
+                        )
+                        .prefix("contact_natural_frequency: "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(
+                            &mut physics_resource
+                                .integration_parameters
+                                .normalized_allowed_linear_error,
+                        )
+                        .prefix("normalized_allowed_linear_error: "),
+                    );
+                });
             }),
             "scene".to_string(),
         ));

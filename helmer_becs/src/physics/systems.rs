@@ -184,10 +184,6 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
 
     // Update integration parameters
     phys_data.integration_parameters.dt = dt;
-    phys_data.integration_parameters.max_ccd_substeps = 4;
-    phys_data
-        .integration_parameters
-        .num_internal_stabilization_iterations = 4;
 
     let gravity_vector = Vector3::new(
         phys_data.gravity.x,

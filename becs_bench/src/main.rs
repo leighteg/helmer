@@ -101,9 +101,9 @@ fn main() {
         let spin_cube_entity = world.spawn((
             BevyTransform {
                 0: Transform {
-                    position: Vec3::from_array([0.0, 0.0, 5.0]),
+                    position: Vec3::from_array([0.0, -4.0, 0.0]),
                     rotation: Quat::default(),
-                    scale: Vec3::from_array([2.0; 3]),
+                    scale: Vec3::from_array([5.0, 1.0, 0.5]),
                 },
             },
             BevyMeshRenderer {
@@ -160,7 +160,7 @@ fn main() {
         let raptor_entity = world.spawn((
             BevyTransform {
                 0: Transform {
-                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    position: glam::Vec3::new(0.0, -5.0, 5.0),
                     rotation: glam::Quat::from_rotation_y(90.0),
                     scale: glam::Vec3::ONE,
                 },

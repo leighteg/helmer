@@ -61,7 +61,7 @@ pub fn spawner_system(
                 );
                 ui.add(
                     egui::DragValue::new(&mut spawner_system_resource.mesh_scale)
-                        .range(1..=100)
+                        .range(0.01..=100.0)
                         .prefix("mesh scale: "),
                 );
 

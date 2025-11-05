@@ -23,7 +23,7 @@ use crate::{
         physics_resource::PhysicsResource,
         systems::{
             cleanup_physics_system, physics_step_system, sync_entities_to_physics_system,
-            sync_physics_to_entities_system,
+            sync_physics_to_entities_system, sync_transforms_to_physics_system,
         },
     },
     systems::{
@@ -96,6 +96,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
                 (
                     cleanup_physics_system,
                     sync_entities_to_physics_system,
+                    sync_transforms_to_physics_system,
                     physics_step_system,
                     sync_physics_to_entities_system,
                 )

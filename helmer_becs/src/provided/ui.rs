@@ -218,7 +218,10 @@ impl StatsUI {
 
                 ui.collapsing("physics", |ui| {
                     if ui.button("default").clicked() {
-                        *physics_resource = PhysicsResource::default();
+                        let default_res = PhysicsResource::default();
+                        physics_resource.gravity = default_res.gravity;
+                        physics_resource.integration_parameters =
+                            default_res.integration_parameters;
                     }
 
                     ui.separator();

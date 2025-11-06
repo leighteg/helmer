@@ -13,7 +13,7 @@ use helmer::{
 use helmer_becs::BevyInputManager;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-use crate::{BevyActiveCamera, BevyCamera, BevyTransform, DeltaTime};
+use helmer_becs::{BevyActiveCamera, BevyCamera, BevyTransform, DeltaTime};
 
 //================================================================================
 // Helper Functions

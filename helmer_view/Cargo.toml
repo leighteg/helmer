@@ -1,0 +1,17 @@
+[package]
+name = "helmer_view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_ecs = "0.17.2"
+gilrs = "0.11.0"
+glam = "0.30.8"
+helmer = { path = "../helmer" }
+helmer_becs = { path = "../helmer_becs" }
+becs_bench = { path = "../becs_bench" }
+winit = "0.30.12"
+egui = { git = "https://github.com/emilk/egui.git" }
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+parking_lot = "0.12.3"
+rand = "0.9.2"

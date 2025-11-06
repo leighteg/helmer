@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use bevy_ecs::{
     component::Component,
@@ -56,6 +56,8 @@ pub struct BevyRuntimeConfig(pub RuntimeConfig);
 // resources
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct DeltaTime(pub f32);
+#[derive(Resource, Clone, Debug, Default)]
+pub struct DraggedFile(pub Option<PathBuf>);
 
 pub mod egui_integration;
 pub mod physics;
@@ -85,6 +87,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<RenderPacket>(RenderPacket::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
+            world.insert_resource::<DraggedFile>(DraggedFile(None));
 
             // core systems
             schedule.add_systems(render_data_system);
@@ -159,7 +162,11 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
                 camera.0.aspect_ratio = new_size.width as f32 / new_size.height as f32;
             }
         },
-        |_path, (_world, _schedule)| {},
+        |path, (world, _schedule)| {
+            if let Some(mut dragged_file_res) = world.get_resource_mut::<DraggedFile>() {
+                dragged_file_res.0 = Some(path)
+            }
+        },
     );
     runtime.init();
 }

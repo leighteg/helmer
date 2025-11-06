@@ -30,7 +30,7 @@ pub struct Ray {
 /// Internal state for the DragSystem.
 #[derive(Default)]
 pub struct DragState {
-    dragged_entity: Option<Entity>,
+    dragged_entity: Option<(Entity, RigidBodyType)>,
     drag_distance: f32,
     was_mouse_button_active_last_frame: bool,
 }
@@ -121,7 +121,7 @@ pub fn drag_system(
     // - Must NOT have a FixedCollider (so we don't drag the ground)
     mut draggable_query: Query<
         (Entity, &mut BevyTransform, &PhysicsHandle),
-        (Without<FixedCollider>, Without<BevyActiveCamera>),
+        Without<BevyActiveCamera>,
     >,
 ) {
     // --- 1. Get Resources and Input State ---
@@ -153,13 +153,12 @@ pub fn drag_system(
 
             // If we hit an entity, start dragging it
             if let Some((hit_id, distance)) = closest_hit {
-                state.dragged_entity = Some(hit_id);
-                state.drag_distance = distance;
-
                 // Set the physics body to Kinematic
                 // We can safely query here because draggable_query ensures the handle exists.
                 if let Ok((_, _, handle)) = draggable_query.get(hit_id) {
                     if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                        state.dragged_entity = Some((hit_id, rb.body_type()));
+                        state.drag_distance = distance;
                         rb.set_body_type(RigidBodyType::KinematicPositionBased, true);
                     }
                 }
@@ -169,7 +168,7 @@ pub fn drag_system(
 
     // --- 3. DRAGGING ---
     if is_active {
-        if let Some(dragged_id) = state.dragged_entity {
+        if let Some((dragged_id, _)) = state.dragged_entity {
             if let Some(ray) = screen_point_to_ray(&camera_query, &input) {
                 let new_pos = ray.origin + ray.direction * state.drag_distance;
 
@@ -193,7 +192,7 @@ pub fn drag_system(
 
     // --- 4. DRAG END ---
     if is_released {
-        if let Some(dragged_id) = state.dragged_entity {
+        if let Some((dragged_id, dragged_body_type)) = state.dragged_entity {
             let mut final_pos: Option<Vec3> = None;
 
             // We use get_mut because we will write to transform at the end.
@@ -248,7 +247,7 @@ pub fn drag_system(
                         new_isometry.translation.vector = pos.to_array().into();
                         rb.set_position(new_isometry, true);
                     }
-                    rb.set_body_type(RigidBodyType::Dynamic, true);
+                    rb.set_body_type(dragged_body_type, true);
                     rb.wake_up(true);
                 }
             }

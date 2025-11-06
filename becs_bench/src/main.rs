@@ -101,7 +101,7 @@ fn main() {
         let spin_cube_entity = world.spawn((
             BevyTransform {
                 0: Transform {
-                    position: Vec3::from_array([0.0, -4.0, 0.0]),
+                    position: Vec3::from_array([0.0, -4.5, 0.0]),
                     rotation: Quat::default(),
                     scale: Vec3::from_array([5.0, 1.0, 0.5]),
                 },
@@ -115,6 +115,86 @@ fn main() {
                 },
             },
             SpinnerObject {},
+            ColliderShape::Cuboid,
+            FixedCollider {},
+        ));
+
+        let l_wall_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: Vec3::from_array([3.0, -4.0, 0.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([0.5, 5.0, 6.0]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
+                },
+            },
+            ColliderShape::Cuboid,
+            FixedCollider {},
+        ));
+
+        let r_wall_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: Vec3::from_array([-3.0, -4.0, 0.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([0.5, 5.0, 6.0]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
+                },
+            },
+            ColliderShape::Cuboid,
+            FixedCollider {},
+        ));
+
+        let t_wall_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: Vec3::from_array([0.0, -4.0, 3.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([6.0, 5.0, 0.5]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
+                },
+            },
+            ColliderShape::Cuboid,
+            FixedCollider {},
+        ));
+
+        let b_wall_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: Vec3::from_array([0.0, -4.0, -3.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([6.0, 5.0, 0.5]),
+                },
+            },
+            BevyMeshRenderer {
+                0: MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
+                },
+            },
             ColliderShape::Cuboid,
             FixedCollider {},
         ));

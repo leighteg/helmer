@@ -212,6 +212,7 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                     camera.aspect_ratio = new_size.width as f32 / new_size.height as f32;
                 });
         },
+        |_path, (_world, _schedule)| {},
     );
 
     runtime.init();

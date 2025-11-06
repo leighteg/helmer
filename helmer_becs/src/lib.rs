@@ -159,6 +159,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
                 camera.0.aspect_ratio = new_size.width as f32 / new_size.height as f32;
             }
         },
+        |_path, (_world, _schedule)| {},
     );
     runtime.init();
 }

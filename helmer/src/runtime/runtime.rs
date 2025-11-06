@@ -5,6 +5,7 @@ use resvg::tiny_skia;
 use std::{
     env,
     num::NonZeroU32,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -46,6 +47,7 @@ pub struct RuntimeCallbacks<T: Send + 'static> {
     init: Option<Box<dyn FnOnce(&mut Runtime<T>, &mut T) + Send>>,
     tick: Arc<dyn Fn(f32, &mut T) -> (Option<RenderData>, Option<EguiRenderData>) + Send + Sync>,
     resize: Arc<dyn Fn(PhysicalSize<u32>, &mut T) + Send + Sync>,
+    dropped_file: Arc<dyn Fn(PathBuf, &mut T) + Send + Sync>,
 }
 
 pub struct Runtime<T: Send + 'static = ()> {
@@ -93,6 +95,7 @@ impl<T: Send + 'static> Runtime<T> {
         + Sync
         + 'static,
         resize_callback: impl Fn(PhysicalSize<u32>, &mut T) + Send + Sync + 'static,
+        dropped_file_callback: impl Fn(PathBuf, &mut T) + Send + Sync + 'static,
     ) -> Self {
         // -- TRACING SETUP
 
@@ -133,6 +136,7 @@ impl<T: Send + 'static> Runtime<T> {
                 init: Some(Box::new(init_callback)),
                 tick: Arc::new(tick_callback),
                 resize: Arc::new(resize_callback),
+                dropped_file: Arc::new(dropped_file_callback),
             },
 
             last_title_update: Instant::now(),
@@ -515,6 +519,14 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
 
                     input_manager_guard.clear_egui_state();
                     input_manager_guard.clear_queues();
+                }
+            }
+
+            WindowEvent::DroppedFile(path) => {
+                if let Some(user_state) = &self.user_state {
+                    let user_state_clone = Arc::clone(user_state);
+                    let mut state = user_state_clone.lock();
+                    (self.callbacks.dropped_file)(path, &mut state);
                 }
             }
 

@@ -1,7 +1,11 @@
 use std::num::NonZero;
 
 use bevy_ecs::{
-    component::Component, prelude::{Entity, Local, With, Without}, query::Changed, resource::Resource, system::{Commands, Query, Res, ResMut}
+    component::Component,
+    prelude::{Entity, Local, With, Without},
+    query::Changed,
+    resource::Resource,
+    system::{Commands, Query, Res, ResMut},
 };
 use glam::{Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
@@ -106,7 +110,7 @@ pub fn sync_entities_to_physics_system(
     if !phys.running {
         return;
     }
-    
+
     // Pre-calculate sizes for batch allocation
     let dynamic_count = dynamic_query.iter().len();
     let fixed_count = fixed_query.iter().len();
@@ -180,7 +184,7 @@ pub fn sync_entities_to_physics_system(
 
 pub fn sync_transforms_to_physics_system(
     mut phys: ResMut<PhysicsResource>,
-    query: Query<(&PhysicsHandle, &BevyTransform), Changed<BevyTransform>>,
+    query: Query<(&PhysicsHandle, &BevyTransform), (Changed<BevyTransform>, With<FixedCollider>)>,
 ) {
     if !phys.running {
         return;
@@ -192,8 +196,6 @@ pub fn sync_transforms_to_physics_system(
         if let Some(rigid_body) = rigid_body_set.get_mut(handle.rigid_body) {
             let iso = build_isometry(transform.0.position, transform.0.rotation);
 
-            // For dynamic bodies, we typically "teleport" the body.
-            // This updates position without interfering with velocities.
             rigid_body.set_position(iso, true);
         }
     }
@@ -204,7 +206,7 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
     if !phys.running {
         return;
     }
-    
+
     let dt = time.0;
     let phys_data = &mut *phys;
 

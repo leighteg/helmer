@@ -1,6 +1,7 @@
 use becs_bench::systems::{config_toggle::config_toggle_system, freecam::freecam_system};
-use helmer::provided::components::ActiveCamera;
-use helmer_becs::{BevyActiveCamera, BevyCamera, BevyTransform, helmer_becs_init};
+use glam::Quat;
+use helmer::provided::components::{ActiveCamera, Light, Transform};
+use helmer_becs::{BevyActiveCamera, BevyCamera, BevyLight, BevyTransform, helmer_becs_init};
 
 use crate::systems::model_loader::{SceneLoaderResource, scene_loader_system};
 
@@ -12,6 +13,26 @@ fn main() {
             BevyTransform::default(),
             BevyCamera::default(),
             BevyActiveCamera { 0: ActiveCamera {} },
+        ));
+
+        let sun_rotation = Quat::from_euler(
+            glam::EulerRot::YXZ,
+            20.0f32.to_radians(),  // Y rotation - very slight side angle
+            -50.0f32.to_radians(), // X rotation - steeper downward angle
+            20.0f32.to_radians(),  // Z rotation - no roll
+        );
+
+        let sun_entity = world.spawn((
+            BevyTransform {
+                0: Transform {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    rotation: sun_rotation,
+                    scale: glam::Vec3::ONE,
+                },
+            },
+            BevyLight {
+                0: Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
+            },
         ));
 
         // resources init

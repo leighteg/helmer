@@ -7,7 +7,10 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use winit::keyboard::KeyCode;
 
-use crate::{BevyInputManager, BevyRuntimeConfig, provided::ui::StatsUI};
+use crate::{
+    BevyInputManager, BevyRuntimeConfig,
+    provided::ui::{inspector::InspectorUI, stats::StatsUI},
+};
 
 #[derive(Resource, Default)]
 pub struct EguiResource {
@@ -19,6 +22,7 @@ pub struct EguiResource {
     )>,
     pub accepting_input: bool,
     pub stats_ui: bool,
+    pub inspector_ui: bool,
 }
 
 pub fn egui_system(world: &mut World) {
@@ -39,10 +43,13 @@ pub fn egui_system(world: &mut World) {
 
     runtime_cfg.0.render_config.egui_pass = true;
 
-    let (do_toggle, raw_input, window_size, pixels_per_point) = {
+    let (do_toggle_stats, do_toggle_inspector, raw_input, window_size, pixels_per_point) = {
         let input = input_arc.read();
+
+        let is_control_active = input.is_key_active(KeyCode::ControlLeft);
         (
-            input.is_key_active(KeyCode::ControlLeft) && input.was_just_pressed(KeyCode::KeyI),
+            is_control_active && input.was_just_pressed(KeyCode::KeyG),
+            is_control_active && input.was_just_pressed(KeyCode::KeyI),
             input.build_egui_raw_input(input.window_size),
             input.window_size,
             input.scale_factor as f32,
@@ -54,14 +61,20 @@ pub fn egui_system(world: &mut World) {
             .get_resource_mut::<EguiResource>()
             .expect("EguiResource resource not found");
 
-        if do_toggle {
+        if do_toggle_stats {
             egui_res.stats_ui = !egui_res.stats_ui;
+        }
+        if do_toggle_inspector {
+            egui_res.inspector_ui = !egui_res.inspector_ui;
         }
 
         egui_res.accepting_input = true;
 
         if egui_res.stats_ui {
             StatsUI::add_windows(&mut egui_res);
+        }
+        if egui_res.inspector_ui {
+            InspectorUI::add_window(&mut egui_res);
         }
 
         egui_res.ctx.clone()

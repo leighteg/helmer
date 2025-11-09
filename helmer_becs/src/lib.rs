@@ -31,7 +31,7 @@ use crate::{
     },
     systems::{
         render_system::{RenderPacket, render_data_system},
-        scene_system::scene_spawning_system,
+        scene_system::{scene_spawning_system, update_scene_child_transforms},
     },
 };
 
@@ -71,7 +71,8 @@ pub mod systems;
 
 pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
     let world = World::new();
-    let schedule = Schedule::default();
+    let mut schedule = Schedule::default();
+    schedule.set_executor_kind(bevy_ecs::schedule::ExecutorKind::MultiThreaded);
 
     let mut type_registry = TypeRegistry::default();
 
@@ -132,7 +133,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             // core systems
             schedule.add_systems(render_data_system);
             schedule.add_systems(egui_system);
-            schedule.add_systems(scene_spawning_system);
+            schedule.add_systems((scene_spawning_system, update_scene_child_transforms).chain());
 
             // physics systems
             schedule.add_systems(

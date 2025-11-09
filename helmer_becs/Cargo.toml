@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 helmer = { path = "../helmer" }
-bevy_ecs = "0.17.2"
+bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
 glam = "0.30.8"
 hashbrown = "0.16.0"
 tracing = "0.1.41"
@@ -14,3 +14,4 @@ egui = { git = "https://github.com/emilk/egui.git" }
 egui-wgpu = { git = "https://github.com/emilk/egui.git" }
 parking_lot = "0.12.5"
 rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+bevy_reflect = { version = "0.17.2", features = ["debug"] }

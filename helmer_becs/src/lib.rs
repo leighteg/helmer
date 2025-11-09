@@ -1,11 +1,14 @@
 use std::{path::PathBuf, sync::Arc};
 
+use bevy_ecs::prelude::{ReflectComponent, ReflectResource};
 use bevy_ecs::{
     component::Component,
+    reflect::AppTypeRegistry,
     resource::Resource,
     schedule::{IntoScheduleConfigs, Schedule},
     world::World,
 };
+use bevy_reflect::{Reflect, TypeRegistry, TypeRegistryArc};
 use helmer::{
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
@@ -54,8 +57,10 @@ pub struct BevyPerformanceMetrics(pub Arc<PerformanceMetrics>);
 pub struct BevyRuntimeConfig(pub RuntimeConfig);
 
 // resources
-#[derive(Resource, Clone, Copy, Debug, Default)]
+#[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Resource)]
 pub struct DeltaTime(pub f32);
+
 #[derive(Resource, Clone, Debug, Default)]
 pub struct DraggedFile(pub Option<PathBuf>);
 
@@ -68,9 +73,44 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
     let world = World::new();
     let schedule = Schedule::default();
 
+    let mut type_registry = TypeRegistry::default();
+
+    // Register primitive types for reflection
+    type_registry.register::<f32>();
+    type_registry.register::<f64>();
+    type_registry.register::<i32>();
+    type_registry.register::<u32>();
+    type_registry.register::<i64>();
+    type_registry.register::<u64>();
+    type_registry.register::<bool>();
+    type_registry.register::<String>();
+
+    // Register Vec types
+    type_registry.register::<Vec<f32>>();
+    type_registry.register::<Vec<String>>();
+
+    // Register reflectable resources
+    type_registry.register::<DeltaTime>();
+
+    // Note: BevyTransform, BevyCamera, etc. cannot be registered because
+    // Transform, Camera, etc. from helmer don't implement Reflect.
+    // You can only register types in the inspector that implement Reflect.
+    // To make your own components inspectable, derive Reflect on them:
+    //
+    // #[derive(Component, Reflect)]
+    // #[reflect(Component)]
+    // pub struct MyComponent { ... }
+    //
+    // Then register with: type_registry.register::<MyComponent>();
+
     let mut runtime: Runtime<(World, Schedule)> = Runtime::new(
         (world, schedule),
         move |runtime, (world, schedule)| {
+            let registry_arc: TypeRegistryArc = TypeRegistryArc {
+                internal: Arc::new(std::sync::RwLock::new(type_registry)),
+            };
+            world.insert_resource(AppTypeRegistry(registry_arc));
+
             world.insert_resource::<BevyRuntimeConfig>(BevyRuntimeConfig(
                 runtime.config.as_ref().clone(),
             ));

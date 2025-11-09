@@ -97,7 +97,7 @@ pub enum LightType {
     Spot { angle: f32 }, // Spot lights might have a cone angle
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Light {
     pub light_type: LightType,
     pub color: Vec3,    // RGB color of the light

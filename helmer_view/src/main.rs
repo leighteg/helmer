@@ -3,7 +3,7 @@ use glam::Quat;
 use helmer::provided::components::{ActiveCamera, Light, Transform};
 use helmer_becs::{BevyActiveCamera, BevyCamera, BevyLight, BevyTransform, helmer_becs_init};
 
-use crate::systems::model_loader::{SceneLoaderResource, scene_loader_system};
+use crate::systems::scene_loader::{SceneLoaderResource, scene_loader_system};
 
 pub mod systems;
 

@@ -9,6 +9,7 @@ use helmer_becs::{
         components::{FixedCollider, PhysicsHandle},
         physics_resource::PhysicsResource,
     },
+    provided::ui::inspector::InspectorSelectedEntityResource,
 };
 use rapier3d::{
     na::Vector3,
@@ -123,6 +124,8 @@ pub fn drag_system(
         (Entity, &mut BevyTransform, &PhysicsHandle),
         Without<BevyActiveCamera>,
     >,
+
+    mut inspector_selected_entity_res: ResMut<InspectorSelectedEntityResource>,
 ) {
     // --- 1. Get Resources and Input State ---
     let (Some(input), Some(mut physics)) = (input_res, physics_res) else {
@@ -153,6 +156,9 @@ pub fn drag_system(
 
             // If we hit an entity, start dragging it
             if let Some((hit_id, distance)) = closest_hit {
+                // set the inspector ui's selected entity resource
+                inspector_selected_entity_res.0 = Some(hit_id);
+
                 // Set the physics body to Kinematic
                 // We can safely query here because draggable_query ensures the handle exists.
                 if let Ok((_, _, handle)) = draggable_query.get(hit_id) {

@@ -17,6 +17,10 @@ pub fn config_toggle_system(
     let input_manager = input_manager.0.read();
     let runtime_config = &mut runtime_config.0;
 
+    if input_manager.is_key_active(KeyCode::ControlLeft) {
+        return;
+    }
+
     for key in input_manager.just_pressed.iter() {
         match key {
             KeyCode::KeyZ => {

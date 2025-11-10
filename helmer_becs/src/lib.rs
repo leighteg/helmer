@@ -20,6 +20,7 @@ use helmer::{
 };
 use parking_lot::{Mutex, RwLock};
 
+use crate::provided::ui::inspector::InspectorSelectedEntityResource;
 use crate::{
     egui_integration::{EguiResource, egui_system},
     physics::{
@@ -129,6 +130,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<EguiResource>(EguiResource::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
             world.insert_resource::<DraggedFile>(DraggedFile(None));
+            world.insert_resource(InspectorSelectedEntityResource::default());
 
             // core systems
             schedule.add_systems(render_data_system);

@@ -1,12 +1,16 @@
 use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::ReflectComponent;
+use bevy_ecs::resource::Resource;
 use bevy_reflect::{PartialReflect, Reflect, ReflectMut, TypeRegistry};
+use egui::Id;
 use helmer::provided::components::{Light, LightType};
 use std::any::TypeId;
-use egui::Id;
 
 use crate::egui_integration::EguiResource;
 use crate::{BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform};
+
+#[derive(Resource, Default)]
+pub struct InspectorSelectedEntityResource(pub Option<Entity>);
 
 pub struct InspectorUI {}
 
@@ -14,7 +18,11 @@ impl InspectorUI {
     pub fn add_window(egui_res: &mut EguiResource) {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
-                fn reflect_ui(registry: &TypeRegistry, value: &mut dyn PartialReflect, ui: &mut egui::Ui) {
+                fn reflect_ui(
+                    registry: &TypeRegistry,
+                    value: &mut dyn PartialReflect,
+                    ui: &mut egui::Ui,
+                ) {
                     let type_id = value.get_represented_type_info().unwrap().type_id();
                     let _registration = registry.get(type_id).expect("Unregistered type");
 
@@ -83,13 +91,13 @@ impl InspectorUI {
                         let current_index = enum_ref.variant_index();
                         let current_name = enum_ref.variant_name().to_string();
                         let enum_info = enum_ref.get_represented_enum_info().unwrap();
-                        
+
                         let variant_names: Vec<String> = (0..enum_info.variant_len())
                             .map(|i| enum_info.variant_at(i).unwrap().name().to_string())
                             .collect();
                         let mut selected = current_index;
 
-                        egui::ComboBox::from_id_salt("enum_variant")  // (uses parent ID stack)
+                        egui::ComboBox::from_id_salt("enum_variant") // (uses parent ID stack)
                             .selected_text(&current_name)
                             .show_ui(ui, |ui| {
                                 for (i, name) in variant_names.iter().enumerate() {
@@ -100,7 +108,10 @@ impl InspectorUI {
                         // Show fields
                         let field_count = enum_ref.field_len();
                         for i in 0..field_count {
-                            let field_name = enum_ref.name_at(i).unwrap_or(&format!("field {}", i)).to_string();
+                            let field_name = enum_ref
+                                .name_at(i)
+                                .unwrap_or(&format!("field {}", i))
+                                .to_string();
                             ui.horizontal(|ui| {
                                 ui.label(&field_name);
                             });
@@ -131,7 +142,7 @@ impl InspectorUI {
                                     reflect_ui(registry, field, ui);
                                 }
                             });
-                        };
+                        }
                         return;
                     }
 
@@ -150,69 +161,119 @@ impl InspectorUI {
                 }
 
                 // Use AppTypeRegistry instead of TypeRegistry
-                let app_registry = if let Some(r) = world.get_resource::<bevy_ecs::prelude::AppTypeRegistry>() {
-                    r.clone()
-                } else {
-                    ui.label("AppTypeRegistry resource is missing.");
-                    return;
-                };
+                let app_registry =
+                    if let Some(r) = world.get_resource::<bevy_ecs::prelude::AppTypeRegistry>() {
+                        r.clone()
+                    } else {
+                        ui.label("AppTypeRegistry resource is missing.");
+                        return;
+                    };
 
                 // Collect entity and component info first, before any mutable borrows
-                let mut entities: Vec<Entity> = world.query::<bevy_ecs::world::EntityRef>()
+                let mut entities: Vec<Entity> = world
+                    .query::<bevy_ecs::world::EntityRef>()
                     .iter(world)
                     .map(|e| e.id())
                     .collect();
                 entities.sort_by_key(|e| e.to_bits());
 
                 // Collect component info for all entities
-                let entity_components: Vec<(Entity, Vec<(bevy_ecs::component::ComponentId, String, std::any::TypeId)>)> = entities
+                let entity_components: Vec<(
+                    Entity,
+                    Vec<(bevy_ecs::component::ComponentId, String, std::any::TypeId)>,
+                )> = entities
                     .iter()
                     .map(|&entity| {
                         let entity_ref = world.entity(entity);
-                        let component_ids: Vec<bevy_ecs::component::ComponentId> = 
-                            entity_ref.archetype().components().into_iter().copied().collect();
-                        
+                        let component_ids: Vec<bevy_ecs::component::ComponentId> = entity_ref
+                            .archetype()
+                            .components()
+                            .into_iter()
+                            .copied()
+                            .collect();
+
                         let components_info: Vec<_> = component_ids
                             .into_iter()
                             .filter_map(|component_id| {
                                 world.components().get_info(component_id).and_then(|info| {
                                     info.type_id().map(|type_id| {
                                         // Match known custom types for real names (bypass placeholder)
-                                        let short_name = if type_id == TypeId::of::<BevyTransform>() {
+                                        let short_name = if type_id == TypeId::of::<BevyTransform>()
+                                        {
                                             "Transform".to_string()
                                         } else if type_id == TypeId::of::<BevyCamera>() {
                                             "Camera".to_string()
                                         } else if type_id == TypeId::of::<BevyActiveCamera>() {
                                             "Active Camera".to_string()
                                         } else if type_id == TypeId::of::<BevyLight>() {
-
-                                            match world.entity(entity).get::<BevyLight>().unwrap().0.light_type {
-                                                LightType::Directional => "Directional Light".to_string(),
-                                                LightType::Spot { angle } => "Spot Light".to_string(),
+                                            match world
+                                                .entity(entity)
+                                                .get::<BevyLight>()
+                                                .unwrap()
+                                                .0
+                                                .light_type
+                                            {
+                                                LightType::Directional => {
+                                                    "Directional Light".to_string()
+                                                }
+                                                LightType::Spot { angle } => {
+                                                    "Spot Light".to_string()
+                                                }
                                                 LightType::Point => "Point Light".to_string(),
                                             }
-
                                         } else if type_id == TypeId::of::<BevyMeshRenderer>() {
                                             "Mesh Renderer".to_string()
                                         } else {
                                             // Fallback for reflectable/unknown (safe now, as knowns are handled)
-                                            info.name().rsplit("::").next().unwrap_or("Unknown").to_string()
+                                            info.name()
+                                                .rsplit("::")
+                                                .next()
+                                                .unwrap_or("Unknown")
+                                                .to_string()
                                         };
                                         (component_id, short_name, type_id)
                                     })
                                 })
                             })
                             .collect();
-                        
+
                         (entity, components_info)
                     })
                     .collect();
 
+                // Get the currently selected entity (if any)
+                let selected_entity = world
+                    .get_resource::<InspectorSelectedEntityResource>()
+                    .and_then(|res| res.0);
+
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (entity, components) in entity_components {
-                        egui::CollapsingHeader::new(format!("Entity {}", entity.to_bits()))
-                            .show(ui, |ui| {
-                                for (component_id, short_name, type_id) in components {
+                        let is_selected = Some(entity) == selected_entity;
+
+                        // Give each entity its own ID scope
+                        ui.push_id(entity, |ui| {
+                            // Draw a highlight frame if this entity is selected
+                            let frame = if is_selected {
+                                egui::Frame::group(ui.style())
+                                    .fill(ui.visuals().selection.bg_fill)
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().selection.stroke.color,
+                                    ))
+                            } else {
+                                egui::Frame::none()
+                            };
+
+                            frame.show(ui, |ui| {
+                                // Entity header (expandable)
+                                let header = egui::CollapsingHeader::new(format!(
+                                    "Entity {}",
+                                    entity.to_bits()
+                                ))
+                                .default_open(is_selected); // auto-open if selected
+
+                                let response = header.show(ui, |ui| {
+                                    for (component_id, short_name, type_id) in components {
                                     let unique_id = Id::new((entity, type_id));  // ← Unique per entity + component type
 
                                     // Check if this is a reflectable component
@@ -344,7 +405,30 @@ impl InspectorUI {
                                         }
                                     }
                                 }
+                                });
+
+                                // Auto-scroll to this entity if it's selected
+                                if is_selected {
+                                    ui.scroll_to_rect(
+                                        response.header_response.rect,
+                                        Some(egui::Align::Center),
+                                    );
+                                }
+
+                                // allow clicking header to select/deselect entity
+                                if response.header_response.clicked() {
+                                    if let Some(mut sel) =
+                                        world.get_resource_mut::<InspectorSelectedEntityResource>()
+                                    {
+                                        if sel.0 == Some(entity) {
+                                            sel.0 = None;
+                                        } else {
+                                            sel.0 = Some(entity);
+                                        }
+                                    }
+                                }
                             });
+                        });
                     }
                 });
             }),

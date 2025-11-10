@@ -136,6 +136,10 @@ pub fn drag_system(
     let is_active = input.0.read().is_mouse_button_active(MouseButton::Left);
     let is_pressed = is_active && !state.was_mouse_button_active_last_frame;
     let is_released = !is_active && state.was_mouse_button_active_last_frame;
+    let can_drag_fixed = input
+        .0
+        .read()
+        .is_key_active(winit::keyboard::KeyCode::ControlLeft);
 
     // --- 2. DRAG START ---
     if is_pressed {
@@ -163,6 +167,11 @@ pub fn drag_system(
                 // We can safely query here because draggable_query ensures the handle exists.
                 if let Ok((_, _, handle)) = draggable_query.get(hit_id) {
                     if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
+                        // dont drag fixed colliders if not holding modifier
+                        if rb.body_type() == RigidBodyType::Fixed && !can_drag_fixed {
+                            return;
+                        }
+
                         state.dragged_entity = Some((hit_id, rb.body_type()));
                         state.drag_distance = distance;
                         rb.set_body_type(RigidBodyType::KinematicPositionBased, true);

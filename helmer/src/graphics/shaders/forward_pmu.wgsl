@@ -6,6 +6,25 @@ const EPSILON: f32 = 0.0001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
 
+const POISSON_DISK_16: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2(-0.94201624, -0.39906216),
+    vec2(0.94558609, -0.76890725),
+    vec2(-0.094184101, -0.92938870),
+    vec2(0.34495938, 0.29387760),
+    vec2(-0.91588581, 0.45771432),
+    vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543, 0.27676845),
+    vec2(0.97484398, 0.75648379),
+    vec2(0.44323325, -0.97511554),
+    vec2(0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023),
+    vec2(0.79197514, 0.19090188),
+    vec2(-0.24188840, 0.99706507),
+    vec2(-0.81409955, 0.91437590),
+    vec2(0.19984126, 0.78641367),
+    vec2(0.14383161, -0.14100790)
+);
+
 //=============== STRUCTS ===============//
 
 struct Constants {
@@ -235,7 +254,7 @@ fn calculate_shadow_factor(
     N: vec3<f32>,
     L: vec3<f32>
 ) -> f32 {
-    // 1. Determine which cascade to use based on view depth
+    // 1. Determine cascade
     var cascade_index = i32(NUM_CASCADES - 1u);
     for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
         if view_z > shadow_uniforms[i].split_depth.x {
@@ -245,7 +264,7 @@ fn calculate_shadow_factor(
     }
     let cascade = shadow_uniforms[cascade_index];
 
-    // 2. Project the world position into the light's clip space
+    // 2. Project to shadow space
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
     if shadow_pos_clip.w < EPSILON {
         return 1.0;
@@ -256,38 +275,63 @@ fn calculate_shadow_factor(
 
     // 3. Bounds check
     if any(shadow_uv < vec2(0.0)) || any(shadow_uv > vec2(1.0)) || shadow_coord.z < 0.0 || shadow_coord.z > 1.0 {
-        return 1.0; // Not in shadow
+        return 1.0;
     }
 
-    // 4. Compute dynamic PCF radius
+    // 4. Calculate dynamic filter size
     let base_radius = f32(render_constants.pcf_radius);
-
-    // Scale radius based on view distance (clamped)
     let dist_factor = clamp(view_z / render_constants.pcf_max_distance, 0.0, 1.0);
     let scale = mix(render_constants.pcf_min_scale, render_constants.pcf_max_scale, dist_factor);
-    let dynamic_radius_f = base_radius * scale;
-    let dynamic_radius = clamp(i32(dynamic_radius_f), 1, 6); // Clamp for performance
+    let filter_radius = base_radius * scale;
 
-    // 5. Sampling setup
+    // 5. Choose sample count based on quality settings
+    // Use fewer samples for far cascades or distant geometry
+    var sample_count = 16;
+    if cascade_index > 1 || dist_factor > 0.7 {
+        sample_count = 8; // Reduce samples for far/distant shadows
+    }
+    
+    // 6. Sample setup - compute once
     let shadow_map_size = vec2<f32>(textureDimensions(shadow_map, 0u));
-    let texel_size = 1.0 / shadow_map_size;
-    var total_moments = vec2<f32>(0.0);
-    var sample_count = 0.0;
+    let texel_size = filter_radius / shadow_map_size;
 
-    // 6. PCF kernel sampling
-    for (var y = -dynamic_radius; y <= dynamic_radius; y = y + 1) {
-        for (var x = -dynamic_radius; x <= dynamic_radius; x = x + 1) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            let sample = textureSample(shadow_map, shadow_sampler, shadow_uv + offset, u32(cascade_index)).rg;
-            total_moments += sample;
-            sample_count += 1.0;
-        }
+    var total_moments = vec2<f32>(0.0);
+    
+    // 7. Poisson disk sampling
+    if sample_count == 16 {
+        // 16-tap sampling
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[1] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[3] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[5] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[7] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[9] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[11] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[13] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[15] * texel_size, u32(cascade_index)).rg;
+        total_moments *= (1.0 / 16.0);
+    } else {
+        // 8-tap sampling - every other sample
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index)).rg;
+        total_moments *= (1.0 / 8.0);
     }
 
-    let avg_moments = total_moments / sample_count;
-
-    // 7. Final shadow value using VSM Chebyshev inequality
-    return chebyshev_inequality(shadow_coord.z, avg_moments, N, L);
+    // 8. EVSM calculation
+    return chebyshev_inequality(shadow_coord.z, total_moments, N, L);
 }
 
 // --- SKY SAMPLING FUNCTIONS ---

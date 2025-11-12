@@ -1,4 +1,6 @@
+use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
+use bevy_ecs::name::Name;
 use bevy_ecs::prelude::ReflectComponent;
 use bevy_ecs::resource::Resource;
 use bevy_reflect::{PartialReflect, Reflect, ReflectMut, TypeRegistry};
@@ -266,10 +268,24 @@ impl InspectorUI {
 
                             frame.show(ui, |ui| {
                                 // Entity header (expandable)
-                                let header = egui::CollapsingHeader::new(format!(
+                                let header_title = if let Some(name) = world.entity(entity).get::<Name>() {
+                                    &name.to_string()
+                                } else if let Some(_) = world.entity(entity).get::<BevyActiveCamera>() {
+                                    "Active Camera"
+                                } else if let Some(light) = world.entity(entity).get::<BevyLight>() {
+                                    match light.0.light_type {
+                                        LightType::Directional => "Directional Light",
+                                        LightType::Point => "Spot Light",
+                                        LightType::Spot { angle: _ } => "Spot Light",
+                                    }
+                                } else { &{
+                                    format!(
                                     "Entity {}",
                                     entity.to_bits()
-                                ))
+                                )
+                                }};
+
+                                let header = egui::CollapsingHeader::new(header_title)
                                 .default_open(is_selected); // auto-open if selected
 
                                 let response = header.show(ui, |ui| {
@@ -385,11 +401,20 @@ impl InspectorUI {
                                         } else if type_id == TypeId::of::<BevyMeshRenderer>() {
                                             if let Some(mut mesh_wrapper) = entity_mut.get_mut::<BevyMeshRenderer>() {
                                                 egui::CollapsingHeader::new(&short_name)
-                                                    .id_salt(unique_id)  // ← Make header ID unique
+                                                    .id_salt(unique_id)  // make header ID unique
                                                     .show(ui, |ui| {
-                                                        ui.push_id(unique_id, |ui| {  // ← Push ID for children
-                                                            let _m = &mut mesh_wrapper.0;  // Prefix with _ to silence unused warning; implement UI here if needed
-                                                            // TODO: Add custom UI for mesh renderer
+                                                        ui.push_id(unique_id, |ui| {  // push ID for children
+                                                            let mesh_renderer = &mut mesh_wrapper.0;
+
+                                                            ui.label("mesh id");
+                                                            ui.add(egui::DragValue::new(&mut mesh_renderer.mesh_id));
+
+                                                            ui.label("material id");
+                                                            ui.add(egui::DragValue::new(&mut mesh_renderer.material_id));
+
+                                                            ui.checkbox(&mut mesh_renderer.casts_shadow, "casts shadow");
+
+                                                            ui.checkbox(&mut mesh_renderer.visible, "visible");
                                                         });
                                                     });
                                             }

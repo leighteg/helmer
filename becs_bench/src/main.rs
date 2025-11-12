@@ -2,6 +2,7 @@ use std::env;
 
 use bevy_ecs::{
     component::Component,
+    name::Name,
     query::With,
     system::{Query, Res},
 };
@@ -76,6 +77,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("ground plane"),
         ));
 
         let sun_rotation = Quat::from_euler(
@@ -117,6 +119,7 @@ fn main() {
             SpinnerObject {},
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("spin cube"),
         ));
 
         let l_wall_entity = world.spawn((
@@ -137,6 +140,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("l wall"),
         ));
 
         let r_wall_entity = world.spawn((
@@ -157,6 +161,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("r wall"),
         ));
 
         let t_wall_entity = world.spawn((
@@ -177,6 +182,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("t wall"),
         ));
 
         let b_wall_entity = world.spawn((
@@ -197,6 +203,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             FixedCollider {},
+            Name::new("b wall"),
         ));
 
         let cube_entity = world.spawn((
@@ -213,6 +220,7 @@ fn main() {
             },
             ColliderShape::Cuboid,
             DynamicRigidBody { mass: 1.0 },
+            Name::new("cube"),
         ));
 
         let city_entity = world.spawn((
@@ -224,6 +232,7 @@ fn main() {
                 },
             },
             SceneRoot(city_scene_handle),
+            Name::new("city scene root"),
         ));
 
         let sponza_entity = world.spawn((
@@ -235,6 +244,7 @@ fn main() {
                 },
             },
             SceneRoot(sponza_scene_handle),
+            Name::new("sponza scene root"),
         ));
 
         let raptor_entity = world.spawn((
@@ -246,6 +256,7 @@ fn main() {
                 },
             },
             SceneRoot(ford_raptor_scene_handle),
+            Name::new("raptor scene root"),
         ));
 
         schedule.add_systems(spinner_system);

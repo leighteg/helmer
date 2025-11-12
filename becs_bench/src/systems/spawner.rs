@@ -5,6 +5,7 @@ use std::{
 
 use bevy_ecs::{
     entity::Entity,
+    name::Name,
     resource::Resource,
     system::{Commands, Res, ResMut},
 };
@@ -184,6 +185,10 @@ pub fn spawner_system(
                     mass: spawner_system_resource.mesh_scale * 10.0,
                 },
                 HideToggleProof {},
+                Name::new(format!(
+                    "spawned object {}",
+                    spawner_system_resource.spawned_entities.len()
+                )),
             ));
             spawner_system_resource
                 .spawned_entities

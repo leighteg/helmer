@@ -1,6 +1,7 @@
 use crate::{BevyAssetServer, BevyMeshRenderer, BevyTransform};
 use bevy_ecs::{
     component::Component,
+    name::Name,
     prelude::{Commands, Entity, Query, Res, Without},
     query::With,
     system::Local,
@@ -83,6 +84,12 @@ pub fn scene_spawning_system(
                     local_transform: node.transform,
                     last_written: world_matrix,
                 });
+
+                commands.entity(child_entity).insert(Name::new(format!(
+                    "scene {} child {}",
+                    scene_root.0.id,
+                    spawned_children.len()
+                )));
             }
 
             local

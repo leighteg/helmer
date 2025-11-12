@@ -27,6 +27,9 @@ struct LightVP {
 }
 
 struct Constants {
+    // general
+    mip_bias: f32,
+
     // lighting
     shade_mode: u32,
     light_model: u32,
@@ -36,6 +39,7 @@ struct Constants {
     planet_radius: f32,
     atmosphere_radius: f32,
     sky_light_samples: u32,
+    _pad0: u32,
 
     // SSR
     ssr_coarse_steps: u32,
@@ -45,6 +49,7 @@ struct Constants {
     ssr_max_distance: f32,
     ssr_roughness_fade_start: f32,
     ssr_roughness_fade_end: f32,
+    _pad1: u32,
 
     // SSGI
     ssgi_num_rays: u32,
@@ -52,6 +57,9 @@ struct Constants {
     ssgi_ray_step_size: f32,
     ssgi_thickness: f32,
     ssgi_blend_factor: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
 
     // shadows
     evsm_c: f32,
@@ -59,10 +67,8 @@ struct Constants {
     pcf_min_scale: f32,
     pcf_max_scale: f32,
     pcf_max_distance: f32,
-
-    // composite
     ssgi_intensity: f32,
-    _padding: vec4<f32>,
+    _final_padding: vec2<f32>,
 };
 
 //=============== BINDINGS ===============//

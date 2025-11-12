@@ -4,6 +4,51 @@ const EPSILON: f32 = 0.00001;
 
 //=============== STRUCTS ===============//
 
+struct Constants {
+    // general
+    mip_bias: f32,
+
+    // lighting
+    shade_mode: u32,
+    light_model: u32,
+    skylight_contribution: u32,
+
+    // sky
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
+    _pad0: u32,
+
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    _pad1: u32,
+
+    // SSGI
+    ssgi_num_rays: u32,
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+
+    // shadows
+    evsm_c: f32,
+    pcf_radius: u32,
+    pcf_min_scale: f32,
+    pcf_max_scale: f32,
+    pcf_max_distance: f32,
+    ssgi_intensity: f32,
+    _final_padding: vec2<f32>,
+};
+
 struct GBufferInput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -64,6 +109,8 @@ struct MaterialData {
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
 @group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
 @group(1) @binding(2) var pbr_sampler: sampler;
+
+@group(2) @binding(0) var<uniform> render_constants: Constants;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
@@ -140,7 +187,7 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var albedo_color = material.albedo.rgb;
     var alpha = material.albedo.a;
     if material.albedo_idx >= 0i {
-        let albedo_sample = textureSample(textures[material.albedo_idx], pbr_sampler, in.tex_coord);
+        let albedo_sample = textureSampleBias(textures[material.albedo_idx], pbr_sampler, in.tex_coord, render_constants.mip_bias);
         albedo_color *= albedo_sample.rgb; // Multiply factor by texture
         alpha *= albedo_sample.a;
     }
@@ -151,7 +198,7 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     var ao = material.ao;
     if material.metallic_roughness_idx >= 0i {
     // Standard GLTF packing: R=Occlusion, G=Roughness, B=Metallic
-        let mra_sample = textureSample(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord);
+        let mra_sample = textureSampleBias(textures[material.metallic_roughness_idx], pbr_sampler, in.tex_coord, render_constants.mip_bias);
         ao *= mra_sample.r;          // Occlusion from Red channel
         roughness *= mra_sample.g;   // Roughness from Green channel
         metallic *= mra_sample.b;    // Metallic from Blue channel
@@ -160,13 +207,13 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     // --- Emission Calculation ---
     var emission_color = material.emission_color * material.emission_strength;
     if material.emission_idx >= 0i {
-        emission_color *= textureSample(textures[material.emission_idx], pbr_sampler, in.tex_coord).rgb;
+        emission_color *= textureSampleBias(textures[material.emission_idx], pbr_sampler, in.tex_coord, render_constants.mip_bias).rgb;
     }
 
     // --- Normal Mapping ---
     var N: vec3<f32>;
     if material.normal_idx >= 0i {
-        let tangent_space_normal = textureSample(textures[material.normal_idx], pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
+        let tangent_space_normal = textureSampleBias(textures[material.normal_idx], pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz * 2.0 - 1.0;
         let T = safe_normalize(in.world_tangent);
         let B = safe_normalize(in.world_bitangent);
         let N_geom = safe_normalize(in.world_normal);

@@ -1493,6 +1493,7 @@ impl DeferredRenderer {
                 bind_group_layouts: &[
                     &scene_data_bind_group_layout,
                     &object_data_bind_group_layout,
+                    &render_constants_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -3046,6 +3047,7 @@ impl DeferredRenderer {
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
         geometry_pass.set_bind_group(0, &self.scene_data_bind_groups[buffer_index], &[]);
         geometry_pass.set_bind_group(1, self.object_data_bind_group.as_ref().unwrap(), &[]);
+        geometry_pass.set_bind_group(2, self.render_constants_bind_group.as_ref().unwrap(), &[]);
 
         // **Bind the one persistent buffer**
         geometry_pass.set_vertex_buffer(1, buffer.as_ref().unwrap().slice(..));

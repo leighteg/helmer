@@ -122,6 +122,14 @@ impl StatsUI {
                 }
 
                 ui.separator();
+                ui.heading("general");
+                ui.add(
+                        egui::DragValue::new(&mut render_cfg.shader_constants.mip_bias)
+                            .speed(0.1)
+                            .prefix("mip bias: "),
+                    );
+
+                ui.separator();
                 ui.heading("Culling & LOD");
                 ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
                 ui.checkbox(&mut render_cfg.lod, "LOD");

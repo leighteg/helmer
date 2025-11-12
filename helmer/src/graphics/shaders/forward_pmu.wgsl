@@ -28,6 +28,9 @@ const POISSON_DISK_16: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
 //=============== STRUCTS ===============//
 
 struct Constants {
+    // general
+    mip_bias: f32,
+
     // lighting
     shade_mode: u32,
     light_model: u32,
@@ -37,6 +40,7 @@ struct Constants {
     planet_radius: f32,
     atmosphere_radius: f32,
     sky_light_samples: u32,
+    _pad0: u32,
 
     // SSR
     ssr_coarse_steps: u32,
@@ -46,6 +50,7 @@ struct Constants {
     ssr_max_distance: f32,
     ssr_roughness_fade_start: f32,
     ssr_roughness_fade_end: f32,
+    _pad1: u32,
 
     // SSGI
     ssgi_num_rays: u32,
@@ -53,6 +58,9 @@ struct Constants {
     ssgi_ray_step_size: f32,
     ssgi_thickness: f32,
     ssgi_blend_factor: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
 
     // shadows
     evsm_c: f32,
@@ -60,10 +68,8 @@ struct Constants {
     pcf_min_scale: f32,
     pcf_max_scale: f32,
     pcf_max_distance: f32,
-
-    // composite
     ssgi_intensity: f32,
-    _padding: vec4<f32>,
+    _final_padding: vec2<f32>,
 };
 
 struct VertexInput {
@@ -425,18 +431,18 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 //=============== FRAGMENT SHADER ===============//
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let albedo_sample = textureSample(albedo_texture, pbr_sampler, in.tex_coord);
+    let albedo_sample = textureSampleBias(albedo_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias);
     let albedo = albedo_sample.rgb * material.albedo.rgb;
     let alpha = albedo_sample.a * material.albedo.a;
 
-    let mr_sample = textureSample(mr_texture, pbr_sampler, in.tex_coord);
+    let mr_sample = textureSampleBias(mr_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias);
     let metallic = mr_sample.b * material.metallic;
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
     var ao = mr_sample.r * material.ao;
     ao = mix(ao, 1.0, 1.0 - smoothstep(0.0, 0.1, ao));
 
     var emission = material.emission_color * material.emission_strength;
-    emission *= textureSample(emission_texture, pbr_sampler, in.tex_coord).rgb;
+    emission *= textureSampleBias(emission_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias).rgb;
 
     let emissive_intensity = max(max(emission.r, emission.g), emission.b);
     if emissive_intensity > EMISSIVE_THRESHOLD {
@@ -458,7 +464,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let effective_albedo = select(albedo, vec3(1.0), is_lighting_only);
     let effective_metallic = metallic;
 
-    let tangent_space_normal = textureSample(normal_texture, pbr_sampler, in.tex_coord).xyz * 2.0 - 1.0;
+    let tangent_space_normal = textureSampleBias(normal_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz * 2.0 - 1.0;
     let N_geom = normalize(in.world_normal);
     let T = normalize(in.world_tangent);
     let B = normalize(in.world_bitangent);
@@ -598,11 +604,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var kD_ibl = vec3(1.0) - kS_ibl;
     kD_ibl *= (1.0 - effective_metallic);
 
-    let irradiance = textureSample(irradiance_map, env_map_sampler, N).rgb;
+    let irradiance = textureSampleBias(irradiance_map, env_map_sampler, N, render_constants.mip_bias).rgb;
     let diffuse_indirect = irradiance * effective_albedo;
 
     let prefiltered_color = textureSampleLevel(prefiltered_env_map, env_map_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
-    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+    let brdf = textureSampleBias(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness), render_constants.mip_bias).rg;
     let specular_indirect = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     ambient += kD_ibl * diffuse_indirect * ao;

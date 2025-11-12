@@ -9,6 +9,7 @@ use crate::{
             TextureManager, Vertex,
         },
         error::RendererError,
+        mipmap::MipmapGenerator,
     },
     provided::components::{Camera, LightType},
     runtime::asset_server::{AssetKind, MaterialGpuData},
@@ -88,6 +89,8 @@ pub struct DeferredRenderer {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     window_size: PhysicalSize<u32>,
+
+    mipmap_generator: MipmapGenerator,
 
     // Maps an asset Handle ID (from AssetServer) to a final GPU texture array index
     handle_id_to_texture_index: HashMap<usize, usize>,
@@ -302,6 +305,8 @@ impl DeferredRenderer {
         };
         surface.configure(&device, &surface_config);
 
+        let mipmap_generator = MipmapGenerator::new(&device);
+
         let egui_renderer = EguiRenderer::new(
             &device,
             surface_config.format,
@@ -316,6 +321,7 @@ impl DeferredRenderer {
             surface,
             surface_config,
             window_size: size,
+            mipmap_generator,
             handle_id_to_texture_index: HashMap::new(),
             pending_materials: Vec::new(),
             geometry_pipeline: None,
@@ -512,6 +518,7 @@ impl DeferredRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
 
@@ -1001,25 +1008,36 @@ impl DeferredRenderer {
             depth_or_array_layers: 1,
         };
 
+        // calculate mip level count
+        let mip_level_count = (width.max(height) as f32).log2().floor() as u32 + 1;
+
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             size: texture_size,
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             label: Some("Bindless Texture"),
             view_formats: &[],
         });
 
         let block_dimensions = format.block_dimensions();
-        let block_size_bytes = format.block_size(None).unwrap_or(4);
+        let block_size_bytes = format.block_copy_size(None).unwrap_or(4);
         let width_in_blocks = width / block_dimensions.0;
         let height_in_blocks = height / block_dimensions.1;
         let bytes_per_row = width_in_blocks * block_size_bytes;
 
+        // Upload the base mip level (Mip 0)
         self.queue.write_texture(
-            texture.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0, // write to Mip 0
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
@@ -1028,6 +1046,25 @@ impl DeferredRenderer {
             },
             texture_size,
         );
+
+        // Generate the rest of the mip chain
+        if mip_level_count > 1 {
+            let mut mip_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Mipmap Generation Encoder"),
+                    });
+
+            self.mipmap_generator.generate_mips(
+                &mut mip_encoder,
+                &self.device,
+                &texture,
+                mip_level_count,
+            );
+
+            // Submit the mip generation commands immediately
+            self.queue.submit(std::iter::once(mip_encoder.finish()));
+        }
 
         let view = texture.create_view(&Default::default());
         target_list.push((texture, view));

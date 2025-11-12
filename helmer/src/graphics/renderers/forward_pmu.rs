@@ -20,6 +20,7 @@ use crate::{
             ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
         },
         error::RendererError,
+        mipmap::MipmapGenerator,
     },
     provided::components::{Camera, LightType},
     runtime::asset_server::MaterialGpuData,
@@ -55,6 +56,8 @@ pub struct ForwardRendererPMU {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
+
+    mipmap_generator: MipmapGenerator,
 
     // Shared Resources
     meshes: HashMap<usize, Mesh>,
@@ -180,6 +183,8 @@ impl ForwardRendererPMU {
         };
         surface.configure(&device, &surface_config);
 
+        let mipmap_generator = MipmapGenerator::new(&device);
+
         let egui_renderer = EguiRenderer::new(
             &device,
             surface_config.format,
@@ -192,6 +197,7 @@ impl ForwardRendererPMU {
             surface,
             surface_config,
             window_size: size,
+            mipmap_generator,
             meshes: HashMap::new(),
             camera_buffers: Vec::new(),
             lights_buffers: Vec::new(),
@@ -275,6 +281,7 @@ impl ForwardRendererPMU {
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         }));
         self.ibl_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1859,25 +1866,66 @@ impl RenderTrait for ForwardRendererPMU {
                 height,
                 ..
             } => {
-                let texture = self.device.create_texture_with_data(
-                    &self.queue,
-                    &wgpu::TextureDescriptor {
-                        size: wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        },
-                        format,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                        label: None,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        view_formats: &[],
+                // calculate mip level count
+                let mip_level_count = (width.max(height) as f32).log2().floor() as u32 + 1;
+
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
                     },
-                    wgpu::util::TextureDataOrder::LayerMajor,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    label: None,
+                    mip_level_count,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    view_formats: &[],
+                });
+
+                // Upload the base mip level (Mip 0)
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0, // write to Mip 0
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
                     &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * width), // Assuming 4-byte pixels
+                        rows_per_image: Some(height),
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
                 );
+
+                // Generate the rest of the mip chain
+                if mip_level_count > 1 {
+                    let mut mip_encoder =
+                        self.device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Mipmap Generation Encoder"),
+                            });
+
+                    self.mipmap_generator.generate_mips(
+                        &mut mip_encoder,
+                        &self.device,
+                        &texture,
+                        mip_level_count,
+                    );
+
+                    // Submit the mip generation commands immediately
+                    self.queue.submit(std::iter::once(mip_encoder.finish()));
+                }
+
                 self.loaded_texture_views
                     .insert(id, Arc::new(texture.create_view(&Default::default())));
             }

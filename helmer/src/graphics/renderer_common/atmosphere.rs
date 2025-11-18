@@ -1,4 +1,3 @@
-// src/graphics/renderer_common/atmosphere.rs
 use crate::graphics::renderer_common::common::{ShaderConstants, SkyUniforms};
 use wgpu::util::DeviceExt;
 
@@ -95,7 +94,7 @@ impl AtmosphereLuts {
     }
 }
 
-pub struct AtmosphereRenderer {
+pub struct AtmospherePrecomputer {
     luts: AtmosphereLuts,
     atmosphere_uniform_buffer: wgpu::Buffer,
 
@@ -112,7 +111,7 @@ pub struct AtmosphereRenderer {
     irradiance_pipeline: wgpu::ComputePipeline,
 }
 
-impl AtmosphereRenderer {
+impl AtmospherePrecomputer {
     pub fn new(device: &wgpu::Device) -> Self {
         let luts = AtmosphereLuts::new(device);
 

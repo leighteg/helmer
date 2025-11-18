@@ -12,7 +12,7 @@ use winit::dpi::PhysicalSize;
 
 use crate::{
     graphics::renderer_common::{
-        atmosphere::AtmosphereRenderer,
+        atmosphere::AtmospherePrecomputer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
             InstanceRaw, LightData, Mesh, MeshLod, ModelPushConstant, NUM_CASCADES, PbrConstants,
@@ -80,7 +80,7 @@ pub struct ForwardRendererPMU {
 
     // atmosphere
     sky_uniforms_buffers: Vec<wgpu::Buffer>,
-    atmosphere: Option<AtmosphereRenderer>,
+    atmosphere: Option<AtmospherePrecomputer>,
 
     // Forward-Specific Resources
     forward_pipeline: Option<wgpu::RenderPipeline>,
@@ -262,7 +262,7 @@ impl ForwardRendererPMU {
 
     fn initialize_resources(&mut self) -> Result<(), RendererError> {
         self.create_samplers();
-        self.atmosphere = Some(AtmosphereRenderer::new(&self.device));
+        self.atmosphere = Some(AtmospherePrecomputer::new(&self.device));
         self.create_default_textures();
         self.create_ibl_resources();
         self.create_layouts();

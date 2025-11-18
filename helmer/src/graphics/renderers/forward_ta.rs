@@ -1,6 +1,6 @@
 use crate::{
     graphics::renderer_common::{
-        atmosphere::AtmosphereRenderer,
+        atmosphere::AtmospherePrecomputer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
             InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
@@ -104,7 +104,7 @@ pub struct ForwardRendererTA {
 
     // atmosphere
     sky_uniforms_buffers: Vec<wgpu::Buffer>,
-    atmosphere: Option<AtmosphereRenderer>,
+    atmosphere: Option<AtmospherePrecomputer>,
 
     // render constants
     render_constants_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -348,7 +348,7 @@ impl ForwardRendererTA {
             })
             .collect();
 
-        self.atmosphere = Some(AtmosphereRenderer::new(&self.device));
+        self.atmosphere = Some(AtmospherePrecomputer::new(&self.device));
 
         self.create_texture_arrays();
         self.upload_default_textures();

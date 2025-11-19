@@ -36,3 +36,4 @@ num_cpus = "1.17.0"
 egui = { git = "https://github.com/emilk/egui.git" }
 egui-wgpu = { git = "https://github.com/emilk/egui.git" }
 egui-winit = { git = "https://github.com/emilk/egui.git" }
+slotmap = "1.0.7"

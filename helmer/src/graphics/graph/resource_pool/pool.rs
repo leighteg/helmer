@@ -1,22 +1,67 @@
+use std::{marker::PhantomData, time::Instant};
+
+use generational_arena::{Arena, Index};
 use slotmap::new_key_type;
 
-use crate::graphics::{graph::resource_pool::{error::ResourcePoolError, resource::Resource}, renderer_common::common::{Material, Mesh}};
+use crate::graphics::{
+    graph::resource_pool::{error::ResourcePoolError, resource::Resource},
+    renderer_common::common::{Material, Mesh},
+    renderers::forward_pmu::MaterialLowEnd,
+};
 
-new_key_type! { pub struct MeshHandle; }
-new_key_type! { pub struct MaterialHandle; }
+pub struct ResourceHandle<T> {
+    index: Index,
+    _phantom: PhantomData<T>,
+}
 
-new_key_type! { pub struct TextureHandle; }
-new_key_type! { pub struct BufferHandle; }
-new_key_type! { pub struct BindGroupHandle; }
+impl<T> ResourceHandle<T> {
+    pub fn from_index(index: Index) -> Self {
+        Self {
+            index,
+            _phantom: PhantomData,
+        }
+    }
 
-pub trait ResourcePool {
-    fn add_mesh(&mut self, mesh: Mesh) -> MeshHandle;
-    fn get_mesh(&self, handle: MeshHandle) -> Option<&Resource<Mesh>>;
-    fn evict_mesh(&mut self, handle: MeshHandle) -> Result<(), ResourcePoolError>;
+    pub fn get_index(&self) -> Index {
+        self.index
+    }
+}
 
-    fn add_material(&mut self, material: Material) -> MaterialHandle;
-    fn get_material(&self, handle: MaterialHandle) -> Option<&Resource<Material>>;
-    fn evict_material(&mut self, handle: MaterialHandle) -> Result<(), ResourcePoolError>;
+#[derive(Default)]
+pub struct ResourcePool {
+    pub meshes: Arena<Resource<Mesh>>,
+    meshes_to_evict: Vec<ResourceHandle<Mesh>>,
 
-    fn cleanup(&mut self);
+    pub materials: Arena<Resource<MaterialLowEnd>>,
+    materials_to_evict: Vec<ResourceHandle<MaterialLowEnd>>,
+
+    pub textures: Arena<Resource<wgpu::Texture>>,
+    textures_to_evict: Vec<ResourceHandle<wgpu::Texture>>,
+
+    pub bind_groups: Arena<Resource<wgpu::BindGroup>>,
+    bind_groups_to_evict: Vec<ResourceHandle<wgpu::BindGroup>>,
+}
+
+impl ResourcePool {
+    pub fn add_texture(&mut self, texture: wgpu::Texture) -> ResourceHandle<wgpu::Texture> {
+        ResourceHandle::from_index(self.textures.insert(Resource::new(texture)))
+    }
+
+    pub fn get_texture(&mut self, handle: ResourceHandle<wgpu::Texture>) -> Option<&wgpu::Texture> {
+        if let Some(texture) = self.textures.get_mut(handle.index) {
+            texture.last_used = Instant::now();
+            return Some(&texture.inner);
+        }
+        None
+    }
+
+    pub fn evict_texture(
+        &mut self,
+        handle: ResourceHandle<wgpu::Texture>,
+    ) -> Option<wgpu::Texture> {
+        if let Some(texture) = self.textures.remove(handle.index) {
+            return Some(texture.inner);
+        }
+        None
+    }
 }

@@ -1,10 +1,10 @@
 use std::time::Instant;
 
 pub struct Resource<T> {
-    inner: T,
+    pub inner: T,
 
-    first_used: Instant,
-    last_used: Instant,
+    pub first_used: Instant,
+    pub last_used: Instant,
 }
 
 impl<T> Resource<T> {

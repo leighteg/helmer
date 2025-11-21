@@ -1,1 +1,2 @@
-pub mod resource_pool;
+pub mod definition;
+pub mod logic;

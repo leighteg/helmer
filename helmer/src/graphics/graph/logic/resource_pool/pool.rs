@@ -7,8 +7,11 @@ use generational_arena::{Arena, Index};
 
 use crate::graphics::{
     graph::logic::resource_pool::{
-        error::ResourcePoolError, evictable_pool::EvictablePool, handle::ResourceHandle,
-        resource::Resource, timer_wheel::TimerWheel,
+        error::ResourcePoolError,
+        evictable_pool::EvictablePool,
+        handle::ResourceHandle,
+        resource::Resource,
+        timer_wheel::{PoolId, TimerWheel},
     },
     renderer_common::common::{Material, Mesh},
     renderers::forward_pmu::MaterialLowEnd,
@@ -44,14 +47,23 @@ impl ResourcePool {
         pool: &'a mut EvictablePool<T>,
         wheel: &'a mut TimerWheel,
         handle: ResourceHandle<T>,
+        pool_id: PoolId,
     ) -> Option<&'a T> {
+        let now = Instant::now();
         let idx = handle.index;
 
         if let Some(resource) = pool.arena.get_mut(idx) {
-            resource.last_used = Instant::now();
+            let previous_last_used = resource.last_used;
+            resource.last_used = now;
             let idx_raw = idx.into_raw_parts().0;
 
-            wheel.schedule(idx, resource.last_used, &mut pool.wheel_index[idx_raw]);
+            wheel.schedule(
+                pool_id,
+                idx,
+                previous_last_used,
+                now,
+                &mut pool.wheel_index[idx_raw],
+            );
 
             return Some(&resource.inner);
         }
@@ -62,14 +74,23 @@ impl ResourcePool {
         pool: &'a mut EvictablePool<T>,
         wheel: &'a mut TimerWheel,
         handle: ResourceHandle<T>,
+        pool_id: PoolId,
     ) -> Option<&'a mut T> {
+        let now = Instant::now();
         let idx = handle.index;
 
         if let Some(resource) = pool.arena.get_mut(idx) {
-            resource.last_used = Instant::now();
+            let previous_last_used = resource.last_used;
+            resource.last_used = now;
             let idx_raw = idx.into_raw_parts().0;
 
-            wheel.schedule(idx, resource.last_used, &mut pool.wheel_index[idx_raw]);
+            wheel.schedule(
+                pool_id,
+                idx,
+                previous_last_used,
+                now,
+                &mut pool.wheel_index[idx_raw],
+            );
 
             return Some(&mut resource.inner);
         }
@@ -82,7 +103,7 @@ impl ResourcePool {
     }
 
     pub fn get_mesh(&mut self, handle: ResourceHandle<Mesh>) -> Option<&Mesh> {
-        Self::get_resource(&mut self.meshes, &mut self.wheel, handle)
+        Self::get_resource(&mut self.meshes, &mut self.wheel, handle, PoolId::Meshes)
     }
 
     pub fn evict_mesh(&mut self, handle: ResourceHandle<Mesh>) {
@@ -99,7 +120,12 @@ impl ResourcePool {
         &mut self,
         handle: ResourceHandle<MaterialLowEnd>,
     ) -> Option<&MaterialLowEnd> {
-        Self::get_resource(&mut self.materials, &mut self.wheel, handle)
+        Self::get_resource(
+            &mut self.materials,
+            &mut self.wheel,
+            handle,
+            PoolId::Materials,
+        )
     }
 
     pub fn evict_material(&mut self, handle: ResourceHandle<MaterialLowEnd>) {
@@ -113,7 +139,12 @@ impl ResourcePool {
     }
 
     pub fn get_texture(&mut self, handle: ResourceHandle<wgpu::Texture>) -> Option<&wgpu::Texture> {
-        Self::get_resource(&mut self.textures, &mut self.wheel, handle)
+        Self::get_resource(
+            &mut self.textures,
+            &mut self.wheel,
+            handle,
+            PoolId::Textures,
+        )
     }
 
     pub fn evict_texture(&mut self, handle: ResourceHandle<wgpu::Texture>) {
@@ -133,7 +164,12 @@ impl ResourcePool {
         &mut self,
         handle: ResourceHandle<wgpu::TextureView>,
     ) -> Option<&wgpu::TextureView> {
-        Self::get_resource(&mut self.texture_views, &mut self.wheel, handle)
+        Self::get_resource(
+            &mut self.texture_views,
+            &mut self.wheel,
+            handle,
+            PoolId::TextureViews,
+        )
     }
 
     pub fn evict_texture_view(&mut self, handle: ResourceHandle<wgpu::TextureView>) {
@@ -153,7 +189,12 @@ impl ResourcePool {
         &mut self,
         handle: ResourceHandle<wgpu::BindGroup>,
     ) -> Option<&wgpu::BindGroup> {
-        Self::get_resource(&mut self.bind_groups, &mut self.wheel, handle)
+        Self::get_resource(
+            &mut self.bind_groups,
+            &mut self.wheel,
+            handle,
+            PoolId::BindGroups,
+        )
     }
 
     pub fn evict_bind_group(&mut self, handle: ResourceHandle<wgpu::BindGroup>) {
@@ -167,11 +208,14 @@ impl ResourcePool {
 
         // Only tick if enough time has passed
         if elapsed >= self.wheel.resolution {
-            self.wheel.tick(&mut self.meshes, now);
-            self.wheel.tick(&mut self.materials, now);
-            self.wheel.tick(&mut self.textures, now);
-            self.wheel.tick(&mut self.texture_views, now);
-            self.wheel.tick(&mut self.bind_groups, now);
+            self.wheel.tick(
+                now,
+                &mut self.meshes,
+                &mut self.materials,
+                &mut self.textures,
+                &mut self.texture_views,
+                &mut self.bind_groups,
+            );
 
             self.last_tick = now;
         }

@@ -5,7 +5,7 @@ use crate::graphics::graph::logic::resource_pool::evictable_pool::EvictablePool;
 
 pub struct TimerWheel {
     buckets: Vec<Vec<Index>>,
-    resolution: Duration,
+    pub(crate) resolution: Duration,
     timeout: Duration,
     current: usize,
 }
@@ -44,7 +44,7 @@ impl TimerWheel {
         for idx in bucket.drain(..) {
             if let Some(res) = pool.arena.get(idx) {
                 if now.duration_since(res.last_used) >= self.timeout {
-                    pool.arena.remove(idx);
+                    pool.remove(idx);
                 }
             }
 

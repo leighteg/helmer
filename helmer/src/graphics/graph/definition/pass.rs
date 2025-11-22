@@ -1,5 +1,5 @@
 use crate::graphics::{
-    graph::logic::resource_pool::pool::ResourceHandle, renderer_common::common::Mesh,
+    graph::logic::resource_pool::handle::ResourceHandle, renderer_common::common::Mesh,
     renderers::forward_pmu::MaterialLowEnd,
 };
 

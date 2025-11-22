@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct Resource<T> {
     pub inner: T,
@@ -16,5 +16,13 @@ impl<T> Resource<T> {
             first_used: now,
             last_used: now,
         }
+    }
+
+    pub fn age(&self) -> Duration {
+        Instant::now().duration_since(self.first_used)
+    }
+
+    pub fn idle_time(&self) -> Duration {
+        Instant::now().duration_since(self.last_used)
     }
 }

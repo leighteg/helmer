@@ -12,7 +12,10 @@ pub enum PoolId {
     Materials,
     Textures,
     TextureViews,
+    Samplers,
+    BindGroupLayouts,
     BindGroups,
+    Buffers,
 }
 
 pub struct TimerWheel {
@@ -70,7 +73,10 @@ impl TimerWheel {
         materials: &mut EvictablePool<MaterialLowEnd>,
         textures: &mut EvictablePool<wgpu::Texture>,
         texture_views: &mut EvictablePool<wgpu::TextureView>,
+        samplers: &mut EvictablePool<wgpu::Sampler>,
+        bind_group_layouts: &mut EvictablePool<wgpu::BindGroupLayout>,
         bind_groups: &mut EvictablePool<wgpu::BindGroup>,
+        buffers: &mut EvictablePool<wgpu::Buffer>,
     ) {
         let bucket = &mut self.buckets[self.current];
 
@@ -119,6 +125,26 @@ impl TimerWheel {
                     }
                     texture_views.wheel_index[raw] = None;
                 }
+                PoolId::Samplers => {
+                    if let Some(res) = samplers.arena.get(idx) {
+                        if now.duration_since(res.last_used) >= self.timeout {
+                            samplers.remove(idx);
+                        } else {
+                            to_reschedule.push((pool_id, idx, res.last_used));
+                        }
+                    }
+                    samplers.wheel_index[raw] = None;
+                }
+                PoolId::BindGroupLayouts => {
+                    if let Some(res) = bind_group_layouts.arena.get(idx) {
+                        if now.duration_since(res.last_used) >= self.timeout {
+                            bind_group_layouts.remove(idx);
+                        } else {
+                            to_reschedule.push((pool_id, idx, res.last_used));
+                        }
+                    }
+                    bind_group_layouts.wheel_index[raw] = None;
+                }
                 PoolId::BindGroups => {
                     if let Some(res) = bind_groups.arena.get(idx) {
                         if now.duration_since(res.last_used) >= self.timeout {
@@ -128,6 +154,16 @@ impl TimerWheel {
                         }
                     }
                     bind_groups.wheel_index[raw] = None;
+                }
+                PoolId::Buffers => {
+                    if let Some(res) = buffers.arena.get(idx) {
+                        if now.duration_since(res.last_used) >= self.timeout {
+                            buffers.remove(idx);
+                        } else {
+                            to_reschedule.push((pool_id, idx, res.last_used));
+                        }
+                    }
+                    buffers.wheel_index[raw] = None;
                 }
             }
         }
@@ -141,7 +177,10 @@ impl TimerWheel {
                 PoolId::Materials => &mut materials.wheel_index[raw],
                 PoolId::Textures => &mut textures.wheel_index[raw],
                 PoolId::TextureViews => &mut texture_views.wheel_index[raw],
+                PoolId::Samplers => &mut samplers.wheel_index[raw],
+                PoolId::BindGroupLayouts => &mut bind_group_layouts.wheel_index[raw],
                 PoolId::BindGroups => &mut bind_groups.wheel_index[raw],
+                PoolId::Buffers => &mut buffers.wheel_index[raw],
             };
             self.schedule(pool_id, idx, last_used, now, wheel_index);
         }

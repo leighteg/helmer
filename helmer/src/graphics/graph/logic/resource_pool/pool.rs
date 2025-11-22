@@ -25,7 +25,10 @@ pub struct ResourcePool {
     materials: EvictablePool<MaterialLowEnd>,
     textures: EvictablePool<wgpu::Texture>,
     texture_views: EvictablePool<wgpu::TextureView>,
+    samplers: EvictablePool<wgpu::Sampler>,
+    bind_group_layouts: EvictablePool<wgpu::BindGroupLayout>,
     bind_groups: EvictablePool<wgpu::BindGroup>,
+    buffers: EvictablePool<wgpu::Buffer>,
 }
 
 impl ResourcePool {
@@ -38,7 +41,10 @@ impl ResourcePool {
             materials: EvictablePool::new(),
             textures: EvictablePool::new(),
             texture_views: EvictablePool::new(),
+            samplers: EvictablePool::new(),
+            bind_group_layouts: EvictablePool::new(),
             bind_groups: EvictablePool::new(),
+            buffers: EvictablePool::new(),
         }
     }
 
@@ -177,6 +183,53 @@ impl ResourcePool {
     }
     // -----
 
+    // Sampler methods
+    pub fn add_sampler(&mut self, sampler: wgpu::Sampler) -> ResourceHandle<wgpu::Sampler> {
+        ResourceHandle::from_index(self.samplers.insert(Resource::new(sampler)))
+    }
+
+    pub fn get_sampler(&mut self, handle: ResourceHandle<wgpu::Sampler>) -> Option<&wgpu::Sampler> {
+        Self::get_resource(
+            &mut self.samplers,
+            &mut self.wheel,
+            handle,
+            PoolId::Samplers,
+        )
+    }
+
+    pub fn evict_sampler(&mut self, handle: ResourceHandle<wgpu::Sampler>) {
+        self.samplers.remove(handle.index);
+    }
+    // -----
+
+    // Bind Group Layout methods
+    pub fn add_bind_group_layout(
+        &mut self,
+        bind_group_layout: wgpu::BindGroupLayout,
+    ) -> ResourceHandle<wgpu::BindGroupLayout> {
+        ResourceHandle::from_index(
+            self.bind_group_layouts
+                .insert(Resource::new(bind_group_layout)),
+        )
+    }
+
+    pub fn get_bind_group_layout(
+        &mut self,
+        handle: ResourceHandle<wgpu::BindGroupLayout>,
+    ) -> Option<&wgpu::BindGroupLayout> {
+        Self::get_resource(
+            &mut self.bind_group_layouts,
+            &mut self.wheel,
+            handle,
+            PoolId::BindGroupLayouts,
+        )
+    }
+
+    pub fn evict_bind_group_layout(&mut self, handle: ResourceHandle<wgpu::BindGroupLayout>) {
+        self.bind_group_layouts.remove(handle.index);
+    }
+    // -----
+
     // Bind Group methods
     pub fn add_bind_group(
         &mut self,
@@ -202,6 +255,20 @@ impl ResourcePool {
     }
     // -----
 
+    // Buffer methods
+    pub fn add_buffer(&mut self, buffer: wgpu::Buffer) -> ResourceHandle<wgpu::Buffer> {
+        ResourceHandle::from_index(self.buffers.insert(Resource::new(buffer)))
+    }
+
+    pub fn get_buffer(&mut self, handle: ResourceHandle<wgpu::Buffer>) -> Option<&wgpu::Buffer> {
+        Self::get_resource(&mut self.buffers, &mut self.wheel, handle, PoolId::Buffers)
+    }
+
+    pub fn evict_buffer(&mut self, handle: ResourceHandle<wgpu::Buffer>) {
+        self.buffers.remove(handle.index);
+    }
+    // -----
+
     pub fn tick(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_tick);
@@ -214,7 +281,10 @@ impl ResourcePool {
                 &mut self.materials,
                 &mut self.textures,
                 &mut self.texture_views,
+                &mut self.samplers,
+                &mut self.bind_group_layouts,
                 &mut self.bind_groups,
+                &mut self.buffers,
             );
 
             self.last_tick = now;

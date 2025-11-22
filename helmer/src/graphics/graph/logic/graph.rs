@@ -1,5 +1,6 @@
 use crate::graphics::graph::logic::{pass::CompiledPassNode, resource_pool::pool::ResourcePool};
 
+#[derive(Default)]
 pub struct CompiledRenderGraph {
     pub passes: Vec<Box<dyn CompiledPassNode>>,
 }

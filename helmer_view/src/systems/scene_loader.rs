@@ -113,6 +113,7 @@ pub fn scene_loader_system(
             ui.separator();
             ui.collapsing("keybinds", |ui| {
                 ui.group(|ui| {
+                    ui.label("ctrl + I: toggle inspector");
                     ui.label("ctrl + G: toggle tunables/config UI");
                     ui.label("U: toggle UI pass");
                     ui.label("F11: toggle fullscreen");

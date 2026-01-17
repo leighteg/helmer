@@ -4,7 +4,10 @@ use helmer::{
     graphics::renderer_common::common::EguiRenderData, runtime::input_manager::InputManager,
 };
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use winit::keyboard::KeyCode;
 
 use crate::{
@@ -23,6 +26,23 @@ pub struct EguiResource {
     pub accepting_input: bool,
     pub stats_ui: bool,
     pub inspector_ui: bool,
+    pub render_graph_passes_state: RenderGraphPassesUiState,
+}
+
+pub struct RenderGraphPassesUiState {
+    pub filter: String,
+    pub sort_by_time: bool,
+    pub show_disabled: bool,
+}
+
+impl Default for RenderGraphPassesUiState {
+    fn default() -> Self {
+        Self {
+            filter: String::new(),
+            sort_by_time: false,
+            show_disabled: true,
+        }
+    }
 }
 
 pub fn egui_system(world: &mut World) {
@@ -89,22 +109,38 @@ pub fn egui_system(world: &mut World) {
 
         drop(egui_res);
 
+        let screen_rect = ctx.available_rect();
+
         for (mut elements, name) in windows {
-            egui::Window::new(name).show(ctx, |ui| {
-                elements(ui, world, &input_arc);
-            });
+            egui::Window::new(name.clone())
+                .constrain_to(screen_rect)
+                .show(ctx, |ui| {
+                    elements(ui, world, &input_arc);
+                });
         }
     });
 
     let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
+    let textures_delta = full_output.textures_delta;
 
     let mut egui_res = world
         .get_resource_mut::<EguiResource>()
         .expect("EguiResource resource not found");
 
+    static EGUI_TEXTURE_VERSION: AtomicU64 = AtomicU64::new(1);
+    let textures_changed = !textures_delta.set.is_empty() || !textures_delta.free.is_empty();
+    let version = if textures_changed {
+        EGUI_TEXTURE_VERSION
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    } else {
+        EGUI_TEXTURE_VERSION.load(Ordering::Relaxed)
+    };
+
     egui_res.render_data = Some(EguiRenderData {
+        version,
         primitives,
-        textures_delta: full_output.textures_delta,
+        textures_delta,
         screen_descriptor: egui_wgpu::ScreenDescriptor {
             size_in_pixels: [window_size.x, window_size.y],
             pixels_per_point,

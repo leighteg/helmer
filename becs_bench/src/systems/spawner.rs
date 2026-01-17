@@ -18,8 +18,6 @@ use helmer_becs::{
 };
 use rand::Rng;
 
-use crate::systems::config_toggle::HideToggleProof;
-
 #[derive(Resource, Default)]
 pub struct MeshRendererStore {
     pub mesh_renderers: HashMap<String, MeshRenderer>,
@@ -184,7 +182,7 @@ pub fn spawner_system(
                 DynamicRigidBody {
                     mass: spawner_system_resource.mesh_scale * 10.0,
                 },
-                HideToggleProof {},
+                //HideToggleProof {},
                 Name::new(format!(
                     "spawned object {}",
                     spawner_system_resource.spawned_entities.len()

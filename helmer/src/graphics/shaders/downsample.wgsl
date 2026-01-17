@@ -1,4 +1,4 @@
-@group(0) @binding(0) var full_res_depth: texture_depth_2d;
+@group(0) @binding(0) var full_res_depth: texture_2d<f32>;
 @group(0) @binding(1) var full_res_normal: texture_2d<f32>;
 @group(0) @binding(2) var full_res_albedo: texture_2d<f32>;
 @group(0) @binding(3) var full_res_lighting_diffuse: texture_2d<f32>;
@@ -28,7 +28,7 @@ struct FragmentOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
-    let texel_size = 1.0 / vec2<f32>(textureDimensions(full_res_depth));
+    let texel_size = 1.0 / vec2<f32>(textureDimensions(full_res_depth, 0));
     
     let uv00 = in.uv;
     let uv10 = in.uv + vec2(texel_size.x, 0.0);
@@ -36,10 +36,10 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let uv11 = in.uv + texel_size;
 
     // Use minimum depth (closest to camera) to preserve geometry edges
-    let d0 = textureSample(full_res_depth, s_point, uv00);
-    let d1 = textureSample(full_res_depth, s_point, uv10);
-    let d2 = textureSample(full_res_depth, s_point, uv01);
-    let d3 = textureSample(full_res_depth, s_point, uv11);
+    let d0 = textureSample(full_res_depth, s_point, uv00).x;
+    let d1 = textureSample(full_res_depth, s_point, uv10).x;
+    let d2 = textureSample(full_res_depth, s_point, uv01).x;
+    let d3 = textureSample(full_res_depth, s_point, uv11).x;
     let min_depth = min(min(d0, d1), min(d2, d3));
 
     let n0 = textureSample(full_res_normal, s_point, uv00);

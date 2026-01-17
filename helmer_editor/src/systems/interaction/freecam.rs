@@ -1,7 +1,10 @@
 use std::f32::consts::FRAC_PI_2;
 
 use glam::{DVec2, Quat, Vec3};
-use helmer::{provided::components::{ActiveCamera, Camera, Transform}, runtime::input_manager::InputManager};
+use helmer::{
+    provided::components::{ActiveCamera, Camera, Transform},
+    runtime::input_manager::InputManager,
+};
 use helmer_ecs::ecs::system::System;
 use winit::{event::MouseButton, keyboard::KeyCode};
 

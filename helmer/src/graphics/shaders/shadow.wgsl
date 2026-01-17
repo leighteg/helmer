@@ -90,10 +90,12 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
     var out: VertexOutput;
     let world_pos = model_matrix * vec4<f32>(vertex.position, 1.0);
-    out.clip_position = light_vp.view_proj * world_pos;
-    
-    // Pass the normalized 0.0 (near) to 1.0 (far) depth to the fragment shader
-    out.depth = out.clip_position.z;
+    let clip_pos = light_vp.view_proj * world_pos;
+
+    // NDC z is already 0..1 for WebGPU.
+    let ndc_z = clip_pos.z / clip_pos.w;
+    out.clip_position = clip_pos;
+    out.depth = ndc_z;
 
     return out;
 }
@@ -101,14 +103,14 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 //=============== FRAGMENT SHADER ===============//
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> @location(0) vec2<f32> {
     // Variance Shadow Mapping (VSM)
     // We store the warped depth (moment 1) and warped depth squared (moment 2)
-    let depth = in.depth;
+    let depth = clamp(in.depth, 0.0, 1.0);
     let warped_depth = exp(render_constants.evsm_c * (depth - 1.0));
 
     // r = moment 1 (warped_depth)
     // g = moment 2 (warped_depth * warped_depth)
     // The output format is Rg32Float
-    return vec4<f32>(warped_depth, warped_depth * warped_depth, 0.0, 1.0);
+    return vec2<f32>(warped_depth, warped_depth * warped_depth);
 }

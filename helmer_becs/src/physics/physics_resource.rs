@@ -1,7 +1,7 @@
 use bevy_ecs::{entity::Entity, resource::Resource};
+use glam::Vec3;
 use hashbrown::HashMap;
 use rapier3d::prelude::*;
-use glam::Vec3;
 
 use crate::physics::components::PhysicsHandle;
 

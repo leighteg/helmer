@@ -57,42 +57,49 @@ struct CameraUniforms {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
-};
+    _pad_light: vec4<u32>,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+    _padding: vec3<u32>,
+    _pad_end: vec4<u32>,
+}
 
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) tex_coords: vec2<f32>,
-};
-
-//=============== BINDINGS ===============//
-// --- Pass Inputs ---
 @group(0) @binding(0) var direct_lighting_tex: texture_2d<f32>;
 @group(0) @binding(1) var ssgi_tex: texture_2d<f32>;
 @group(0) @binding(2) var ssr_tex: texture_2d<f32>;
 @group(0) @binding(3) var albedo_tex: texture_2d<f32>;
 @group(0) @binding(4) var emission_tex: texture_2d<f32>;
 @group(0) @binding(5) var scene_sampler: sampler;
-// --- G-Buffer for IBL ---
 @group(0) @binding(6) var normal_tex: texture_2d<f32>;
 @group(0) @binding(7) var mra_tex: texture_2d<f32>;
-@group(0) @binding(8) var depth_tex: texture_depth_2d;
+@group(0) @binding(8) var depth_tex: texture_2d<f32>;
 @group(0) @binding(9) var sky_tex: texture_2d<f32>;
 
-// --- IBL Textures ---
 @group(1) @binding(0) var brdf_lut: texture_2d<f32>;
 @group(1) @binding(1) var irradiance_map: texture_cube<f32>;
 @group(1) @binding(2) var prefiltered_env_map: texture_cube<f32>;
 @group(1) @binding(3) var ibl_sampler: sampler;
 @group(1) @binding(4) var brdf_lut_sampler: sampler;
 
-// --- Scene Uniforms ---
 @group(2) @binding(0) var<uniform> camera: CameraUniforms;
-
 @group(3) @binding(0) var<uniform> constants: Constants;
 
-//=============== UTILITY & PBR FUNCTIONS ===============//
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) tex_coords: vec2<f32>,
+};
+
 fn fresnel_schlick_roughness(cosTheta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+    return F0 + (max(vec3<f32>(1.0 - roughness), F0) - F0)
+        * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+fn sample_depth(tex: texture_2d<f32>, uv: vec2<f32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(tex, 0));
+    let clamped_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let max_coord = max(size - vec2<i32>(1), vec2<i32>(0));
+    let coord = clamp(vec2<i32>(clamped_uv * vec2<f32>(size)), vec2<i32>(0), max_coord);
+    return textureLoad(tex, coord, 0).x;
 }
 
 //=============== SHADERS ===============//
@@ -115,7 +122,7 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let depth = textureSample(depth_tex, scene_sampler, in.tex_coords);
+    let depth = sample_depth(depth_tex, in.tex_coords);
     if (depth <= 0.0) {
         let sky_color = textureSample(sky_tex, scene_sampler, in.tex_coords).rgb;
         return vec4<f32>(sky_color, 1.0);

@@ -1,18 +1,10 @@
-use bevy_ecs::{
-    component::Component,
-    query::Without,
-    system::{Query, Res, ResMut},
-};
-use helmer_becs::{BevyInputManager, BevyMeshRenderer, BevyRuntimeConfig};
+use bevy_ecs::system::{Res, ResMut};
+use helmer_becs::{BevyInputManager, BevyRuntimeConfig};
 use winit::keyboard::KeyCode;
-
-#[derive(Component)]
-pub struct HideToggleProof {}
 
 pub fn config_toggle_system(
     input_manager: Res<BevyInputManager>,
     mut runtime_config: ResMut<BevyRuntimeConfig>,
-    mut hide_toggle_query: Query<&mut BevyMeshRenderer, Without<HideToggleProof>>,
 ) {
     let input_manager = input_manager.0.read();
     let runtime_config = &mut runtime_config.0;
@@ -45,12 +37,6 @@ pub fn config_toggle_system(
             KeyCode::Digit0 => runtime_config.render_config.shader_constants.shade_mode = 1,
             KeyCode::Digit1 => runtime_config.render_config.shader_constants.shade_mode = 0,
             KeyCode::Digit2 => runtime_config.render_config.shader_constants.shade_mode = 2,
-
-            KeyCode::KeyM => {
-                for mut mesh_renderer in hide_toggle_query.iter_mut() {
-                    mesh_renderer.0.visible = !mesh_renderer.0.visible;
-                }
-            }
 
             _ => {}
         }

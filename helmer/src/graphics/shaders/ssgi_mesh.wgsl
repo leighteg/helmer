@@ -1,0 +1,229 @@
+enable wgpu_mesh_shader;
+
+struct Constants {
+    // general
+    mip_bias: f32,
+
+    // lighting
+    shade_mode: u32,
+    light_model: u32,
+    skylight_contribution: u32,
+
+    // sky
+    planet_radius: f32,
+    atmosphere_radius: f32,
+    sky_light_samples: u32,
+    _pad0: u32,
+
+    // SSR
+    ssr_coarse_steps: u32,
+    ssr_binary_search_steps: u32,
+    ssr_linear_step_size: f32,
+    ssr_thickness: f32,
+    ssr_max_distance: f32,
+    ssr_roughness_fade_start: f32,
+    ssr_roughness_fade_end: f32,
+    _pad1: u32,
+
+    // SSGI
+    ssgi_num_rays: u32,
+    ssgi_num_steps: u32,
+    ssgi_ray_step_size: f32,
+    ssgi_thickness: f32,
+    ssgi_blend_factor: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+
+    // shadows
+    evsm_c: f32,
+    pcf_radius: u32,
+    pcf_min_scale: f32,
+    pcf_max_scale: f32,
+    pcf_max_distance: f32,
+    ssgi_intensity: f32,
+    _final_padding: vec2<f32>,
+};
+
+const PI: f32 = 3.14159265359;
+
+// --- TUNING PARAMETERS ---
+const NUM_RAYS: i32 = 6;
+const NUM_STEPS: i32 = 12;
+const RAY_STEP_SIZE: f32 = 0.6;
+const THICKNESS: f32 = 0.4; 
+const BLEND_FACTOR: f32 = 0.15;
+const EPSILON: f32 = 0.001;
+
+// --- STRUCTS & BINDINGS ---
+struct Camera {
+    view_matrix: mat4x4<f32>,
+    projection_matrix: mat4x4<f32>,
+    inverse_projection_matrix: mat4x4<f32>,
+    inverse_view_projection_matrix: mat4x4<f32>,
+    view_position: vec3<f32>,
+    light_count: u32,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+};
+
+@group(0) @binding(0) var t_normal: texture_2d<f32>;
+@group(0) @binding(1) var t_depth: texture_2d<f32>;
+@group(0) @binding(2) var t_albedo: texture_2d<f32>; 
+@group(0) @binding(3) var t_history: texture_2d<f32>;
+@group(0) @binding(4) var t_direct_lighting_diffuse : texture_2d<f32>;
+@group(0) @binding(5) var s_gbuffer: sampler;
+@group(0) @binding(6) var s_scene: sampler;
+
+@group(1) @binding(0) var<uniform> camera: Camera;
+
+@group(2) @binding(0) var t_blue_noise: texture_2d<f32>;
+@group(2) @binding(1) var s_blue_noise: sampler;
+
+@group(3) @binding(0) var<uniform> constants: Constants;
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+struct PrimitiveOutput {
+    @builtin(triangle_indices) indices: vec3<u32>,
+};
+
+struct MeshOutput {
+    @builtin(vertex_count) vertex_count: u32,
+    @builtin(primitive_count) primitive_count: u32,
+    @builtin(vertices) vertices: array<VertexOutput, 3>,
+    @builtin(primitives) primitives: array<PrimitiveOutput, 1>,
+};
+
+var<workgroup> mesh_output: MeshOutput;
+
+@vertex
+fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+    let x = f32(in_vertex_index / 2u) * 4.0 - 1.0;
+    let y = f32(in_vertex_index % 2u) * 4.0 - 1.0;
+    out.clip_position = vec4<f32>(x, y, 1.0, 1.0);
+    out.uv = vec2<f32>(x * 0.5 + 0.5, -y * 0.5 + 0.5);
+    return out;
+}
+
+fn write_vertex(index: u32) {
+    let x = f32(index / 2u) * 4.0 - 1.0;
+    let y = f32(index % 2u) * 4.0 - 1.0;
+    mesh_output.vertices[index].clip_position = vec4<f32>(x, y, 1.0, 1.0);
+    mesh_output.vertices[index].uv = vec2<f32>(x * 0.5 + 0.5, -y * 0.5 + 0.5);
+}
+
+@mesh(mesh_output)
+@workgroup_size(1)
+fn ms_main() {
+    mesh_output.vertex_count = 3u;
+    mesh_output.primitive_count = 1u;
+    write_vertex(0u);
+    write_vertex(1u);
+    write_vertex(2u);
+    mesh_output.primitives[0].indices = vec3<u32>(0u, 1u, 2u);
+}
+
+// --- HELPER FUNCTIONS ---
+fn world_from_depth(uv: vec2<f32>, depth: f32, inv_vp: mat4x4<f32>) -> vec3<f32> {
+    let ndc = vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth, 1.0);
+    let world = inv_vp * ndc;
+    return world.xyz / world.w;
+}
+
+fn view_pos_from_uv_depth(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth);
+    let clip = vec4<f32>(ndc, 1.0);
+    let view_h = camera.inverse_projection_matrix * clip;
+    return view_h.xyz / (view_h.w + EPSILON);
+}
+
+fn create_onb(normal: vec3<f32>) -> mat3x3<f32> {
+    let up_vec = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.x) > 0.999);
+    let tangent = normalize(cross(up_vec, normal));
+    let bitangent = cross(normal, tangent);
+    return mat3x3<f32>(tangent, bitangent, normal);
+}
+
+fn cosine_sample_hemisphere(r: vec2<f32>) -> vec3<f32> {
+    let phi = 2.0 * PI * r.x;
+    let r_sqrt = sqrt(r.y);
+    let x = r_sqrt * cos(phi);
+    let y = r_sqrt * sin(phi);
+    let z = sqrt(max(0.0, 1.0 - r.y));
+    return vec3<f32>(x, y, z);
+}
+
+// --- MAIN SHADER ---
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let frag_coord = vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth, 0))));
+    let depth = textureLoad(t_depth, frag_coord, 0).r;
+    if depth >= 1.0 { discard; }
+
+    let origin_vs = view_pos_from_uv_depth(in.uv, depth);
+    let world_normal = normalize(textureLoad(t_normal, frag_coord, 0).xyz * 2.0 - 1.0);
+    let normal_matrix = mat3x3<f32>(camera.view_matrix[0].xyz, camera.view_matrix[1].xyz, camera.view_matrix[2].xyz);
+    let normal_vs = normalize(normal_matrix * world_normal);
+
+    let tangent_to_view = create_onb(normal_vs);
+    var indirect_light = vec3<f32>(0.0);
+
+    let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise, 0));
+    let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse, 0)) / blue_noise_dims;
+    let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
+
+    for (var i = 0; i < i32(constants.ssgi_num_rays); i += 1) {
+        let r = fract(blue_noise + vec2<f32>(f32(i) * 0.137, f32(camera.frame_index) * 0.379));
+        let ray_dir_tangent = cosine_sample_hemisphere(r);
+        let ray_dir_vs = tangent_to_view * ray_dir_tangent;
+
+        for (var j = 1; j <= i32(constants.ssgi_num_steps); j += 1) {
+            let sample_pos_vs = origin_vs + ray_dir_vs * constants.ssgi_ray_step_size * f32(j);
+
+            var sample_pos_clip = camera.projection_matrix * vec4(sample_pos_vs, 1.0);
+            if sample_pos_clip.w <= EPSILON { break; }
+            sample_pos_clip /= sample_pos_clip.w;
+            let sample_uv = sample_pos_clip.xy * vec2(0.5, -0.5) + 0.5;
+
+            if any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0)) { break; }
+
+            let depth_at_sample = textureSample(t_depth, s_gbuffer, sample_uv).r;
+            let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, depth_at_sample);
+
+            let ray_depth = -sample_pos_vs.z;
+            let scene_depth = -scene_vs_at_sample.z;
+
+            if ray_depth > scene_depth && ray_depth < scene_depth + constants.ssgi_thickness {
+                // get the color of the surface the ray hit.
+                let albedo_at_hit = textureSample(t_albedo, s_gbuffer, sample_uv).rgb;
+
+                // get the light hitting that surface.
+                let lighting_at_hit = textureSample(t_direct_lighting_diffuse, s_gbuffer, sample_uv).rgb;
+
+                // combine them to get the final reflected light color.
+                let reflected_light = albedo_at_hit * lighting_at_hit;
+
+                indirect_light += reflected_light;
+                break;
+            }
+        }
+    }
+
+    let ssgi_result = indirect_light / f32(constants.ssgi_num_rays);
+    
+    // --- Temporal Blending ---
+    let world_pos = world_from_depth(in.uv, depth, camera.inverse_view_projection_matrix);
+    var prev_clip = camera.prev_view_proj * vec4(world_pos, 1.0);
+    prev_clip /= prev_clip.w;
+    let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
+
+    let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
+    let blended_light = mix(prev_result, ssgi_result, constants.ssgi_blend_factor);
+
+    return vec4<f32>(blended_light, 1.0);
+}

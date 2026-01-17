@@ -322,14 +322,14 @@ impl InspectorUI {
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
                                                             let t = &mut transform_wrapper.0;
-                                                            
+
                                                             ui.label("Position:");
                                                             ui.horizontal(|ui| {
                                                                 ui.add(egui::DragValue::new(&mut t.position.x).prefix("x: ").speed(0.1));
                                                                 ui.add(egui::DragValue::new(&mut t.position.y).prefix("y: ").speed(0.1));
                                                                 ui.add(egui::DragValue::new(&mut t.position.z).prefix("z: ").speed(0.1));
                                                             });
-                                                            
+
                                                             ui.label("Rotation:");
                                                             ui.horizontal(|ui| {
                                                                 ui.add(egui::DragValue::new(&mut t.rotation.x).prefix("x: ").speed(0.01));
@@ -337,7 +337,7 @@ impl InspectorUI {
                                                                 ui.add(egui::DragValue::new(&mut t.rotation.z).prefix("z: ").speed(0.01));
                                                                 ui.add(egui::DragValue::new(&mut t.rotation.w).prefix("w: ").speed(0.01));
                                                             });
-                                                            
+
                                                             ui.label("Scale:");
                                                             ui.horizontal(|ui| {
                                                                 ui.add(egui::DragValue::new(&mut t.scale.x).prefix("x: ").speed(0.1));
@@ -354,7 +354,7 @@ impl InspectorUI {
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
                                                             let c = &mut camera_wrapper.0;
-                                                            
+
                                                             ui.horizontal(|ui| {
                                                                 ui.label("FOV:");
                                                                 ui.add(egui::DragValue::new(&mut c.fov_y_rad).speed(0.1).suffix("°"));
@@ -381,7 +381,7 @@ impl InspectorUI {
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
                                                             let l = &mut light_wrapper.0;
-                                                            
+
                                                             ui.horizontal(|ui| {
                                                                 ui.label("Color:");
                                                                 let mut color = [l.color.x, l.color.y, l.color.z];

@@ -11,7 +11,7 @@ rayon = "1.11.0"
 tracing = "0.1.41"
 parking_lot = "0.12.5"
 glam = "0.30.8"
-egui = { git = "https://github.com/emilk/egui.git" }
-egui-wgpu = { git = "https://github.com/emilk/egui.git" }
+egui = "0.33.3"
+egui-wgpu = "0.33.3"
 winit = "0.30.12"
 rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }

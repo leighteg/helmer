@@ -242,7 +242,7 @@ pub struct DeferredRenderer {
 
     // State
     frame_index: usize,
-    current_render_data: Option<RenderData>,
+    current_render_data: Option<Arc<RenderData>>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
     prev_view_proj: Mat4,
@@ -266,7 +266,7 @@ impl DeferredRenderer {
                     | wgpu::Features::TEXTURE_BINDING_ARRAY
                     | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
                 required_limits: wgpu::Limits {
-                    max_push_constant_size: 0,
+                    max_immediate_size: 0,
                     max_binding_array_elements_per_shader_stage: MAX_TOTAL_TEXTURES,
                     ..Default::default()
                 },
@@ -500,7 +500,7 @@ impl DeferredRenderer {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         }));
 
@@ -529,7 +529,7 @@ impl DeferredRenderer {
             label: Some("IBL Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         }));
 
@@ -884,7 +884,7 @@ impl DeferredRenderer {
         &mut self,
         id: usize,
         vertices: &[Vertex],
-        lod_indices: &[Vec<u32>],
+        lod_indices: &[Arc<[u32]>],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
         let vertex_buffer = self
@@ -901,7 +901,7 @@ impl DeferredRenderer {
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
-                    contents: bytemuck::cast_slice(indices),
+                    contents: bytemuck::cast_slice(indices.as_ref()),
                     usage: wgpu::BufferUsages::INDEX,
                 });
             gpu_lods.push(MeshLod {
@@ -1304,7 +1304,7 @@ impl DeferredRenderer {
                     &object_data_bind_group_layout,
                     &render_constants_bind_group_layout,
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1314,14 +1314,14 @@ impl DeferredRenderer {
                 atmosphere_lut_bind_group_layout,
                 &render_constants_bind_group_layout,
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let downsample_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Downsample Pipeline Layout"),
                 bind_group_layouts: &[&downsample_bind_group_layout],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let ssr_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1331,7 +1331,7 @@ impl DeferredRenderer {
                 &ssr_camera_bind_group_layout,
                 &render_constants_bind_group_layout,
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let ssgi_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1342,7 +1342,7 @@ impl DeferredRenderer {
                 &ssgi_blue_noise_bind_group_layout,
                 &render_constants_bind_group_layout,
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let ssgi_denoise_pipeline_layout =
@@ -1352,14 +1352,14 @@ impl DeferredRenderer {
                     &ssgi_denoise_inputs_bind_group_layout,
                     &ssr_camera_bind_group_layout,
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let ssgi_upsample_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("SSGI Upsample Pipeline Layout"),
                 bind_group_layouts: &[&ssgi_upsample_bind_group_layout],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let lighting_pipeline_layout =
@@ -1371,7 +1371,7 @@ impl DeferredRenderer {
                     atmosphere_lut_bind_group_layout,
                     &render_constants_bind_group_layout,
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         let composite_pipeline_layout =
@@ -1383,7 +1383,7 @@ impl DeferredRenderer {
                     &scene_data_bind_group_layout,
                     &render_constants_bind_group_layout,
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         self.geometry_pipeline = Some(device.create_render_pipeline(
@@ -1419,7 +1419,7 @@ impl DeferredRenderer {
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1443,7 +1443,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             }),
         );
@@ -1472,7 +1472,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1500,7 +1500,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             }),
         );
@@ -1528,7 +1528,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             }),
         );
@@ -1556,7 +1556,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1580,7 +1580,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1615,7 +1615,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1643,7 +1643,7 @@ impl DeferredRenderer {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -2458,9 +2458,13 @@ impl DeferredRenderer {
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
+            _pad_light: [0; 4],
             prev_view_proj: self.prev_view_proj.to_cols_array_2d(),
             frame_index: self.frame_index as u32,
+            _pad_after_frame: [0; 3],
             _padding: [0; 3],
+            _pad_after_padding: 0,
+            _pad_end: [0; 4],
         };
 
         let light_data: Vec<LightData> = render_data
@@ -2631,7 +2635,9 @@ impl DeferredRenderer {
                 }),
                 stencil_ops: None,
             }),
-            ..Default::default()
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         geometry_pass.set_pipeline(self.geometry_pipeline.as_ref().unwrap());
@@ -2671,7 +2677,9 @@ impl DeferredRenderer {
                 },
             })],
             depth_stencil_attachment: None,
-            ..Default::default()
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
         let buffer_index = self.frame_index % FRAMES_IN_FLIGHT;
@@ -2713,7 +2721,9 @@ impl DeferredRenderer {
                 }),
             ],
             depth_stencil_attachment: None,
-            ..Default::default()
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.lighting_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.lighting_inputs_bind_group.as_ref().unwrap(), &[]);
@@ -2773,7 +2783,10 @@ impl DeferredRenderer {
                     },
                 }),
             ],
-            ..Default::default()
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.downsample_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.downsample_bind_group.as_ref().unwrap(), &[]);
@@ -2792,7 +2805,10 @@ impl DeferredRenderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            ..Default::default()
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.ssgi_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.ssgi_inputs_bind_group.as_ref().unwrap(), &[]);
@@ -2815,7 +2831,10 @@ impl DeferredRenderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            ..Default::default()
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.ssgi_denoise_pipeline.as_ref().unwrap());
         pass.set_bind_group(
@@ -2842,7 +2861,10 @@ impl DeferredRenderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            ..Default::default()
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.ssgi_upsample_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.ssgi_upsample_bind_group.as_ref().unwrap(), &[]);
@@ -2861,7 +2883,10 @@ impl DeferredRenderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            ..Default::default()
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.ssr_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.ssr_inputs_bind_group.as_ref().unwrap(), &[]);
@@ -2893,7 +2918,9 @@ impl DeferredRenderer {
                 },
             })],
             depth_stencil_attachment: None,
-            ..Default::default()
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(self.composite_pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.composite_inputs_bind_group.as_ref().unwrap(), &[]);
@@ -3018,6 +3045,7 @@ impl RenderTrait for DeferredRenderer {
             .iter()
             .find(|l| matches!(l.light_type, LightType::Directional));
 
+        let sky_cfg = &render_data.render_config.shader_constants;
         let (sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
             (
                 (light.current_transform.rotation * Vec3::Z).normalize_or_zero(),
@@ -3038,8 +3066,10 @@ impl RenderTrait for DeferredRenderer {
             _padding: 0.0,
             sun_color: sun_color,
             sun_intensity,
-            ground_albedo: [0.3, 0.25, 0.2], // Brownish ground
-            ground_brightness: 1.0,
+            ground_albedo: sky_cfg.sky_ground_albedo,
+            ground_brightness: sky_cfg.sky_ground_brightness,
+            night_ambient_color: sky_cfg.night_ambient_color,
+            sun_angular_radius_cos: sky_cfg.sun_angular_radius_cos,
         };
 
         self.queue.write_buffer(
@@ -3196,6 +3226,7 @@ impl RenderTrait for DeferredRenderer {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     self.egui_renderer.render(
@@ -3221,9 +3252,11 @@ impl RenderTrait for DeferredRenderer {
                 id,
                 vertices,
                 lod_indices,
+                meshlets: _,
                 bounds,
             } => {
-                self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
+                self.add_mesh(id, vertices.as_ref(), &lod_indices, bounds)
+                    .unwrap();
             }
             RenderMessage::CreateTexture {
                 id,
@@ -3234,7 +3267,8 @@ impl RenderTrait for DeferredRenderer {
                 width,
                 height,
             } => {
-                if let Ok(gpu_index) = self.add_texture(&data, kind, format, width, height) {
+                if let Ok(gpu_index) = self.add_texture(data.as_ref(), kind, format, width, height)
+                {
                     self.handle_id_to_texture_index.insert(id, gpu_index);
                 }
             }
@@ -3242,6 +3276,7 @@ impl RenderTrait for DeferredRenderer {
                 self.pending_materials.push(mat_data);
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::RenderDelta(_) => {}
             RenderMessage::EguiData(data) => {
                 // Upload textures immediately when message arrives
                 for (id, delta) in &data.textures_delta.set {
@@ -3256,12 +3291,14 @@ impl RenderTrait for DeferredRenderer {
 
                 self.current_egui_data = Some(data);
             }
+            RenderMessage::Control(_) => {}
             RenderMessage::Resize(size) => self.resize(size),
+            RenderMessage::WindowRecreated { .. } => {}
             RenderMessage::Shutdown => {}
         }
     }
 
-    fn update_render_data(&mut self, render_data: RenderData) {
+    fn update_render_data(&mut self, render_data: Arc<RenderData>) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
                 if current_data.render_config.shader_constants

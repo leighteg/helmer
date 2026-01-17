@@ -1,2 +1,2 @@
-pub mod stats;
 pub mod inspector;
+pub mod stats;

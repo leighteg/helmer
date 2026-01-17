@@ -128,7 +128,7 @@ fn cosine_sample_hemisphere(r: vec2<f32>) -> vec3<f32> {
 // --- MAIN SHADER ---
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let frag_coord = vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth))));
+    let frag_coord = vec2<i32>(floor(in.uv * vec2<f32>(textureDimensions(t_depth, 0))));
     let depth = textureLoad(t_depth, frag_coord, 0).r;
     if depth >= 1.0 { discard; }
 
@@ -140,8 +140,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tangent_to_view = create_onb(normal_vs);
     var indirect_light = vec3<f32>(0.0);
 
-    let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise));
-    let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse)) / blue_noise_dims;
+    let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise, 0));
+    let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse, 0)) / blue_noise_dims;
     let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
 
     for (var i = 0; i < i32(constants.ssgi_num_rays); i += 1) {

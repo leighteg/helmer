@@ -1,5 +1,5 @@
 @group(0) @binding(0) var low_res_ssgi: texture_2d<f32>;
-@group(0) @binding(1) var full_res_depth: texture_depth_2d;
+@group(0) @binding(1) var full_res_depth: texture_2d<f32>;
 @group(0) @binding(2) var full_res_normal: texture_2d<f32>;
 @group(0) @binding(3) var s_linear: sampler;
 @group(0) @binding(4) var s_point: sampler;
@@ -25,13 +25,13 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let center_depth = textureSample(full_res_depth, s_point, in.uv);
+    let center_depth = textureSample(full_res_depth, s_point, in.uv).x;
     if (center_depth >= 1.0) {
         return vec4(0.0);
     }
     let center_normal = normalize(textureSample(full_res_normal, s_point, in.uv).xyz * 2.0 - 1.0);
 
-    let low_res_texel = 1.0 / vec2<f32>(textureDimensions(low_res_ssgi));
+    let low_res_texel = 1.0 / vec2<f32>(textureDimensions(low_res_ssgi, 0));
     
     var final_color = vec3(0.0);
     var total_weight = 0.0;
@@ -45,7 +45,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let offset = vec2<f32>(f32(x), f32(y)) * low_res_texel;
             let sample_uv = in.uv + offset;
 
-            let sample_depth = textureSample(full_res_depth, s_point, sample_uv);
+            let sample_depth = textureSample(full_res_depth, s_point, sample_uv).x;
             let sample_normal = normalize(textureSample(full_res_normal, s_point, sample_uv).xyz * 2.0 - 1.0);
 
             let depth_diff = abs(sample_depth - center_depth);

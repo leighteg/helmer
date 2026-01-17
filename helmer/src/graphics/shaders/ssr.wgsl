@@ -41,6 +41,7 @@ struct Constants {
     pcf_max_distance: f32,
     ssgi_intensity: f32,
     _final_padding: vec2<f32>,
+    ssr_jitter_strength: f32,
 };
 
 struct CameraUniforms {
@@ -50,38 +51,26 @@ struct CameraUniforms {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
-};
+    _pad_light: vec4<u32>,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+    _padding: vec3<u32>,
+    _pad_end: vec4<u32>,
+}
 
-//=============== BINDINGS ===============//
+const EPSILON: f32 = 0.00001;
+const SELF_INTERSECTION_TOLERANCE: f32 = 0.02;
+
 @group(0) @binding(0) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(1) var gbuf_mra: texture_2d<f32>;
-@group(0) @binding(2) var depth_texture: texture_depth_2d;
+@group(0) @binding(2) var depth_texture: texture_2d<f32>;
 @group(0) @binding(3) var lit_scene_texture: texture_2d<f32>;
 @group(0) @binding(4) var gbuf_sampler: sampler;
-@group(0) @binding(5) var scene_sampler: sampler; // Should be a linear sampler
+@group(0) @binding(5) var scene_sampler: sampler;
+@group(0) @binding(6) var blue_noise_tex: texture_2d<f32>;
 
 @group(1) @binding(0) var<uniform> camera: CameraUniforms;
-
 @group(2) @binding(0) var<uniform> constants: Constants;
-
-//=============== CONSTANTS ===============//
-// Using a stricter thickness check to improve reflection accuracy on top surfaces.
-const COARSE_STEPS = 160u;      // Keep high for precision.
-const LINEAR_STEP_SIZE = 0.07;  // A constant, linear step size
-const THICKNESS = 0.1;          // Surface thickness for intersection
-
-const BINARY_SEARCH_STEPS = 6u; // Refinement steps
-const MAX_DISTANCE = 250.0; // Max reflection distance
-const ROUGHNESS_FADE_START = 0.1;
-const ROUGHNESS_FADE_END = 0.5;
-const EPSILON = 0.0001;
-const SELF_INTERSECTION_TOLERANCE = 0.05; // A small tolerance to prevent a reflection ray from immediately hitting the surface it came from.
-
-//=============== UTILITY FUNCTIONS ===============//
-
-fn rand(uv: vec2<f32>) -> f32 {
-    return fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
-}
 
 fn unproject_to_view_h(uv: vec2<f32>, depth: f32) -> vec4<f32> {
     let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth);
@@ -90,7 +79,7 @@ fn unproject_to_view_h(uv: vec2<f32>, depth: f32) -> vec4<f32> {
 }
 
 fn get_view_pos(uv: vec2<f32>) -> vec3<f32> {
-    let depth = textureSample(depth_texture, gbuf_sampler, uv);
+    let depth = textureSample(depth_texture, gbuf_sampler, uv).x;
     let view_h = unproject_to_view_h(uv, depth);
     return view_h.xyz / (view_h.w + EPSILON);
 }
@@ -118,6 +107,12 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     return res;
 }
 
+fn blue_noise(frag_coord: vec2<f32>) -> f32 {
+    let noise_dims = vec2<f32>(textureDimensions(blue_noise_tex, 0));
+    let offset = vec2<f32>(f32(camera.frame_index), f32(camera.frame_index));
+    let uv = (frag_coord + offset) / noise_dims;
+    return textureSample(blue_noise_tex, gbuf_sampler, uv).x;
+}
 
 //=============== SHADERS ===============//
 @vertex
@@ -129,7 +124,7 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> @builtin(position) ve
 
 @fragment
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
-    let screen_size = vec2<f32>(textureDimensions(gbuf_normal));
+    let screen_size = vec2<f32>(textureDimensions(gbuf_normal, 0));
     let screen_uv = frag_coord.xy / screen_size;
 
     // --- 1. G-Buffer Unpack ---
@@ -139,7 +134,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let origin_depth = textureSample(depth_texture, gbuf_sampler, screen_uv);
+    let origin_depth = textureSample(depth_texture, gbuf_sampler, screen_uv).x;
     if (origin_depth >= 1.0) { discard; } // Skybox
     let origin_vs_h = unproject_to_view_h(screen_uv, origin_depth);
     if (abs(origin_vs_h.w) < EPSILON) { discard; }
@@ -160,8 +155,9 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     // --- 2. Linear Ray Marching with Thickness Check ---
     var ray_pos_vs = origin_vs + N_vs * SELF_INTERSECTION_TOLERANCE;
     
-    let dither_amount = rand(screen_uv);
-    let step_size = constants.ssr_linear_step_size * (1.0 + dither_amount * 0.2);
+    let dither_amount = blue_noise(frag_coord.xy);
+    let step_size = constants.ssr_linear_step_size
+        * (1.0 + dither_amount * constants.ssr_jitter_strength);
     
     var hit_found = false;
     var last_ray_pos_vs = ray_pos_vs;

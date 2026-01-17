@@ -1,8 +1,10 @@
 # [helmer](http://helmer.leighteg.dev) &nbsp; ![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
 
-an ECS game engine featuring 3 purpose built renderers written in rust
+### this todo really needs a rewrite - the entire repo needs proper docs - but i dont feel like it/cant. this readme sucks
 
-![city corner screenshot (deferred renderer)](assets/screenshots/city_corner.png)
+a performant, flexible, extensible, scalable foundation for creation - featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
+
+![city corner screenshot (legacy deferred renderer)](assets/screenshots/city_corner.png)
 
 ## features
 - multiplatform
@@ -13,15 +15,16 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - rapier3D physics integration
 - basic pbr (full pbr todo)
 - right handed +Y-up coordinate system
-- deferred bindless renderer, forward per-material uniforms renderer, forward texture array renderer
+- highly capable, scalable, robust render graph
+- legacy monolithic renderers: deferred bindless renderer, forward per-material uniforms renderer, forward texture array renderer
 - sharp cascaded EVSM shadows
-- SSGI, SSR, physically based sky (deferred only rn)
-- frustum culling
-- LOD generation
+- SSGI, SSR, physically based sky
+- frustum+occlusion culling
+- LOD/mip generation
 
 ## todo 😡
 - [x] provide custom runtime hooks?
-- [ ] provide custom renderer hooks
+- [x] ~~provide custom renderer hooks~~ [render graph]
 - [x] provide custom logic thread hooks
 - [x] "bring your own logic" option (through logic thread hooks)
 - [ ] provide integrations to multiple popular and custom logic architectures
@@ -30,8 +33,8 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [x] ui implementation or integration
 - [ ] editor & project cli tools
 - [ ] taskable worker pool system/api for ecs (resource based? - asynchronously taskable by systems?)
-- [ ] asset streaming
-- [ ] AssetServer improved worker pool usage (scene parsing)
+- [x] asset streaming
+- [x] AssetServer improved worker pool usage (scene parsing)
 - [ ] skinned mesh & animation system/support
 - [x] precomputed atmospheric scattering
 - [x] fix sky light contribution (generally fixed)
@@ -39,16 +42,16 @@ an ECS game engine featuring 3 purpose built renderers written in rust
 - [ ] modular cubemap generics
 - [ ] SSR cubemap fallback
 - [ ] more light types
-- [ ] occlusion culling
+- [x] occlusion culling [broken?]
 - [x] soft shadows (PCSS?) [basic pcf for now]
 - [ ] point light shadows
 - [ ] full gi (SDFGI, DDGI?)
 - [ ] full pbr/modern brdf
-~~- [ ] implement supported advanced features to forward renderers~~
-- [ ] replace forward renderer(s) shadow pipeline with a simpler implementation
-- [ ] add indirect lighting to forward renderer(s)? (Simplified Light Propagation Volumes?)
-- [ ] cubemap-based reflections in forward renderers
-- [ ] gpu compute based culling?
+- [ ] ~~implement supported advanced features to forward renderers~~
+- [ ] ~~replace forward renderer(s) shadow pipeline with a simpler implementation~~ [implement alternate shadow pipeline]
+- [ ] ~~add indirect lighting to forward renderer(s)? (Simplified Light Propagation Volumes?)~~
+- [ ] ~~cubemap-based reflections in forward renderers~~
+- [ ] ~~gpu compute based culling?~~
 - [ ] hardware RT path/pipeline or acceleration?
 - [ ] touch support
 - [ ] physically based audio engine

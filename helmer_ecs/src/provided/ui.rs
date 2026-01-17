@@ -2,17 +2,32 @@ use std::sync::{Arc, atomic::Ordering};
 
 use egui::ComboBox;
 use helmer::{
-    graphics::{config::RenderConfig, renderer_common::common::ShaderConstants},
+    graphics::{
+        config::RenderConfig,
+        render_graphs::{graph_templates, template_for_graph},
+        renderer_common::common::ShaderConstants,
+    },
     provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
     runtime::{config::RuntimeConfig, runtime::PerformanceMetrics},
 };
 
 use crate::{
     ecs::ecs_core::ECSCore, egui_integration::EguiResource,
-    physics::physics_resource::PhysicsResource,
+    physics::physics_resource::PhysicsResource, systems::renderer_system::RenderGraphResource,
 };
 
 pub struct StatsUI {}
+
+fn toggle_debug_flag(ui: &mut egui::Ui, flags: &mut u32, mask: u32, label: &str) {
+    let mut enabled = (*flags & mask) != 0;
+    if ui.checkbox(&mut enabled, label).changed() {
+        if enabled {
+            *flags |= mask;
+        } else {
+            *flags &= !mask;
+        }
+    }
+}
 
 impl StatsUI {
     pub fn run(ecs: &mut ECSCore) {
@@ -54,14 +69,6 @@ impl StatsUI {
                                 *render_cfg = new_cfg;
                             }
                             ui.separator();
-
-                            ui.heading("Render Passes");
-                            ui.checkbox(&mut render_cfg.shadow_pass, "Shadow Pass");
-                            ui.checkbox(&mut render_cfg.direct_lighting_pass, "Direct Lighting");
-                            ui.checkbox(&mut render_cfg.sky_pass, "Sky Pass");
-                            ui.checkbox(&mut render_cfg.ssgi_pass, "SSGI Pass");
-                            ui.checkbox(&mut render_cfg.ssgi_denoise_pass, "SSGI Denoise Pass");
-                            ui.checkbox(&mut render_cfg.ssr_pass, "SSR Pass");
 
                             let shade_mode_labels = ["lit", "unlit", "lighting"];
                             ComboBox::from_label("shade mode")
@@ -127,6 +134,10 @@ impl StatsUI {
                             ui.separator();
                             ui.heading("Culling & LOD");
                             ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
+                            ui.checkbox(
+                                &mut render_cfg.occlusion_culling,
+                                "Occlusion Culling (Hi-Z)",
+                            );
                             ui.checkbox(&mut render_cfg.lod, "LOD");
 
                             ui.separator();
@@ -147,6 +158,92 @@ impl StatsUI {
                     );
                 }),
                 "render config".to_string(),
+            ));
+
+            egui_res.windows.push((
+                Box::new(move |ui, ecs, _input| {
+                    let templates = graph_templates();
+                    let fallback_template =
+                        templates.first().expect("render graph templates missing");
+                    let mut active_name = ecs
+                        .get_resource::<RenderGraphResource>()
+                        .map(|res| res.0.name)
+                        .unwrap_or(fallback_template.name);
+
+                    ui.heading("render graph");
+                    ui.separator();
+                    ui.heading("graph selection");
+
+                    if let Some(mut graph_res) = ecs.get_resource_mut::<RenderGraphResource>() {
+                        let mut selected_name = active_name;
+                        ComboBox::from_label("graph template")
+                            .selected_text(
+                                template_for_graph(selected_name)
+                                    .unwrap_or(fallback_template)
+                                    .label,
+                            )
+                            .show_ui(ui, |ui| {
+                                for template in templates {
+                                    ui.selectable_value(
+                                        &mut selected_name,
+                                        template.name,
+                                        template.label,
+                                    );
+                                }
+                            });
+
+                        if selected_name != active_name {
+                            if let Some(template) = template_for_graph(selected_name) {
+                                graph_res.0 = (template.build)();
+                                active_name = selected_name;
+                            }
+                        }
+
+                        ui.label(format!("active graph: {}", graph_res.0.name));
+                    } else {
+                        ui.label("render graph resource unavailable");
+                    }
+
+                    let active_template =
+                        template_for_graph(active_name).unwrap_or(fallback_template);
+
+                    ui.separator();
+                    ui.heading("passes");
+                    ecs.resource_scope::<RuntimeConfig, _>(
+                        |ecs, runtime_cfg: &mut RuntimeConfig| {
+                            let render_cfg = &mut runtime_cfg.render_config;
+                            for pass in active_template.pass_toggles {
+                                let mut enabled = pass.toggle.get(render_cfg);
+                                if ui.checkbox(&mut enabled, pass.label).changed() {
+                                    pass.toggle.set(render_cfg, enabled);
+                                }
+                            }
+
+                            if !active_template.debug_flags.is_empty() {
+                                ui.separator();
+                                ui.heading("debug composite");
+                                let flags = &mut render_cfg.debug_flags;
+                                for flag in active_template.debug_flags {
+                                    toggle_debug_flag(ui, flags, flag.mask, flag.label);
+                                }
+
+                                let all_mask = active_template
+                                    .debug_flags
+                                    .iter()
+                                    .fold(0u32, |acc, flag| acc | flag.mask);
+                                ui.horizontal(|ui| {
+                                    if ui.button("all").clicked() {
+                                        *flags = all_mask;
+                                    }
+                                    if ui.button("none").clicked() {
+                                        *flags = 0;
+                                    }
+                                });
+                            }
+                        },
+                    );
+                }),
+                "render graph".to_string(),
             ));
 
             egui_res.windows.push((

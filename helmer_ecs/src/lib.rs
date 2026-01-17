@@ -187,7 +187,7 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 scheduler.run_all(dt, ecs_core, &input_manager);
             });
 
-            let render_data = {
+            let render_delta = {
                 if let Some(packet) = ecs_core.get_resource_mut::<RenderPacket>() {
                     packet.0.take()
                 } else {
@@ -203,7 +203,7 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 }
             };
 
-            (render_data, egui_data)
+            (render_delta, egui_data)
         },
         |new_size, (ecs_core, _)| {
             ecs_core

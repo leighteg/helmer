@@ -2,7 +2,7 @@
 
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
-const NUM_CASCADES: u32 = 4u;
+const MAX_SHADOW_CASCADES: u32 = 4u;
 const VSM_MIN_VARIANCE: f32 = 0.00002;
 const SHADOW_BLEEDING_REDUCTION: f32 = 0.4;
 
@@ -29,8 +29,15 @@ struct VertexOutput {
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
     projection_matrix: mat4x4<f32>,
+    inverse_projection_matrix: mat4x4<f32>,
+    inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
+    _pad_light: vec4<u32>,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+    _padding: vec3<u32>,
+    _pad_end: vec4<u32>,
 }
 
 struct LightData {
@@ -58,8 +65,13 @@ struct MaterialData {
 
 struct CascadeData {
     light_view_proj: mat4x4<f32>,
-    split_depth: f32,
-    // padding would be here if needed for alignment
+    split_depth: vec4<f32>,
+}
+
+struct ShadowUniforms {
+    cascade_count: u32,
+    _pad0: vec3<u32>,
+    cascades: array<CascadeData, MAX_SHADOW_CASCADES>,
 }
 
 struct PbrConstants {
@@ -79,10 +91,9 @@ struct PbrConstants {
 @group(0) @binding(7) var pbr_sampler: sampler;
 @group(0) @binding(8) var shadow_map: texture_2d_array<f32>;
 @group(0) @binding(9) var shadow_sampler: sampler;
-@group(0) @binding(10) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
+@group(0) @binding(10) var<uniform> shadow_uniforms: ShadowUniforms;
 
-@vertex
-var<push_constant> constants: PbrConstants;
+var<immediate> constants: PbrConstants;
 
 //=============== MATRIX UTILITY FUNCTIONS ===============//
 
@@ -183,20 +194,20 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>) -> f32 {
 
 fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32) -> f32 {
     // 1. Select the correct cascade for this fragment
-    var cascade_index = -1;
-    for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
-        if (view_z > shadow_uniforms[i].split_depth) {
-            cascade_index = i;
+    let cascade_count = max(
+        1u,
+        min(shadow_uniforms.cascade_count, MAX_SHADOW_CASCADES)
+    );
+    var cascade_index = i32(cascade_count - 1u);
+    for (var i = 0u; i < cascade_count; i = i + 1u) {
+        if (view_z > shadow_uniforms.cascades[i].split_depth.x) {
+            cascade_index = i32(i);
             break;
         }
     }
 
-    if (cascade_index < 0) {
-        return 1.0; // Not in any cascade, so not shadowed
-    }
-
     // 2. Project to light space and perform lookup
-    let cascade = shadow_uniforms[cascade_index];
+    let cascade = shadow_uniforms.cascades[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;
     let shadow_uv = vec2(shadow_coord.x * 0.5 + 0.5, shadow_coord.y * -0.5 + 0.5);

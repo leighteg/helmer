@@ -21,6 +21,22 @@ struct AtmosphereUniforms {
     _padding: f32,
     sun_direction: [f32; 3],
     _padding2: f32,
+    rayleigh_scattering_coeff: [f32; 3],
+    rayleigh_scale_height: f32,
+    mie_scattering_coeff: f32,
+    mie_absorption_coeff: f32,
+    mie_scale_height: f32,
+    mie_preferred_scattering_dir: f32,
+    ozone_absorption_coeff: [f32; 3],
+    ozone_center_height: f32,
+    ozone_falloff: f32,
+    _pad_after_ozone: [f32; 3],
+    _pad_atmo0: [f32; 3],
+    _pad_after_atmo0: f32,
+    ground_albedo: [f32; 3],
+    ground_brightness: f32,
+    night_ambient_color: [f32; 3],
+    _pad_atmo1: f32,
 }
 
 pub struct AtmosphereLuts {
@@ -129,7 +145,7 @@ impl AtmospherePrecomputer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -409,7 +425,7 @@ impl AtmospherePrecomputer {
                     &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("Transmittance Layout"),
                         bind_group_layouts: &[&transmittance_bgl],
-                        push_constant_ranges: &[],
+                        immediate_size: 0,
                     }),
                 ),
                 module: &precompute_shader,
@@ -425,7 +441,7 @@ impl AtmospherePrecomputer {
                     &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("Scattering Layout"),
                         bind_group_layouts: &[&scattering_bgl],
-                        push_constant_ranges: &[],
+                        immediate_size: 0,
                     }),
                 ),
                 module: &precompute_shader,
@@ -441,7 +457,7 @@ impl AtmospherePrecomputer {
                     &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("Irradiance Layout"),
                         bind_group_layouts: &[&irradiance_bgl],
-                        push_constant_ranges: &[],
+                        immediate_size: 0,
                     }),
                 ),
                 module: &precompute_shader,
@@ -478,6 +494,22 @@ impl AtmospherePrecomputer {
             _padding: 0.0,
             sun_direction: sky_uniforms.sun_direction,
             _padding2: 0.0,
+            rayleigh_scattering_coeff: shader_constants.rayleigh_scattering_coeff,
+            rayleigh_scale_height: shader_constants.rayleigh_scale_height,
+            mie_scattering_coeff: shader_constants.mie_scattering_coeff,
+            mie_absorption_coeff: shader_constants.mie_absorption_coeff,
+            mie_scale_height: shader_constants.mie_scale_height,
+            mie_preferred_scattering_dir: shader_constants.mie_preferred_scattering_dir,
+            ozone_absorption_coeff: shader_constants.ozone_absorption_coeff,
+            ozone_center_height: shader_constants.ozone_center_height,
+            ozone_falloff: shader_constants.ozone_falloff,
+            _pad_after_ozone: [0.0; 3],
+            _pad_atmo0: [0.0; 3],
+            _pad_after_atmo0: 0.0,
+            ground_albedo: shader_constants.sky_ground_albedo,
+            ground_brightness: shader_constants.sky_ground_brightness,
+            night_ambient_color: shader_constants.night_ambient_color,
+            _pad_atmo1: 0.0,
         };
         queue.write_buffer(
             &self.atmosphere_uniform_buffer,

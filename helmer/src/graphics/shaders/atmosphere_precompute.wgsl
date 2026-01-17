@@ -5,6 +5,20 @@ struct AtmosphereParams {
     _padding: f32,
     sun_direction: vec3<f32>,
     _padding2: f32,
+    rayleigh_scattering_coeff: vec3<f32>,
+    rayleigh_scale_height: f32,
+    mie_scattering_coeff: f32,
+    mie_absorption_coeff: f32,
+    mie_scale_height: f32,
+    mie_preferred_scattering_dir: f32,
+    ozone_absorption_coeff: vec3<f32>,
+    ozone_center_height: f32,
+    ozone_falloff: f32,
+    _pad_atmo0: vec3<f32>,
+    ground_albedo: vec3<f32>,
+    ground_brightness: f32,
+    night_ambient_color: vec3<f32>,
+    _pad_atmo1: f32,
 };
 
 // Bindings are now split across different passes using different pipelines,
@@ -31,30 +45,6 @@ struct AtmosphereParams {
 
 // --- Constants ---
 const PI: f32 = 3.14159265;
-
-// --- Atmospheric Scattering ---
-const rayleigh_scattering_coeff: vec3<f32> = vec3(5.8e-6, 13.5e-6, 33.1e-6);
-const rayleigh_scale_height: f32 = 8e3;
-
-const mie_scattering_coeff: f32 = 3e-6;           // Fixed: was 21e-6
-const mie_absorption_coeff: f32 = 0.3e-6;
-const mie_extinction_coeff: f32 = mie_scattering_coeff + mie_absorption_coeff;
-const mie_scale_height: f32 = 1.2e3;
-const mie_preferred_scattering_dir: f32 = 0.76;
-
-// --- Ozone (for red sunsets) ---
-const ozone_absorption_coeff: vec3<f32> = vec3(0.65e-6, 1.881e-6, 0.085e-6);
-const ozone_center_height: f32 = 25e3;
-const ozone_falloff: f32 = 15e3;
-
-// --- Ground ---
-const ground_albedo: vec3<f32> = vec3(0.05);      // Dark soil
-
-// --- Sun Disk ---
-const sun_angular_diameter: f32 = 0.00935;        // cos(0.53°)
-
-// --- Night Sky ---
-const night_ambient_color: vec3<f32> = vec3(0.0002, 0.0004, 0.0008);
 
 // --- Sampling ---
 const transmittance_samples: i32 = 64;
@@ -85,16 +75,17 @@ fn altitude_mu_to_uv(altitude: f32, mu: f32, planet_radius: f32, atmosphere_radi
     return vec2<f32>(u, v);
 }
 
-fn calculate_optical_depth(ray_origin: vec3<f32>, ray_dir: vec3<f32>, ray_length: f32, planet_radius: f32) -> vec3<f32> {
+fn calculate_optical_depth(ray_origin: vec3<f32>, ray_dir: vec3<f32>, ray_length: f32, atm: AtmosphereParams) -> vec3<f32> {
     var optical_depth = vec3<f32>(0.0);
     let step_size = ray_length / f32(transmittance_samples);
     for (var i = 0; i < transmittance_samples; i = i + 1) {
         let sample_pos = ray_origin + ray_dir * (f32(i) + 0.5) * step_size;
-        let height = length(sample_pos) - planet_radius;
+        let height = length(sample_pos) - atm.planet_radius;
         if height < 0.0 { break; }
-        let rayleigh_density = exp(-height / rayleigh_scale_height);
-        let mie_density = exp(-height / mie_scale_height);
-        optical_depth += (rayleigh_scattering_coeff * rayleigh_density + (mie_scattering_coeff + mie_extinction_coeff) * mie_density) * step_size;
+        let rayleigh_density = exp(-height / atm.rayleigh_scale_height);
+        let mie_density = exp(-height / atm.mie_scale_height);
+        let mie_extinction = atm.mie_scattering_coeff + atm.mie_absorption_coeff;
+        optical_depth += (atm.rayleigh_scattering_coeff * rayleigh_density + mie_extinction * mie_density) * step_size;
     }
     return optical_depth;
 }
@@ -126,7 +117,7 @@ fn compute_transmittance(@builtin(global_invocation_id) id: vec3<u32>) {
     let intersection = ray_sphere_intersect(ray_origin, ray_dir, atmosphere_p1.atmosphere_radius);
     let ray_length = intersection.y;
 
-    let optical_depth = calculate_optical_depth(ray_origin, ray_dir, ray_length, atmosphere_p1.planet_radius);
+    let optical_depth = calculate_optical_depth(ray_origin, ray_dir, ray_length, atmosphere_p1);
     let transmittance = exp(-optical_depth);
 
     textureStore(transmittance_lut_write, id.xy, vec4<f32>(transmittance, 1.0));
@@ -175,7 +166,7 @@ fn compute_scattering(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let step_size = ray_length / f32(scattering_samples);
     let rayleigh_phase = rayleigh_phase_function(mu_v_s);
-    let mie_phase = mie_phase_function(mu_v_s, mie_preferred_scattering_dir);
+    let mie_phase = mie_phase_function(mu_v_s, atm.mie_preferred_scattering_dir);
 
     var rayleigh_scatter = vec3<f32>(0.0);
     var mie_scatter = vec3<f32>(0.0);
@@ -197,11 +188,11 @@ fn compute_scattering(@builtin(global_invocation_id) id: vec3<u32>) {
         let uv_to_sun = altitude_mu_to_uv(sample_altitude, mu_to_sun, atm.planet_radius, atm.atmosphere_radius);
         let transmittance_to_sun = textureSampleLevel(transmittance_lut_read_p2, sampler_p2, uv_to_sun, 0.0).rgb;
 
-        let rayleigh_density = exp(-sample_height / rayleigh_scale_height);
-        let mie_density = exp(-sample_height / mie_scale_height);
+        let rayleigh_density = exp(-sample_height / atm.rayleigh_scale_height);
+        let mie_density = exp(-sample_height / atm.mie_scale_height);
 
-        rayleigh_scatter += rayleigh_scattering_coeff * rayleigh_density * rayleigh_phase * transmittance_to_sun * transmittance_to_camera * step_size;
-        mie_scatter += mie_scattering_coeff * mie_density * mie_phase * transmittance_to_sun * transmittance_to_camera * step_size;
+        rayleigh_scatter += atm.rayleigh_scattering_coeff * rayleigh_density * rayleigh_phase * transmittance_to_sun * transmittance_to_camera * step_size;
+        mie_scatter += atm.mie_scattering_coeff * mie_density * mie_phase * transmittance_to_sun * transmittance_to_camera * step_size;
     }
 
     let sun_radiance = atm.sun_intensity;
@@ -223,7 +214,7 @@ fn compute_irradiance(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Early-out for night side (optional – keep a tiny ambient)
     if mu_s < -0.2 {
-        textureStore(irradiance_lut_write, id.xy, vec4<f32>(night_ambient_color, 1.0));
+        textureStore(irradiance_lut_write, id.xy, vec4<f32>(atm.night_ambient_color, 1.0));
         return;
     }
 
@@ -263,8 +254,8 @@ fn compute_irradiance(@builtin(global_invocation_id) id: vec3<u32>) {
                 let h = length(pos) - atm.planet_radius;
                 if h < 0.0 { break; }
 
-                let density_r = exp(-h / rayleigh_scale_height);
-                let density_m = exp(-h / mie_scale_height);
+                let density_r = exp(-h / atm.rayleigh_scale_height);
+                let density_m = exp(-h / atm.mie_scale_height);
 
                 // transmittance sample to camera (origin)
                 let mu_cam = dot(normalize(pos), -L);
@@ -277,10 +268,10 @@ fn compute_irradiance(@builtin(global_invocation_id) id: vec3<u32>) {
                 let T_sun = textureSampleLevel(transmittance_lut_read_p3, sampler_p3, uv_sun, 0.0).rgb;
 
                 let phase_r = rayleigh_phase_function(dot(L, sun_dir));
-                let phase_m = mie_phase_function(dot(L, sun_dir), mie_preferred_scattering_dir);
+                let phase_m = mie_phase_function(dot(L, sun_dir), atm.mie_preferred_scattering_dir);
 
-                rayleigh += rayleigh_scattering_coeff * density_r * phase_r * T_sun * T_cam * step;
-                mie += mie_scattering_coeff * density_m * phase_m * T_sun * T_cam * step;
+                rayleigh += atm.rayleigh_scattering_coeff * density_r * phase_r * T_sun * T_cam * step;
+                mie += atm.mie_scattering_coeff * density_m * phase_m * T_sun * T_cam * step;
             }
 
             // Ground reflection (only when ray hits planet)
@@ -292,7 +283,7 @@ fn compute_irradiance(@builtin(global_invocation_id) id: vec3<u32>) {
                 // simple Lambert ground
                 let T_g = textureSampleLevel(transmittance_lut_read_p3, sampler_p3,
                     altitude_mu_to_uv(length(hit), dot(N_g, V_g), atm.planet_radius, atm.atmosphere_radius), 0.0).rgb;
-                ground = ground_albedo * T_g * max(dot(N_g, sun_dir), 0.0) * atm.sun_intensity;
+                ground = atm.ground_albedo * atm.ground_brightness * T_g * max(dot(N_g, sun_dir), 0.0) * atm.sun_intensity;
             }
 
             irradiance += (rayleigh + mie) * LdotUp + ground * LdotUp;

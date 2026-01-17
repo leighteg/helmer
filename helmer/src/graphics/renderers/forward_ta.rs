@@ -117,7 +117,7 @@ pub struct ForwardRendererTA {
 
     // State
     frame_index: usize,
-    current_render_data: Option<RenderData>,
+    current_render_data: Option<Arc<RenderData>>,
     logic_frame_duration: Duration,
     last_timestamp: Option<Instant>,
     prev_sky_uniforms: SkyUniforms,
@@ -161,7 +161,7 @@ impl ForwardRendererTA {
                 label: Some("Primary Device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits {
-                    max_push_constant_size: 0,
+                    max_immediate_size: 0,
                     max_texture_array_layers: MAX_TEXTURES_PER_TYPE,
                     ..Default::default()
                 },
@@ -310,7 +310,7 @@ impl ForwardRendererTA {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         }));
 
@@ -320,7 +320,7 @@ impl ForwardRendererTA {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         }));
 
@@ -659,7 +659,7 @@ impl ForwardRendererTA {
                 &bind_group_layout,
                 self.render_constants_bind_group_layout.as_ref().unwrap(),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -697,7 +697,7 @@ impl ForwardRendererTA {
                 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -896,7 +896,7 @@ impl ForwardRendererTA {
                 self.material_bind_group_layout.as_ref().unwrap(),
                 &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout,
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         self.forward_pipeline = Some(device.create_render_pipeline(
@@ -931,7 +931,7 @@ impl ForwardRendererTA {
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -953,7 +953,7 @@ impl ForwardRendererTA {
                     &self.atmosphere.as_ref().unwrap().sampling_bind_group_layout,
                     self.render_constants_bind_group_layout.as_ref().unwrap(),
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
         self.sky_pipeline = Some(self.device.create_render_pipeline(
             &wgpu::RenderPipelineDescriptor {
@@ -978,7 +978,7 @@ impl ForwardRendererTA {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             },
         ));
@@ -1174,7 +1174,7 @@ impl ForwardRendererTA {
         &mut self,
         id: usize,
         vertices: &[Vertex],
-        lod_indices: &[Vec<u32>],
+        lod_indices: &[Arc<[u32]>],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
         let vertex_buffer = self
@@ -1191,7 +1191,7 @@ impl ForwardRendererTA {
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
-                    contents: bytemuck::cast_slice(indices),
+                    contents: bytemuck::cast_slice(indices.as_ref()),
                     usage: wgpu::BufferUsages::INDEX,
                 });
             gpu_lods.push(MeshLod {
@@ -1299,9 +1299,13 @@ impl ForwardRendererTA {
             inverse_view_projection_matrix: inv_view_proj.to_cols_array_2d(),
             view_position: eye.to_array(),
             light_count: render_data.lights.len() as u32,
+            _pad_light: [0; 4],
             prev_view_proj: [[0.0; 4]; 4], // PLACEHOLDER
             frame_index: 0,                // PLACEHOLDER,
+            _pad_after_frame: [0; 3],
             _padding: [0; 3],
+            _pad_after_padding: 0,
+            _pad_end: [0; 4],
         };
         self.queue.write_buffer(
             &self.camera_buffers[self.frame_index],
@@ -1529,7 +1533,9 @@ impl ForwardRendererTA {
                         }),
                         stencil_ops: None,
                     }),
-                    ..Default::default()
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
@@ -1574,6 +1580,9 @@ impl ForwardRendererTA {
         let scene_corners = scene_bounds.get_corners();
 
         let mut uniforms = ShadowUniforms {
+            cascade_count: NUM_CASCADES as u32,
+            _pad0: [0; 3],
+            _pad1: [0; 4],
             cascades: [CascadeUniform::default(); NUM_CASCADES],
         };
 
@@ -1698,6 +1707,7 @@ impl RenderTrait for ForwardRendererTA {
             .iter()
             .find(|l| matches!(l.light_type, LightType::Directional));
 
+        let sky_cfg = &render_data.render_config.shader_constants;
         let (sun_dir, sun_color, sun_intensity) = if let Some(light) = directional_light {
             (
                 (light.current_transform.rotation * Vec3::Z).normalize_or_zero(),
@@ -1718,8 +1728,10 @@ impl RenderTrait for ForwardRendererTA {
             _padding: 0.0,
             sun_color: sun_color,
             sun_intensity,
-            ground_albedo: [0.3, 0.25, 0.2], // Brownish ground
-            ground_brightness: 1.0,
+            ground_albedo: sky_cfg.sky_ground_albedo,
+            ground_brightness: sky_cfg.sky_ground_brightness,
+            night_ambient_color: sky_cfg.night_ambient_color,
+            sun_angular_radius_cos: sky_cfg.sun_angular_radius_cos,
         };
 
         self.queue.write_buffer(
@@ -1867,7 +1879,9 @@ impl RenderTrait for ForwardRendererTA {
                 }),
                 stencil_ops: None,
             }),
-            ..Default::default()
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         if total_instances > 0 {
@@ -1926,6 +1940,7 @@ impl RenderTrait for ForwardRendererTA {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             sky_pass.set_pipeline(self.sky_pipeline.as_ref().unwrap());
             sky_pass.set_bind_group(0, &self.sky_bind_groups[buffer_index], &[]);
@@ -1967,6 +1982,7 @@ impl RenderTrait for ForwardRendererTA {
                         depth_stencil_attachment: None,
                         timestamp_writes: None,
                         occlusion_query_set: None,
+                        multiview_mask: None,
                     });
 
                     self.egui_renderer.render(
@@ -1992,9 +2008,11 @@ impl RenderTrait for ForwardRendererTA {
                 id,
                 vertices,
                 lod_indices,
+                meshlets: _,
                 bounds,
             } => {
-                self.add_mesh(id, &vertices, &lod_indices, bounds).unwrap();
+                self.add_mesh(id, vertices.as_ref(), &lod_indices, bounds)
+                    .unwrap();
             }
             RenderMessage::CreateTexture {
                 id,
@@ -2005,7 +2023,8 @@ impl RenderTrait for ForwardRendererTA {
                 width,
                 height,
             } => {
-                if let Ok(gpu_index) = self.add_texture(&data, kind, format, width, height) {
+                if let Ok(gpu_index) = self.add_texture(data.as_ref(), kind, format, width, height)
+                {
                     // This logic is imperfect for textures that aren't 1:1 with a material,
                     // but it works for the current model.
                     let indices = match kind {
@@ -2030,6 +2049,7 @@ impl RenderTrait for ForwardRendererTA {
                 self.pending_materials.push(mat_data);
             }
             RenderMessage::RenderData(data) => self.update_render_data(data),
+            RenderMessage::RenderDelta(_) => {}
             RenderMessage::EguiData(data) => {
                 // Upload textures immediately when message arrives
                 for (id, delta) in &data.textures_delta.set {
@@ -2044,13 +2064,14 @@ impl RenderTrait for ForwardRendererTA {
 
                 self.current_egui_data = Some(data);
             }
+            RenderMessage::Control(_) => {}
             RenderMessage::Resize(size) => self.resize(size),
             RenderMessage::Shutdown => {}
             _ => {}
         }
     }
 
-    fn update_render_data(&mut self, render_data: RenderData) {
+    fn update_render_data(&mut self, render_data: Arc<RenderData>) {
         if let Some(current_data) = &self.current_render_data {
             if current_data.render_config != render_data.render_config {
                 self.needs_atmosphere_precompute = true;

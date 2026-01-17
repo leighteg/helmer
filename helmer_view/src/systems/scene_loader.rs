@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use bevy_ecs::{
     entity::Entity,
     resource::Resource,
-    system::{Commands, Query, ResMut},
+    system::{Commands, ResMut},
 };
 use glam::Quat;
 use helmer::provided::components::Transform;
@@ -29,7 +29,6 @@ pub fn scene_loader_system(
     mut egui_res: ResMut<EguiResource>,
     mut dragged_file_res: ResMut<DraggedFile>,
     asset_server: ResMut<BevyAssetServer>,
-    mut transform_query: Query<&mut BevyTransform>,
 ) {
     // --- UI ---
     egui_res.windows.push((
@@ -110,7 +109,16 @@ pub fn scene_loader_system(
             });
 
             ui.separator();
-            ui.label("Drag and drop a .glb file to load");
+            ui.label("Drag and drop a .gltf/.glb file containing a scene or model to load");
+            ui.separator();
+            ui.collapsing("keybinds", |ui| {
+                ui.group(|ui| {
+                    ui.label("ctrl + G: toggle tunables/config UI");
+                    ui.label("U: toggle UI pass");
+                    ui.label("F11: toggle fullscreen");
+                    ui.label("alt + F4: quit");
+                });
+            });
         }),
         "Scene Loader".to_string(),
     ));

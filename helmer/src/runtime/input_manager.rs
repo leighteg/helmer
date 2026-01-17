@@ -333,7 +333,7 @@ impl InputManager {
                         events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Line,
                             delta: egui::vec2(*x, *y),
-                            phase,
+                            //phase,
                             modifiers,
                         });
                     }
@@ -341,7 +341,7 @@ impl InputManager {
                         events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: egui::vec2(p.x as f32, p.y as f32),
-                            phase,
+                            //phase,
                             modifiers,
                         });
                     }

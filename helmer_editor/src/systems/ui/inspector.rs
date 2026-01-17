@@ -1,7 +1,4 @@
-use helmer::{
-    provided::components::Transform,
-    runtime::input_manager::InputManager,
-};
+use helmer::{provided::components::Transform, runtime::input_manager::InputManager};
 use helmer_ecs::{ecs::system::System, egui_integration::EguiResource};
 
 pub struct InspectorSystem {}
@@ -11,7 +8,12 @@ impl System for InspectorSystem {
         "inspector system"
     }
 
-    fn run(&mut self, _dt: f32, ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore, _input_manager: &InputManager) {
+    fn run(
+        &mut self,
+        _dt: f32,
+        ecs: &mut helmer_ecs::ecs::ecs_core::ECSCore,
+        _input_manager: &InputManager,
+    ) {
         ecs.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
             egui_resource.windows.push((
                 Box::new(move |ui, ecs, _| {
@@ -20,7 +22,7 @@ impl System for InspectorSystem {
                         .show(ui, |ui| {
                             let mut entities = ecs.get_all_entities();
                             entities.sort();
-                            
+
                             for entity in entities {
                                 let header_label = format!("Entity {}", entity);
 

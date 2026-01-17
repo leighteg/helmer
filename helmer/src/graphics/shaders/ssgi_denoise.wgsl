@@ -40,7 +40,7 @@ fn world_from_depth(uv: vec2<f32>, depth: f32, inv_vp: mat4x4<f32>) -> vec3<f32>
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let texel_size = 1.0 / vec2<f32>(textureDimensions(t_noisy_input));
+    let texel_size = 1.0 / vec2<f32>(textureDimensions(t_noisy_input, 0));
     let center_uv = in.uv;
     
     let center_depth = textureSample(t_depth, s_point, center_uv).r;
@@ -49,7 +49,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     
     let center_normal = normalize(textureSample(t_normal, s_point, center_uv).xyz * 2.0 - 1.0);
-    let center_color = textureSample(t_noisy_input, s_point, center_uv).rgb;
+    let center_color = textureSample(t_noisy_input, s_linear, center_uv).rgb;
 
     // --- 1. Temporal Reprojection with History Rejection ---
     let world_pos = world_from_depth(center_uv, center_depth, camera.inverse_view_projection_matrix);
@@ -83,7 +83,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         for (var x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) { continue; }
             let neighbor_uv = center_uv + vec2(f32(x), f32(y)) * texel_size;
-            let neighbor_color = textureSample(t_noisy_input, s_point, neighbor_uv).rgb;
+            let neighbor_color = textureSample(t_noisy_input, s_linear, neighbor_uv).rgb;
             moment1 += neighbor_color;
             moment2 += neighbor_color * neighbor_color;
         }

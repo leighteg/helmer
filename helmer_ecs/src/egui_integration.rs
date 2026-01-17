@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::{
     ecs::{ecs_core::ECSCore, system::System},
@@ -68,7 +71,11 @@ impl System for EguiSystem {
                 let pixels_per_point = input.scale_factor as f32;
                 let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
 
+                static EGUI_FRAME_COUNTER: AtomicU64 = AtomicU64::new(1);
+                let version = EGUI_FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+
                 egui_res.render_data = Some(EguiRenderData {
+                    version,
                     primitives,
                     textures_delta: full_output.textures_delta,
                     screen_descriptor: egui_wgpu::ScreenDescriptor {

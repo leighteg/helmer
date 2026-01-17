@@ -1,7 +1,7 @@
 //=============== CONSTANTS ===============//
 const PI: f32 = 3.14159265359;
 const MIN_ROUGHNESS: f32 = 0.04;
-const NUM_CASCADES: u32 = 4u;
+const MAX_SHADOW_CASCADES: u32 = 4u;
 const EPSILON: f32 = 0.00001;
 const MAX_REFLECTION_LOD: f32 = 4.0;
 const EMISSIVE_THRESHOLD: f32 = 0.01;
@@ -83,6 +83,11 @@ struct CameraUniforms {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
+    _pad_light: vec4<u32>,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+    _padding: vec3<u32>,
+    _pad_end: vec4<u32>,
 }
 
 struct LightData {
@@ -97,6 +102,11 @@ struct LightData {
 struct CascadeData {
     light_view_proj: mat4x4<f32>,
     split_depth: vec4<f32>,
+}
+struct ShadowUniforms {
+    cascade_count: u32,
+    _pad0: vec3<u32>,
+    cascades: array<CascadeData, MAX_SHADOW_CASCADES>,
 }
 
 struct MaterialData {
@@ -118,6 +128,10 @@ struct SkyUniforms {
     _padding: f32,
     sun_color: vec3<f32>,
     sun_intensity: f32,
+    ground_albedo: vec3<f32>,
+    ground_brightness: f32,
+    night_ambient_color: vec3<f32>,
+    sun_angular_radius_cos: f32,
 };
 
 struct AtmosphereParams {
@@ -127,6 +141,20 @@ struct AtmosphereParams {
     _padding: f32,
     sun_direction: vec3<f32>,
     _padding2: f32,
+    rayleigh_scattering_coeff: vec3<f32>,
+    rayleigh_scale_height: f32,
+    mie_scattering_coeff: f32,
+    mie_absorption_coeff: f32,
+    mie_scale_height: f32,
+    mie_preferred_scattering_dir: f32,
+    ozone_absorption_coeff: vec3<f32>,
+    ozone_center_height: f32,
+    ozone_falloff: f32,
+    _pad_atmo0: vec3<f32>,
+    ground_albedo: vec3<f32>,
+    ground_brightness: f32,
+    night_ambient_color: vec3<f32>,
+    _pad_atmo1: f32,
 };
 
 //=============== BINDINGS ===============//
@@ -135,7 +163,7 @@ struct AtmosphereParams {
 @group(0) @binding(1) var<storage, read> lights_buffer: array<LightData>;
 @group(0) @binding(2) var shadow_map: texture_2d_array<f32>;
 @group(0) @binding(3) var shadow_sampler: sampler;
-@group(0) @binding(4) var<uniform> shadow_uniforms: array<CascadeData, NUM_CASCADES>;
+@group(0) @binding(4) var<uniform> shadow_uniforms: ShadowUniforms;
 @group(0) @binding(5) var<uniform> sky: SkyUniforms;
 @group(0) @binding(6) var<uniform> render_constants: Constants;
 
@@ -221,14 +249,18 @@ fn chebyshev_inequality(depth: f32, moments: vec2<f32>, N: vec3<f32>, L: vec3<f3
 }
 
 fn calculate_shadow_factor(world_pos: vec3<f32>, view_z: f32, N: vec3<f32>, L: vec3<f32>) -> f32 {
-    var cascade_index = i32(NUM_CASCADES - 1u);
-    for (var i = 0i; i < i32(NUM_CASCADES); i = i + 1i) {
-        if view_z > shadow_uniforms[i].split_depth.x {
-            cascade_index = i;
+    let cascade_count = max(
+        1u,
+        min(shadow_uniforms.cascade_count, MAX_SHADOW_CASCADES)
+    );
+    var cascade_index = i32(cascade_count - 1u);
+    for (var i = 0u; i < cascade_count; i = i + 1u) {
+        if view_z > shadow_uniforms.cascades[i].split_depth.x {
+            cascade_index = i32(i);
             break;
         }
     }
-    let cascade = shadow_uniforms[cascade_index];
+    let cascade = shadow_uniforms.cascades[cascade_index];
     let shadow_pos_clip = cascade.light_view_proj * vec4(world_pos, 1.0);
     if shadow_pos_clip.w < EPSILON { return 1.0; }
     let shadow_coord = shadow_pos_clip.xyz / shadow_pos_clip.w;

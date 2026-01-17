@@ -15,16 +15,18 @@ thiserror = "2.0.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 bytemuck = "1.23.0"
-wgpu = { version = "27.0.0", features = ["static-dxc"] }
+wgpu = { version = "28.0.0", features = ["static-dxc"] }
 pollster = "0.4.0"
 resvg = "0.45.1"
 softbuffer = "0.4.6"
 colored = "3.0.0"
 rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
 rand = "0.9.1"
+base64 = "0.21.7"
 gltf = { version = "1.4.1", features = ["KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_materials_pbrSpecularGlossiness"] }
 ktx2 = "0.4.0"
 basis-universal = "0.3.1"
+memmap2 = "0.9.5"
 serde = { version = "1.0.219", features = ["derive"] }
 ron = "0.10.1"
 mikktspace = "0.3.0"
@@ -33,8 +35,10 @@ image = { version = "0.25.6", features = ["png"] }
 gilrs = "0.11.0"
 meshopt = "0.6.1"
 num_cpus = "1.17.0"
-egui = { git = "https://github.com/emilk/egui.git" }
-egui-wgpu = { git = "https://github.com/emilk/egui.git" }
-egui-winit = { git = "https://github.com/emilk/egui.git" }
+egui = "0.33.3"
+egui-wgpu = "0.33.3"
+egui-winit = "0.33.3"
 slotmap = "1.0.7"
 generational-arena = "0.2.9"
+bitflags = "2.10.0"
+dyn-clone = "1.0.20"

@@ -6,8 +6,8 @@ use rapier3d::{
     math::Isometry,
     prelude::{ColliderBuilder, RigidBodyBuilder},
 };
-use tracing::warn;
 use std::any::TypeId;
+use tracing::warn;
 
 use crate::{
     ecs::{
@@ -111,7 +111,10 @@ impl System for SyncEntitiesToPhysicsSystem {
                             collider: collider_handle,
                         },
                     ));
-                    physics_resource.physics_entities.insert(entity_id, new_handles_to_add[new_handles_to_add.len() - 1].1);
+                    physics_resource.physics_entities.insert(
+                        entity_id,
+                        new_handles_to_add[new_handles_to_add.len() - 1].1,
+                    );
                 }
             }
         }
@@ -178,7 +181,10 @@ impl System for SyncEntitiesToPhysicsSystem {
                             collider: collider_handle,
                         },
                     ));
-                    physics_resource.physics_entities.insert(entity_id, new_handles_to_add[new_handles_to_add.len() - 1].1);
+                    physics_resource.physics_entities.insert(
+                        entity_id,
+                        new_handles_to_add[new_handles_to_add.len() - 1].1,
+                    );
                 }
             }
         }
@@ -207,7 +213,8 @@ impl System for PhysicsStepSystem {
 
         phys.integration_parameters.dt = dt;
         phys.integration_parameters.max_ccd_substeps = 4;
-        phys.integration_parameters.num_internal_stabilization_iterations = 4; // Optional: helps with stability
+        phys.integration_parameters
+            .num_internal_stabilization_iterations = 4; // Optional: helps with stability
 
         let gravity_vector = nalgebra::Vector3::new(phys.gravity.x, phys.gravity.y, phys.gravity.z);
 
@@ -302,11 +309,11 @@ impl CleanupPhysicsSystem {
 
     /// Check if a position is within safe Rapier bounds
     fn is_position_safe(&self, pos: &nalgebra::Vector3<f32>) -> bool {
-        pos.x.abs() < self.max_coordinate 
-            && pos.y.abs() < self.max_coordinate 
+        pos.x.abs() < self.max_coordinate
+            && pos.y.abs() < self.max_coordinate
             && pos.z.abs() < self.max_coordinate
-            && pos.x.is_finite() 
-            && pos.y.is_finite() 
+            && pos.x.is_finite()
+            && pos.y.is_finite()
             && pos.z.is_finite()
     }
 }
@@ -319,7 +326,7 @@ impl System for CleanupPhysicsSystem {
     fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
         let mut dead_entities: Vec<Entity> = Vec::new();
         let mut out_of_bounds_entities: Vec<Entity> = Vec::new();
-        
+
         // Pass 1: Collect entities that need to be destroyed (separate scope to avoid borrow conflicts)
         {
             if let Some(physics_resource) = ecs.get_resource::<PhysicsResource>() {
@@ -331,9 +338,10 @@ impl System for CleanupPhysicsSystem {
                     }
 
                     // Check if physics body is out of bounds
-                    if let Some(rigid_body) = physics_resource.rigid_body_set.get(handle.rigid_body) {
+                    if let Some(rigid_body) = physics_resource.rigid_body_set.get(handle.rigid_body)
+                    {
                         let position = rigid_body.translation();
-                        
+
                         if !self.is_position_safe(position) {
                             warn!(
                                 "Entity {} is out of bounds at [{:.2}, {:.2}, {:.2}], destroying to prevent Rapier panic",

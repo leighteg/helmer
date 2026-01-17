@@ -1,6 +1,6 @@
+use glam::Vec3;
 use hashbrown::HashMap;
 use rapier3d::prelude::*;
-use glam::Vec3;
 
 use crate::{ecs::ecs_core::Entity, physics::components::PhysicsHandle};
 

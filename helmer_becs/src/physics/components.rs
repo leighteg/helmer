@@ -1,5 +1,5 @@
 use bevy_ecs::component::Component;
-use rapier3d::prelude::{RigidBodyHandle, ColliderHandle};
+use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 
 // A component that will store the Rapier handle after the body is created.
 // This is how we map an ECS entity to a Rapier body.

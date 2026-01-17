@@ -60,10 +60,11 @@ struct GBufferInput {
 }
 
 struct GBufferOutput {
-    @location(0) normal: vec4<f32>,
-    @location(1) albedo: vec4<f32>,
-    @location(2) mra: vec4<f32>, // Metallic, Roughness, AO
+    @location(0) depth: f32,
+    @location(1) normal: vec4<f32>,
+    @location(2) albedo: vec4<f32>,
     @location(3) emission: vec4<f32>,
+    @location(4) mra: vec4<f32>, // Metallic, Roughness, AO
 }
 
 struct VertexInput {
@@ -79,6 +80,7 @@ struct InstanceInput {
     @location(7) model_matrix_col_2: vec4<f32>,
     @location(8) model_matrix_col_3: vec4<f32>,
     @location(9) material_id: u32,
+    @location(10) visibility: u32,
 }
 
 struct CameraUniforms {
@@ -88,6 +90,11 @@ struct CameraUniforms {
     inverse_view_projection_matrix: mat4x4<f32>,
     view_position: vec3<f32>,
     light_count: u32,
+    _pad_light: vec4<u32>,
+    prev_view_proj: mat4x4<f32>,
+    frame_index: u32,
+    _padding: vec3<u32>,
+    _pad_end: vec4<u32>,
 }
 
 struct MaterialData {
@@ -144,6 +151,16 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
 @vertex
 fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
     var out: GBufferInput;
+    if (instance.visibility == 0u) {
+        out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.world_position = vec3<f32>(0.0);
+        out.world_normal = vec3<f32>(0.0, 0.0, 1.0);
+        out.world_tangent = vec3<f32>(1.0, 0.0, 0.0);
+        out.world_bitangent = vec3<f32>(0.0, 1.0, 0.0);
+        out.tex_coord = vec2<f32>(0.0);
+        out.material_id = 0u;
+        return out;
+    }
 
     // Reconstruct model_matrix from instance input
     let model_matrix = mat4x4<f32>(
@@ -229,6 +246,7 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     out.albedo = vec4<f32>(albedo_color, alpha);
     out.mra = vec4<f32>(metallic, roughness, ao, 1.0);
     out.emission = vec4<f32>(emission_color, 1.0);
+    out.depth = in.clip_position.z;
 
     return out;
 }

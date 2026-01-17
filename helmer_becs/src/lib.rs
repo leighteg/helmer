@@ -1,4 +1,6 @@
-use std::{path::PathBuf, sync::Arc};
+use crossbeam_channel::Sender;
+use hashbrown::HashMap;
+use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Instant};
 
 use bevy_ecs::prelude::{ReflectComponent, ReflectResource};
 use bevy_ecs::{
@@ -10,17 +12,19 @@ use bevy_ecs::{
 };
 use bevy_reflect::{Reflect, TypeRegistry, TypeRegistryArc};
 use helmer::{
+    graphics::renderer_common::common::{RenderMessage, RendererStats, StreamingTuning},
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
         asset_server::AssetServer,
         config::RuntimeConfig,
         input_manager::InputManager,
-        runtime::{PerformanceMetrics, Runtime},
+        runtime::{PerformanceMetrics, Runtime, RuntimeProfiling, RuntimeTuning},
     },
 };
 use parking_lot::{Mutex, RwLock};
 
 use crate::provided::ui::inspector::InspectorSelectedEntityResource;
+use crate::systems::render_system::RenderGraphResource;
 use crate::{
     egui_integration::{EguiResource, egui_system},
     physics::{
@@ -31,8 +35,11 @@ use crate::{
         },
     },
     systems::{
+        render_system::RenderObjectCount,
         render_system::{RenderPacket, render_data_system},
-        scene_system::{scene_spawning_system, update_scene_child_transforms},
+        scene_system::{
+            SceneSpawnedChildren, scene_spawning_system, update_scene_child_transforms,
+        },
     },
 };
 
@@ -56,6 +63,89 @@ pub struct BevyInputManager(pub Arc<RwLock<InputManager>>);
 pub struct BevyPerformanceMetrics(pub Arc<PerformanceMetrics>);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct BevyRuntimeConfig(pub RuntimeConfig);
+#[derive(Resource)]
+pub struct BevyRuntimeTuning(pub Arc<RuntimeTuning>);
+#[derive(Resource)]
+pub struct BevyRuntimeProfiling(pub Arc<RuntimeProfiling>);
+#[derive(Resource)]
+pub struct BevyRendererStats(pub Arc<RendererStats>);
+#[derive(Resource)]
+pub struct BevyRenderSender(pub Sender<RenderMessage>);
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BevyStreamingTuning(pub StreamingTuning);
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BevyLodTuning(pub crate::systems::render_system::LodTuning);
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BevyRenderWorkerTuning(pub crate::systems::render_system::RenderWorkerTuning);
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BevySceneTuning(pub crate::systems::scene_system::SceneTuning);
+
+impl Default for BevyStreamingTuning {
+    fn default() -> Self {
+        Self(StreamingTuning::default())
+    }
+}
+
+impl Default for BevyLodTuning {
+    fn default() -> Self {
+        Self(crate::systems::render_system::LodTuning::default())
+    }
+}
+
+impl Default for BevyRenderWorkerTuning {
+    fn default() -> Self {
+        Self(crate::systems::render_system::RenderWorkerTuning::default())
+    }
+}
+
+impl Default for BevySceneTuning {
+    fn default() -> Self {
+        Self(crate::systems::scene_system::SceneTuning::default())
+    }
+}
+
+#[derive(Resource, Default, Clone)]
+pub struct DebugGraphHistory {
+    pub vram_bytes: VecDeque<f64>,
+    pub mesh_bytes: VecDeque<f64>,
+    pub texture_bytes: VecDeque<f64>,
+    pub material_bytes: VecDeque<f64>,
+    pub fps: VecDeque<f64>,
+}
+
+#[derive(Resource, Default, Clone)]
+pub struct ProfilingHistory {
+    pub main_event_ms: VecDeque<f64>,
+    pub main_update_ms: VecDeque<f64>,
+    pub logic_frame_ms: VecDeque<f64>,
+    pub logic_asset_ms: VecDeque<f64>,
+    pub logic_input_ms: VecDeque<f64>,
+    pub logic_tick_ms: VecDeque<f64>,
+    pub logic_schedule_ms: VecDeque<f64>,
+    pub logic_render_send_ms: VecDeque<f64>,
+    pub ecs_render_data_ms: VecDeque<f64>,
+    pub ecs_scene_spawn_ms: VecDeque<f64>,
+    pub ecs_scene_update_ms: VecDeque<f64>,
+    pub render_thread_frame_ms: VecDeque<f64>,
+    pub render_thread_messages_ms: VecDeque<f64>,
+    pub render_thread_upload_ms: VecDeque<f64>,
+    pub render_thread_render_ms: VecDeque<f64>,
+    pub render_prepare_globals_ms: VecDeque<f64>,
+    pub render_streaming_plan_ms: VecDeque<f64>,
+    pub render_occlusion_ms: VecDeque<f64>,
+    pub render_graph_ms: VecDeque<f64>,
+    pub render_graph_pass_ms: VecDeque<f64>,
+    pub render_graph_encoder_create_ms: VecDeque<f64>,
+    pub render_graph_encoder_finish_ms: VecDeque<f64>,
+    pub render_graph_overhead_ms: VecDeque<f64>,
+    pub render_resource_mgmt_ms: VecDeque<f64>,
+    pub render_acquire_ms: VecDeque<f64>,
+    pub render_submit_ms: VecDeque<f64>,
+    pub render_present_ms: VecDeque<f64>,
+    pub render_pass_ms: HashMap<String, VecDeque<f64>>,
+    pub render_pass_last_ms: HashMap<String, f64>,
+    pub render_pass_order: Vec<String>,
+}
 
 // resources
 #[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
@@ -94,17 +184,6 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
     // Register reflectable resources
     type_registry.register::<DeltaTime>();
 
-    // Note: BevyTransform, BevyCamera, etc. cannot be registered because
-    // Transform, Camera, etc. from helmer don't implement Reflect.
-    // You can only register types in the inspector that implement Reflect.
-    // To make your own components inspectable, derive Reflect on them:
-    //
-    // #[derive(Component, Reflect)]
-    // #[reflect(Component)]
-    // pub struct MyComponent { ... }
-    //
-    // Then register with: type_registry.register::<MyComponent>();
-
     let mut runtime: Runtime<(World, Schedule)> = Runtime::new(
         (world, schedule),
         move |runtime, (world, schedule)| {
@@ -116,6 +195,10 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<BevyRuntimeConfig>(BevyRuntimeConfig(
                 runtime.config.as_ref().clone(),
             ));
+            world.insert_resource::<BevyRuntimeTuning>(BevyRuntimeTuning(runtime.tuning.clone()));
+            world.insert_resource::<BevyRuntimeProfiling>(BevyRuntimeProfiling(
+                runtime.profiling.clone(),
+            ));
             world.insert_resource::<BevyAssetServer>(BevyAssetServer(
                 runtime.asset_server.as_ref().unwrap().clone(),
             ));
@@ -125,8 +208,23 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<BevyPerformanceMetrics>(BevyPerformanceMetrics(
                 runtime.metrics.clone(),
             ));
+            world.insert_resource::<BevyRendererStats>(BevyRendererStats(
+                runtime.renderer_stats.clone(),
+            ));
+            world.insert_resource::<BevyRenderSender>(BevyRenderSender(
+                runtime.render_thread_sender.clone(),
+            ));
+            world.insert_resource::<BevyStreamingTuning>(BevyStreamingTuning::default());
+            world.insert_resource::<BevyLodTuning>(BevyLodTuning::default());
+            world.insert_resource::<BevyRenderWorkerTuning>(BevyRenderWorkerTuning::default());
+            world.insert_resource::<BevySceneTuning>(BevySceneTuning::default());
+            world.insert_resource::<DebugGraphHistory>(DebugGraphHistory::default());
+            world.insert_resource::<ProfilingHistory>(ProfilingHistory::default());
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<RenderPacket>(RenderPacket::default());
+            world.insert_resource::<RenderObjectCount>(RenderObjectCount::default());
+            world.insert_resource(RenderGraphResource::default());
+            world.insert_resource(SceneSpawnedChildren::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
             world.insert_resource::<DraggedFile>(DraggedFile(None));
@@ -177,9 +275,27 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
 
             world.resource_mut::<DeltaTime>().0 = dt;
 
+            let profiling = world
+                .get_resource::<BevyRuntimeProfiling>()
+                .map(|p| p.0.clone());
+            let profiling_enabled = profiling
+                .as_ref()
+                .map(|p| p.enabled.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(false);
+            let schedule_start = if profiling_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             schedule.run(world);
+            if let (Some(start), Some(profiling)) = (schedule_start, profiling.as_ref()) {
+                profiling.logic_schedule_us.store(
+                    start.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
 
-            let render_data = {
+            let render_delta = {
                 if let Some(mut packet) = world.get_resource_mut::<RenderPacket>() {
                     packet.0.take()
                 } else {
@@ -195,7 +311,7 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
                 }
             };
 
-            (render_data, egui_data)
+            (render_delta, egui_data)
         },
         |new_size, (world, _schedule)| {
             for (mut camera, _) in world

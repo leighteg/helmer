@@ -4,9 +4,7 @@ use tracing::info;
 
 use crate::ecs::{resource::Resource, resource_pool::ResourcePool};
 
-use super::{
-    component::Component, component_pool::ComponentPool,
-};
+use super::{component::Component, component_pool::ComponentPool};
 
 pub type Entity = usize;
 

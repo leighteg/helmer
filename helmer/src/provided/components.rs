@@ -133,7 +133,7 @@ impl Light {
 // --- Camera Component ---
 // Defines a camera in your world. The ECS system would select one active camera
 // to provide data for the renderer's camera uniforms.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
     pub fov_y_rad: f32,    // Vertical field of view in radians
     pub aspect_ratio: f32, // Width / Height

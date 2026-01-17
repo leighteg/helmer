@@ -3,7 +3,13 @@ use std::cell::RefCell;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles as _};
 use hashbrown::HashMap;
 
-use crate::{graphics::renderer_common::common::{Aabb, CASCADE_SPLITS, CascadeUniform, InstanceRaw, Mesh, NUM_CASCADES, RenderData, SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex}, provided::components::{Camera, LightType}};
+use crate::{
+    graphics::renderer_common::common::{
+        Aabb, CASCADE_SPLITS, CascadeUniform, InstanceRaw, Mesh, NUM_CASCADES, RenderData,
+        SHADOW_MAP_RESOLUTION, ShadowPipeline, ShadowUniforms, Vertex,
+    },
+    provided::components::{Camera, LightType},
+};
 
 pub struct CascadedEVSMPass {
     shadow_pipeline: Option<ShadowPipeline>,
@@ -123,7 +129,11 @@ impl CascadedEVSMPass {
         self.cascade_views = Some(cascade_views);
     }
 
-    pub fn create_shadow_pipeline(&mut self, device: &wgpu::Device, render_constants_bind_group_layout: &wgpu::BindGroupLayout) {
+    pub fn create_shadow_pipeline(
+        &mut self,
+        device: &wgpu::Device,
+        render_constants_bind_group_layout: &wgpu::BindGroupLayout,
+    ) {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../../shaders/shadow.wgsl"));
 
         let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress;
@@ -168,11 +178,8 @@ impl CascadedEVSMPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[
-                &bind_group_layout,
-                render_constants_bind_group_layout,
-            ],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[&bind_group_layout, render_constants_bind_group_layout],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -210,7 +217,7 @@ impl CascadedEVSMPass {
                 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -411,15 +418,13 @@ impl CascadedEVSMPass {
                         }),
                         stencil_ops: None,
                     }),
-                    ..Default::default()
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 shadow_pass.set_pipeline(&shadow_pipeline.pipeline);
                 shadow_pass.set_bind_group(0, &shadow_pipeline.bind_group, &[offset]);
-                shadow_pass.set_bind_group(
-                    1,
-                    render_constants_bind_group,
-                    &[],
-                );
+                shadow_pass.set_bind_group(1, render_constants_bind_group, &[]);
 
                 // Bind the one persistent buffer
                 shadow_pass.set_vertex_buffer(1, buffer.as_ref().unwrap().slice(..));
@@ -456,6 +461,9 @@ impl CascadedEVSMPass {
         let scene_corners = scene_bounds.get_corners();
 
         let mut uniforms = ShadowUniforms {
+            cascade_count: NUM_CASCADES as u32,
+            _pad0: [0; 3],
+            _pad1: [0; 4],
             cascades: [CascadeUniform::default(); NUM_CASCADES],
         };
 

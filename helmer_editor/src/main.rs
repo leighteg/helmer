@@ -1,13 +1,19 @@
 use std::{any::TypeId, collections::HashSet, env};
 
 use glam::Quat;
-use helmer_ecs::{egui_integration::EguiResource, helmer_ecs_init, physics::components::{ColliderShape, DynamicRigidBody, FixedCollider}};
+use helmer::provided::components::{
+    ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform,
+};
+use helmer_ecs::{
+    egui_integration::EguiResource,
+    helmer_ecs_init,
+    physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
+};
 use helmer_editor::systems::{
     core::state::{EditorStateResource, EditorStateSystem, WorldState},
     interaction::freecam::FreecamSystem,
     ui::inspector::InspectorSystem,
 };
-use helmer::provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform};
 
 fn main() {
     let current_path = env::current_dir().expect("Failed to find executable path");

@@ -55,6 +55,9 @@ opt-level = 3
 [profile.dev.package.simd-adler32]
 opt-level = 3
 
+[patch.crates-io]
+egui-wgpu = { path = "vendor/egui-wgpu" }
+
 # Math helpers
 [profile.dev.package.num-traits]
 opt-level = 3

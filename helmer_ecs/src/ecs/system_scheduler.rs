@@ -1,9 +1,9 @@
 use helmer::runtime::input_manager::InputManager;
 use rayon::prelude::*;
-use tracing::{info, error};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::{error, info};
 
 use super::{ecs_core::ECSCore, system::System};
 

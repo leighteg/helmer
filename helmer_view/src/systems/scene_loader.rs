@@ -120,6 +120,21 @@ pub fn scene_loader_system(
                     ui.label("alt + F4: quit");
                 });
             });
+            ui.collapsing("miscellaneous keybinds", |ui| {
+                ui.group(|ui| {
+                    ui.label("1: lit view");
+                    ui.label("2: lighting view");
+                    ui.label("0: unlit view");
+                    ui.separator();
+                    ui.label("Z: toggle shadow pass");
+                    ui.label("G: toggle GI pass");
+                    ui.label("R: toggle reflection pass");
+                    ui.label("H: toggle sky pass");
+                    ui.label("U: toggle UI pass");
+                    ui.label("F: toggle frustum culling");
+                    ui.label("L: toggle LODs");
+                });
+            });
         }),
         "Scene Loader".to_string(),
     ));

@@ -1,3 +1,5 @@
+use std::env;
+
 use becs_bench::systems::{config_toggle::config_toggle_system, freecam::freecam_system};
 use glam::Quat;
 use helmer::provided::components::{ActiveCamera, Light, Transform};
@@ -8,6 +10,11 @@ use crate::systems::scene_loader::{SceneLoaderResource, scene_loader_system};
 pub mod systems;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        env::set_var("HELMER_FORCE_UNIX_BACKEND", "x11")
+    };
+
     helmer_becs_init(|world, schedule, asset_server| {
         let camera_entity = world.spawn((
             BevyTransform::default(),

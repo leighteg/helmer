@@ -1,3 +1,4 @@
+use crate::graphics::backend::binding_backend::BindingBackendKind;
 use crate::graphics::{
     graph::{
         definition::{
@@ -34,6 +35,7 @@ pub struct RayTracingPass {
     outputs: RayTracingOutputs,
     history: ResourceId,
     textured: Arc<RwLock<Option<RayTracingPipeline>>>,
+    textured_arrays: Arc<RwLock<Option<RayTracingPipeline>>>,
     untextured: Arc<RwLock<Option<RayTracingPipeline>>>,
     fallback_storage: Arc<RwLock<Option<wgpu::Buffer>>>,
 }
@@ -69,6 +71,7 @@ impl RayTracingPass {
             outputs: RayTracingOutputs { accumulation },
             history,
             textured: Arc::new(RwLock::new(None)),
+            textured_arrays: Arc::new(RwLock::new(None)),
             untextured: Arc::new(RwLock::new(None)),
             fallback_storage: Arc::new(RwLock::new(None)),
         }
@@ -459,6 +462,89 @@ impl RayTracingPass {
         });
     }
 
+    fn ensure_pipeline_textured_arrays(&self, device: &wgpu::Device) {
+        if self.textured_arrays.read().is_some() {
+            return;
+        }
+
+        let (bgl0, bgl1) = Self::create_common_bgls(device);
+        let bgl2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("RayTracing/BGL2Arrays"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("RayTracing/PipelineLayoutArrays"),
+            bind_group_layouts: &[&bgl0, &bgl1, &bgl2],
+            immediate_size: 0,
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("raytracing_arrays.wgsl"));
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("RayTracing/PipelineArrays"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("trace"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        *self.textured_arrays.write() = Some(RayTracingPipeline {
+            pipeline,
+            bgl0,
+            bgl1,
+            bgl2: Some(bgl2),
+            texture_array_size: 0,
+        });
+    }
+
     fn fallback_storage(&self, device: &wgpu::Device) -> wgpu::Buffer {
         if let Some(buf) = self.fallback_storage.read().as_ref() {
             return buf.clone();
@@ -509,14 +595,38 @@ impl RenderPass for RayTracingPass {
             None => return,
         };
 
-        let supports_textures = frame
+        let supports_bindless = frame
             .device_caps
             .features
             .contains(wgpu::Features::TEXTURE_BINDING_ARRAY);
-        let use_textures = frame.render_config.rt_use_textures && supports_textures;
-        let array_size = frame.texture_array_size.max(1);
+        let want_textures = frame.render_config.rt_use_textures;
+        let use_array_textures = want_textures && frame.rt_texture_arrays.is_some();
+        let use_bindless_textures = want_textures
+            && !use_array_textures
+            && supports_bindless
+            && frame.binding_backend != BindingBackendKind::BindGroups;
 
-        let (pipeline, bgl0, bgl1, bgl2) = if use_textures {
+        let (pipeline, bgl0, bgl1, bgl2) = if use_array_textures {
+            self.ensure_pipeline_textured_arrays(ctx.device());
+            let guard = self.textured_arrays.read();
+            let state = match guard.as_ref() {
+                Some(state) => state,
+                None => return,
+            };
+            (
+                state.pipeline.clone(),
+                state.bgl0.clone(),
+                state.bgl1.clone(),
+                state.bgl2.clone(),
+            )
+        } else if use_bindless_textures {
+            let texture_view_count = frame.texture_views.len().max(1) as u32;
+            let device_limit = frame
+                .device_caps
+                .limits
+                .max_sampled_textures_per_shader_stage
+                .max(1);
+            let array_size = texture_view_count.min(device_limit).max(1);
             self.ensure_pipeline_textured(ctx.device(), array_size);
             let guard = self.textured.read();
             let state = match guard.as_ref() {
@@ -630,17 +740,58 @@ impl RenderPass for RayTracingPass {
             ],
         });
 
-        let bgl2 = if use_textures {
+        let bgl2 = if use_array_textures {
             let bgl2 = match bgl2 {
                 Some(layout) => layout,
                 None => return,
             };
-            let mut texture_views: Vec<&wgpu::TextureView> =
-                Vec::with_capacity(array_size as usize);
-            for view in frame.texture_views.iter() {
+            let arrays = match frame.rt_texture_arrays.as_ref() {
+                Some(arrays) => arrays,
+                None => return,
+            };
+            Some(ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RayTracing/BG2Arrays"),
+                layout: &bgl2,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&arrays.albedo),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&arrays.normal),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&arrays.metallic_roughness),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&arrays.emission),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                    },
+                ],
+            }))
+        } else if use_bindless_textures {
+            let bgl2 = match bgl2 {
+                Some(layout) => layout,
+                None => return,
+            };
+            let texture_view_count = frame.texture_views.len().max(1) as u32;
+            let device_limit = frame
+                .device_caps
+                .limits
+                .max_sampled_textures_per_shader_stage
+                .max(1);
+            let array_size = texture_view_count.min(device_limit).max(1) as usize;
+            let mut texture_views: Vec<&wgpu::TextureView> = Vec::with_capacity(array_size);
+            for view in frame.texture_views.iter().take(array_size) {
                 texture_views.push(view);
             }
-            while texture_views.len() < array_size as usize {
+            while texture_views.len() < array_size {
                 texture_views.push(&frame.fallback_view);
             }
 

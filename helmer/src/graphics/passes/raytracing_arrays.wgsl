@@ -3,6 +3,7 @@ const MAX_STACK: u32 = 128u;
 const EPSILON: f32 = 1.0e-4;
 const RT_FLAG_DIRECT_LIGHTING: u32 = 1u << 0u;
 const RT_FLAG_SHADOWS: u32 = 1u << 1u;
+const RT_FLAG_USE_TEXTURES: u32 = 1u << 2u;
 const RT_FLAG_SHADE_SMOOTH: u32 = 1u << 3u;
 
 struct CameraUniforms {
@@ -229,6 +230,12 @@ struct HitInfo {
 @group(1) @binding(1) var blue_noise_samp: sampler;
 @group(1) @binding(2) var accum_tex: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(3) var history_tex: texture_2d<f32>;
+
+@group(2) @binding(0) var albedo_textures: texture_2d_array<f32>;
+@group(2) @binding(1) var normal_textures: texture_2d_array<f32>;
+@group(2) @binding(2) var mra_textures: texture_2d_array<f32>;
+@group(2) @binding(3) var emission_textures: texture_2d_array<f32>;
+@group(2) @binding(4) var pbr_sampler: sampler;
 
 fn wang_hash(seed: u32) -> u32 {
     var s = seed;
@@ -799,6 +806,7 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let use_direct = (constants.flags & RT_FLAG_DIRECT_LIGHTING) != 0u;
     let use_shadows = (constants.flags & RT_FLAG_SHADOWS) != 0u;
+    let use_textures = (constants.flags & RT_FLAG_USE_TEXTURES) != 0u;
     let direct_samples = max(1u, constants.direct_light_samples);
     let ray_bias = max(constants.ray_bias, EPSILON);
     let shadow_bias = max(constants.shadow_bias, EPSILON);
@@ -839,15 +847,79 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             let material_id = hit.material_id;
             let mat = materials[material_id];
-            let albedo = mat.albedo.xyz;
-            let metallic = mat.metallic;
+            let layer_limit = max(1u, constants.texture_array_layers);
+            let layer = select(material_id, 0u, material_id >= layer_limit);
+            let layer_i = i32(layer);
+            let inst = instances[hit.instance_index];
+            let tri = blas_triangles[hit.tri_index];
+            var albedo = mat.albedo.xyz;
+            var metallic = mat.metallic;
             var roughness = mat.roughness;
-            let ao = mat.ao;
-            let emission = mat.emission_color * mat.emission_strength;
+            var ao = mat.ao;
+            var emission = mat.emission_color * mat.emission_strength;
+            if use_textures {
+                if mat.albedo_idx >= 0i {
+                    let albedo_sample =
+                        textureSampleLevel(albedo_textures, pbr_sampler, hit.uv, layer_i, 0.0);
+                    albedo = albedo * albedo_sample.rgb;
+                }
+                if mat.metallic_roughness_idx >= 0i {
+                    let mra_sample = textureSampleLevel(
+                        mra_textures,
+                        pbr_sampler,
+                        hit.uv,
+                        layer_i,
+                        0.0,
+                    );
+                    ao = ao * mra_sample.r;
+                    roughness = roughness * mra_sample.g;
+                    metallic = metallic * mra_sample.b;
+                }
+                if mat.emission_idx >= 0i {
+                    let emission_sample =
+                        textureSampleLevel(emission_textures, pbr_sampler, hit.uv, layer_i, 0.0);
+                    emission = emission * emission_sample.rgb;
+                }
+            }
 
             roughness = clamp(roughness, constants.min_roughness, 1.0);
+            var shading_normal = safe_normal;
+            if use_textures && mat.normal_idx >= 0i {
+                let p0 = tri.v0.xyz;
+                let p1 = tri.v1.xyz;
+                let p2 = tri.v2.xyz;
+                let uv0 = tri.uv0;
+                let uv1 = tri.uv1;
+                let uv2 = tri.uv2;
+                let dp1 = p1 - p0;
+                let dp2 = p2 - p0;
+                let duv1 = uv1 - uv0;
+                let duv2 = uv2 - uv0;
+                let denom = duv1.x * duv2.y - duv1.y * duv2.x;
+                var t_local = vec3<f32>(1.0, 0.0, 0.0);
+                var b_local = vec3<f32>(0.0, 1.0, 0.0);
+                if abs(denom) > 1.0e-6 {
+                    let r = 1.0 / denom;
+                    t_local = normalize((dp1 * duv2.y - dp2 * duv1.y) * r);
+                    b_local = normalize((dp2 * duv1.x - dp1 * duv2.x) * r);
+                }
+                let t_world = normalize((inst.model * vec4(t_local, 0.0)).xyz);
+                let t = normalize(t_world - safe_normal * dot(safe_normal, t_world));
+                let b = normalize(cross(safe_normal, t));
+                let strength = max(constants.normal_map_strength, 0.0);
+                let n_sample =
+                    textureSampleLevel(normal_textures, pbr_sampler, hit.uv, layer_i, 0.0).xyz
+                    * 2.0
+                    - 1.0;
+                let n_tangent = normalize(vec3(n_sample.xy * strength, n_sample.z));
+                shading_normal = normalize(t * n_tangent.x + b * n_tangent.y + safe_normal * n_tangent.z);
+            }
+            if dot(shading_normal, dir) > 0.0 {
+                shading_normal = -shading_normal;
+            }
+
             let V = normalize(-dir);
-            let NdotV = max(dot(safe_normal, V), 0.0);
+            let NdotV = max(dot(shading_normal, V), 0.0);
             let alpha = max(roughness * roughness, 1.0e-4);
             let f0 = mix(vec3<f32>(0.04), albedo, metallic);
             let diffuse_color = albedo * (1.0 - metallic) * ao;
@@ -881,12 +953,12 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
                             radiance_light = light.color * light.intensity / max(dist_sq, 1.0);
                         }
                     }
-                    let NdotL = max(dot(safe_normal, L), 0.0);
+                    let NdotL = max(dot(shading_normal, L), 0.0);
                     let shadowed =
-                        use_shadows && trace_shadow(hit_pos + safe_normal * shadow_bias, L, max_t);
+                        use_shadows && trace_shadow(hit_pos + shading_normal * shadow_bias, L, max_t);
                     if NdotL > 0.0 && !shadowed {
                         let H = normalize(L + V);
-                        let NdotH = max(dot(safe_normal, H), 0.0);
+                        let NdotH = max(dot(shading_normal, H), 0.0);
                         let VdotH = max(dot(V, H), 0.0);
                         let F = fresnel_schlick(VdotH, f0);
                         let D = distribution_ggx(NdotH, alpha);
@@ -911,23 +983,23 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight_sum = spec_weight + diff_weight;
             let spec_prob = select(1.0, clamp(spec_weight / weight_sum, 0.0, 1.0), weight_sum > 0.0);
 
-            let tangent = make_tangent(safe_normal);
-            let bitangent = normalize(cross(safe_normal, tangent));
+            let tangent = make_tangent(shading_normal);
+            let bitangent = normalize(cross(shading_normal, tangent));
 
             if rand(&seed) < spec_prob {
                 let r1 = rand(&seed);
                 let r2 = rand(&seed);
                 let h_local = sample_ggx(r1, r2, alpha);
                 let H = normalize(
-                    tangent * h_local.x + bitangent * h_local.y + safe_normal * h_local.z
+                    tangent * h_local.x + bitangent * h_local.y + shading_normal * h_local.z
                 );
                 let L = normalize(reflect(-V, H));
-                let NdotL = dot(safe_normal, L);
+                let NdotL = dot(shading_normal, L);
                 if NdotL <= 0.0 {
                     break;
                 }
                 let VdotH = max(dot(V, H), 0.0);
-                let NdotH = max(dot(safe_normal, H), 0.0);
+                let NdotH = max(dot(shading_normal, H), 0.0);
                 let F = fresnel_schlick(VdotH, f0);
                 let D = distribution_ggx(NdotH, alpha);
                 let G = geometry_smith(NdotV, NdotL, roughness);
@@ -940,9 +1012,9 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let r2 = rand(&seed);
                 let local_dir = cosine_sample_hemisphere(r1, r2);
                 let L = normalize(
-                    tangent * local_dir.x + bitangent * local_dir.y + safe_normal * local_dir.z
+                    tangent * local_dir.x + bitangent * local_dir.y + shading_normal * local_dir.z
                 );
-                let NdotL = max(dot(safe_normal, L), 0.0);
+                let NdotL = max(dot(shading_normal, L), 0.0);
                 let diff = diffuse_color / PI;
                 let pdf = max(NdotL / PI, EPSILON);
                 let diff_prob = max(1.0 - spec_prob, EPSILON);
@@ -950,7 +1022,7 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
                 dir = L;
             }
 
-            origin = hit_pos + safe_normal * ray_bias;
+            origin = hit_pos + shading_normal * ray_bias;
             if constants.throughput_cutoff > 0.0 {
                 if max_component(throughput) < constants.throughput_cutoff {
                     break;

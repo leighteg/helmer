@@ -70,6 +70,7 @@ pub struct FrameGlobals {
     pub material_bindings_version: u64,
     pub texture_views: Vec<wgpu::TextureView>,
     pub texture_array_size: u32,
+    pub rt_texture_arrays: Option<RayTracingTextureArrays>,
     pub pbr_sampler: wgpu::Sampler,
     pub shadow_sampler: wgpu::Sampler,
     pub scene_sampler: wgpu::Sampler,
@@ -133,6 +134,15 @@ pub struct MaterialTextureSet {
     pub normal: wgpu::TextureView,
     pub metallic_roughness: wgpu::TextureView,
     pub emission: wgpu::TextureView,
+}
+
+#[derive(Clone)]
+pub struct RayTracingTextureArrays {
+    pub albedo: wgpu::TextureView,
+    pub normal: wgpu::TextureView,
+    pub metallic_roughness: wgpu::TextureView,
+    pub emission: wgpu::TextureView,
+    pub layers: u32,
 }
 
 #[derive(Clone)]

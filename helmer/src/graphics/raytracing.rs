@@ -80,6 +80,7 @@ pub struct RtConstants {
     pub throughput_cutoff: f32,
     pub sky_multi_scatter_strength: f32,
     pub sky_multi_scatter_power: f32,
+    pub texture_array_layers: u32,
 }
 
 pub const RT_FLAG_DIRECT_LIGHTING: u32 = 1 << 0;

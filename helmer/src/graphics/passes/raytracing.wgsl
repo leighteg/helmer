@@ -122,6 +122,7 @@ struct RtConstants {
     throughput_cutoff: f32,
     sky_multi_scatter_strength: f32,
     sky_multi_scatter_power: f32,
+    texture_array_layers: u32,
 }
 
 struct ShaderConstants {

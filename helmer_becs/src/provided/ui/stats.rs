@@ -1727,6 +1727,27 @@ impl StatsUI {
                                     .prefix("throughput cutoff: "),
                             );
                         });
+                        ui.collapsing("texture arrays", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_texture_array_budget_bytes)
+                                    .speed(1024.0 * 1024.0)
+                                    .prefix("array budget bytes: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_texture_array_min_resolution,
+                                )
+                                .speed(1.0)
+                                .prefix("min resolution: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_texture_array_max_resolution,
+                                )
+                                .speed(1.0)
+                                .prefix("max resolution: "),
+                            );
+                        });
                         ui.collapsing("resolution scaling", |ui| {
                             ui.add(
                                 egui::DragValue::new(&mut render_cfg.rt_resolution_scale)

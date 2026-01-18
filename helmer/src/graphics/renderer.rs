@@ -39,7 +39,7 @@ use crate::graphics::{
     },
     passes::{
         BundleMode, FrameGlobals, GBufferBundleKey, IndirectDrawBatch, MaterialTextureSet,
-        RayTracingFrameInput, ShadowBundleKey, SwapchainFrameInput,
+        RayTracingFrameInput, RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput,
     },
     raytracing::{
         BlasBuild, RT_FLAG_DIRECT_LIGHTING, RT_FLAG_SHADE_SMOOTH, RT_FLAG_SHADOWS,
@@ -102,6 +102,19 @@ struct ResolvedDrawMesh {
 struct MaterialEntry {
     buffer: ResourceId,
     meta: MaterialGpuData,
+}
+
+struct RtTextureArraySet {
+    resolution: u32,
+    layers: u32,
+    albedo: wgpu::Texture,
+    normal: wgpu::Texture,
+    mra: wgpu::Texture,
+    emission: wgpu::Texture,
+    albedo_view: wgpu::TextureView,
+    normal_view: wgpu::TextureView,
+    mra_view: wgpu::TextureView,
+    emission_view: wgpu::TextureView,
 }
 
 #[repr(C)]
@@ -1261,6 +1274,10 @@ pub struct GraphRenderer {
 
     frame_inputs: FrameInputHub,
     mipmap_generator: MipmapGenerator,
+    rt_texture_arrays: Option<RtTextureArraySet>,
+    rt_texture_arrays_signature: u64,
+    rt_texture_copy_bgl: wgpu::BindGroupLayout,
+    rt_texture_copy_pipeline: wgpu::ComputePipeline,
 
     meshes: SlotVec<MeshGpu>,
     fallback_mesh: Option<MeshGpu>,
@@ -2147,6 +2164,55 @@ impl GraphRenderer {
         info!("Selected binding backend: {}", backend_name);
 
         let mipmap_generator = MipmapGenerator::new(&device);
+        let rt_texture_copy_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("RayTracing/TextureCopyBGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let rt_texture_copy_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/rt_texture_copy.wgsl"));
+        let rt_texture_copy_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("RayTracing/TextureCopyPipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("RayTracing/TextureCopyLayout"),
+                        bind_group_layouts: &[&rt_texture_copy_bgl],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &rt_texture_copy_shader,
+                entry_point: Some("copy"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
 
         // Budget defaults: tuned for low-memory GPUs
         let mb = 1024 * 1024;
@@ -2186,6 +2252,10 @@ impl GraphRenderer {
 
             frame_inputs,
             mipmap_generator,
+            rt_texture_arrays: None,
+            rt_texture_arrays_signature: 0,
+            rt_texture_copy_bgl,
+            rt_texture_copy_pipeline,
 
             meshes: SlotVec::new(),
             fallback_mesh: None,
@@ -3239,6 +3309,8 @@ impl GraphRenderer {
         self.streaming_requests = streaming_requests;
         self.rt_state = RayTracingState::new(self.frames_in_flight, self.surface_size);
         self.rt_state.apply_snapshot(rt_state);
+        self.rt_texture_arrays = None;
+        self.rt_texture_arrays_signature = 0;
         self.configure_rt_blas_budget();
 
         self.streaming_inflight = SlotVec::new();
@@ -5527,6 +5599,13 @@ impl GraphRenderer {
         } else {
             None
         };
+        let rt_texture_arrays = if frame_binding_backend == BindingBackendKind::BindGroups {
+            material_textures
+                .as_ref()
+                .and_then(|textures| self.ensure_rt_texture_arrays(textures, &frame_render_config))
+        } else {
+            None
+        };
 
         let gbuffer_pass = render_data.render_config.gbuffer_pass;
         let shadow_pass = render_data.render_config.shadow_pass;
@@ -5803,6 +5882,7 @@ impl GraphRenderer {
             material_bindings_version: self.material_bindings_version,
             texture_views,
             texture_array_size,
+            rt_texture_arrays,
             pbr_sampler: self.default_sampler.clone(),
             shadow_sampler: self.shadow_sampler.clone(),
             scene_sampler: self.scene_sampler.clone(),
@@ -5936,6 +6016,11 @@ impl GraphRenderer {
         let min_roughness = cfg.rt_min_roughness.clamp(0.0, 1.0);
         let normal_map_strength = cfg.rt_normal_map_strength.max(0.0);
         let throughput_cutoff = cfg.rt_throughput_cutoff.max(0.0);
+        let texture_array_layers = globals
+            .rt_texture_arrays
+            .as_ref()
+            .map(|arrays| arrays.layers)
+            .unwrap_or(0);
         let camera_pos_epsilon = cfg.rt_camera_pos_epsilon.max(0.0);
         let camera_rot_epsilon = cfg.rt_camera_rot_epsilon.max(0.0);
         let scene_pos_quantize = cfg.rt_scene_pos_quantize.max(0.0);
@@ -6306,6 +6391,7 @@ impl GraphRenderer {
             throughput_cutoff: self.rt_state.throughput_cutoff,
             sky_multi_scatter_strength: self.rt_state.sky_multi_scatter_strength,
             sky_multi_scatter_power: self.rt_state.sky_multi_scatter_power,
+            texture_array_layers,
         };
 
         let constants_buf = self.rt_state.constants_buffer.ensure(
@@ -7289,6 +7375,236 @@ impl GraphRenderer {
             signature,
             changed: true,
         }
+    }
+
+    fn compute_rt_texture_array_resolution(&self, layers: u32, cfg: &RenderConfig) -> u32 {
+        let max_dim = self.device_caps.limits.max_texture_dimension_2d.max(1);
+        let max_res_cfg = cfg.rt_texture_array_max_resolution.max(1);
+        let max_res = max_dim.min(max_res_cfg).max(1);
+        let min_res_cfg = cfg.rt_texture_array_min_resolution.max(1);
+        let min_res = min_res_cfg.min(max_res).max(1);
+        let layer_count = layers.max(1) as u64;
+        let bytes_per_texel = 4u64;
+        let array_count = 4u64;
+        let budget_bytes = cfg.rt_texture_array_budget_bytes.max(1);
+        let denom = array_count
+            .saturating_mul(layer_count)
+            .saturating_mul(bytes_per_texel)
+            .max(1);
+        let max_pixels = budget_bytes / denom;
+        let mut res = if max_pixels > 0 {
+            (max_pixels as f64).sqrt().floor() as u32
+        } else {
+            0
+        };
+        if res < min_res {
+            res = min_res;
+        }
+        if res > max_res {
+            res = max_res;
+        }
+        res.max(1)
+    }
+
+    fn copy_rt_texture_layer(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        src: &wgpu::TextureView,
+        dst: &wgpu::Texture,
+        layer: u32,
+        dispatch_x: u32,
+        dispatch_y: u32,
+    ) {
+        let dst_view = dst.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer,
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RayTracing/TextureCopyBG"),
+            layout: &self.rt_texture_copy_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.default_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&dst_view),
+                },
+            ],
+        });
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(dispatch_x.max(1), dispatch_y.max(1), 1);
+    }
+
+    fn ensure_rt_texture_arrays(
+        &mut self,
+        material_textures: &Arc<Vec<MaterialTextureSet>>,
+        cfg: &RenderConfig,
+    ) -> Option<RayTracingTextureArrays> {
+        if material_textures.is_empty() {
+            self.rt_texture_arrays = None;
+            self.rt_texture_arrays_signature = 0;
+            return None;
+        }
+
+        let max_layers = self.device_caps.limits.max_texture_array_layers.max(1);
+        let layers_needed = material_textures.len() as u32;
+        let layers = layers_needed.min(max_layers);
+        if layers == 0 {
+            return None;
+        }
+
+        if layers_needed > max_layers {
+            tracing::warn!(
+                max_layers,
+                layers_needed,
+                "Ray tracing texture arrays capped; materials beyond limit will use fallback"
+            );
+        }
+
+        let resolution = self.compute_rt_texture_array_resolution(layers, cfg);
+        let signature =
+            self.cached_material_textures_signature ^ ((layers as u64) << 32) ^ (resolution as u64);
+
+        let needs_recreate = match self.rt_texture_arrays.as_ref() {
+            Some(existing) => existing.layers != layers || existing.resolution != resolution,
+            None => true,
+        };
+
+        if !needs_recreate && signature == self.rt_texture_arrays_signature {
+            return self
+                .rt_texture_arrays
+                .as_ref()
+                .map(|arrays| RayTracingTextureArrays {
+                    albedo: arrays.albedo_view.clone(),
+                    normal: arrays.normal_view.clone(),
+                    metallic_roughness: arrays.mra_view.clone(),
+                    emission: arrays.emission_view.clone(),
+                    layers,
+                });
+        }
+
+        if needs_recreate {
+            let size = wgpu::Extent3d {
+                width: resolution,
+                height: resolution,
+                depth_or_array_layers: layers,
+            };
+            let usage = wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST;
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let create_array = |label: &'static str| {
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some(label),
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
+                (texture, view)
+            };
+
+            let (albedo, albedo_view) = create_array("RayTracing/AlbedoArray");
+            let (normal, normal_view) = create_array("RayTracing/NormalArray");
+            let (mra, mra_view) = create_array("RayTracing/MRAArray");
+            let (emission, emission_view) = create_array("RayTracing/EmissionArray");
+
+            self.rt_texture_arrays = Some(RtTextureArraySet {
+                resolution,
+                layers,
+                albedo,
+                normal,
+                mra,
+                emission,
+                albedo_view,
+                normal_view,
+                mra_view,
+                emission_view,
+            });
+        }
+
+        let arrays = match self.rt_texture_arrays.as_ref() {
+            Some(arrays) => arrays,
+            None => return None,
+        };
+
+        let workgroup = 8u32;
+        let dispatch_x = (resolution + workgroup - 1) / workgroup;
+        let dispatch_y = (resolution + workgroup - 1) / workgroup;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("RayTracing/TextureArrayCopy"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RayTracing/TextureArrayCopyPass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.rt_texture_copy_pipeline);
+            for (layer, set) in material_textures.iter().enumerate().take(layers as usize) {
+                let layer = layer as u32;
+                self.copy_rt_texture_layer(
+                    &mut pass,
+                    &set.albedo,
+                    &arrays.albedo,
+                    layer,
+                    dispatch_x,
+                    dispatch_y,
+                );
+                self.copy_rt_texture_layer(
+                    &mut pass,
+                    &set.normal,
+                    &arrays.normal,
+                    layer,
+                    dispatch_x,
+                    dispatch_y,
+                );
+                self.copy_rt_texture_layer(
+                    &mut pass,
+                    &set.metallic_roughness,
+                    &arrays.mra,
+                    layer,
+                    dispatch_x,
+                    dispatch_y,
+                );
+                self.copy_rt_texture_layer(
+                    &mut pass,
+                    &set.emission,
+                    &arrays.emission,
+                    layer,
+                    dispatch_x,
+                    dispatch_y,
+                );
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        self.rt_texture_arrays_signature = signature;
+
+        Some(RayTracingTextureArrays {
+            albedo: arrays.albedo_view.clone(),
+            normal: arrays.normal_view.clone(),
+            metallic_roughness: arrays.mra_view.clone(),
+            emission: arrays.emission_view.clone(),
+            layers,
+        })
     }
 
     fn build_gbuffer_instances(

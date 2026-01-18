@@ -23,6 +23,8 @@ use crate::graphics::{
         gbuffer::{GBufferFormats, GBufferOutputs, GBufferPass},
         hiz::{HiZOutputs, HiZPass},
         lighting::{LightingOutputs, LightingPass},
+        raytracing::{RayTracingOutputs, RayTracingPass},
+        raytracing_composite::{RayTracingCompositeInputs, RayTracingCompositePass},
         shadow::{ShadowOutputs, ShadowPass},
         sky::{SkyOutputs, SkyPass},
         ssgi::{SsgiOutputs, SsgiPass},
@@ -163,6 +165,11 @@ const DEBUG_GRAPH_FLAGS: &[DebugFlagToggle] = &[
     },
 ];
 
+const TRACED_GRAPH_PASSES: &[RenderPassToggle] = &[RenderPassToggle {
+    label: "Egui",
+    toggle: RenderPassToggleFlag::Egui,
+}];
+
 const GRAPH_TEMPLATES: &[RenderGraphTemplate] = &[
     RenderGraphTemplate {
         name: "default-graph",
@@ -177,6 +184,13 @@ const GRAPH_TEMPLATES: &[RenderGraphTemplate] = &[
         build: debug_graph_spec,
         pass_toggles: DEFAULT_GRAPH_PASSES,
         debug_flags: DEBUG_GRAPH_FLAGS,
+    },
+    RenderGraphTemplate {
+        name: "traced-graph",
+        label: "Traced Graph",
+        build: traced_graph_spec,
+        pass_toggles: TRACED_GRAPH_PASSES,
+        debug_flags: &[],
     },
 ];
 
@@ -263,6 +277,12 @@ impl PassResourceOutput for SsrOutputs {
     }
 }
 
+impl PassResourceOutput for RayTracingOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.accumulation]
+    }
+}
+
 impl PassResourceOutput for CompositeInputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         let mut ids = vec![
@@ -307,6 +327,12 @@ impl PassResourceOutput for DebugCompositeInputs {
     }
 }
 
+impl PassResourceOutput for RayTracingCompositeInputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.accumulation, self.swapchain]
+    }
+}
+
 impl PassResourceOutput for EguiOutputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.swapchain]
@@ -324,6 +350,13 @@ pub fn default_graph_spec() -> RenderGraphSpec {
 pub fn debug_graph_spec() -> RenderGraphSpec {
     RenderGraphSpec::unique("debug-graph", |params, pool| {
         build_debug_graph(params, pool)
+    })
+}
+
+/// Traced graph: BVH-traced path with accumulation.
+pub fn traced_graph_spec() -> RenderGraphSpec {
+    RenderGraphSpec::unique("traced-graph", |params, pool| {
+        build_traced_graph(params, pool)
     })
 }
 
@@ -907,5 +940,53 @@ fn build_debug_graph(
         swapchain_id,
         resource_ids,
         hiz_id,
+    }
+}
+
+fn build_traced_graph(
+    params: &RenderGraphBuildParams,
+    pool: &mut GpuResourcePool,
+) -> RenderGraphBuildOutput {
+    let size: PhysicalSize<u32> = params.surface_size;
+    let toggles = params.config;
+
+    let mut builder = PassGraphBuilder::new(pool);
+
+    builder.add::<RayTracingPass, RayTracingOutputs, _>(|pool, _| {
+        let pass = RayTracingPass::new(pool, size.width, size.height);
+        let outputs = pass.outputs();
+        (pass, outputs)
+    });
+
+    let composite =
+        builder.add::<RayTracingCompositePass, RayTracingCompositeInputs, _>(|pool, store| {
+            let traced = store
+                .outputs::<RayTracingOutputs>()
+                .expect("Ray tracing pass missing");
+            let pass =
+                RayTracingCompositePass::new(pool, traced.accumulation, params.surface_format);
+            let outputs = pass.inputs();
+            (pass, outputs)
+        });
+    let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.egui_pass {
+        builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
+            let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
+    let (graph, passes) = builder.into_parts();
+    let mut resource_ids: Vec<ResourceId> = passes.resource_ids().collect();
+    resource_ids.sort_by_key(|id| id.raw());
+    resource_ids.dedup_by_key(|id| id.raw());
+
+    RenderGraphBuildOutput {
+        graph,
+        swapchain_id,
+        resource_ids,
+        hiz_id: None,
     }
 }

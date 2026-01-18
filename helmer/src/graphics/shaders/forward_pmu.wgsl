@@ -33,6 +33,7 @@ struct Constants {
 
     // lighting
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
 
@@ -232,6 +233,14 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     res[2][1] = (m[2][0] * m[0][1] - m[0][0] * m[2][1]) * inv_det;
     res[2][2] = (m[0][0] * m[1][1] - m[1][0] * m[0][1]) * inv_det;
     return res;
+}
+
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if len < EPSILON {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return v / len;
 }
 
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
@@ -496,12 +505,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let effective_albedo = select(albedo, vec3(1.0), is_lighting_only);
     let effective_metallic = metallic;
 
-    let tangent_space_normal = textureSampleBias(normal_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz * 2.0 - 1.0;
-    let N_geom = normalize(in.world_normal);
-    let T = normalize(in.world_tangent);
-    let B = normalize(in.world_bitangent);
-    let tbn = mat3x3<f32>(T, B, N_geom);
-    let N = normalize(tbn * tangent_space_normal);
+    let smooth_normal = safe_normalize(in.world_normal);
+    var geom_normal = smooth_normal;
+    if render_constants.shade_smooth == 0u {
+        var flat_normal = safe_normalize(cross(dpdx(in.world_position), dpdy(in.world_position)));
+        if dot(flat_normal, smooth_normal) < 0.0 {
+            flat_normal = -flat_normal;
+        }
+        geom_normal = flat_normal;
+    }
+    let tangent_space_normal =
+        textureSampleBias(normal_texture, pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz
+        * 2.0
+        - 1.0;
+    let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+    var B = safe_normalize(cross(geom_normal, T));
+    if dot(B, in.world_bitangent) < 0.0 {
+        B = -B;
+    }
+    let tbn = mat3x3<f32>(T, B, geom_normal);
+    let N = safe_normalize(tbn * tangent_space_normal);
 
     let V = normalize(camera.view_position - in.world_position);
     let R = reflect(-V, N);

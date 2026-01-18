@@ -7,6 +7,8 @@ pub mod forward;
 pub mod gbuffer;
 pub mod hiz;
 pub mod lighting;
+pub mod raytracing;
+pub mod raytracing_composite;
 pub mod shadow;
 pub mod sky;
 pub mod ssgi;
@@ -173,4 +175,17 @@ pub struct IndirectDrawBatch {
 pub struct SwapchainFrameInput {
     pub view: wgpu::TextureView,
     pub format: wgpu::TextureFormat,
+}
+
+#[derive(Clone)]
+pub struct RayTracingFrameInput {
+    pub rt_extent: PhysicalSize<u32>,
+    pub blas_nodes: wgpu::Buffer,
+    pub blas_indices: wgpu::Buffer,
+    pub blas_triangles: wgpu::Buffer,
+    pub blas_descs: wgpu::Buffer,
+    pub tlas_nodes: wgpu::Buffer,
+    pub tlas_indices: wgpu::Buffer,
+    pub instances: wgpu::Buffer,
+    pub constants: wgpu::Buffer,
 }

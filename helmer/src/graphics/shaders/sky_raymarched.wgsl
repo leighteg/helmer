@@ -42,6 +42,7 @@ struct AtmosphereParams {
 struct Constants {
     // lighting
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
 

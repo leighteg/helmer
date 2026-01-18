@@ -3,6 +3,7 @@ const EPSILON: f32 = 0.0001;
 struct Constants {
     mip_bias: f32,
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
     planet_radius: f32,

@@ -1,6 +1,12 @@
 use crossbeam_channel::{Sender, TrySendError};
 use hashbrown::{HashMap, HashSet};
-use std::{env, sync::Arc, time::Instant};
+use std::{
+    collections::hash_map::DefaultHasher,
+    env,
+    hash::{Hash, Hasher},
+    sync::Arc,
+    time::Instant,
+};
 use tracing::{info, warn};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -33,7 +39,12 @@ use crate::graphics::{
     },
     passes::{
         BundleMode, FrameGlobals, GBufferBundleKey, IndirectDrawBatch, MaterialTextureSet,
-        ShadowBundleKey, SwapchainFrameInput,
+        RayTracingFrameInput, ShadowBundleKey, SwapchainFrameInput,
+    },
+    raytracing::{
+        BlasBuild, RT_FLAG_DIRECT_LIGHTING, RT_FLAG_SHADE_SMOOTH, RT_FLAG_SHADOWS,
+        RT_FLAG_USE_TEXTURES, RtBlasDesc, RtBvhNode, RtConstants, RtInstance, RtTriangle,
+        build_blas, build_tlas, transform_aabb,
     },
     render_graphs::default_graph_spec,
     renderer_common::{
@@ -65,6 +76,7 @@ struct MeshLodResource {
     buffer: ResourceId,
     index_count: u32,
     meshlets: MeshletGpu,
+    rt_blas_index: u32,
 }
 
 struct MeshletGpu {
@@ -222,7 +234,11 @@ impl ReusableBuffer {
         let (buffer, size, prev_usage) = &mut self.slots[slot_idx];
 
         // Allocate with some headroom to reduce re-allocations.
-        let target_size = needed.max(256).next_power_of_two();
+        let mut target_size = needed.max(256).next_power_of_two();
+        let max_size = device.limits().max_buffer_size;
+        if max_size > 0 && target_size > max_size {
+            target_size = needed.max(256).min(max_size);
+        }
         let needs_realloc = buffer
             .as_ref()
             .map_or(true, |_| *size < target_size || *prev_usage != usage);
@@ -240,6 +256,513 @@ impl ReusableBuffer {
 
         (buffer.as_ref().expect("buffer must exist"), needs_realloc)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RayTracingBlasBudget {
+    max_nodes: usize,
+    max_indices: usize,
+    max_triangles: usize,
+    max_descs: usize,
+}
+
+impl RayTracingBlasBudget {
+    fn unbounded() -> Self {
+        Self {
+            max_nodes: usize::MAX,
+            max_indices: usize::MAX,
+            max_triangles: usize::MAX,
+            max_descs: usize::MAX,
+        }
+    }
+
+    fn from_limits(limits: &wgpu::Limits) -> Self {
+        let max_buffer = limits.max_buffer_size;
+        let max_storage = limits.max_storage_buffer_binding_size as u64;
+        let max_bytes = max_buffer.min(max_storage);
+        let mut pow2 = max_bytes.next_power_of_two();
+        if pow2 > max_bytes {
+            pow2 >>= 1;
+        }
+        let max_bytes = pow2;
+
+        let clamp = |elem_size: usize| -> usize {
+            if max_bytes == 0 {
+                return 0;
+            }
+            let max_elems = max_bytes / elem_size as u64;
+            max_elems.min(u32::MAX as u64) as usize
+        };
+
+        let max_nodes = clamp(std::mem::size_of::<RtBvhNode>());
+        let max_indices = clamp(std::mem::size_of::<u32>());
+        let max_triangles = clamp(std::mem::size_of::<RtTriangle>());
+        let max_descs = clamp(std::mem::size_of::<RtBlasDesc>()).max(1);
+
+        Self {
+            max_nodes,
+            max_indices,
+            max_triangles,
+            max_descs,
+        }
+    }
+}
+
+struct RayTracingState {
+    blas_nodes: Vec<RtBvhNode>,
+    blas_indices: Vec<u32>,
+    blas_triangles: Vec<RtTriangle>,
+    blas_descs: Vec<RtBlasDesc>,
+    blas_dirty: bool,
+    blas_budget: RayTracingBlasBudget,
+    fallback_blas_index: u32,
+    warned_blas_budget: bool,
+    blas_nodes_buffer: ReusableBuffer,
+    blas_indices_buffer: ReusableBuffer,
+    blas_triangles_buffer: ReusableBuffer,
+    blas_descs_buffer: ReusableBuffer,
+    tlas_nodes_buffer: ReusableBuffer,
+    tlas_indices_buffer: ReusableBuffer,
+    instances_buffer: ReusableBuffer,
+    constants_buffer: ReusableBuffer,
+    last_scene_hash: u64,
+    last_camera_hash: u64,
+    accumulation_frame: u32,
+    reset_accumulation: bool,
+    max_bounces: u32,
+    samples_per_frame: u32,
+    direct_lighting: bool,
+    shadows: bool,
+    use_textures: bool,
+    shade_smooth: bool,
+    accumulation_enabled: bool,
+    exposure: f32,
+    direct_light_samples: u32,
+    max_accumulation_frames: u32,
+    camera_pos_epsilon: f32,
+    camera_rot_epsilon: f32,
+    scene_pos_quantize: f32,
+    scene_rot_quantize: f32,
+    scene_scale_quantize: f32,
+    env_intensity: f32,
+    sky_view_samples: u32,
+    sky_sun_samples: u32,
+    sky_multi_scatter_strength: f32,
+    sky_multi_scatter_power: f32,
+    firefly_clamp: f32,
+    shadow_bias: f32,
+    ray_bias: f32,
+    min_roughness: f32,
+    normal_map_strength: f32,
+    throughput_cutoff: f32,
+    last_surface_size: PhysicalSize<u32>,
+    last_rt_extent: PhysicalSize<u32>,
+    adaptive_scale: f32,
+    adaptive_frames_since_error: u32,
+    adaptive_error_count: u32,
+    blas_leaf_size: usize,
+    tlas_leaf_size: usize,
+}
+
+impl RayTracingState {
+    fn new(frames_in_flight: usize, surface_size: PhysicalSize<u32>) -> Self {
+        let defaults = RenderConfig::default();
+        let max_bounces = defaults.rt_max_bounces.max(1);
+        let samples_per_frame = defaults.rt_samples_per_frame.max(1);
+        let direct_lighting = defaults.rt_direct_lighting;
+        let shadows = defaults.rt_shadows;
+        let use_textures = defaults.rt_use_textures;
+        let shade_smooth = defaults.shader_constants.shade_smooth != 0;
+        let accumulation_enabled = defaults.rt_accumulation;
+        let exposure = defaults.rt_exposure;
+        let direct_light_samples = defaults.rt_direct_light_samples.max(1);
+        let max_accumulation_frames = defaults.rt_max_accumulation_frames;
+        let camera_pos_epsilon = defaults.rt_camera_pos_epsilon;
+        let camera_rot_epsilon = defaults.rt_camera_rot_epsilon;
+        let scene_pos_quantize = defaults.rt_scene_pos_quantize;
+        let scene_rot_quantize = defaults.rt_scene_rot_quantize;
+        let scene_scale_quantize = defaults.rt_scene_scale_quantize;
+        let env_intensity = defaults.rt_env_intensity;
+        let sky_view_samples = defaults.rt_sky_view_samples.max(1);
+        let sky_sun_samples = defaults.rt_sky_sun_samples.max(1);
+        let sky_multi_scatter_strength = defaults.rt_sky_multi_scatter_strength;
+        let sky_multi_scatter_power = defaults.rt_sky_multi_scatter_power;
+        let firefly_clamp = defaults.rt_firefly_clamp;
+        let shadow_bias = defaults.rt_shadow_bias;
+        let ray_bias = defaults.rt_ray_bias;
+        let min_roughness = defaults.rt_min_roughness;
+        let normal_map_strength = defaults.rt_normal_map_strength;
+        let throughput_cutoff = defaults.rt_throughput_cutoff;
+        let blas_leaf_size = defaults.rt_blas_leaf_size.max(1) as usize;
+        let tlas_leaf_size = defaults.rt_tlas_leaf_size.max(1) as usize;
+        let adaptive_scale = if defaults.rt_adaptive_scale {
+            let min_scale = defaults.rt_adaptive_scale_min.max(0.0);
+            let max_scale = defaults.rt_adaptive_scale_max.max(0.0);
+            if max_scale >= min_scale {
+                max_scale
+            } else {
+                min_scale
+            }
+        } else {
+            1.0
+        };
+        Self {
+            blas_nodes: Vec::new(),
+            blas_indices: Vec::new(),
+            blas_triangles: Vec::new(),
+            blas_descs: vec![RtBlasDesc {
+                node_offset: 0,
+                node_count: 0,
+                index_offset: 0,
+                index_count: 0,
+                tri_offset: 0,
+                tri_count: 0,
+                _pad0: [0; 2],
+            }],
+            blas_dirty: true,
+            blas_budget: RayTracingBlasBudget::unbounded(),
+            fallback_blas_index: 0,
+            warned_blas_budget: false,
+            blas_nodes_buffer: ReusableBuffer::new("RayTracing/BlasNodes", 1),
+            blas_indices_buffer: ReusableBuffer::new("RayTracing/BlasIndices", 1),
+            blas_triangles_buffer: ReusableBuffer::new("RayTracing/BlasTriangles", 1),
+            blas_descs_buffer: ReusableBuffer::new("RayTracing/BlasDescs", 1),
+            tlas_nodes_buffer: ReusableBuffer::new("RayTracing/TlasNodes", frames_in_flight),
+            tlas_indices_buffer: ReusableBuffer::new("RayTracing/TlasIndices", frames_in_flight),
+            instances_buffer: ReusableBuffer::new("RayTracing/Instances", frames_in_flight),
+            constants_buffer: ReusableBuffer::new("RayTracing/Constants", frames_in_flight),
+            last_scene_hash: 0,
+            last_camera_hash: 0,
+            accumulation_frame: 0,
+            reset_accumulation: true,
+            max_bounces,
+            samples_per_frame,
+            direct_lighting,
+            shadows,
+            use_textures,
+            shade_smooth,
+            accumulation_enabled,
+            exposure,
+            direct_light_samples,
+            max_accumulation_frames,
+            camera_pos_epsilon,
+            camera_rot_epsilon,
+            scene_pos_quantize,
+            scene_rot_quantize,
+            scene_scale_quantize,
+            env_intensity,
+            sky_view_samples,
+            sky_sun_samples,
+            sky_multi_scatter_strength,
+            sky_multi_scatter_power,
+            firefly_clamp,
+            shadow_bias,
+            ray_bias,
+            min_roughness,
+            normal_map_strength,
+            throughput_cutoff,
+            last_surface_size: surface_size,
+            last_rt_extent: surface_size,
+            adaptive_scale,
+            adaptive_frames_since_error: 0,
+            adaptive_error_count: 0,
+            blas_leaf_size,
+            tlas_leaf_size,
+        }
+    }
+
+    fn resize(&mut self, frames_in_flight: usize) {
+        self.tlas_nodes_buffer.resize_slots(frames_in_flight);
+        self.tlas_indices_buffer.resize_slots(frames_in_flight);
+        self.instances_buffer.resize_slots(frames_in_flight);
+        self.constants_buffer.resize_slots(frames_in_flight);
+    }
+
+    fn note_surface_error(&mut self) {
+        self.adaptive_error_count = self.adaptive_error_count.saturating_add(1);
+        self.adaptive_frames_since_error = 0;
+    }
+
+    fn update_adaptive_scale(&mut self, cfg: &RenderConfig) {
+        if !cfg.rt_adaptive_scale {
+            self.adaptive_scale = 1.0;
+            self.adaptive_error_count = 0;
+            self.adaptive_frames_since_error = 0;
+            return;
+        }
+
+        let min_scale = cfg.rt_adaptive_scale_min.max(0.0);
+        let max_scale = cfg.rt_adaptive_scale_max.max(0.0);
+        let (min_scale, max_scale) = if max_scale >= min_scale {
+            (min_scale, max_scale)
+        } else {
+            (max_scale, min_scale)
+        };
+        let down_factor = cfg.rt_adaptive_scale_down.max(0.0);
+        let up_factor = cfg.rt_adaptive_scale_up.max(0.0);
+        let recovery_frames = cfg.rt_adaptive_scale_recovery_frames;
+
+        if !self.adaptive_scale.is_finite() || self.adaptive_scale <= 0.0 {
+            self.adaptive_scale = max_scale.max(min_scale);
+        }
+
+        if self.adaptive_error_count > 0 {
+            let factor = down_factor.powi(self.adaptive_error_count as i32);
+            if factor.is_finite() {
+                self.adaptive_scale *= factor;
+            }
+            self.adaptive_error_count = 0;
+            self.adaptive_frames_since_error = 0;
+        } else {
+            let recover_ready =
+                recovery_frames == 0 || self.adaptive_frames_since_error >= recovery_frames;
+            if recover_ready {
+                let next = self.adaptive_scale * up_factor;
+                if next.is_finite() {
+                    self.adaptive_scale = next;
+                }
+                self.adaptive_frames_since_error = 0;
+            } else {
+                self.adaptive_frames_since_error =
+                    self.adaptive_frames_since_error.saturating_add(1);
+            }
+        }
+
+        self.adaptive_scale = self.adaptive_scale.clamp(min_scale, max_scale);
+    }
+
+    fn set_blas_budget(&mut self, budget: RayTracingBlasBudget) {
+        self.blas_budget = budget;
+    }
+
+    fn fallback_blas_index(&self) -> u32 {
+        self.fallback_blas_index
+    }
+
+    fn register_blas(&mut self, mut build: BlasBuild) -> u32 {
+        let next_nodes = self.blas_nodes.len().saturating_add(build.nodes.len());
+        let next_indices = self.blas_indices.len().saturating_add(build.indices.len());
+        let next_triangles = self
+            .blas_triangles
+            .len()
+            .saturating_add(build.triangles.len());
+        let next_descs = self.blas_descs.len().saturating_add(1);
+        if next_nodes > self.blas_budget.max_nodes
+            || next_indices > self.blas_budget.max_indices
+            || next_triangles > self.blas_budget.max_triangles
+            || next_descs > self.blas_budget.max_descs
+        {
+            if !self.warned_blas_budget {
+                warn!(
+                    "Ray tracing BLAS budget exceeded; skipping extra mesh geometry to stay within device limits"
+                );
+                self.warned_blas_budget = true;
+            }
+            return self.fallback_blas_index;
+        }
+
+        let node_base = self.blas_nodes.len() as u32;
+        let index_base = self.blas_indices.len() as u32;
+        let tri_base = self.blas_triangles.len() as u32;
+
+        for node in &mut build.nodes {
+            if node.index_count > 0 {
+                node.first_index = node.first_index.saturating_add(index_base);
+            } else {
+                node.left = node.left.saturating_add(node_base);
+                node.right = node.right.saturating_add(node_base);
+            }
+        }
+
+        self.blas_triangles.extend(build.triangles.drain(..));
+        self.blas_indices
+            .extend(build.indices.drain(..).map(|idx| idx + tri_base));
+
+        let desc = RtBlasDesc {
+            node_offset: node_base,
+            node_count: build.nodes.len() as u32,
+            index_offset: index_base,
+            index_count: self.blas_indices.len() as u32 - index_base,
+            tri_offset: tri_base,
+            tri_count: self.blas_triangles.len() as u32 - tri_base,
+            _pad0: [0; 2],
+        };
+        self.blas_nodes.extend(build.nodes.drain(..));
+        let blas_index = self.blas_descs.len() as u32;
+        self.blas_descs.push(desc);
+        self.blas_dirty = true;
+        blas_index
+    }
+
+    fn ensure_blas_buffers(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if !self.blas_dirty {
+            return;
+        }
+
+        let nodes_bytes = (self.blas_nodes.len() * std::mem::size_of::<RtBvhNode>()) as u64;
+        let indices_bytes = (self.blas_indices.len() * std::mem::size_of::<u32>()) as u64;
+        let tri_bytes = (self.blas_triangles.len() * std::mem::size_of::<RtTriangle>()) as u64;
+        let desc_bytes = (self.blas_descs.len() * std::mem::size_of::<RtBlasDesc>()) as u64;
+
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let nodes = self.blas_nodes_buffer.ensure(device, nodes_bytes, usage, 0);
+        let indices = self
+            .blas_indices_buffer
+            .ensure(device, indices_bytes, usage, 0);
+        let tris = self
+            .blas_triangles_buffer
+            .ensure(device, tri_bytes, usage, 0);
+        let descs = self.blas_descs_buffer.ensure(device, desc_bytes, usage, 0);
+
+        if !self.blas_nodes.is_empty() {
+            queue.write_buffer(nodes, 0, bytemuck::cast_slice(&self.blas_nodes));
+        }
+        if !self.blas_indices.is_empty() {
+            queue.write_buffer(indices, 0, bytemuck::cast_slice(&self.blas_indices));
+        }
+        if !self.blas_triangles.is_empty() {
+            queue.write_buffer(tris, 0, bytemuck::cast_slice(&self.blas_triangles));
+        }
+        if !self.blas_descs.is_empty() {
+            queue.write_buffer(descs, 0, bytemuck::cast_slice(&self.blas_descs));
+        }
+
+        self.blas_dirty = false;
+    }
+
+    fn snapshot(&self) -> RayTracingSnapshot {
+        RayTracingSnapshot {
+            blas_nodes: self.blas_nodes.clone(),
+            blas_indices: self.blas_indices.clone(),
+            blas_triangles: self.blas_triangles.clone(),
+            blas_descs: self.blas_descs.clone(),
+            last_scene_hash: self.last_scene_hash,
+            last_camera_hash: self.last_camera_hash,
+            accumulation_frame: self.accumulation_frame,
+            max_bounces: self.max_bounces,
+            samples_per_frame: self.samples_per_frame,
+            direct_lighting: self.direct_lighting,
+            shadows: self.shadows,
+            use_textures: self.use_textures,
+            shade_smooth: self.shade_smooth,
+            accumulation_enabled: self.accumulation_enabled,
+            exposure: self.exposure,
+            direct_light_samples: self.direct_light_samples,
+            max_accumulation_frames: self.max_accumulation_frames,
+            camera_pos_epsilon: self.camera_pos_epsilon,
+            camera_rot_epsilon: self.camera_rot_epsilon,
+            scene_pos_quantize: self.scene_pos_quantize,
+            scene_rot_quantize: self.scene_rot_quantize,
+            scene_scale_quantize: self.scene_scale_quantize,
+            env_intensity: self.env_intensity,
+            sky_view_samples: self.sky_view_samples,
+            sky_sun_samples: self.sky_sun_samples,
+            sky_multi_scatter_strength: self.sky_multi_scatter_strength,
+            sky_multi_scatter_power: self.sky_multi_scatter_power,
+            firefly_clamp: self.firefly_clamp,
+            shadow_bias: self.shadow_bias,
+            ray_bias: self.ray_bias,
+            min_roughness: self.min_roughness,
+            normal_map_strength: self.normal_map_strength,
+            throughput_cutoff: self.throughput_cutoff,
+            last_surface_size: self.last_surface_size,
+            last_rt_extent: self.last_rt_extent,
+            adaptive_scale: self.adaptive_scale,
+            adaptive_frames_since_error: self.adaptive_frames_since_error,
+            adaptive_error_count: self.adaptive_error_count,
+            blas_leaf_size: self.blas_leaf_size,
+            tlas_leaf_size: self.tlas_leaf_size,
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: RayTracingSnapshot) {
+        self.blas_nodes = snapshot.blas_nodes;
+        self.blas_indices = snapshot.blas_indices;
+        self.blas_triangles = snapshot.blas_triangles;
+        self.blas_descs = snapshot.blas_descs;
+        self.last_scene_hash = snapshot.last_scene_hash;
+        self.last_camera_hash = snapshot.last_camera_hash;
+        self.accumulation_frame = 0;
+        self.reset_accumulation = true;
+        self.max_bounces = snapshot.max_bounces;
+        self.samples_per_frame = snapshot.samples_per_frame;
+        self.direct_lighting = snapshot.direct_lighting;
+        self.shadows = snapshot.shadows;
+        self.use_textures = snapshot.use_textures;
+        self.shade_smooth = snapshot.shade_smooth;
+        self.accumulation_enabled = snapshot.accumulation_enabled;
+        self.exposure = snapshot.exposure;
+        self.direct_light_samples = snapshot.direct_light_samples;
+        self.max_accumulation_frames = snapshot.max_accumulation_frames;
+        self.camera_pos_epsilon = snapshot.camera_pos_epsilon;
+        self.camera_rot_epsilon = snapshot.camera_rot_epsilon;
+        self.scene_pos_quantize = snapshot.scene_pos_quantize;
+        self.scene_rot_quantize = snapshot.scene_rot_quantize;
+        self.scene_scale_quantize = snapshot.scene_scale_quantize;
+        self.env_intensity = snapshot.env_intensity;
+        self.sky_view_samples = snapshot.sky_view_samples;
+        self.sky_sun_samples = snapshot.sky_sun_samples;
+        self.sky_multi_scatter_strength = snapshot.sky_multi_scatter_strength;
+        self.sky_multi_scatter_power = snapshot.sky_multi_scatter_power;
+        self.firefly_clamp = snapshot.firefly_clamp;
+        self.shadow_bias = snapshot.shadow_bias;
+        self.ray_bias = snapshot.ray_bias;
+        self.min_roughness = snapshot.min_roughness;
+        self.normal_map_strength = snapshot.normal_map_strength;
+        self.throughput_cutoff = snapshot.throughput_cutoff;
+        self.last_surface_size = snapshot.last_surface_size;
+        self.last_rt_extent = snapshot.last_rt_extent;
+        self.adaptive_scale = snapshot.adaptive_scale;
+        self.adaptive_frames_since_error = snapshot.adaptive_frames_since_error;
+        self.adaptive_error_count = snapshot.adaptive_error_count;
+        self.blas_leaf_size = snapshot.blas_leaf_size;
+        self.tlas_leaf_size = snapshot.tlas_leaf_size;
+        self.blas_dirty = true;
+    }
+}
+
+#[derive(Clone)]
+struct RayTracingSnapshot {
+    blas_nodes: Vec<RtBvhNode>,
+    blas_indices: Vec<u32>,
+    blas_triangles: Vec<RtTriangle>,
+    blas_descs: Vec<RtBlasDesc>,
+    last_scene_hash: u64,
+    last_camera_hash: u64,
+    accumulation_frame: u32,
+    max_bounces: u32,
+    samples_per_frame: u32,
+    direct_lighting: bool,
+    shadows: bool,
+    use_textures: bool,
+    shade_smooth: bool,
+    accumulation_enabled: bool,
+    exposure: f32,
+    direct_light_samples: u32,
+    max_accumulation_frames: u32,
+    camera_pos_epsilon: f32,
+    camera_rot_epsilon: f32,
+    scene_pos_quantize: f32,
+    scene_rot_quantize: f32,
+    scene_scale_quantize: f32,
+    env_intensity: f32,
+    sky_view_samples: u32,
+    sky_sun_samples: u32,
+    sky_multi_scatter_strength: f32,
+    sky_multi_scatter_power: f32,
+    firefly_clamp: f32,
+    shadow_bias: f32,
+    ray_bias: f32,
+    min_roughness: f32,
+    normal_map_strength: f32,
+    throughput_cutoff: f32,
+    last_surface_size: PhysicalSize<u32>,
+    last_rt_extent: PhysicalSize<u32>,
+    adaptive_scale: f32,
+    adaptive_frames_since_error: u32,
+    adaptive_error_count: u32,
+    blas_leaf_size: usize,
+    tlas_leaf_size: usize,
 }
 
 struct BufferCache {
@@ -783,6 +1306,7 @@ pub struct GraphRenderer {
     shadow_format: wgpu::TextureFormat,
     frames_in_flight: usize,
     buffer_cache: BufferCache,
+    rt_state: RayTracingState,
     gpu_instance_buffer: Option<wgpu::Buffer>,
     gpu_instance_capacity: usize,
     gpu_visible_buffer: Option<wgpu::Buffer>,
@@ -891,6 +1415,7 @@ pub(crate) struct RendererSnapshot {
     egui_texture_cache: EguiTextureCache,
     streaming_tuning: StreamingTuning,
     streaming_requests: Option<Vec<AssetStreamingRequest>>,
+    rt_state: RayTracingSnapshot,
 }
 
 struct MaterialBuildResult {
@@ -1705,6 +2230,7 @@ impl GraphRenderer {
             shadow_format,
             frames_in_flight,
             buffer_cache: BufferCache::new(frames_in_flight),
+            rt_state: RayTracingState::new(frames_in_flight, size),
             gpu_instance_buffer: None,
             gpu_instance_capacity: 0,
             gpu_visible_buffer: None,
@@ -1795,6 +2321,7 @@ impl GraphRenderer {
             last_instance_pressure: MemoryPressure::None,
         };
 
+        renderer.configure_rt_blas_budget();
         renderer.init_fallback_mesh();
         renderer.update_stats();
         info!("initialized renderer");
@@ -1813,11 +2340,20 @@ impl GraphRenderer {
         };
         let output_frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost) => {
-                //self.resize(self.window_size);
+            Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
+                self.rt_state.note_surface_error();
+                self.handle_resize(self.surface_size);
                 return Ok(());
             }
-            Err(e) => return Err(RendererError::ResourceCreation(e.to_string())),
+            Err(wgpu::SurfaceError::Timeout) | Err(wgpu::SurfaceError::Other) => {
+                self.rt_state.note_surface_error();
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                return Err(RendererError::ResourceCreation(
+                    wgpu::SurfaceError::OutOfMemory.to_string(),
+                ));
+            }
         };
         if let Some(start) = acquire_start {
             self.shared_stats.render_acquire_us.store(
@@ -1842,6 +2378,7 @@ impl GraphRenderer {
         };
 
         let graph_spec = scene.data.render_graph.clone();
+        let tracing_active = graph_spec.name == "traced-graph";
         let graph_sig = RenderGraphConfigSignature::from_render_config(&scene.data.render_config);
 
         if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig) {
@@ -1911,6 +2448,16 @@ impl GraphRenderer {
             );
         }
         self.run_atmosphere_precompute(&globals);
+        if tracing_active {
+            if let Some(rt_inputs) = self.prepare_ray_tracing_inputs(&scene, &globals) {
+                self.frame_inputs.set(rt_inputs);
+            } else {
+                self.frame_inputs.remove::<RayTracingFrameInput>();
+            }
+        } else {
+            self.frame_inputs.remove::<RayTracingFrameInput>();
+            self.rt_state.reset_accumulation = true;
+        }
         self.frame_inputs.set(globals);
 
         self.frame_inputs.set(SwapchainFrameInput {
@@ -2646,6 +3193,7 @@ impl GraphRenderer {
             egui_texture_cache: std::mem::take(&mut self.egui_texture_cache),
             streaming_tuning: self.streaming_tuning,
             streaming_requests: self.streaming_requests.take(),
+            rt_state: self.rt_state.snapshot(),
         }
     }
 
@@ -2667,6 +3215,7 @@ impl GraphRenderer {
             egui_texture_cache,
             streaming_tuning,
             streaming_requests,
+            rt_state,
         } = snapshot;
 
         self.pool = pool;
@@ -2688,6 +3237,9 @@ impl GraphRenderer {
         self.egui_texture_cache = egui_texture_cache;
         self.streaming_tuning = streaming_tuning;
         self.streaming_requests = streaming_requests;
+        self.rt_state = RayTracingState::new(self.frames_in_flight, self.surface_size);
+        self.rt_state.apply_snapshot(rt_state);
+        self.configure_rt_blas_budget();
 
         self.streaming_inflight = SlotVec::new();
         self.recently_evicted = SlotVec::new();
@@ -2991,6 +3543,11 @@ impl GraphRenderer {
         self.bump_egui_epoch();
         self.pool.evict_all();
         self.update_stats();
+    }
+
+    fn configure_rt_blas_budget(&mut self) {
+        let budget = RayTracingBlasBudget::from_limits(&self.device_caps.limits);
+        self.rt_state.set_blas_budget(budget);
     }
 
     fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -3403,6 +3960,12 @@ impl GraphRenderer {
                 .create_logical(inds_desc.clone(), Some(inds_hints), self.frame_index, None);
         self.insert_buffer_entry(inds_id, inds_desc, inds_buffer, inds_hints, None);
 
+        let rt_blas_index = self.rt_state.register_blas(build_blas(
+            vertices.as_slice(),
+            &indices,
+            self.rt_state.blas_leaf_size.max(1),
+        ));
+
         self.fallback_mesh = Some(MeshGpu {
             vertex: vertex_id,
             lods: vec![MeshLodResource {
@@ -3414,6 +3977,7 @@ impl GraphRenderer {
                     indices: inds_id,
                     count: meshlet_data.meshlet_count(),
                 },
+                rt_blas_index,
             }],
             bounds: Aabb {
                 min: Vec3::splat(-p),
@@ -3526,6 +4090,16 @@ impl GraphRenderer {
         let meshlet_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let empty_meshlet = MeshletLodData::default();
         let mut lods = Vec::new();
+        let rt_blas_index = lod_indices
+            .last()
+            .map(|indices| {
+                self.rt_state.register_blas(build_blas(
+                    vertices,
+                    indices.as_ref(),
+                    self.rt_state.blas_leaf_size.max(1),
+                ))
+            })
+            .unwrap_or_else(|| self.rt_state.fallback_blas_index());
         for (lod, indices) in lod_indices.iter().enumerate() {
             let meshlet_data = meshlets.get(lod).unwrap_or(&empty_meshlet);
             let index_buffer = self
@@ -3671,6 +4245,7 @@ impl GraphRenderer {
                     indices: inds_id,
                     count: meshlet_count,
                 },
+                rt_blas_index,
             });
         }
 
@@ -4752,6 +5327,7 @@ impl GraphRenderer {
         if frames_in_flight != self.frames_in_flight {
             self.frames_in_flight = frames_in_flight;
             self.buffer_cache.resize(frames_in_flight);
+            self.rt_state.resize(frames_in_flight);
         }
         if frame_render_config.gpu_driven && !self.supports_indirect_first_instance {
             if !self.warned_indirect_first_instance_missing {
@@ -5266,6 +5842,533 @@ impl GraphRenderer {
             occlusion_camera_stable,
             gbuffer_bundle_key,
             shadow_bundle_key,
+        })
+    }
+
+    fn compute_ray_tracing_extent(
+        &self,
+        surface_size: PhysicalSize<u32>,
+        max_bounces: u32,
+        samples_per_frame: u32,
+        direct_lighting: bool,
+        direct_light_samples: u32,
+        tlas_nodes: usize,
+        cfg: &RenderConfig,
+        adaptive_scale: f32,
+    ) -> PhysicalSize<u32> {
+        let surface_pixels = (surface_size.width as u64)
+            .saturating_mul(surface_size.height as u64)
+            .max(1);
+        let mut rays_per_pixel =
+            (max_bounces.max(1) as u64).saturating_mul(samples_per_frame.max(1) as u64);
+        if direct_lighting {
+            rays_per_pixel = rays_per_pixel.saturating_mul(direct_light_samples.max(1) as u64);
+        }
+
+        let mut ray_budget = cfg.rt_ray_budget.max(1);
+        let complexity = tlas_nodes.max(1) as u64;
+        let complexity_base = cfg.rt_complexity_base.max(1);
+        let complexity_exponent = cfg.rt_complexity_exponent.max(0.0);
+        if complexity > complexity_base && complexity_exponent > 0.0 {
+            let scale =
+                (complexity as f64 / complexity_base as f64).powf(complexity_exponent as f64);
+            if scale.is_finite() && scale > 0.0 {
+                ray_budget = (ray_budget as f64 / scale).round().max(1.0) as u64;
+            }
+        }
+
+        let min_pixels = cfg.rt_min_pixel_budget.max(1).min(surface_pixels);
+        let pixel_budget = (ray_budget / rays_per_pixel.max(1)).clamp(min_pixels, surface_pixels);
+        let mut scale = (pixel_budget as f64 / surface_pixels as f64).sqrt();
+        let resolution_scale = if cfg.rt_resolution_scale.is_finite() {
+            cfg.rt_resolution_scale.max(0.0)
+        } else {
+            1.0
+        };
+        let adaptive_scale = if adaptive_scale.is_finite() {
+            adaptive_scale.max(0.0)
+        } else {
+            1.0
+        };
+        scale *= resolution_scale as f64;
+        scale *= adaptive_scale as f64;
+        let width = ((surface_size.width as f64) * scale).round().max(1.0) as u32;
+        let height = ((surface_size.height as f64) * scale).round().max(1.0) as u32;
+        let max_dim = self.device_caps.limits.max_texture_dimension_2d;
+
+        PhysicalSize {
+            width: width.min(max_dim),
+            height: height.min(max_dim),
+        }
+    }
+
+    fn prepare_ray_tracing_inputs(
+        &mut self,
+        scene: &RenderSceneState,
+        globals: &FrameGlobals,
+    ) -> Option<RayTracingFrameInput> {
+        self.rt_state.ensure_blas_buffers(&self.device, &self.queue);
+
+        let cfg = &globals.render_config;
+        self.rt_state.update_adaptive_scale(cfg);
+        let blas_leaf_size = cfg.rt_blas_leaf_size.max(1) as usize;
+        let tlas_leaf_size = cfg.rt_tlas_leaf_size.max(1) as usize;
+        self.rt_state.blas_leaf_size = blas_leaf_size;
+        self.rt_state.tlas_leaf_size = tlas_leaf_size;
+        let max_bounces = cfg.rt_max_bounces.max(1);
+        let samples_per_frame = cfg.rt_samples_per_frame.max(1);
+        let direct_lighting = cfg.rt_direct_lighting;
+        let shadows = cfg.rt_shadows;
+        let use_textures = cfg.rt_use_textures;
+        let shade_smooth = cfg.shader_constants.shade_smooth != 0;
+        let accumulation_enabled = cfg.rt_accumulation;
+        let exposure = cfg.rt_exposure.max(0.0);
+        let direct_light_samples = cfg.rt_direct_light_samples.max(1);
+        let max_accumulation_frames = cfg.rt_max_accumulation_frames;
+        let firefly_clamp = cfg.rt_firefly_clamp.max(0.0);
+        let env_intensity = cfg.rt_env_intensity.max(0.0);
+        let sky_view_samples = cfg.rt_sky_view_samples.max(1);
+        let sky_sun_samples = cfg.rt_sky_sun_samples.max(1);
+        let sky_multi_scatter_strength = cfg.rt_sky_multi_scatter_strength.max(0.0);
+        let sky_multi_scatter_power = cfg.rt_sky_multi_scatter_power.max(0.0);
+        let shadow_bias = cfg.rt_shadow_bias.max(0.0);
+        let ray_bias = cfg.rt_ray_bias.max(0.0);
+        let min_roughness = cfg.rt_min_roughness.clamp(0.0, 1.0);
+        let normal_map_strength = cfg.rt_normal_map_strength.max(0.0);
+        let throughput_cutoff = cfg.rt_throughput_cutoff.max(0.0);
+        let camera_pos_epsilon = cfg.rt_camera_pos_epsilon.max(0.0);
+        let camera_rot_epsilon = cfg.rt_camera_rot_epsilon.max(0.0);
+        let scene_pos_quantize = cfg.rt_scene_pos_quantize.max(0.0);
+        let scene_rot_quantize = cfg.rt_scene_rot_quantize.max(0.0);
+        let scene_scale_quantize = cfg.rt_scene_scale_quantize.max(0.0);
+        let tuning_changed = self.rt_state.max_bounces != max_bounces
+            || self.rt_state.samples_per_frame != samples_per_frame
+            || self.rt_state.direct_lighting != direct_lighting
+            || self.rt_state.shadows != shadows
+            || self.rt_state.use_textures != use_textures
+            || self.rt_state.shade_smooth != shade_smooth
+            || self.rt_state.accumulation_enabled != accumulation_enabled
+            || self.rt_state.exposure.to_bits() != exposure.to_bits()
+            || self.rt_state.direct_light_samples != direct_light_samples
+            || self.rt_state.max_accumulation_frames != max_accumulation_frames
+            || self.rt_state.firefly_clamp.to_bits() != firefly_clamp.to_bits()
+            || self.rt_state.env_intensity.to_bits() != env_intensity.to_bits()
+            || self.rt_state.sky_view_samples != sky_view_samples
+            || self.rt_state.sky_sun_samples != sky_sun_samples
+            || self.rt_state.sky_multi_scatter_strength.to_bits()
+                != sky_multi_scatter_strength.to_bits()
+            || self.rt_state.sky_multi_scatter_power.to_bits() != sky_multi_scatter_power.to_bits()
+            || self.rt_state.shadow_bias.to_bits() != shadow_bias.to_bits()
+            || self.rt_state.ray_bias.to_bits() != ray_bias.to_bits()
+            || self.rt_state.min_roughness.to_bits() != min_roughness.to_bits()
+            || self.rt_state.normal_map_strength.to_bits() != normal_map_strength.to_bits()
+            || self.rt_state.throughput_cutoff.to_bits() != throughput_cutoff.to_bits()
+            || self.rt_state.camera_pos_epsilon.to_bits() != camera_pos_epsilon.to_bits()
+            || self.rt_state.camera_rot_epsilon.to_bits() != camera_rot_epsilon.to_bits()
+            || self.rt_state.scene_pos_quantize.to_bits() != scene_pos_quantize.to_bits()
+            || self.rt_state.scene_rot_quantize.to_bits() != scene_rot_quantize.to_bits()
+            || self.rt_state.scene_scale_quantize.to_bits() != scene_scale_quantize.to_bits();
+        if tuning_changed {
+            self.rt_state.reset_accumulation = true;
+        }
+        self.rt_state.max_bounces = max_bounces;
+        self.rt_state.samples_per_frame = samples_per_frame;
+        self.rt_state.direct_lighting = direct_lighting;
+        self.rt_state.shadows = shadows;
+        self.rt_state.use_textures = use_textures;
+        self.rt_state.shade_smooth = shade_smooth;
+        self.rt_state.accumulation_enabled = accumulation_enabled;
+        self.rt_state.exposure = exposure;
+        self.rt_state.direct_light_samples = direct_light_samples;
+        self.rt_state.max_accumulation_frames = max_accumulation_frames;
+        self.rt_state.firefly_clamp = firefly_clamp;
+        self.rt_state.env_intensity = env_intensity;
+        self.rt_state.sky_view_samples = sky_view_samples;
+        self.rt_state.sky_sun_samples = sky_sun_samples;
+        self.rt_state.sky_multi_scatter_strength = sky_multi_scatter_strength;
+        self.rt_state.sky_multi_scatter_power = sky_multi_scatter_power;
+        self.rt_state.shadow_bias = shadow_bias;
+        self.rt_state.ray_bias = ray_bias;
+        self.rt_state.min_roughness = min_roughness;
+        self.rt_state.normal_map_strength = normal_map_strength;
+        self.rt_state.throughput_cutoff = throughput_cutoff;
+        self.rt_state.camera_pos_epsilon = camera_pos_epsilon;
+        self.rt_state.camera_rot_epsilon = camera_rot_epsilon;
+        self.rt_state.scene_pos_quantize = scene_pos_quantize;
+        self.rt_state.scene_rot_quantize = scene_rot_quantize;
+        self.rt_state.scene_scale_quantize = scene_scale_quantize;
+
+        let render_data = &scene.data;
+        let pressure = self.streaming_pressure;
+        let lod_bias = match pressure {
+            MemoryPressure::Hard => self.streaming_tuning.lod_bias_hard,
+            MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
+            MemoryPressure::None => 0,
+        };
+        let force_lowest =
+            matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
+
+        let interp = globals.alpha > 0.0 && globals.alpha < 1.0;
+        let material_version = self.material_version;
+        let material_index_map = &self.material_index_map;
+
+        let mut instances = Vec::new();
+        let mut bounds = Vec::new();
+        let mut scene_hash = 0u64;
+
+        fn quantize(value: f32, step: f32) -> i64 {
+            if !value.is_finite() {
+                return 0;
+            }
+            if step > 0.0 {
+                (value / step).round() as i64
+            } else {
+                value.to_bits() as i64
+            }
+        }
+
+        fn quantize_vec3(v: Vec3, step: f32) -> [i64; 3] {
+            [
+                quantize(v.x, step),
+                quantize(v.y, step),
+                quantize(v.z, step),
+            ]
+        }
+
+        fn quantize_quat(q: Quat, step: f32) -> [i64; 4] {
+            let mut rot = q.normalize();
+            if rot.w < 0.0 {
+                rot = -rot;
+            }
+            let arr = rot.to_array();
+            [
+                quantize(arr[0], step),
+                quantize(arr[1], step),
+                quantize(arr[2], step),
+                quantize(arr[3], step),
+            ]
+        }
+
+        fn mix_hash(state: &mut u64, value: u64) {
+            let mut v = value.wrapping_add(0x9e3779b97f4a7c15);
+            v ^= v >> 30;
+            v = v.wrapping_mul(0xbf58476d1ce4e5b9);
+            v ^= v >> 27;
+            v = v.wrapping_mul(0x94d049bb133111eb);
+            v ^= v >> 31;
+            *state ^= v;
+        }
+
+        for object in &render_data.objects {
+            let mat_idx = match material_index_map.get(object.material_id) {
+                Some(entry) if entry.version == material_version => entry.index,
+                _ => continue,
+            };
+
+            let mut desired_lod = object.lod_index.saturating_add(lod_bias);
+            if force_lowest {
+                desired_lod = usize::MAX;
+            } else if let Some(mesh) = self.meshes.get(object.mesh_id) {
+                let max_idx = mesh.lods.len().saturating_sub(1);
+                desired_lod = desired_lod.min(max_idx);
+            }
+
+            let resolved = match self.resolve_draw_mesh(object.mesh_id, desired_lod, false) {
+                Some(resolved) => resolved,
+                None => continue,
+            };
+
+            let mesh = if resolved.mesh_id == FALLBACK_MESH_KEY {
+                self.fallback_mesh.as_ref()?
+            } else {
+                self.meshes.get(resolved.mesh_id)?
+            };
+            let lod = resolved.lod_index.min(mesh.lods.len().saturating_sub(1));
+            let rt_blas_index = mesh.lods[lod].rt_blas_index;
+
+            let position = if interp {
+                object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, globals.alpha)
+            } else if globals.alpha <= 0.0 {
+                object.previous_transform.position
+            } else {
+                object.current_transform.position
+            };
+            let rotation = if interp {
+                Quat::from(object.previous_transform.rotation)
+                    .slerp(object.current_transform.rotation, globals.alpha)
+            } else if globals.alpha <= 0.0 {
+                Quat::from(object.previous_transform.rotation)
+            } else {
+                Quat::from(object.current_transform.rotation)
+            };
+            let scale = if interp {
+                object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, globals.alpha)
+            } else if globals.alpha <= 0.0 {
+                object.previous_transform.scale
+            } else {
+                object.current_transform.scale
+            };
+
+            let model = Mat4::from_scale_rotation_translation(scale, rotation, position);
+            let inv_model = model.inverse();
+
+            bounds.push(transform_aabb(mesh.bounds, model));
+            instances.push(RtInstance {
+                model: model.to_cols_array_2d(),
+                inv_model: inv_model.to_cols_array_2d(),
+                blas_index: rt_blas_index,
+                material_id: mat_idx,
+                _pad0: [0; 2],
+            });
+
+            let mut obj_hasher = DefaultHasher::new();
+            object.id.hash(&mut obj_hasher);
+            resolved.mesh_id.hash(&mut obj_hasher);
+            mat_idx.hash(&mut obj_hasher);
+            rt_blas_index.hash(&mut obj_hasher);
+            quantize_vec3(position, scene_pos_quantize).hash(&mut obj_hasher);
+            quantize_quat(rotation, scene_rot_quantize).hash(&mut obj_hasher);
+            quantize_vec3(scale, scene_scale_quantize).hash(&mut obj_hasher);
+            mix_hash(&mut scene_hash, obj_hasher.finish());
+        }
+
+        for light in globals.lights.iter() {
+            let mut light_hasher = DefaultHasher::new();
+            light.light_type.hash(&mut light_hasher);
+            quantize_vec3(Vec3::from(light.position), scene_pos_quantize).hash(&mut light_hasher);
+            quantize_vec3(Vec3::from(light.direction), scene_rot_quantize).hash(&mut light_hasher);
+            quantize_vec3(Vec3::from(light.color), scene_pos_quantize).hash(&mut light_hasher);
+            quantize(light.intensity, scene_pos_quantize).hash(&mut light_hasher);
+            mix_hash(&mut scene_hash, light_hasher.finish());
+        }
+
+        mix_hash(&mut scene_hash, instances.len() as u64);
+        mix_hash(&mut scene_hash, globals.lights.len() as u64);
+        let scene_hash = scene_hash;
+        let prev_cam = render_data.previous_camera_transform;
+        let curr_cam = render_data.current_camera_transform;
+        let cam_pos = if interp {
+            prev_cam.position.lerp(curr_cam.position, globals.alpha)
+        } else if globals.alpha <= 0.0 {
+            prev_cam.position
+        } else {
+            curr_cam.position
+        };
+        let cam_rot = if interp {
+            Quat::from(prev_cam.rotation).slerp(curr_cam.rotation, globals.alpha)
+        } else if globals.alpha <= 0.0 {
+            Quat::from(prev_cam.rotation)
+        } else {
+            Quat::from(curr_cam.rotation)
+        };
+        let cam_scale = if interp {
+            prev_cam.scale.lerp(curr_cam.scale, globals.alpha)
+        } else if globals.alpha <= 0.0 {
+            prev_cam.scale
+        } else {
+            curr_cam.scale
+        };
+        let cam_rot_step = if camera_rot_epsilon > 0.0 {
+            (camera_rot_epsilon * 0.5).sin().abs()
+        } else {
+            0.0
+        };
+        let mut camera_hasher = DefaultHasher::new();
+        quantize_vec3(cam_pos, camera_pos_epsilon).hash(&mut camera_hasher);
+        quantize_quat(cam_rot, cam_rot_step).hash(&mut camera_hasher);
+        quantize_vec3(cam_scale, camera_pos_epsilon).hash(&mut camera_hasher);
+        let camera_hash = camera_hasher.finish();
+        let tlas = build_tlas(&bounds, self.rt_state.tlas_leaf_size);
+        let rt_extent = self.compute_ray_tracing_extent(
+            globals.surface_size,
+            max_bounces,
+            samples_per_frame,
+            direct_lighting,
+            direct_light_samples,
+            tlas.nodes.len(),
+            cfg,
+            self.rt_state.adaptive_scale,
+        );
+
+        let camera_changed = camera_hash != self.rt_state.last_camera_hash;
+        let size_changed = self.rt_state.last_surface_size != globals.surface_size;
+        let rt_size_changed = self.rt_state.last_rt_extent != rt_extent;
+        let scene_changed = scene_hash != self.rt_state.last_scene_hash;
+        let reset = camera_changed
+            || scene_changed
+            || size_changed
+            || rt_size_changed
+            || self.rt_state.reset_accumulation
+            || !self.rt_state.accumulation_enabled;
+
+        if reset {
+            self.rt_state.accumulation_frame = 0;
+            self.rt_state.reset_accumulation = true;
+        }
+        self.rt_state.last_scene_hash = scene_hash;
+        self.rt_state.last_camera_hash = camera_hash;
+        self.rt_state.last_surface_size = globals.surface_size;
+        self.rt_state.last_rt_extent = rt_extent;
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+
+        let nodes_bytes = (tlas.nodes.len() * std::mem::size_of::<RtBvhNode>()) as u64;
+        let indices_bytes = (tlas.indices.len() * std::mem::size_of::<u32>()) as u64;
+        let inst_bytes = (instances.len() * std::mem::size_of::<RtInstance>()) as u64;
+
+        let tlas_nodes = self.rt_state.tlas_nodes_buffer.ensure(
+            &self.device,
+            nodes_bytes,
+            usage,
+            self.frame_index,
+        );
+        let tlas_indices = self.rt_state.tlas_indices_buffer.ensure(
+            &self.device,
+            indices_bytes,
+            usage,
+            self.frame_index,
+        );
+        let inst_buffer = self.rt_state.instances_buffer.ensure(
+            &self.device,
+            inst_bytes,
+            usage,
+            self.frame_index,
+        );
+
+        if !tlas.nodes.is_empty() {
+            self.queue
+                .write_buffer(tlas_nodes, 0, bytemuck::cast_slice(&tlas.nodes));
+        }
+        if !tlas.indices.is_empty() {
+            self.queue
+                .write_buffer(tlas_indices, 0, bytemuck::cast_slice(&tlas.indices));
+        }
+        if !instances.is_empty() {
+            self.queue
+                .write_buffer(inst_buffer, 0, bytemuck::cast_slice(&instances));
+        }
+
+        let mut flags = 0u32;
+        if self.rt_state.direct_lighting {
+            flags |= RT_FLAG_DIRECT_LIGHTING;
+        }
+        if self.rt_state.shadows {
+            flags |= RT_FLAG_SHADOWS;
+        }
+        if self.rt_state.use_textures {
+            flags |= RT_FLAG_USE_TEXTURES;
+        }
+        if self.rt_state.shade_smooth {
+            flags |= RT_FLAG_SHADE_SMOOTH;
+        }
+
+        let capped_accumulation = if self.rt_state.max_accumulation_frames > 0 {
+            self.rt_state
+                .accumulation_frame
+                .min(self.rt_state.max_accumulation_frames.saturating_sub(1))
+        } else {
+            self.rt_state.accumulation_frame
+        };
+        let constants = RtConstants {
+            rng_frame_index: globals.frame_index,
+            accumulation_frame: capped_accumulation,
+            max_bounces: self.rt_state.max_bounces,
+            samples_per_frame: self.rt_state.samples_per_frame,
+            light_count: globals.lights_len,
+            flags,
+            reset: if self.rt_state.reset_accumulation {
+                1
+            } else {
+                0
+            },
+            width: rt_extent.width.max(1),
+            height: rt_extent.height.max(1),
+            tlas_node_count: tlas.nodes.len() as u32,
+            tlas_index_count: tlas.indices.len() as u32,
+            instance_count: instances.len() as u32,
+            blas_desc_count: self.rt_state.blas_descs.len() as u32,
+            direct_light_samples: self.rt_state.direct_light_samples,
+            max_accumulation_frames: self.rt_state.max_accumulation_frames,
+            sky_view_samples: self.rt_state.sky_view_samples,
+            sky_sun_samples: self.rt_state.sky_sun_samples,
+            exposure: self.rt_state.exposure,
+            env_intensity: self.rt_state.env_intensity,
+            firefly_clamp: self.rt_state.firefly_clamp,
+            shadow_bias: self.rt_state.shadow_bias,
+            ray_bias: self.rt_state.ray_bias,
+            min_roughness: self.rt_state.min_roughness,
+            normal_map_strength: self.rt_state.normal_map_strength,
+            throughput_cutoff: self.rt_state.throughput_cutoff,
+            sky_multi_scatter_strength: self.rt_state.sky_multi_scatter_strength,
+            sky_multi_scatter_power: self.rt_state.sky_multi_scatter_power,
+        };
+
+        let constants_buf = self.rt_state.constants_buffer.ensure(
+            &self.device,
+            std::mem::size_of::<RtConstants>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            self.frame_index,
+        );
+        self.queue
+            .write_buffer(constants_buf, 0, bytemuck::bytes_of(&constants));
+
+        if self.rt_state.accumulation_enabled {
+            if self.rt_state.max_accumulation_frames > 0 {
+                let max_frames = self.rt_state.max_accumulation_frames.saturating_sub(1);
+                self.rt_state.accumulation_frame = self
+                    .rt_state
+                    .accumulation_frame
+                    .saturating_add(1)
+                    .min(max_frames);
+            } else {
+                self.rt_state.accumulation_frame =
+                    self.rt_state.accumulation_frame.saturating_add(1);
+            }
+        } else {
+            self.rt_state.accumulation_frame = 0;
+        }
+        self.rt_state.reset_accumulation = false;
+
+        let blas_nodes = self.rt_state.blas_nodes_buffer.ensure(
+            &self.device,
+            (self.rt_state.blas_nodes.len() * std::mem::size_of::<RtBvhNode>()) as u64,
+            usage,
+            0,
+        );
+        let blas_indices = self.rt_state.blas_indices_buffer.ensure(
+            &self.device,
+            (self.rt_state.blas_indices.len() * std::mem::size_of::<u32>()) as u64,
+            usage,
+            0,
+        );
+        let blas_triangles = self.rt_state.blas_triangles_buffer.ensure(
+            &self.device,
+            (self.rt_state.blas_triangles.len() * std::mem::size_of::<RtTriangle>()) as u64,
+            usage,
+            0,
+        );
+        let blas_descs = self.rt_state.blas_descs_buffer.ensure(
+            &self.device,
+            (self.rt_state.blas_descs.len() * std::mem::size_of::<RtBlasDesc>()) as u64,
+            usage,
+            0,
+        );
+
+        Some(RayTracingFrameInput {
+            rt_extent,
+            blas_nodes: blas_nodes.clone(),
+            blas_indices: blas_indices.clone(),
+            blas_triangles: blas_triangles.clone(),
+            blas_descs: blas_descs.clone(),
+            tlas_nodes: tlas_nodes.clone(),
+            tlas_indices: tlas_indices.clone(),
+            instances: inst_buffer.clone(),
+            constants: constants_buf.clone(),
         })
     }
 

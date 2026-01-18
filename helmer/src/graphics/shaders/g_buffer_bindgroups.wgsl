@@ -10,6 +10,7 @@ struct Constants {
 
     // lighting
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
 
@@ -231,16 +232,28 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     }
 
     // --- Normal Mapping ---
+    let smooth_normal = safe_normalize(in.world_normal);
+    var geom_normal = smooth_normal;
+    if render_constants.shade_smooth == 0u {
+        var flat_normal = safe_normalize(cross(dpdx(in.world_position), dpdy(in.world_position)));
+        if dot(flat_normal, smooth_normal) < 0.0 {
+            flat_normal = -flat_normal;
+        }
+        geom_normal = flat_normal;
+    }
+
     var N: vec3<f32>;
     if material.normal_idx >= 0i {
         let tangent_space_normal = textureSampleBias(normal_tex, pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz * 2.0 - 1.0;
-        let T = safe_normalize(in.world_tangent);
-        let B = safe_normalize(in.world_bitangent);
-        let N_geom = safe_normalize(in.world_normal);
-        let tbn = mat3x3<f32>(T, B, N_geom);
+        let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+        var B = safe_normalize(cross(geom_normal, T));
+        if dot(B, in.world_bitangent) < 0.0 {
+            B = -B;
+        }
+        let tbn = mat3x3<f32>(T, B, geom_normal);
         N = safe_normalize(tbn * tangent_space_normal);
     } else {
-        N = safe_normalize(in.world_normal);
+        N = geom_normal;
     }
 
     // --- Pack and Output ---

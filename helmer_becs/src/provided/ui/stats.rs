@@ -1416,6 +1416,12 @@ impl StatsUI {
                                 }
                             });
 
+                        let mut shade_smooth = render_cfg.shader_constants.shade_smooth != 0;
+                        if ui.checkbox(&mut shade_smooth, "shade smooth").changed() {
+                            render_cfg.shader_constants.shade_smooth =
+                                if shade_smooth { 1 } else { 0 };
+                        }
+
                         if render_cfg.shader_constants.shade_mode != 1 {
                             let light_model_labels = ["PBR lit", "stylized lit"];
                             ComboBox::from_label("lighting model")
@@ -1588,6 +1594,207 @@ impl StatsUI {
                                         .prefix(format!("split {idx}: ")),
                                 );
                             }
+                        });
+
+                        ui.separator();
+                        ui.heading("Ray Tracing");
+                        ui.checkbox(&mut render_cfg.rt_accumulation, "accumulation");
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.rt_max_accumulation_frames)
+                                .speed(1.0)
+                                .prefix("max accumulation frames: "),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut render_cfg.rt_samples_per_frame, 1..=64)
+                                .text("samples per frame"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut render_cfg.rt_max_bounces, 1..=16)
+                                .text("max bounces"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut render_cfg.rt_direct_light_samples, 1..=8)
+                                .text("direct light samples"),
+                        );
+                        ui.checkbox(&mut render_cfg.rt_direct_lighting, "direct lighting");
+                        ui.checkbox(&mut render_cfg.rt_shadows, "shadows");
+                        ui.checkbox(&mut render_cfg.rt_use_textures, "use material textures");
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.rt_exposure)
+                                .speed(0.05)
+                                .range(0.0..=10.0)
+                                .prefix("exposure: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.rt_env_intensity)
+                                .speed(0.05)
+                                .range(0.0..=10.0)
+                                .prefix("env intensity: "),
+                        );
+                        ui.collapsing("sky ", |ui| {
+                            ui.add(
+                                egui::Slider::new(&mut render_cfg.rt_sky_view_samples, 1..=64)
+                                    .text("sky view samples"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut render_cfg.rt_sky_sun_samples, 1..=64)
+                                    .text("sky sun samples"),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_sky_multi_scatter_strength)
+                                    .speed(0.05)
+                                    .range(0.0..=4.0)
+                                    .prefix("multi scatter strength: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_sky_multi_scatter_power)
+                                    .speed(0.05)
+                                    .range(0.1..=8.0)
+                                    .prefix("multi scatter power: "),
+                            );
+                        });
+                        ui.collapsing("stability", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_camera_pos_epsilon)
+                                    .speed(0.0001)
+                                    .range(0.0..=1.0)
+                                    .prefix("camera pos epsilon: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_camera_rot_epsilon)
+                                    .speed(0.0001)
+                                    .range(0.0..=1.0)
+                                    .prefix("camera rot epsilon: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_scene_pos_quantize)
+                                    .speed(0.0001)
+                                    .range(0.0..=1.0)
+                                    .prefix("scene pos quantize: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_scene_rot_quantize)
+                                    .speed(0.0001)
+                                    .range(0.0..=1.0)
+                                    .prefix("scene rot quantize: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_scene_scale_quantize)
+                                    .speed(0.0001)
+                                    .range(0.0..=1.0)
+                                    .prefix("scene scale quantize: "),
+                            );
+                        });
+                        ui.collapsing("quality", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_firefly_clamp)
+                                    .speed(0.1)
+                                    .range(0.0..=100.0)
+                                    .prefix("firefly clamp: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_min_roughness)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("min roughness: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_normal_map_strength)
+                                    .speed(0.05)
+                                    .range(0.0..=2.0)
+                                    .prefix("normal strength: "),
+                            );
+                        });
+                        ui.collapsing("ray bias", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_shadow_bias)
+                                    .speed(0.0001)
+                                    .range(0.0..=0.01)
+                                    .prefix("shadow bias: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_ray_bias)
+                                    .speed(0.0001)
+                                    .range(0.0..=0.01)
+                                    .prefix("ray bias: "),
+                            );
+                        });
+                        ui.collapsing("performance", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_throughput_cutoff)
+                                    .speed(0.001)
+                                    .range(0.0..=1.0)
+                                    .prefix("throughput cutoff: "),
+                            );
+                        });
+                        ui.collapsing("resolution scaling", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_resolution_scale)
+                                    .speed(0.01)
+                                    .prefix("resolution scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_ray_budget)
+                                    .speed(1000.0)
+                                    .prefix("ray budget: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_min_pixel_budget)
+                                    .speed(64.0)
+                                    .prefix("min pixel budget: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_complexity_base)
+                                    .speed(256.0)
+                                    .prefix("complexity base: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_complexity_exponent)
+                                    .speed(0.05)
+                                    .prefix("complexity exponent: "),
+                            );
+                        });
+                        ui.collapsing("adaptive scaling", |ui| {
+                            ui.checkbox(&mut render_cfg.rt_adaptive_scale, "enabled");
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_adaptive_scale_min)
+                                    .speed(0.01)
+                                    .prefix("min scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_adaptive_scale_max)
+                                    .speed(0.01)
+                                    .prefix("max scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_adaptive_scale_down)
+                                    .speed(0.01)
+                                    .prefix("scale down: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_adaptive_scale_up)
+                                    .speed(0.01)
+                                    .prefix("scale up: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_adaptive_scale_recovery_frames,
+                                )
+                                .speed(1.0)
+                                .prefix("recovery frames: "),
+                            );
+                        });
+                        ui.collapsing("acceleration structures", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_blas_leaf_size)
+                                    .speed(1.0)
+                                    .prefix("blas leaf size: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_tlas_leaf_size)
+                                    .speed(1.0)
+                                    .prefix("tlas leaf size: "),
+                            );
                         });
 
                         ui.separator();

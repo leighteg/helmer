@@ -13,6 +13,7 @@ struct Constants {
 
     // lighting
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
 
@@ -203,6 +204,14 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     return res;
 }
 
+fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
+    let len = length(v);
+    if len < EPSILON {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return v / len;
+}
+
 //=============== PBR FUNCTIONS ===============//
 fn distribution_ggx(NdotH: f32, roughness: f32) -> f32 {
     let a = roughness * roughness;
@@ -385,12 +394,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let roughness = max(mr_sample.g * material.roughness, MIN_ROUGHNESS);
 
     // --- Normal Calculation ---
-    let tangent_space_normal = textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz * 2.0 - 1.0;
-    let N_geom = normalize(in.world_normal);
-    let T = normalize(in.world_tangent);
-    let B = normalize(in.world_bitangent);
-    let tbn = mat3x3<f32>(T, B, N_geom);
-    let N = normalize(tbn * tangent_space_normal);
+    let smooth_normal = safe_normalize(in.world_normal);
+    var geom_normal = smooth_normal;
+    if render_constants.shade_smooth == 0u {
+        var flat_normal = safe_normalize(cross(dpdx(in.world_position), dpdy(in.world_position)));
+        if dot(flat_normal, smooth_normal) < 0.0 {
+            flat_normal = -flat_normal;
+        }
+        geom_normal = flat_normal;
+    }
+    let tangent_space_normal =
+        textureSample(normal_textures, texture_sampler, in.tex_coord, u32(material.normal_idx)).xyz
+        * 2.0
+        - 1.0;
+    let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+    var B = safe_normalize(cross(geom_normal, T));
+    if dot(B, in.world_bitangent) < 0.0 {
+        B = -B;
+    }
+    let tbn = mat3x3<f32>(T, B, geom_normal);
+    let N = safe_normalize(tbn * tangent_space_normal);
 
     // Add emission
     let emission = material.emission_color * material.emission_strength;

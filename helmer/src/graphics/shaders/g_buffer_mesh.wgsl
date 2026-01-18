@@ -14,6 +14,7 @@ struct Constants {
 
     // lighting
     shade_mode: u32,
+    shade_smooth: u32,
     light_model: u32,
     skylight_contribution: u32,
 
@@ -507,7 +508,17 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     }
 
     // --- NORMAL MAP ---
-    var N = in.world_normal;
+    let smooth_normal = safe_normalize(in.world_normal);
+    var geom_normal = smooth_normal;
+    if render_constants.shade_smooth == 0u {
+        var flat_normal = safe_normalize(cross(dpdx(in.world_position), dpdy(in.world_position)));
+        if dot(flat_normal, smooth_normal) < 0.0 {
+            flat_normal = -flat_normal;
+        }
+        geom_normal = flat_normal;
+    }
+
+    var N = geom_normal;
     if material.normal_idx >= 0i {
         let normal_sample = textureSampleBias(
             textures[material.normal_idx],
@@ -516,10 +527,13 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
             render_constants.mip_bias
         ).xyz * 2.0 - 1.0;
 
-        let T = normalize(in.world_tangent);
-        let B = normalize(in.world_bitangent);
-        let tbn = mat3x3<f32>(T, B, N);
-        N = normalize(tbn * normal_sample);
+        let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+        var B = safe_normalize(cross(geom_normal, T));
+        if dot(B, in.world_bitangent) < 0.0 {
+            B = -B;
+        }
+        let tbn = mat3x3<f32>(T, B, geom_normal);
+        N = safe_normalize(tbn * normal_sample);
     }
 
     // --- METALLIC, ROUGHNESS, AO ---
@@ -538,7 +552,7 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
         ao *= mra_sample.r;
     }
 
-    out.normal = vec4<f32>(normalize(N) * 0.5 + 0.5, 1.0);
+    out.normal = vec4<f32>(safe_normalize(N) * 0.5 + 0.5, 1.0);
     out.albedo = vec4<f32>(albedo, alpha);
     out.mra = vec4<f32>(metallic, roughness, ao, 1.0);
     out.emission = vec4<f32>(emission, 1.0);

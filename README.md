@@ -23,6 +23,8 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - LOD/mip generation
 
 ## todo 😡
+- [ ] promote statelessness of GraphRenderer
+- [ ] ditch monolithic ShaderConstants for modularized uniforms
 - [x] provide custom runtime hooks?
 - [x] ~~provide custom renderer hooks~~ [render graph]
 - [x] provide custom logic thread hooks

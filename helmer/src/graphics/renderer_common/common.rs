@@ -700,6 +700,7 @@ pub struct ShaderConstants {
     pub mip_bias: f32,
 
     pub shade_mode: u32,
+    pub shade_smooth: u32,
     pub light_model: u32,
     pub skylight_contribution: u32,
 
@@ -757,6 +758,7 @@ pub struct ShaderConstants {
     pub _pad_atmo1: f32,
     pub sky_ground_albedo: [f32; 3],
     pub sky_ground_brightness: f32,
+    pub _pad_end: [f32; 3],
 }
 
 impl Default for ShaderConstants {
@@ -767,6 +769,7 @@ impl Default for ShaderConstants {
 
             // lighting
             shade_mode: 0,
+            shade_smooth: 1,
             light_model: 0,
             skylight_contribution: 1,
 
@@ -827,6 +830,7 @@ impl Default for ShaderConstants {
             _pad_atmo1: 0.0,
             sky_ground_albedo: [0.3, 0.25, 0.2],
             sky_ground_brightness: 1.0,
+            _pad_end: [0.0; 3],
         }
     }
 }

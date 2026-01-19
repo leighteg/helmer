@@ -563,6 +563,7 @@ fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
         return false;
     }
     let bias = max(constants.shadow_bias, EPSILON);
+    let max_dist = max(max_t - bias, 0.0);
     let inv_dir = 1.0 / dir;
     var stack: array<u32, MAX_STACK>;
     var stack_ptr = 0u;
@@ -580,7 +581,7 @@ fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
         }
         let node = tlas_nodes[node_index];
         let hit = intersect_aabb(origin, inv_dir, node.bounds_min.xyz, node.bounds_max.xyz);
-        if hit.y < max(hit.x, 0.0) {
+        if hit.y < max(hit.x, 0.0) || hit.x > max_dist {
             continue;
         }
         if node.index_count > 0u {
@@ -598,7 +599,7 @@ fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
                     continue;
                 }
                 let local_origin = (inst.inv_model * vec4(origin, 1.0)).xyz;
-                let local_dir = normalize((inst.inv_model * vec4(dir, 0.0)).xyz);
+                let local_dir = (inst.inv_model * vec4(dir, 0.0)).xyz;
                 let inv_local_dir = 1.0 / local_dir;
 
                 var blas_stack: array<u32, MAX_STACK>;
@@ -613,7 +614,7 @@ fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
                     let blas_index = blas_stack[blas_ptr];
                     let bnode = blas_nodes[blas_index];
                     let bhit = intersect_aabb(local_origin, inv_local_dir, bnode.bounds_min.xyz, bnode.bounds_max.xyz);
-                    if bhit.y < max(bhit.x, 0.0) {
+                    if bhit.y < max(bhit.x, 0.0) || bhit.x > max_dist {
                         continue;
                     }
                     if bnode.index_count > 0u {
@@ -624,13 +625,8 @@ fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
                             }
                             let tri = blas_triangles[tri_idx];
                             let res = intersect_triangle(local_origin, local_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz);
-                            if res.x > 0.0 {
-                                let hit_local = local_origin + local_dir * res.x;
-                                let hit_world = (inst.model * vec4(hit_local, 1.0)).xyz;
-                                let dist = length(hit_world - origin);
-                                if dist < max_t - bias {
-                                    return true;
-                                }
+                            if res.x > 0.0 && res.x < max_dist {
+                                return true;
                             }
                         }
                     } else {
@@ -671,7 +667,6 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     var best_material = 0u;
     var best_instance = 0u;
     var best_tri = 0u;
-    var best_hit = vec3<f32>(0.0);
     let use_smooth = (constants.flags & RT_FLAG_SHADE_SMOOTH) != 0u;
 
     loop {
@@ -703,8 +698,9 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                     continue;
                 }
                 let local_origin = (inst.inv_model * vec4(origin, 1.0)).xyz;
-                let local_dir = normalize((inst.inv_model * vec4(dir, 0.0)).xyz);
+                let local_dir = (inst.inv_model * vec4(dir, 0.0)).xyz;
                 let inv_local_dir = 1.0 / local_dir;
+                let normal_matrix = transpose(inst.inv_model);
 
                 var blas_stack: array<u32, MAX_STACK>;
                 var blas_ptr = 0u;
@@ -719,7 +715,7 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                     let blas_index = blas_stack[blas_ptr];
                     let bnode = blas_nodes[blas_index];
                     let bhit = intersect_aabb(local_origin, inv_local_dir, bnode.bounds_min.xyz, bnode.bounds_max.xyz);
-                    if bhit.y < max(bhit.x, 0.0) {
+                    if bhit.y < max(bhit.x, 0.0) || bhit.x > best_t {
                         continue;
                     }
                     if bnode.index_count > 0u {
@@ -730,36 +726,30 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                             }
                             let tri = blas_triangles[tri_idx];
                             let res = intersect_triangle(local_origin, local_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz);
-                            if res.x > 0.0 {
-                                let hit_local = local_origin + local_dir * res.x;
-                                let hit_world = (inst.model * vec4(hit_local, 1.0)).xyz;
-                                let dist = length(hit_world - origin);
-                                if dist < best_t {
-                                    best_t = dist;
-                                    let w = 1.0 - res.y - res.z;
-                                    let uv = tri.uv0 * w + tri.uv1 * res.y + tri.uv2 * res.z;
-                                    let face_local = normalize(cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz));
-                                    let face_world = normalize((transpose(inst.inv_model) * vec4(face_local, 0.0)).xyz);
-                                    var normal_world = face_world;
-                                    if use_smooth {
-                                        let n0_world = normalize((transpose(inst.inv_model) * vec4(tri.n0.xyz, 0.0)).xyz);
-                                        let n1_world = normalize((transpose(inst.inv_model) * vec4(tri.n1.xyz, 0.0)).xyz);
-                                        let n2_world = normalize((transpose(inst.inv_model) * vec4(tri.n2.xyz, 0.0)).xyz);
-                                        let smooth_sum = n0_world * w + n1_world * res.y + n2_world * res.z;
-                                        if length(smooth_sum) > 1.0e-5 {
-                                            normal_world = normalize(smooth_sum);
-                                            if dot(normal_world, face_world) < 0.0 {
-                                                normal_world = -normal_world;
-                                            }
+                            if res.x > 0.0 && res.x < best_t {
+                                best_t = res.x;
+                                let w = 1.0 - res.y - res.z;
+                                let uv = tri.uv0 * w + tri.uv1 * res.y + tri.uv2 * res.z;
+                                let face_local = normalize(cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz));
+                                let face_world = normalize((normal_matrix * vec4(face_local, 0.0)).xyz);
+                                var normal_world = face_world;
+                                if use_smooth {
+                                    let n0_world = normalize((normal_matrix * vec4(tri.n0.xyz, 0.0)).xyz);
+                                    let n1_world = normalize((normal_matrix * vec4(tri.n1.xyz, 0.0)).xyz);
+                                    let n2_world = normalize((normal_matrix * vec4(tri.n2.xyz, 0.0)).xyz);
+                                    let smooth_sum = n0_world * w + n1_world * res.y + n2_world * res.z;
+                                    if length(smooth_sum) > 1.0e-5 {
+                                        normal_world = normalize(smooth_sum);
+                                        if dot(normal_world, face_world) < 0.0 {
+                                            normal_world = -normal_world;
                                         }
                                     }
-                                    best_normal = normal_world;
-                                    best_uv = uv;
-                                    best_material = inst.material_id;
-                                    best_instance = instance_index;
-                                    best_tri = tri_idx;
-                                    best_hit = hit_world;
                                 }
+                                best_normal = normal_world;
+                                best_uv = uv;
+                                best_material = inst.material_id;
+                                best_instance = instance_index;
+                                best_tri = tri_idx;
                             }
                         }
                     } else {
@@ -783,6 +773,7 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     }
 
     if best_t < 1.0e29 {
+        let best_hit = origin + dir * best_t;
         return HitInfo(best_hit, best_normal, best_uv, best_material, best_instance, best_tri, 1u);
     }
     return HitInfo(vec3(0.0), vec3(0.0), vec2(0.0), 0u, 0u, 0u, 0u);

@@ -195,6 +195,9 @@ fn build_bvh(items: &[BoundsInfo], leaf_size: usize) -> (Vec<RtBvhNode>, Vec<u32
     let mut nodes = Vec::new();
     let mut leaf_indices = Vec::new();
     if !indices.is_empty() {
+        let node_capacity = items.len().saturating_mul(2).saturating_sub(1);
+        nodes.reserve(node_capacity);
+        leaf_indices.reserve(items.len());
         build_node(
             &mut indices,
             items,
@@ -243,13 +246,12 @@ fn build_node(
         2
     };
 
-    indices.sort_unstable_by(|a, b| {
+    let mid = indices.len() / 2;
+    indices.select_nth_unstable_by(mid, |a, b| {
         let ca = items[*a as usize].centroid[axis];
         let cb = items[*b as usize].centroid[axis];
-        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+        ca.total_cmp(&cb)
     });
-
-    let mid = indices.len() / 2;
     let (left_indices, right_indices) = indices.split_at_mut(mid);
     if left_indices.is_empty() || right_indices.is_empty() {
         let first = leaf_indices.len() as u32;

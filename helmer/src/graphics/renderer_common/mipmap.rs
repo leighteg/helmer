@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use wgpu::util::DeviceExt;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 /// A modular, reusable utility for generating mipmap chains on the GPU.
 /// It uses a series of render passes ("blits") to downscale a texture.
@@ -8,6 +10,7 @@ pub struct MipmapGenerator {
     pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    pipelines: Mutex<HashMap<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>>,
 }
 
 impl MipmapGenerator {
@@ -58,6 +61,7 @@ impl MipmapGenerator {
             pipeline_layout,
             bind_group_layout,
             sampler,
+            pipelines: Mutex::new(HashMap::new()),
         }
     }
 
@@ -69,35 +73,64 @@ impl MipmapGenerator {
         texture: &wgpu::Texture,
         mip_count: u32,
     ) {
+        self.generate_mips_from(encoder, device, texture, 0, mip_count);
+    }
+
+    /// Generates mipmaps starting from the provided base level.
+    pub fn generate_mips_from(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+        texture: &wgpu::Texture,
+        start_level: u32,
+        mip_count: u32,
+    ) {
+        if mip_count <= 1 {
+            return;
+        }
+        let start_level = start_level.min(mip_count.saturating_sub(1));
+        if start_level + 1 >= mip_count {
+            return;
+        }
+
         let format = texture.format();
+        let pipeline = {
+            let mut pipelines = self.pipelines.lock().expect("mipmap pipeline lock");
+            pipelines
+                .entry(format)
+                .or_insert_with(|| {
+                    Arc::new(
+                        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                            label: Some("Mipmap Blit Pipeline (runtime)"),
+                            layout: Some(&self.pipeline_layout),
+                            vertex: wgpu::VertexState {
+                                module: &self.shader,
+                                entry_point: Some("vs_main"),
+                                buffers: &[],
+                                compilation_options: Default::default(),
+                            },
+                            fragment: Some(wgpu::FragmentState {
+                                module: &self.shader,
+                                entry_point: Some("fs_main"),
+                                targets: &[Some(wgpu::ColorTargetState {
+                                    format,
+                                    blend: None,
+                                    write_mask: wgpu::ColorWrites::ALL,
+                                })],
+                                compilation_options: Default::default(),
+                            }),
+                            primitive: wgpu::PrimitiveState::default(),
+                            depth_stencil: None,
+                            multisample: wgpu::MultisampleState::default(),
+                            multiview_mask: None,
+                            cache: None,
+                        }),
+                    )
+                })
+                .clone()
+        };
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Mipmap Blit Pipeline (runtime)"),
-            layout: Some(&self.pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &self.shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &self.shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        for i in 1..mip_count {
+        for i in (start_level + 1)..mip_count {
             let src_mip = i - 1;
             let dst_mip = i;
 
@@ -147,7 +180,7 @@ impl MipmapGenerator {
                 multiview_mask: None,
             });
 
-            rpass.set_pipeline(&pipeline); // Use the format-specific pipeline
+            rpass.set_pipeline(&pipeline); // Use the cached format-specific pipeline
             rpass.set_bind_group(0, &bind_group, &[]);
             rpass.draw(0..3, 0..1); // Draw a fullscreen triangle
         }

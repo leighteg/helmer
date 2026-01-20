@@ -51,13 +51,13 @@ use crate::graphics::{
         atmosphere::AtmospherePrecomputer,
         common::{
             Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            EguiTextureCache, InstanceRaw, LightData, MaterialShaderData, MeshletDesc,
-            MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
+            EguiTextureCache, InstanceRaw, LightData, MaterialShaderData, MeshLodPayload,
+            MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
             OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
             RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
             RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
             RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
-            apply_egui_delta, mesh_task_tiling,
+            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
         error::RendererError,
         graph::{RenderGraphBuildParams, RenderGraphConfigSignature, RenderGraphSpec},
@@ -72,13 +72,18 @@ use glam::{Mat3, Mat4, Quat, Vec3, Vec4Swizzles};
 const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
 
+#[derive(Clone, Copy)]
 struct MeshLodResource {
+    lod_index: usize,
+    vertex: ResourceId,
     buffer: ResourceId,
     index_count: u32,
+    estimated_bytes: u64,
     meshlets: MeshletGpu,
     rt_blas_index: u32,
 }
 
+#[derive(Clone, Copy)]
 struct MeshletGpu {
     descs: ResourceId,
     vertices: ResourceId,
@@ -87,9 +92,9 @@ struct MeshletGpu {
 }
 
 struct MeshGpu {
-    vertex: ResourceId,
     lods: Vec<MeshLodResource>,
     bounds: Aabb,
+    available_lods: usize,
 }
 
 struct ResolvedDrawMesh {
@@ -1285,6 +1290,7 @@ pub struct GraphRenderer {
     material_index_map: SlotVec<MaterialIndexEntry>,
     material_index_order: Vec<usize>,
     mesh_lod_state: SlotVec<usize>,
+    mesh_lod_min: SlotVec<usize>,
     texture_low_res_state: SlotVec<bool>,
     // Materials that can't upload yet (usually waiting on textures); keeps dependency metadata alive for streaming.
     pending_materials: HashMap<usize, MaterialGpuData>,
@@ -1427,6 +1433,7 @@ pub(crate) struct RendererSnapshot {
     material_bindings_version: u64,
     pending_materials: HashMap<usize, MaterialGpuData>,
     mesh_lod_state: SlotVec<usize>,
+    mesh_lod_min: SlotVec<usize>,
     texture_low_res_state: SlotVec<bool>,
     pass_overrides: HashMap<String, bool>,
     egui_texture_cache: EguiTextureCache,
@@ -2263,6 +2270,7 @@ impl GraphRenderer {
             material_index_map: SlotVec::new(),
             material_index_order: Vec::new(),
             mesh_lod_state: SlotVec::new(),
+            mesh_lod_min: SlotVec::new(),
             texture_low_res_state: SlotVec::new(),
             pending_materials: HashMap::new(),
             current_render_data: None,
@@ -2781,6 +2789,8 @@ impl GraphRenderer {
                 self.recently_evicted = SlotVec::new();
                 self.streaming_pressure = MemoryPressure::None;
                 self.streaming_pressure_frame = self.frame_index;
+                self.streaming_dirty = true;
+                self.streaming_last_frame = 0;
                 self.materials_dirty = true;
                 self.instances_dirty = true;
                 self.shadow_instances_dirty = true;
@@ -2788,11 +2798,24 @@ impl GraphRenderer {
                 self.shadow_bounds_dirty = true;
                 self.gbuffer_draws_dirty = true;
                 self.shadow_draws_dirty = true;
+                self.gpu_instances_dirty = true;
+                self.gpu_draws_dirty = true;
+                self.gpu_cull_dirty = true;
+                self.gpu_instance_updates.clear();
                 self.note_bundle_resource_change();
+                let reset_rt = restream_assets
+                    || self
+                        .current_render_data
+                        .as_ref()
+                        .is_some_and(|state| state.data.render_graph.name == "traced-graph");
+                if reset_rt {
+                    self.reset_ray_tracing_state();
+                } else {
+                    self.fallback_mesh = None;
+                    self.init_fallback_mesh();
+                }
                 if restream_assets {
                     if let Some(state) = self.current_render_data.take() {
-                        self.streaming_dirty = true;
-                        self.streaming_last_frame = 0;
                         self.refresh_streaming_plan(&state.data);
                         self.current_render_data = Some(state);
                     }
@@ -2843,39 +2866,14 @@ impl GraphRenderer {
 
     pub fn process_message(&mut self, message: RenderMessage) {
         match message {
-            RenderMessage::CreateMesh {
-                id,
-                vertices,
-                lod_indices,
-                meshlets,
-                bounds,
-            } => {
-                if let Err(err) =
-                    self.upload_mesh(id, vertices.as_ref(), &lod_indices, &meshlets, bounds)
-                {
-                    warn!("Failed to upload mesh {id}: {err:?}");
-                }
-            }
-            RenderMessage::CreateTexture {
-                id,
-                name: _,
-                kind: _,
-                data,
-                format,
-                width,
-                height,
-            } => {
-                if let Err(err) = self.upload_texture(id, data.as_ref(), format, width, height) {
-                    warn!("Failed to upload texture {id}: {err:?}");
-                }
-                self.resolve_pending_materials();
-            }
-            RenderMessage::CreateMaterial(mat) => {
-                if self.try_upload_material(mat.clone()) {
-                    self.pending_materials.remove(&mat.id);
-                } else {
-                    self.pending_materials.insert(mat.id, mat);
-                }
+            RenderMessage::CreateMesh { .. }
+            | RenderMessage::CreateTexture { .. }
+            | RenderMessage::CreateMaterial(_) => {
+                let mut resolve_materials = false;
+                let mut mip_encoder: Option<wgpu::CommandEncoder> = None;
+                self.process_asset_message(message, &mut resolve_materials, &mut mip_encoder);
+                self.finish_asset_batch(resolve_materials, mip_encoder);
+                return;
             }
             RenderMessage::RenderData(data) => {
                 self.ingest_render_data(data);
@@ -2895,6 +2893,77 @@ impl GraphRenderer {
             RenderMessage::Resize(size) => self.handle_resize(size),
             RenderMessage::WindowRecreated { .. } => {}
             RenderMessage::Shutdown => {}
+        }
+        self.drain_pool_evictions();
+        self.drain_pool_binding_changes();
+    }
+
+    pub fn process_asset_batch(&mut self, batch: &mut Vec<RenderMessage>) {
+        if batch.is_empty() {
+            return;
+        }
+        let mut resolve_materials = false;
+        let mut mip_encoder: Option<wgpu::CommandEncoder> = None;
+        for message in batch.drain(..) {
+            self.process_asset_message(message, &mut resolve_materials, &mut mip_encoder);
+        }
+        self.finish_asset_batch(resolve_materials, mip_encoder);
+    }
+
+    fn process_asset_message(
+        &mut self,
+        message: RenderMessage,
+        resolve_materials: &mut bool,
+        mip_encoder: &mut Option<wgpu::CommandEncoder>,
+    ) {
+        match message {
+            RenderMessage::CreateMesh {
+                id,
+                total_lods,
+                lods,
+                bounds,
+            } => {
+                if let Err(err) = self.upload_mesh(id, total_lods, &lods, bounds) {
+                    warn!("Failed to upload mesh {id}: {err:?}");
+                }
+            }
+            RenderMessage::CreateTexture {
+                id,
+                name: _,
+                kind: _,
+                data,
+                format,
+                width,
+                height,
+            } => {
+                if let Err(err) =
+                    self.upload_texture(id, data.as_ref(), format, width, height, mip_encoder)
+                {
+                    warn!("Failed to upload texture {id}: {err:?}");
+                }
+                *resolve_materials = true;
+            }
+            RenderMessage::CreateMaterial(mat) => {
+                if self.try_upload_material(mat.clone()) {
+                    self.pending_materials.remove(&mat.id);
+                } else {
+                    self.pending_materials.insert(mat.id, mat);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_asset_batch(
+        &mut self,
+        resolve_materials: bool,
+        mip_encoder: Option<wgpu::CommandEncoder>,
+    ) {
+        if let Some(encoder) = mip_encoder {
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
+        if resolve_materials {
+            self.resolve_pending_materials();
         }
         self.drain_pool_evictions();
         self.drain_pool_binding_changes();
@@ -3226,6 +3295,23 @@ impl GraphRenderer {
         }
     }
 
+    fn streaming_byte_caps(&self, pressure: MemoryPressure) -> (u64, u64, u64, u64) {
+        match pressure {
+            MemoryPressure::Hard => {
+                let caps = self.streaming_tuning.caps_bytes_hard;
+                (caps.global, caps.mesh, caps.material, caps.texture)
+            }
+            MemoryPressure::Soft => {
+                let caps = self.streaming_tuning.caps_bytes_soft;
+                (caps.global, caps.mesh, caps.material, caps.texture)
+            }
+            MemoryPressure::None => {
+                let caps = self.streaming_tuning.caps_bytes_none;
+                (caps.global, caps.mesh, caps.material, caps.texture)
+            }
+        }
+    }
+
     pub fn into_parts(self) -> (wgpu::Instance, wgpu::Surface<'static>) {
         (self.instance, self.surface)
     }
@@ -3255,6 +3341,7 @@ impl GraphRenderer {
             material_bindings_version: self.material_bindings_version,
             pending_materials: std::mem::take(&mut self.pending_materials),
             mesh_lod_state: std::mem::replace(&mut self.mesh_lod_state, SlotVec::new()),
+            mesh_lod_min: std::mem::replace(&mut self.mesh_lod_min, SlotVec::new()),
             texture_low_res_state: std::mem::replace(
                 &mut self.texture_low_res_state,
                 SlotVec::new(),
@@ -3280,6 +3367,7 @@ impl GraphRenderer {
             material_bindings_version,
             pending_materials,
             mesh_lod_state,
+            mesh_lod_min,
             texture_low_res_state,
             pass_overrides,
             egui_texture_cache,
@@ -3302,6 +3390,7 @@ impl GraphRenderer {
         self.material_bindings_version = material_bindings_version;
         self.pending_materials = pending_materials;
         self.mesh_lod_state = mesh_lod_state;
+        self.mesh_lod_min = mesh_lod_min;
         self.texture_low_res_state = texture_low_res_state;
         self.pass_overrides = pass_overrides;
         self.egui_texture_cache = egui_texture_cache;
@@ -3620,6 +3709,99 @@ impl GraphRenderer {
     fn configure_rt_blas_budget(&mut self) {
         let budget = RayTracingBlasBudget::from_limits(&self.device_caps.limits);
         self.rt_state.set_blas_budget(budget);
+    }
+
+    fn register_rt_blas_for_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) -> u32 {
+        let tri_count = indices.len() / 3;
+        if tri_count == 0 || vertices.is_empty() {
+            return self.rt_state.fallback_blas_index();
+        }
+
+        let remaining_descs = self
+            .rt_state
+            .blas_budget
+            .max_descs
+            .saturating_sub(self.rt_state.blas_descs.len());
+        if remaining_descs == 0 {
+            if !self.rt_state.warned_blas_budget {
+                warn!(
+                    "Ray tracing BLAS budget exceeded; skipping extra mesh geometry to stay within device limits"
+                );
+                self.rt_state.warned_blas_budget = true;
+            }
+            return self.rt_state.fallback_blas_index();
+        }
+
+        let remaining_nodes = self
+            .rt_state
+            .blas_budget
+            .max_nodes
+            .saturating_sub(self.rt_state.blas_nodes.len());
+        let remaining_indices = self
+            .rt_state
+            .blas_budget
+            .max_indices
+            .saturating_sub(self.rt_state.blas_indices.len());
+        let remaining_tris = self
+            .rt_state
+            .blas_budget
+            .max_triangles
+            .saturating_sub(self.rt_state.blas_triangles.len());
+        let max_tris_by_nodes = remaining_nodes / 2;
+        let max_tris = remaining_tris.min(remaining_indices).min(max_tris_by_nodes);
+        if max_tris == 0 {
+            if !self.rt_state.warned_blas_budget {
+                warn!(
+                    "Ray tracing BLAS budget exceeded; skipping extra mesh geometry to stay within device limits"
+                );
+                self.rt_state.warned_blas_budget = true;
+            }
+            return self.rt_state.fallback_blas_index();
+        }
+
+        let leaf_size = self.rt_state.blas_leaf_size.max(1);
+        if tri_count > max_tris {
+            if !self.rt_state.warned_blas_budget {
+                warn!(
+                    "Ray tracing BLAS budget exceeded; using decimated geometry for additional meshes"
+                );
+                self.rt_state.warned_blas_budget = true;
+            }
+            let stride = (tri_count + max_tris - 1) / max_tris;
+            let mut decimated = Vec::with_capacity(max_tris.saturating_mul(3));
+            for tri in (0..tri_count).step_by(stride.max(1)) {
+                let base = tri * 3;
+                if base + 2 >= indices.len() {
+                    break;
+                }
+                decimated.extend_from_slice(&indices[base..base + 3]);
+            }
+            if decimated.len() < 3 {
+                return self.rt_state.fallback_blas_index();
+            }
+            let build = build_blas(vertices, &decimated, leaf_size);
+            return self.rt_state.register_blas(build);
+        }
+
+        let build = build_blas(vertices, indices, leaf_size);
+        self.rt_state.register_blas(build)
+    }
+
+    fn reset_ray_tracing_state(&mut self) {
+        self.rt_state = RayTracingState::new(self.frames_in_flight, self.surface_size);
+        self.rt_texture_arrays = None;
+        self.rt_texture_arrays_signature = 0;
+        self.fallback_mesh = None;
+        self.init_fallback_mesh();
+        let fallback_blas = self.rt_state.fallback_blas_index();
+        for entry in &mut self.meshes.entries {
+            if let Some(mesh) = entry.as_mut() {
+                for lod in &mut mesh.lods {
+                    lod.rt_blas_index = fallback_blas;
+                }
+            }
+        }
+        self.configure_rt_blas_budget();
     }
 
     fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -4037,12 +4219,21 @@ impl GraphRenderer {
             &indices,
             self.rt_state.blas_leaf_size.max(1),
         ));
+        self.rt_state.fallback_blas_index = rt_blas_index;
+        let estimated_bytes = (vertices.len() * std::mem::size_of::<Vertex>()
+            + indices.len() * std::mem::size_of::<u32>()
+            + meshlet_data.descs.len() * std::mem::size_of::<MeshletDesc>()
+            + meshlet_data.vertices.len() * std::mem::size_of::<u32>()
+            + meshlet_data.indices.len() * std::mem::size_of::<u32>())
+            as u64;
 
         self.fallback_mesh = Some(MeshGpu {
-            vertex: vertex_id,
             lods: vec![MeshLodResource {
+                lod_index: 0,
+                vertex: vertex_id,
                 buffer: index_id,
                 index_count: indices.len() as u32,
+                estimated_bytes,
                 meshlets: MeshletGpu {
                     descs: descs_id,
                     vertices: verts_id,
@@ -4055,40 +4246,170 @@ impl GraphRenderer {
                 min: Vec3::splat(-p),
                 max: Vec3::splat(p),
             },
+            available_lods: 1,
         });
     }
 
     fn upload_mesh(
         &mut self,
         id: usize,
-        vertices: &[Vertex],
-        lod_indices: &[Arc<[u32]>],
-        meshlets: &[MeshletLodData],
+        total_lods: usize,
+        lods: &[MeshLodPayload],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
-        let vertex_bytes = (vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-        let lod_bytes: u64 = lod_indices
-            .iter()
-            .map(|indices| (indices.len() * std::mem::size_of::<u32>()) as u64)
-            .sum();
-        let meshlet_bytes: u64 = meshlets
+        if lods.is_empty() {
+            return Ok(());
+        }
+
+        let vertex_usage =
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
+        let index_usage =
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
+        let meshlet_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+
+        let max_buffer_size = self.device_caps.limits.max_buffer_size;
+        let fits_buffer_init = |size: u64, usage: wgpu::BufferUsages| -> bool {
+            if max_buffer_size == 0 || size == 0 {
+                return true;
+            }
+            let align_mask = wgpu::COPY_BUFFER_ALIGNMENT - 1;
+            let padded =
+                (size.saturating_add(align_mask) & !align_mask).max(wgpu::COPY_BUFFER_ALIGNMENT);
+            if padded > max_buffer_size {
+                return false;
+            }
+            let mut actual = if usage.contains(wgpu::BufferUsages::VERTEX) {
+                padded.saturating_add(1)
+            } else {
+                padded
+            };
+            let rem = actual % wgpu::COPY_BUFFER_ALIGNMENT;
+            if rem != 0 {
+                actual = actual.saturating_add(wgpu::COPY_BUFFER_ALIGNMENT - rem);
+            }
+            actual <= max_buffer_size
+        };
+        let bytes_for = |len: usize, elem_size: usize| -> u64 {
+            len.checked_mul(elem_size)
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .unwrap_or(u64::MAX)
+        };
+
+        let mut filtered_lods = Vec::with_capacity(lods.len());
+        let mut lod_floor_updated = false;
+        for lod in lods.iter() {
+            let vertex_bytes = bytes_for(lod.vertices.len(), std::mem::size_of::<Vertex>());
+            let index_bytes = bytes_for(lod.indices.len(), std::mem::size_of::<u32>());
+            let meshlet_desc_bytes =
+                bytes_for(lod.meshlets.descs.len(), std::mem::size_of::<MeshletDesc>());
+            let meshlet_vert_bytes =
+                bytes_for(lod.meshlets.vertices.len(), std::mem::size_of::<u32>());
+            let meshlet_index_bytes =
+                bytes_for(lod.meshlets.indices.len(), std::mem::size_of::<u32>());
+            let fits = fits_buffer_init(vertex_bytes, vertex_usage)
+                && fits_buffer_init(index_bytes, index_usage)
+                && fits_buffer_init(meshlet_desc_bytes, meshlet_usage)
+                && fits_buffer_init(meshlet_vert_bytes, meshlet_usage)
+                && fits_buffer_init(meshlet_index_bytes, meshlet_usage);
+            if !fits {
+                let updated = self.bump_mesh_lod_floor(id, lod.lod_index, total_lods);
+                lod_floor_updated |= updated;
+                if updated {
+                    let next_lod = lod.lod_index.saturating_add(1);
+                    let max_bytes = vertex_bytes
+                        .max(index_bytes)
+                        .max(meshlet_desc_bytes)
+                        .max(meshlet_vert_bytes)
+                        .max(meshlet_index_bytes);
+                    if next_lod >= total_lods {
+                        warn!(
+                            mesh_id = id,
+                            lod = lod.lod_index,
+                            max_buffer_size,
+                            max_bytes,
+                            "Mesh LOD exceeds device buffer limit; no coarser LOD available"
+                        );
+                    } else {
+                        warn!(
+                            mesh_id = id,
+                            lod = lod.lod_index,
+                            next_lod,
+                            max_buffer_size,
+                            max_bytes,
+                            "Mesh LOD exceeds device buffer limit; clamping to coarser LOD"
+                        );
+                    }
+                }
+                continue;
+            }
+            filtered_lods.push(lod.clone());
+        }
+
+        if lod_floor_updated {
+            self.streaming_dirty = true;
+        }
+        if filtered_lods.is_empty() {
+            self.streaming_inflight.remove(id);
+            return Ok(());
+        }
+        let lods = filtered_lods;
+
+        let new_bytes: u64 = lods
             .iter()
             .map(|lod| {
-                let descs = lod.descs.len() as u64 * std::mem::size_of::<MeshletDesc>() as u64;
-                let verts = lod.vertices.len() as u64 * std::mem::size_of::<u32>() as u64;
-                let inds = lod.indices.len() as u64 * std::mem::size_of::<u32>() as u64;
-                descs + verts + inds
+                let verts = (lod.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
+                let indices = (lod.indices.len() * std::mem::size_of::<u32>()) as u64;
+                let meshlets = {
+                    let descs =
+                        lod.meshlets.descs.len() as u64 * std::mem::size_of::<MeshletDesc>() as u64;
+                    let verts =
+                        lod.meshlets.vertices.len() as u64 * std::mem::size_of::<u32>() as u64;
+                    let inds =
+                        lod.meshlets.indices.len() as u64 * std::mem::size_of::<u32>() as u64;
+                    descs + verts + inds
+                };
+                verts + indices + meshlets
             })
             .sum();
-        let new_bytes = vertex_bytes + lod_bytes + meshlet_bytes;
-        let mut reclaimed_bytes = 0u64;
+
+        let payload_lods: HashSet<usize> = lods.iter().map(|lod| lod.lod_index).collect();
+        let min_requested = payload_lods.iter().copied().min().unwrap_or(0);
+        let existing_available_lods = self
+            .meshes
+            .get(id)
+            .map(|mesh| mesh.available_lods)
+            .unwrap_or(0);
+        let mut existing_lods: HashMap<usize, MeshLodResource> = HashMap::new();
         if let Some(existing) = self.meshes.get(id) {
-            if let Some(entry) = self.pool.entry(existing.vertex) {
-                if entry.residency == Residency::Resident {
-                    reclaimed_bytes = reclaimed_bytes.saturating_add(entry.desc_size_bytes);
-                }
-            }
             for lod in &existing.lods {
+                existing_lods.insert(lod.lod_index, *lod);
+            }
+        }
+        let primary_vertex = self
+            .pool
+            .asset_id_to_resource(ResourceKind::Buffer, id as u32);
+        if let Some((&lod_index, _)) = existing_lods
+            .iter()
+            .find(|(_, lod)| lod.lod_index != 0 && lod.vertex == primary_vertex)
+        {
+            existing_lods.remove(&lod_index);
+        }
+        let existing_rt_blas = existing_lods
+            .values()
+            .map(|lod| lod.rt_blas_index)
+            .find(|idx| *idx != self.rt_state.fallback_blas_index);
+
+        let mut reclaimed_bytes = 0u64;
+        if !existing_lods.is_empty() {
+            let should_evict = |lod: &MeshLodResource| {
+                payload_lods.contains(&lod.lod_index) || lod.lod_index < min_requested
+            };
+            for lod in existing_lods.values().filter(|lod| should_evict(lod)) {
+                if let Some(entry) = self.pool.entry(lod.vertex) {
+                    if entry.residency == Residency::Resident {
+                        reclaimed_bytes = reclaimed_bytes.saturating_add(entry.desc_size_bytes);
+                    }
+                }
                 if let Some(entry) = self.pool.entry(lod.buffer) {
                     if entry.residency == Residency::Resident {
                         reclaimed_bytes = reclaimed_bytes.saturating_add(entry.desc_size_bytes);
@@ -4110,14 +4431,12 @@ impl GraphRenderer {
         let net_bytes = new_bytes.saturating_sub(reclaimed_bytes);
         self.pre_evict_for_upload(net_bytes);
 
-        let existing_lod_ids: Vec<ResourceId> = self
-            .meshes
-            .get(id)
-            .map(|mesh| mesh.lods.iter().map(|lod| lod.buffer).collect())
-            .unwrap_or_default();
-
-        if let Some(existing) = self.meshes.get(id) {
-            for lod in &existing.lods {
+        if !existing_lods.is_empty() {
+            let should_evict = |lod: &MeshLodResource| {
+                payload_lods.contains(&lod.lod_index) || lod.lod_index < min_requested
+            };
+            for lod in existing_lods.values().filter(|lod| should_evict(lod)) {
+                self.pool.evict(lod.vertex);
                 self.pool.evict(lod.buffer);
                 self.pool.evict(lod.meshlets.descs);
                 self.pool.evict(lod.meshlets.vertices);
@@ -4125,65 +4444,84 @@ impl GraphRenderer {
             }
         }
 
-        let vertex_usage =
-            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("mesh-vbo-{}", id)),
-                contents: bytemuck::cast_slice(vertices),
+        let mut gpu_lods = Vec::with_capacity(lods.len().saturating_add(existing_lods.len()));
+        let primary_slot = lods.iter().position(|lod| lod.lod_index == 0).unwrap_or(0);
+        let rt_blas_index = existing_rt_blas.unwrap_or_else(|| {
+            lods.get(primary_slot)
+                .filter(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
+                .or_else(|| {
+                    lods.iter()
+                        .find(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
+                })
+                .map(|lod| {
+                    self.register_rt_blas_for_mesh(lod.vertices.as_ref(), lod.indices.as_ref())
+                })
+                .unwrap_or_else(|| self.rt_state.fallback_blas_index())
+        });
+        for lod in lods.iter() {
+            let lod_estimated_bytes = (lod.vertices.len() * std::mem::size_of::<Vertex>()
+                + lod.indices.len() * std::mem::size_of::<u32>()
+                + lod.meshlets.descs.len() * std::mem::size_of::<MeshletDesc>()
+                + lod.meshlets.vertices.len() * std::mem::size_of::<u32>()
+                + lod.meshlets.indices.len() * std::mem::size_of::<u32>())
+                as u64;
+            let (existing_vertex, existing_index, existing_meshlets) =
+                if let Some(existing) = existing_lods.remove(&lod.lod_index) {
+                    (
+                        Some(existing.vertex),
+                        Some(existing.buffer),
+                        Some(existing.meshlets),
+                    )
+                } else {
+                    (None, None, None)
+                };
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("mesh-vbo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.vertices.as_ref()),
+                    usage: vertex_usage,
+                });
+            let vertex_desc = ResourceDesc::Buffer {
+                size: (lod.vertices.len() * std::mem::size_of::<Vertex>()) as u64,
                 usage: vertex_usage,
-            });
+            };
+            let mut vertex_hints = ResourceUsageHints {
+                flags: ResourceFlags::PREFER_RESIDENT,
+                estimated_size_bytes: vertex_desc.estimate_size_bytes(),
+            };
+            vertex_hints.flags |= ResourceFlags::FREQUENT_UPDATE;
+            vertex_hints.flags |= ResourceFlags::STREAMING;
+            vertex_hints.flags |= ResourceFlags::STABLE_ID;
+            let vertex_id = if lod.lod_index == 0 {
+                primary_vertex
+            } else if let Some(existing) = existing_vertex {
+                existing
+            } else {
+                self.pool.create_logical(
+                    vertex_desc.clone(),
+                    Some(vertex_hints),
+                    self.frame_index,
+                    None,
+                )
+            };
+            self.insert_buffer_entry(
+                vertex_id,
+                vertex_desc,
+                vertex_buffer,
+                vertex_hints,
+                Some(id),
+            );
 
-        let vertex_desc = ResourceDesc::Buffer {
-            size: (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-            usage: vertex_usage,
-        };
-        let mut vertex_hints = ResourceUsageHints {
-            flags: ResourceFlags::PREFER_RESIDENT,
-            estimated_size_bytes: vertex_desc.estimate_size_bytes(),
-        };
-        vertex_hints.flags |= ResourceFlags::FREQUENT_UPDATE;
-        vertex_hints.flags |= ResourceFlags::STREAMING;
-
-        let vertex_id = self
-            .pool
-            .asset_id_to_resource(ResourceKind::Buffer, id as u32);
-        self.insert_buffer_entry(
-            vertex_id,
-            vertex_desc,
-            vertex_buffer,
-            vertex_hints,
-            Some(id),
-        );
-
-        let index_usage =
-            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
-        let meshlet_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        let empty_meshlet = MeshletLodData::default();
-        let mut lods = Vec::new();
-        let rt_blas_index = lod_indices
-            .last()
-            .map(|indices| {
-                self.rt_state.register_blas(build_blas(
-                    vertices,
-                    indices.as_ref(),
-                    self.rt_state.blas_leaf_size.max(1),
-                ))
-            })
-            .unwrap_or_else(|| self.rt_state.fallback_blas_index());
-        for (lod, indices) in lod_indices.iter().enumerate() {
-            let meshlet_data = meshlets.get(lod).unwrap_or(&empty_meshlet);
             let index_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod)),
-                    contents: bytemuck::cast_slice(indices.as_ref()),
+                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.indices.as_ref()),
                     usage: index_usage,
                 });
-
             let desc = ResourceDesc::Buffer {
-                size: (indices.len() * std::mem::size_of::<u32>()) as u64,
+                size: (lod.indices.len() * std::mem::size_of::<u32>()) as u64,
                 usage: index_usage,
             };
             let mut hints = ResourceUsageHints {
@@ -4191,16 +4529,12 @@ impl GraphRenderer {
                 estimated_size_bytes: desc.estimate_size_bytes(),
             };
             hints.flags |= ResourceFlags::STABLE_ID;
-            let mut index_id = None;
-            if let Some(&candidate) = existing_lod_ids.get(lod) {
-                if self.pool.entry(candidate).is_some() {
-                    index_id = Some(candidate);
-                }
-            }
-            let index_id = index_id.unwrap_or_else(|| {
+            let index_id = if let Some(existing) = existing_index {
+                existing
+            } else {
                 self.pool
                     .create_logical(desc.clone(), Some(hints), self.frame_index, None)
-            });
+            };
             let mut entry = crate::graphics::graph::logic::residency::GpuResourceEntry::new(
                 index_id,
                 desc.kind(),
@@ -4214,7 +4548,7 @@ impl GraphRenderer {
             self.pool.insert_entry(entry);
             self.pool.mark_used(index_id, self.frame_index);
 
-            let meshlet_count = meshlet_data.meshlet_count();
+            let meshlet_count = lod.meshlets.meshlet_count();
             let empty_desc = MeshletDesc {
                 vertex_offset: 0,
                 vertex_count: 0,
@@ -4223,26 +4557,26 @@ impl GraphRenderer {
                 bounds_center: [0.0; 3],
                 bounds_radius: 0.0,
             };
-            let descs_bytes = if meshlet_data.descs.is_empty() {
+            let descs_bytes = if lod.meshlets.descs.is_empty() {
                 bytemuck::bytes_of(&empty_desc)
             } else {
-                bytemuck::cast_slice(meshlet_data.descs.as_ref())
+                bytemuck::cast_slice(lod.meshlets.descs.as_ref())
             };
-            let verts_bytes = if meshlet_data.vertices.is_empty() {
+            let verts_bytes = if lod.meshlets.vertices.is_empty() {
                 bytemuck::cast_slice(&[0u32])
             } else {
-                bytemuck::cast_slice(meshlet_data.vertices.as_ref())
+                bytemuck::cast_slice(lod.meshlets.vertices.as_ref())
             };
-            let inds_bytes = if meshlet_data.indices.is_empty() {
+            let inds_bytes = if lod.meshlets.indices.is_empty() {
                 bytemuck::cast_slice(&[0u32])
             } else {
-                bytemuck::cast_slice(meshlet_data.indices.as_ref())
+                bytemuck::cast_slice(lod.meshlets.indices.as_ref())
             };
 
             let descs_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-meshlets-{}-lod{}-descs", id, lod)),
+                    label: Some(&format!("mesh-meshlets-{}-lod{}-descs", id, lod.lod_index)),
                     contents: descs_bytes,
                     usage: meshlet_usage,
                 });
@@ -4251,21 +4585,27 @@ impl GraphRenderer {
                 usage: meshlet_usage,
             };
             let descs_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STREAMING,
+                flags: ResourceFlags::PREFER_RESIDENT
+                    | ResourceFlags::STREAMING
+                    | ResourceFlags::STABLE_ID,
                 estimated_size_bytes: descs_desc.estimate_size_bytes(),
             };
-            let descs_id = self.pool.create_logical(
-                descs_desc.clone(),
-                Some(descs_hints),
-                self.frame_index,
-                None,
-            );
+            let descs_id = existing_meshlets
+                .map(|meshlets| meshlets.descs)
+                .unwrap_or_else(|| {
+                    self.pool.create_logical(
+                        descs_desc.clone(),
+                        Some(descs_hints),
+                        self.frame_index,
+                        None,
+                    )
+                });
             self.insert_buffer_entry(descs_id, descs_desc, descs_buffer, descs_hints, Some(id));
 
             let verts_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-meshlets-{}-lod{}-verts", id, lod)),
+                    label: Some(&format!("mesh-meshlets-{}-lod{}-verts", id, lod.lod_index)),
                     contents: verts_bytes,
                     usage: meshlet_usage,
                 });
@@ -4274,21 +4614,30 @@ impl GraphRenderer {
                 usage: meshlet_usage,
             };
             let verts_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STREAMING,
+                flags: ResourceFlags::PREFER_RESIDENT
+                    | ResourceFlags::STREAMING
+                    | ResourceFlags::STABLE_ID,
                 estimated_size_bytes: verts_desc.estimate_size_bytes(),
             };
-            let verts_id = self.pool.create_logical(
-                verts_desc.clone(),
-                Some(verts_hints),
-                self.frame_index,
-                None,
-            );
+            let verts_id = existing_meshlets
+                .map(|meshlets| meshlets.vertices)
+                .unwrap_or_else(|| {
+                    self.pool.create_logical(
+                        verts_desc.clone(),
+                        Some(verts_hints),
+                        self.frame_index,
+                        None,
+                    )
+                });
             self.insert_buffer_entry(verts_id, verts_desc, verts_buffer, verts_hints, Some(id));
 
             let inds_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-meshlets-{}-lod{}-indices", id, lod)),
+                    label: Some(&format!(
+                        "mesh-meshlets-{}-lod{}-indices",
+                        id, lod.lod_index
+                    )),
                     contents: inds_bytes,
                     usage: meshlet_usage,
                 });
@@ -4297,20 +4646,29 @@ impl GraphRenderer {
                 usage: meshlet_usage,
             };
             let inds_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STREAMING,
+                flags: ResourceFlags::PREFER_RESIDENT
+                    | ResourceFlags::STREAMING
+                    | ResourceFlags::STABLE_ID,
                 estimated_size_bytes: inds_desc.estimate_size_bytes(),
             };
-            let inds_id = self.pool.create_logical(
-                inds_desc.clone(),
-                Some(inds_hints),
-                self.frame_index,
-                None,
-            );
+            let inds_id = existing_meshlets
+                .map(|meshlets| meshlets.indices)
+                .unwrap_or_else(|| {
+                    self.pool.create_logical(
+                        inds_desc.clone(),
+                        Some(inds_hints),
+                        self.frame_index,
+                        None,
+                    )
+                });
             self.insert_buffer_entry(inds_id, inds_desc, inds_buffer, inds_hints, Some(id));
 
-            lods.push(MeshLodResource {
+            gpu_lods.push(MeshLodResource {
+                lod_index: lod.lod_index,
+                vertex: vertex_id,
                 buffer: index_id,
-                index_count: indices.len() as u32,
+                index_count: lod.indices.len() as u32,
+                estimated_bytes: lod_estimated_bytes,
                 meshlets: MeshletGpu {
                     descs: descs_id,
                     vertices: verts_id,
@@ -4320,13 +4678,21 @@ impl GraphRenderer {
                 rt_blas_index,
             });
         }
+        if !existing_lods.is_empty() {
+            for (_lod_index, mut lod) in existing_lods {
+                lod.rt_blas_index = rt_blas_index;
+                gpu_lods.push(lod);
+            }
+        }
+        gpu_lods.sort_by_key(|lod| lod.lod_index);
 
+        let available_lods = total_lods.max(existing_available_lods).max(gpu_lods.len());
         self.meshes.insert(
             id,
             MeshGpu {
-                vertex: vertex_id,
-                lods,
+                lods: gpu_lods,
                 bounds,
+                available_lods,
             },
         );
         let requested_lod = self
@@ -4355,11 +4721,37 @@ impl GraphRenderer {
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        mip_encoder: &mut Option<wgpu::CommandEncoder>,
     ) -> Result<(), RendererError> {
-        let mip_level_count = (width.max(height) as f32).log2().floor() as u32 + 1;
-        let usage = wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let is_compressed = format.is_compressed();
+        let full_mip_levels = calc_mip_level_count(width, height);
+        let (uploads, used_bytes) =
+            build_mip_uploads(format, width, height, data.len(), full_mip_levels);
+        if uploads.is_empty() {
+            return Err(RendererError::ResourceCreation(
+                "Texture upload missing mip data.".into(),
+            ));
+        }
+        if used_bytes != data.len() {
+            warn!(
+                "Texture upload size mismatch (used {}, provided {}).",
+                used_bytes,
+                data.len()
+            );
+        }
+        let provided_levels = uploads.len() as u32;
+        let mut mip_level_count = full_mip_levels;
+        if is_compressed && provided_levels < full_mip_levels {
+            warn!(
+                "Compressed texture {} missing mip data ({} of {}).",
+                id, provided_levels, full_mip_levels
+            );
+            mip_level_count = provided_levels.max(1);
+        }
+        let mut usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        if !is_compressed {
+            usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+        }
         let desc = ResourceDesc::Texture2D {
             width,
             height,
@@ -4401,40 +4793,44 @@ impl GraphRenderer {
             view_formats: &[],
         });
 
-        let block_size = format.block_size(None).unwrap_or(4);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(block_size * width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        for upload in &uploads {
+            let end = upload.offset + upload.size;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: upload.level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data[upload.offset..end],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(upload.bytes_per_row),
+                    rows_per_image: Some(upload.rows_per_image),
+                },
+                wgpu::Extent3d {
+                    width: upload.width,
+                    height: upload.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
-        if mip_level_count > 1 {
-            let mut mip_encoder =
+        if !is_compressed && mip_level_count > 1 && provided_levels < mip_level_count {
+            let start_level = provided_levels.saturating_sub(1);
+            let encoder = mip_encoder.get_or_insert_with(|| {
                 self.device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("texture-mip-encoder"),
-                    });
-            self.mipmap_generator.generate_mips(
-                &mut mip_encoder,
+                    })
+            });
+            self.mipmap_generator.generate_mips_from(
+                encoder,
                 &self.device,
                 &texture,
+                start_level,
                 mip_level_count,
             );
-            self.queue.submit(std::iter::once(mip_encoder.finish()));
         }
 
         let view = texture.create_view(&Default::default());
@@ -4471,39 +4867,25 @@ impl GraphRenderer {
 
     fn try_upload_material(&mut self, mat_data: MaterialGpuData) -> bool {
         let mat_id = mat_data.id;
-        let mut texture_index =
-            |pool: &mut GpuResourcePool, opt_id: Option<usize>| -> Option<i32> {
-                match opt_id {
-                    None => Some(-1),
-                    Some(tex_id) => {
-                        let rid = pool.asset_id_to_resource(ResourceKind::Texture, tex_id as u32);
-                        let ready = pool
-                            .entry(rid)
-                            .map(|e| e.residency == Residency::Resident && e.texture_view.is_some())
-                            .unwrap_or(false);
-                        if ready {
-                            Some(rid.index() as i32)
-                        } else {
-                            None
-                        }
+        let mut texture_index = |pool: &mut GpuResourcePool, opt_id: Option<usize>| -> i32 {
+            match opt_id {
+                None => -1,
+                Some(tex_id) => {
+                    let rid = pool.asset_id_to_resource(ResourceKind::Texture, tex_id as u32);
+                    let idx = rid.index();
+                    if idx > i32::MAX as usize {
+                        i32::MAX
+                    } else {
+                        idx as i32
                     }
                 }
-            };
+            }
+        };
 
-        let albedo_idx = match texture_index(&mut self.pool, mat_data.albedo_texture_id) {
-            Some(idx) => idx,
-            None => return false,
-        };
-        let normal_idx = match texture_index(&mut self.pool, mat_data.normal_texture_id) {
-            Some(idx) => idx,
-            None => return false,
-        };
-        let mra_idx = match texture_index(&mut self.pool, mat_data.metallic_roughness_texture_id) {
-            Some(idx) => idx,
-            None => return false,
-        };
-        let emission_idx =
-            texture_index(&mut self.pool, mat_data.emission_texture_id).unwrap_or(-1);
+        let albedo_idx = texture_index(&mut self.pool, mat_data.albedo_texture_id);
+        let normal_idx = texture_index(&mut self.pool, mat_data.normal_texture_id);
+        let mra_idx = texture_index(&mut self.pool, mat_data.metallic_roughness_texture_id);
+        let emission_idx = texture_index(&mut self.pool, mat_data.emission_texture_id);
 
         let shader_data = MaterialShaderData {
             albedo: mat_data.albedo,
@@ -4615,10 +4997,13 @@ impl GraphRenderer {
     }
 
     fn ingest_render_data(&mut self, data: Arc<RenderData>) {
+        let reset_scan_cursor = self.current_render_data.is_none();
         self.pending_render_delta = None;
         self.streaming_requests = None;
         self.streaming_dirty = true;
-        self.streaming_scan_cursor = 0;
+        if reset_scan_cursor {
+            self.streaming_scan_cursor = 0;
+        }
         self.materials_dirty = true;
         self.instances_dirty = true;
         self.shadow_instances_dirty = true;
@@ -4634,6 +5019,7 @@ impl GraphRenderer {
     }
 
     fn mark_streaming_plan_usage(&mut self, plan: &StreamingPlan) {
+        let require_meshlets = plan.require_meshlets;
         for req in &plan.requests {
             match req.kind {
                 AssetStreamKind::Mesh => {
@@ -4643,17 +5029,20 @@ impl GraphRenderer {
                     if mesh.lods.is_empty() {
                         continue;
                     }
-                    self.pool.mark_used(mesh.vertex, self.frame_index);
                     let desired = req.max_lod.unwrap_or(0);
-                    let require_meshlets = self.device_caps.supports_mesh_pipeline();
-                    if let Some(lod_index) =
-                        self.select_resident_lod(mesh, desired, require_meshlets)
-                    {
+                    let mut lod_index = self.select_resident_lod(mesh, desired, require_meshlets);
+                    if lod_index.is_none() && require_meshlets {
+                        lod_index = self.select_resident_lod(mesh, desired, false);
+                    }
+                    if let Some(lod_index) = lod_index {
                         if let Some(lod) = mesh.lods.get(lod_index) {
+                            self.pool.mark_used(lod.vertex, self.frame_index);
                             self.pool.mark_used(lod.buffer, self.frame_index);
-                            self.pool.mark_used(lod.meshlets.descs, self.frame_index);
-                            self.pool.mark_used(lod.meshlets.vertices, self.frame_index);
-                            self.pool.mark_used(lod.meshlets.indices, self.frame_index);
+                            if self.meshlet_resident(lod) {
+                                self.pool.mark_used(lod.meshlets.descs, self.frame_index);
+                                self.pool.mark_used(lod.meshlets.vertices, self.frame_index);
+                                self.pool.mark_used(lod.meshlets.indices, self.frame_index);
+                            }
                         }
                     }
                 }
@@ -4676,6 +5065,133 @@ impl GraphRenderer {
         }
     }
 
+    fn estimate_mesh_request_bytes(&self, mesh: &MeshGpu, desired_lod: usize) -> u64 {
+        let fallback = self.streaming_tuning.fallback_mesh_bytes.max(1);
+        if mesh.lods.is_empty() {
+            return fallback;
+        }
+        let desired = desired_lod.min(mesh.available_lods.saturating_sub(1));
+        let mut best_higher: Option<&MeshLodResource> = None;
+        let mut best_lower: Option<&MeshLodResource> = None;
+        for lod in &mesh.lods {
+            if lod.lod_index >= desired {
+                if best_higher.map_or(true, |best| lod.lod_index < best.lod_index) {
+                    best_higher = Some(lod);
+                }
+            } else if best_lower.map_or(true, |best| lod.lod_index > best.lod_index) {
+                best_lower = Some(lod);
+            }
+        }
+        let estimate = best_higher
+            .or(best_lower)
+            .map(|lod| lod.estimated_bytes)
+            .unwrap_or(0);
+        if estimate > 0 { estimate } else { fallback }
+    }
+
+    fn mesh_resource_for_lod(&mut self, mesh_id: usize, desired_lod: usize) -> ResourceId {
+        if let Some(mesh) = self.meshes.get(mesh_id) {
+            if let Some(lod) = mesh.lods.iter().find(|lod| lod.lod_index == desired_lod) {
+                return lod.vertex;
+            }
+        }
+        self.pool
+            .asset_id_to_resource(ResourceKind::Buffer, mesh_id as u32)
+    }
+
+    fn mesh_lod_floor(&self, mesh_id: usize) -> Option<usize> {
+        match self.mesh_lod_min.get(mesh_id).copied() {
+            Some(usize::MAX) => None,
+            Some(value) => Some(value),
+            None => Some(0),
+        }
+    }
+
+    fn clamp_mesh_lod(
+        &self,
+        mesh_id: usize,
+        desired: usize,
+        max_idx: Option<usize>,
+    ) -> Option<usize> {
+        let floor = self.mesh_lod_floor(mesh_id)?;
+        if let Some(max_idx) = max_idx {
+            if floor > max_idx {
+                return None;
+            }
+            return Some(desired.min(max_idx).max(floor));
+        }
+        Some(desired.max(floor))
+    }
+
+    fn bump_mesh_lod_floor(
+        &mut self,
+        mesh_id: usize,
+        failed_lod: usize,
+        total_lods: usize,
+    ) -> bool {
+        let next_lod = failed_lod.saturating_add(1);
+        let new_floor = if total_lods == 0 || next_lod >= total_lods {
+            usize::MAX
+        } else {
+            next_lod
+        };
+        let current = self.mesh_lod_min.get(mesh_id).copied().unwrap_or(0);
+        let should_update = match (current, new_floor) {
+            (usize::MAX, _) => false,
+            (_, usize::MAX) => true,
+            _ => new_floor > current,
+        };
+        if should_update {
+            self.mesh_lod_min.insert(mesh_id, new_floor);
+        }
+        should_update
+    }
+
+    fn estimate_stream_request_bytes(
+        &mut self,
+        kind: AssetStreamKind,
+        asset_id: usize,
+        max_lod: Option<usize>,
+        force_low_res: bool,
+    ) -> u64 {
+        match kind {
+            AssetStreamKind::Mesh => self
+                .meshes
+                .get(asset_id)
+                .map(|mesh| self.estimate_mesh_request_bytes(mesh, max_lod.unwrap_or(0)))
+                .unwrap_or(self.streaming_tuning.fallback_mesh_bytes.max(1)),
+            AssetStreamKind::Material => {
+                let fallback = self.streaming_tuning.fallback_material_bytes.max(1);
+                let rid = self
+                    .pool
+                    .asset_id_to_resource(ResourceKind::Buffer, asset_id as u32);
+                self.pool
+                    .entry(rid)
+                    .map(|entry| entry.desc_size_bytes.max(1))
+                    .unwrap_or(fallback)
+            }
+            AssetStreamKind::Texture => {
+                let fallback = self.streaming_tuning.fallback_texture_bytes.max(1);
+                let low_res_fallback = (fallback / 4).max(1);
+                let rid = self
+                    .pool
+                    .asset_id_to_resource(ResourceKind::Texture, asset_id as u32);
+                if let Some(entry) = self.pool.entry(rid) {
+                    let size = entry.desc_size_bytes.max(1);
+                    if force_low_res {
+                        size.min(low_res_fallback)
+                    } else {
+                        size
+                    }
+                } else if force_low_res {
+                    low_res_fallback
+                } else {
+                    fallback
+                }
+            }
+        }
+    }
+
     fn accumulate_streaming_for_object(
         &mut self,
         obj: &RenderObject,
@@ -4685,6 +5201,7 @@ impl GraphRenderer {
         priority_floor: f32,
         base_lod_bias: usize,
         critical_threshold: f32,
+        require_meshlets: bool,
     ) {
         let world_center = obj.current_transform.position;
         let dist_now = (world_center - camera_pos).length();
@@ -4706,10 +5223,7 @@ impl GraphRenderer {
         if obj.casts_shadow {
             priority *= self.streaming_tuning.shadow_priority_boost;
         }
-        let critical = priority >= critical_threshold;
-        if !critical && priority_floor > 0.0 && priority < priority_floor {
-            return;
-        }
+        let mut critical = priority >= critical_threshold;
 
         let mut desired_lod = obj.lod_index;
         let prediction_margin = self.streaming_tuning.prediction_distance_threshold.max(0.0);
@@ -4726,15 +5240,30 @@ impl GraphRenderer {
         }
         desired_lod = desired_lod.saturating_add(lod_bias);
 
-        if let Some(mesh_gpu) = self.meshes.get(obj.mesh_id) {
-            let max_idx = mesh_gpu.lods.len().saturating_sub(1);
-            if matches!(pressure, MemoryPressure::Hard)
-                && self.streaming_tuning.force_lowest_lod_hard
-            {
-                desired_lod = max_idx;
-            } else {
-                desired_lod = desired_lod.min(max_idx);
+        if matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard {
+            desired_lod = usize::MAX;
+        }
+        let max_idx = self
+            .meshes
+            .get(obj.mesh_id)
+            .map(|mesh| mesh.available_lods.saturating_sub(1));
+        let Some(desired_lod) = self.clamp_mesh_lod(obj.mesh_id, desired_lod, max_idx) else {
+            return;
+        };
+
+        let mesh_resident = self
+            .meshes
+            .get(obj.mesh_id)
+            .and_then(|mesh| self.select_resident_lod(mesh, desired_lod, require_meshlets))
+            .is_some();
+        if !mesh_resident {
+            critical = true;
+            if priority_floor > 0.0 && priority < priority_floor {
+                priority = priority_floor;
             }
+        }
+        if !critical && priority_floor > 0.0 && priority < priority_floor {
+            return;
         }
 
         let force_low_res = match pressure {
@@ -4746,16 +5275,21 @@ impl GraphRenderer {
             MemoryPressure::None => false,
         };
 
-        let mesh_resource = self
-            .pool
-            .asset_id_to_resource(ResourceKind::Buffer, obj.mesh_id as u32);
+        let mesh_resource = self.mesh_resource_for_lod(obj.mesh_id, desired_lod);
         let mesh_priority = self.adjust_request_priority(mesh_resource, obj.mesh_id, priority);
+        let mesh_estimated_bytes = self.estimate_stream_request_bytes(
+            AssetStreamKind::Mesh,
+            obj.mesh_id,
+            Some(desired_lod),
+            false,
+        );
         self.streaming_mesh_scratch.upsert(
             obj.mesh_id,
             mesh_resource,
             AssetStreamKind::Mesh,
             Some(desired_lod),
             mesh_priority,
+            mesh_estimated_bytes,
             false,
             critical,
         );
@@ -4765,12 +5299,19 @@ impl GraphRenderer {
             .asset_id_to_resource(ResourceKind::Buffer, obj.material_id as u32);
         let material_priority =
             self.adjust_request_priority(material_resource, obj.material_id, priority);
+        let material_estimated_bytes = self.estimate_stream_request_bytes(
+            AssetStreamKind::Material,
+            obj.material_id,
+            None,
+            false,
+        );
         self.streaming_material_scratch.upsert(
             obj.material_id,
             material_resource,
             AssetStreamKind::Material,
             None,
             material_priority,
+            material_estimated_bytes,
             false,
             critical,
         );
@@ -4788,12 +5329,19 @@ impl GraphRenderer {
                     .asset_id_to_resource(ResourceKind::Texture, *tex as u32);
                 let texture_priority =
                     self.adjust_request_priority(texture_resource, *tex, priority);
+                let texture_estimated_bytes = self.estimate_stream_request_bytes(
+                    AssetStreamKind::Texture,
+                    *tex,
+                    None,
+                    force_low_res,
+                );
                 self.streaming_texture_scratch.upsert(
                     *tex,
                     texture_resource,
                     AssetStreamKind::Texture,
                     None,
                     texture_priority,
+                    texture_estimated_bytes,
                     force_low_res,
                     critical,
                 );
@@ -4809,6 +5357,8 @@ impl GraphRenderer {
     ) -> StreamingPlan {
         let pressure = self.update_streaming_pressure();
         let (global_cap, mesh_cap, material_cap, texture_cap) = self.streaming_caps(pressure);
+        let (global_cap_bytes, mesh_cap_bytes, material_cap_bytes, texture_cap_bytes) =
+            self.streaming_byte_caps(pressure);
         let priority_floor = match pressure {
             MemoryPressure::Hard => self.streaming_tuning.priority_floor_hard,
             MemoryPressure::Soft => self.streaming_tuning.priority_floor_soft,
@@ -4819,6 +5369,8 @@ impl GraphRenderer {
             MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
             MemoryPressure::None => 0,
         };
+        let require_meshlets =
+            data.render_config.use_mesh_shaders && self.device_caps.supports_mesh_pipeline();
 
         let camera_pos = data.current_camera_transform.position;
         let camera_delta =
@@ -4835,25 +5387,6 @@ impl GraphRenderer {
         self.streaming_material_scratch.clear();
         self.streaming_texture_scratch.clear();
 
-        let mut upsert_req = |scratch: &mut StreamRequestScratch,
-                              resource: ResourceId,
-                              kind: AssetStreamKind,
-                              max_lod: Option<usize>,
-                              adjusted_prio: f32,
-                              asset_id: usize,
-                              force_low_res: bool,
-                              critical: bool| {
-            scratch.upsert(
-                asset_id,
-                resource,
-                kind,
-                max_lod,
-                adjusted_prio,
-                force_low_res,
-                critical,
-            );
-        };
-
         let critical_threshold = self.streaming_tuning.priority_critical;
 
         let do_full_scan = allow_full_scan;
@@ -4869,6 +5402,7 @@ impl GraphRenderer {
                     priority_floor,
                     base_lod_bias,
                     critical_threshold,
+                    require_meshlets,
                 );
             }
             if object_count > 0 {
@@ -4888,6 +5422,7 @@ impl GraphRenderer {
                     priority_floor,
                     base_lod_bias,
                     critical_threshold,
+                    require_meshlets,
                 );
                 scanned += 1;
             }
@@ -4897,10 +5432,7 @@ impl GraphRenderer {
         if let Some(requests) = extra_requests {
             for req in requests {
                 let mut priority = req.priority;
-                let critical = priority >= critical_threshold;
-                if !critical && priority_floor > 0.0 && priority < priority_floor {
-                    continue;
-                }
+                let mut critical = priority >= critical_threshold;
 
                 let force_low_res = match pressure {
                     MemoryPressure::Hard => {
@@ -4923,45 +5455,78 @@ impl GraphRenderer {
                         }
                         desired_lod = desired_lod.saturating_add(lod_bias);
 
-                        if let Some(mesh_gpu) = self.meshes.get(req.id) {
-                            let max_idx = mesh_gpu.lods.len().saturating_sub(1);
-                            if matches!(pressure, MemoryPressure::Hard)
-                                && self.streaming_tuning.force_lowest_lod_hard
-                            {
-                                desired_lod = max_idx;
-                            } else {
-                                desired_lod = desired_lod.min(max_idx);
+                        if matches!(pressure, MemoryPressure::Hard)
+                            && self.streaming_tuning.force_lowest_lod_hard
+                        {
+                            desired_lod = usize::MAX;
+                        }
+                        let max_idx = self
+                            .meshes
+                            .get(req.id)
+                            .map(|mesh| mesh.available_lods.saturating_sub(1));
+                        let Some(desired_lod) = self.clamp_mesh_lod(req.id, desired_lod, max_idx)
+                        else {
+                            continue;
+                        };
+
+                        let mesh_resident = self
+                            .meshes
+                            .get(req.id)
+                            .and_then(|mesh| {
+                                self.select_resident_lod(mesh, desired_lod, require_meshlets)
+                            })
+                            .is_some();
+                        if !mesh_resident {
+                            critical = true;
+                            if priority_floor > 0.0 && priority < priority_floor {
+                                priority = priority_floor;
                             }
                         }
+                        if !critical && priority_floor > 0.0 && priority < priority_floor {
+                            continue;
+                        }
 
-                        let mesh_resource = self
-                            .pool
-                            .asset_id_to_resource(ResourceKind::Buffer, req.id as u32);
+                        let mesh_resource = self.mesh_resource_for_lod(req.id, desired_lod);
                         priority = self.adjust_request_priority(mesh_resource, req.id, priority);
-                        upsert_req(
-                            &mut self.streaming_mesh_scratch,
+                        let mesh_estimated_bytes = self.estimate_stream_request_bytes(
+                            AssetStreamKind::Mesh,
+                            req.id,
+                            Some(desired_lod),
+                            false,
+                        );
+                        self.streaming_mesh_scratch.upsert(
+                            req.id,
                             mesh_resource,
                             AssetStreamKind::Mesh,
                             Some(desired_lod),
                             priority,
-                            req.id,
+                            mesh_estimated_bytes,
                             false,
                             critical,
                         );
                     }
                     AssetStreamKind::Material => {
+                        if !critical && priority_floor > 0.0 && priority < priority_floor {
+                            continue;
+                        }
                         let material_resource = self
                             .pool
                             .asset_id_to_resource(ResourceKind::Buffer, req.id as u32);
                         priority =
                             self.adjust_request_priority(material_resource, req.id, priority);
-                        upsert_req(
-                            &mut self.streaming_material_scratch,
+                        let material_estimated_bytes = self.estimate_stream_request_bytes(
+                            AssetStreamKind::Material,
+                            req.id,
+                            None,
+                            false,
+                        );
+                        self.streaming_material_scratch.upsert(
+                            req.id,
                             material_resource,
                             AssetStreamKind::Material,
                             None,
                             priority,
-                            req.id,
+                            material_estimated_bytes,
                             false,
                             critical,
                         );
@@ -4979,13 +5544,19 @@ impl GraphRenderer {
                                     .asset_id_to_resource(ResourceKind::Texture, *tex as u32);
                                 let texture_priority =
                                     self.adjust_request_priority(texture_resource, *tex, priority);
-                                upsert_req(
-                                    &mut self.streaming_texture_scratch,
+                                let texture_estimated_bytes = self.estimate_stream_request_bytes(
+                                    AssetStreamKind::Texture,
+                                    *tex,
+                                    None,
+                                    force_low_res,
+                                );
+                                self.streaming_texture_scratch.upsert(
+                                    *tex,
                                     texture_resource,
                                     AssetStreamKind::Texture,
                                     None,
                                     texture_priority,
-                                    *tex,
+                                    texture_estimated_bytes,
                                     force_low_res,
                                     critical,
                                 );
@@ -4993,17 +5564,26 @@ impl GraphRenderer {
                         }
                     }
                     AssetStreamKind::Texture => {
+                        if !critical && priority_floor > 0.0 && priority < priority_floor {
+                            continue;
+                        }
                         let texture_resource = self
                             .pool
                             .asset_id_to_resource(ResourceKind::Texture, req.id as u32);
                         priority = self.adjust_request_priority(texture_resource, req.id, priority);
-                        upsert_req(
-                            &mut self.streaming_texture_scratch,
+                        let texture_estimated_bytes = self.estimate_stream_request_bytes(
+                            AssetStreamKind::Texture,
+                            req.id,
+                            None,
+                            force_low_res,
+                        );
+                        self.streaming_texture_scratch.upsert(
+                            req.id,
                             texture_resource,
                             AssetStreamKind::Texture,
                             None,
                             priority,
-                            req.id,
+                            texture_estimated_bytes,
                             force_low_res,
                             critical,
                         );
@@ -5017,16 +5597,26 @@ impl GraphRenderer {
                 .total_cmp(&a.priority)
                 .then_with(|| a.resource.raw().cmp(&b.resource.raw()))
         };
-        let mut cap_and_sort = |requests: &mut Vec<StreamRequest>, cap: usize| {
-            if cap == 0 {
+        let mut cap_and_sort = |requests: &mut Vec<StreamRequest>, cap: usize, cap_bytes: u64| {
+            if cap == 0 || cap_bytes == 0 {
                 requests.clear();
                 return;
             }
-            if requests.len() > cap {
-                requests.select_nth_unstable_by(cap, cmp_priority);
-                requests.truncate(cap);
-            }
             requests.sort_by(cmp_priority);
+            let mut kept = Vec::with_capacity(requests.len().min(cap));
+            let mut used_bytes = 0u64;
+            for req in requests.drain(..) {
+                if kept.len() >= cap {
+                    break;
+                }
+                let bytes = req.estimated_bytes.max(1);
+                if cap_bytes != u64::MAX && used_bytes.saturating_add(bytes) > cap_bytes {
+                    continue;
+                }
+                used_bytes = used_bytes.saturating_add(bytes);
+                kept.push(req);
+            }
+            *requests = kept;
         };
         let mut split_requests = |requests: &mut Vec<StreamRequest>| {
             let mut critical = Vec::new();
@@ -5055,9 +5645,9 @@ impl GraphRenderer {
         let (mut texture_critical, mut texture_optional) =
             split_requests(&mut self.streaming_texture_requests);
 
-        cap_and_sort(&mut mesh_optional, mesh_cap);
-        cap_and_sort(&mut material_optional, material_cap);
-        cap_and_sort(&mut texture_optional, texture_cap);
+        cap_and_sort(&mut mesh_optional, mesh_cap, mesh_cap_bytes);
+        cap_and_sort(&mut material_optional, material_cap, material_cap_bytes);
+        cap_and_sort(&mut texture_optional, texture_cap, texture_cap_bytes);
 
         let mut critical_requests = Vec::new();
         critical_requests.append(&mut mesh_critical);
@@ -5069,10 +5659,13 @@ impl GraphRenderer {
         optional_requests.append(&mut material_optional);
         optional_requests.append(&mut texture_optional);
 
-        let critical_len = critical_requests.len();
-        cap_and_sort(&mut critical_requests, critical_len);
+        critical_requests.sort_by(cmp_priority);
+        let critical_bytes = critical_requests.iter().fold(0u64, |acc, req| {
+            acc.saturating_add(req.estimated_bytes.max(1))
+        });
         let remaining = global_cap.saturating_sub(critical_requests.len());
-        cap_and_sort(&mut optional_requests, remaining);
+        let remaining_bytes = global_cap_bytes.saturating_sub(critical_bytes);
+        cap_and_sort(&mut optional_requests, remaining, remaining_bytes);
 
         let mut requests = Vec::with_capacity(critical_requests.len() + optional_requests.len());
         requests.append(&mut critical_requests);
@@ -5090,6 +5683,7 @@ impl GraphRenderer {
             requests,
             priority_lookup,
             pressure,
+            require_meshlets,
         }
     }
 
@@ -5098,6 +5692,10 @@ impl GraphRenderer {
         if plan.pressure == MemoryPressure::None
             || global_budget.current_bytes <= global_budget.soft_limit_bytes
         {
+            return;
+        }
+        let max_evictions = self.streaming_tuning.pool_max_evictions_per_tick;
+        if max_evictions == 0 {
             return;
         }
         let mut need = global_budget.current_bytes - global_budget.soft_limit_bytes;
@@ -5111,9 +5709,10 @@ impl GraphRenderer {
             MemoryPressure::None => 0,
         };
         let mut scanned = 0usize;
+        let mut evicted = 0usize;
         let mut to_evict = Vec::new();
         for idx in self.pool.lru_tail_indices() {
-            if scanned >= scan_budget || need == 0 {
+            if scanned >= scan_budget || need == 0 || evicted >= max_evictions {
                 break;
             }
             scanned += 1;
@@ -5125,6 +5724,9 @@ impl GraphRenderer {
                 continue;
             }
             if entry.is_pinned() {
+                continue;
+            }
+            if !entry.is_streaming() {
                 continue;
             }
             if entry.flags().contains(ResourceFlags::TRANSIENT) {
@@ -5147,6 +5749,7 @@ impl GraphRenderer {
             let id = entry.id;
             to_evict.push(id);
             need = need.saturating_sub(size);
+            evicted += 1;
         }
         if to_evict.is_empty() {
             return;
@@ -5187,6 +5790,9 @@ impl GraphRenderer {
             if entry.is_pinned() {
                 continue;
             }
+            if !entry.is_streaming() {
+                continue;
+            }
             if entry.flags().contains(ResourceFlags::TRANSIENT) {
                 continue;
             }
@@ -5215,8 +5821,11 @@ impl GraphRenderer {
 
     fn process_streaming_plan(&mut self, plan: &StreamingPlan, request_budget: usize) {
         self.evict_streaming(plan);
-        self.evict_unplanned_idle(plan);
+        if plan.pressure != MemoryPressure::None {
+            self.evict_unplanned_idle(plan);
+        }
 
+        let require_meshlets = plan.require_meshlets;
         let total = plan.requests.len();
         if total == 0 {
             self.streaming_request_cursor = 0;
@@ -5242,30 +5851,46 @@ impl GraphRenderer {
                 advance(&mut index, &mut processed);
                 continue;
             }
-            let mesh_primary = req.kind == AssetStreamKind::Mesh
-                && req.resource
-                    == self
-                        .pool
-                        .asset_id_to_resource(ResourceKind::Buffer, req.asset_id as u32);
-            let current_mesh_lod = if mesh_primary {
+            let mesh_request = req.kind == AssetStreamKind::Mesh;
+            let current_mesh_lod = if mesh_request {
                 self.mesh_lod_state.get(req.asset_id).copied()
             } else {
                 None
             };
-            let mesh_lod_mismatch = if mesh_primary {
+            let mesh_lod_mismatch = if mesh_request {
                 req.max_lod.map_or(false, |desired| {
                     current_mesh_lod.map_or(true, |current| current != desired)
                 })
             } else {
                 false
             };
-            let mesh_upgrade = if mesh_primary {
+            let mesh_upgrade = if mesh_request {
                 match (req.max_lod, current_mesh_lod) {
                     (Some(desired), Some(current)) => desired < current,
                     _ => false,
                 }
             } else {
                 false
+            };
+            let (mesh_ready, desired_resource_matches) = if mesh_request {
+                if let Some(desired) = req.max_lod {
+                    if let Some(mesh) = self.meshes.get(req.asset_id) {
+                        if let Some(lod) = mesh.lods.iter().find(|lod| lod.lod_index == desired) {
+                            let ready = self.buffer_resident(lod.vertex)
+                                && self.buffer_resident(lod.buffer)
+                                && (!require_meshlets || self.meshlet_resident(lod));
+                            (ready, lod.vertex == req.resource)
+                        } else {
+                            (false, false)
+                        }
+                    } else {
+                        (false, false)
+                    }
+                } else {
+                    (false, false)
+                }
+            } else {
+                (false, false)
             };
             let texture_current_low = if req.kind == AssetStreamKind::Texture {
                 self.texture_low_res_state.get(req.asset_id).copied()
@@ -5287,6 +5912,19 @@ impl GraphRenderer {
             let entry_opt = self.pool.entry(req.resource);
             let asset_id = if let Some(entry) = entry_opt {
                 if entry.residency == Residency::Resident
+                    && mesh_request
+                    && mesh_lod_mismatch
+                    && desired_resource_matches
+                    && mesh_ready
+                {
+                    if let Some(desired) = req.max_lod {
+                        self.mesh_lod_state.insert(req.asset_id, desired);
+                    }
+                    advance(&mut index, &mut processed);
+                    continue;
+                }
+                if entry.residency == Residency::Resident
+                    && (!mesh_request || mesh_ready)
                     && !mesh_lod_mismatch
                     && !texture_low_res_mismatch
                 {
@@ -5336,13 +5974,17 @@ impl GraphRenderer {
                 }
                 let should_send = match self.streaming_inflight.get(asset_id) {
                     Some(existing) => {
-                        let beyond_cooldown = self.frame_index.saturating_sub(existing.last_frame)
-                            > self.streaming_tuning.inflight_cooldown_frames;
+                        let inflight_age = self.frame_index.saturating_sub(existing.last_frame);
+                        let beyond_cooldown =
+                            inflight_age > self.streaming_tuning.inflight_cooldown_frames;
                         let priority_bump = req.priority
                             > existing.priority * self.streaming_tuning.priority_bump_factor;
                         let lod_change = req.max_lod != existing.requested_lod;
                         let low_res_change = req.force_low_res != existing.force_low_res;
-                        beyond_cooldown && (priority_bump || lod_change || low_res_change)
+                        let force_retry = self.streaming_tuning.evict_retry_frames > 0
+                            && inflight_age > self.streaming_tuning.evict_retry_frames;
+                        (beyond_cooldown && (priority_bump || lod_change || low_res_change))
+                            || force_retry
                     }
                     None => true,
                 };
@@ -5437,8 +6079,8 @@ impl GraphRenderer {
                 .gpu_fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let require_meshlets =
-            frame_render_config.use_mesh_shaders && self.device_caps.supports_mesh_pipeline();
+        // Allow vertex fallback if meshlets are missing; passes decide when mesh shaders are safe.
+        let draw_require_meshlets = false;
         let gpu_driven = frame_render_config.gpu_driven;
         if gpu_driven != self.gpu_driven_active {
             self.gpu_driven_active = gpu_driven;
@@ -5674,7 +6316,7 @@ impl GraphRenderer {
             let (gbuffer_instances, gbuffer_batches) = if gbuffer_pass {
                 if self.instances_dirty || self.cached_gbuffer_instances.is_none() {
                     let (instances, batches) =
-                        self.build_gbuffer_instances(render_data, alpha, require_meshlets);
+                        self.build_gbuffer_instances(render_data, alpha, draw_require_meshlets);
                     self.cached_gbuffer_instances = instances.clone();
                     self.cached_gbuffer_batches = batches.clone();
                     if self.gbuffer_draws_dirty {
@@ -5704,7 +6346,7 @@ impl GraphRenderer {
                             render_data,
                             alpha,
                             view_matrix,
-                            require_meshlets,
+                            draw_require_meshlets,
                         );
                         self.cached_shadow_instances = instances.clone();
                         self.cached_shadow_batches = batches.clone();
@@ -6154,7 +6796,7 @@ impl GraphRenderer {
             if force_lowest {
                 desired_lod = usize::MAX;
             } else if let Some(mesh) = self.meshes.get(object.mesh_id) {
-                let max_idx = mesh.lods.len().saturating_sub(1);
+                let max_idx = mesh.available_lods.saturating_sub(1);
                 desired_lod = desired_lod.min(max_idx);
             }
 
@@ -7641,7 +8283,7 @@ impl GraphRenderer {
             if force_lowest {
                 desired_lod = usize::MAX;
             } else if let Some(mesh) = meshes.get(object.mesh_id) {
-                let max_idx = mesh.lods.len().saturating_sub(1);
+                let max_idx = mesh.available_lods.saturating_sub(1);
                 desired_lod = desired_lod.min(max_idx);
             }
             let resolved =
@@ -7739,7 +8381,7 @@ impl GraphRenderer {
                     index_count: lod.index_count,
                     instance_range: offset..(offset + count),
                     material_id: batch.key.material_id,
-                    vertex: mesh.vertex,
+                    vertex: lod.vertex,
                     index: lod.buffer,
                     meshlet_descs: lod.meshlets.descs,
                     meshlet_vertices: lod.meshlets.vertices,
@@ -7819,7 +8461,7 @@ impl GraphRenderer {
             if force_lowest {
                 desired_lod = usize::MAX;
             } else if let Some(mesh) = meshes.get(object.mesh_id) {
-                let max_idx = mesh.lods.len().saturating_sub(1);
+                let max_idx = mesh.available_lods.saturating_sub(1);
                 desired_lod = desired_lod.min(max_idx);
             }
             let resolved =
@@ -7910,7 +8552,7 @@ impl GraphRenderer {
                     index_count: lod.index_count,
                     instance_range: offset..(offset + count),
                     material_id: 0,
-                    vertex: mesh.vertex,
+                    vertex: lod.vertex,
                     index: lod.buffer,
                     meshlet_descs: lod.meshlets.descs,
                     meshlet_vertices: lod.meshlets.vertices,
@@ -8159,12 +8801,14 @@ impl GraphRenderer {
     }
 
     fn collect_resident_lods(&self, mesh: &MeshGpu, require_meshlets: bool) -> Vec<usize> {
-        if mesh.lods.is_empty() || !self.buffer_resident(mesh.vertex) {
+        if mesh.lods.is_empty() {
             return Vec::new();
         }
         let mut lods = Vec::with_capacity(mesh.lods.len());
         for (idx, lod) in mesh.lods.iter().enumerate() {
-            if self.buffer_resident(lod.buffer) && (!require_meshlets || self.meshlet_resident(lod))
+            if self.buffer_resident(lod.vertex)
+                && self.buffer_resident(lod.buffer)
+                && (!require_meshlets || self.meshlet_resident(lod))
             {
                 lods.push(idx);
             }
@@ -8178,27 +8822,31 @@ impl GraphRenderer {
         desired: usize,
         require_meshlets: bool,
     ) -> Option<usize> {
-        if mesh.lods.is_empty() || !self.buffer_resident(mesh.vertex) {
+        if mesh.lods.is_empty() {
             return None;
         }
-        let max_idx = mesh.lods.len().saturating_sub(1);
-        let mut idx = desired.min(max_idx);
-        for candidate in idx..mesh.lods.len() {
-            if self.buffer_resident(mesh.lods[candidate].buffer)
-                && (!require_meshlets || self.meshlet_resident(&mesh.lods[candidate]))
-            {
-                return Some(candidate);
+        let desired = desired.min(mesh.available_lods.saturating_sub(1));
+        let mut best_higher: Option<(usize, usize)> = None;
+        let mut best_lower: Option<(usize, usize)> = None;
+        for (idx, lod) in mesh.lods.iter().enumerate() {
+            if !self.buffer_resident(lod.vertex) || !self.buffer_resident(lod.buffer) {
+                continue;
+            }
+            if require_meshlets && !self.meshlet_resident(lod) {
+                continue;
+            }
+            if lod.lod_index >= desired {
+                if best_higher.map_or(true, |(_, best)| lod.lod_index < best) {
+                    best_higher = Some((idx, lod.lod_index));
+                }
+            } else if best_lower.map_or(true, |(_, best)| lod.lod_index > best) {
+                best_lower = Some((idx, lod.lod_index));
             }
         }
-        while idx > 0 {
-            idx -= 1;
-            if self.buffer_resident(mesh.lods[idx].buffer)
-                && (!require_meshlets || self.meshlet_resident(&mesh.lods[idx]))
-            {
-                return Some(idx);
-            }
+        if let Some((idx, _)) = best_higher {
+            return Some(idx);
         }
-        None
+        best_lower.map(|(idx, _)| idx)
     }
 
     fn resolve_draw_mesh(
@@ -8354,8 +9002,8 @@ impl GraphRenderer {
         u32,
         Vec<u32>,
     ) {
-        let require_meshlets =
-            render_data.render_config.use_mesh_shaders && self.device_caps.supports_mesh_pipeline();
+        // GPU-driven draws should tolerate missing meshlets; passes choose mesh path.
+        let require_meshlets = false;
         let mesh_count = self.meshes.len().saturating_add(1);
         let mut mesh_counts = vec![0u32; mesh_count];
         let mut mesh_lods: Vec<Option<Vec<usize>>> = vec![None; self.meshes.len()];
@@ -8460,7 +9108,7 @@ impl GraphRenderer {
                     mesh_id: mesh_index,
                     lod: draw_lod_idx,
                     material_id: 0,
-                    vertex: mesh.vertex,
+                    vertex: lod.vertex,
                     index: lod.buffer,
                     meshlet_descs: lod.meshlets.descs,
                     meshlet_vertices: lod.meshlets.vertices,
@@ -8512,8 +9160,8 @@ impl GraphRenderer {
         u32,
         HashMap<(usize, u32), u32>,
     ) {
-        let require_meshlets =
-            render_data.render_config.use_mesh_shaders && self.device_caps.supports_mesh_pipeline();
+        // GPU-driven draws should tolerate missing meshlets; passes choose mesh path.
+        let require_meshlets = false;
         let mut mesh_lods: Vec<Option<Vec<usize>>> = vec![None; self.meshes.len()];
         let fallback_lods = self
             .fallback_mesh
@@ -8614,7 +9262,7 @@ impl GraphRenderer {
                     mesh_id: mesh_key,
                     lod: draw_lod_idx,
                     material_id,
-                    vertex: mesh.vertex,
+                    vertex: lod.vertex,
                     index: lod.buffer,
                     meshlet_descs: lod.meshlets.descs,
                     meshlet_vertices: lod.meshlets.vertices,
@@ -9196,6 +9844,7 @@ struct StreamRequest {
     kind: AssetStreamKind,
     max_lod: Option<usize>,
     asset_id: usize,
+    estimated_bytes: u64,
     force_low_res: bool,
     critical: bool,
 }
@@ -9228,6 +9877,7 @@ impl StreamRequestScratch {
         kind: AssetStreamKind,
         max_lod: Option<usize>,
         priority: f32,
+        estimated_bytes: u64,
         force_low_res: bool,
         critical: bool,
     ) {
@@ -9236,15 +9886,34 @@ impl StreamRequestScratch {
         }
         match self.entries[asset_id].as_mut() {
             Some(existing) => {
-                existing.priority = existing.priority.max(priority);
-                if let Some(lod) = max_lod {
-                    existing.max_lod = existing
-                        .max_lod
-                        .map(|current| current.min(lod))
-                        .or(Some(lod));
+                let mut update_resource = false;
+                if priority > existing.priority {
+                    update_resource = true;
                 }
-                existing.force_low_res |= force_low_res;
+                existing.priority = existing.priority.max(priority);
+
+                match max_lod {
+                    Some(lod) => {
+                        let next = existing.max_lod.map_or(lod, |current| current.min(lod));
+                        if existing.max_lod != Some(next) {
+                            update_resource = true;
+                        }
+                        existing.max_lod = Some(next);
+                    }
+                    None => {
+                        if existing.max_lod.is_some() {
+                            update_resource = true;
+                        }
+                        existing.max_lod = None;
+                    }
+                }
+
+                existing.estimated_bytes = existing.estimated_bytes.max(estimated_bytes);
+                existing.force_low_res &= force_low_res;
                 existing.critical |= critical;
+                if update_resource {
+                    existing.resource = resource;
+                }
             }
             None => {
                 self.entries[asset_id] = Some(StreamRequest {
@@ -9253,6 +9922,7 @@ impl StreamRequestScratch {
                     kind,
                     max_lod,
                     asset_id,
+                    estimated_bytes,
                     force_low_res,
                     critical,
                 });
@@ -9279,6 +9949,7 @@ struct StreamingPlan {
     requests: Vec<StreamRequest>,
     priority_lookup: HashMap<ResourceId, f32>,
     pressure: MemoryPressure,
+    require_meshlets: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

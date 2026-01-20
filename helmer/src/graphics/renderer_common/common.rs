@@ -394,12 +394,12 @@ impl InstanceRaw {
 }
 
 pub struct MeshLod {
+    pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
 }
 
 pub struct Mesh {
-    pub vertex_buffer: wgpu::Buffer, // A single vertex buffer is shared across all LODs
     pub lods: Vec<MeshLod>,
     pub bounds: Aabb,
 }
@@ -443,6 +443,14 @@ pub struct AssetStreamingRequest {
     pub max_lod: Option<usize>,
     /// Request a low-res mip chain when under heavy VRAM pressure
     pub force_low_res: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeshLodPayload {
+    pub lod_index: usize,
+    pub vertices: Arc<[Vertex]>,
+    pub indices: Arc<[u32]>,
+    pub meshlets: MeshletLodData,
 }
 
 #[derive(Debug, Clone)]
@@ -914,9 +922,8 @@ pub enum RenderMessage {
     // --- Asset Pipeline Messages ---
     CreateMesh {
         id: usize,
-        vertices: Arc<[Vertex]>,
-        lod_indices: Vec<Arc<[u32]>>,
-        meshlets: Vec<MeshletLodData>,
+        total_lods: usize,
+        lods: Vec<MeshLodPayload>,
         bounds: Aabb,
     },
     CreateTexture {
@@ -935,19 +942,15 @@ pub enum RenderMessage {
 
 pub fn render_message_payload_bytes(message: &RenderMessage) -> usize {
     match message {
-        RenderMessage::CreateMesh {
-            vertices,
-            lod_indices,
-            meshlets,
-            ..
-        } => {
-            let mut bytes = std::mem::size_of_val(vertices.as_ref());
-            for indices in lod_indices {
-                bytes = bytes.saturating_add(std::mem::size_of_val(indices.as_ref()));
-            }
-            for meshlet in meshlets {
+        RenderMessage::CreateMesh { lods, .. } => {
+            let mut bytes = 0usize;
+            for lod in lods {
+                bytes = bytes.saturating_add(std::mem::size_of_val(lod.vertices.as_ref()));
+                bytes = bytes.saturating_add(std::mem::size_of_val(lod.indices.as_ref()));
                 bytes = bytes.saturating_add(
-                    crate::graphics::renderer_common::meshlets::meshlet_lod_size_bytes(meshlet),
+                    crate::graphics::renderer_common::meshlets::meshlet_lod_size_bytes(
+                        &lod.meshlets,
+                    ),
                 );
             }
             bytes
@@ -956,6 +959,67 @@ pub fn render_message_payload_bytes(message: &RenderMessage) -> usize {
         RenderMessage::CreateMaterial(mat) => std::mem::size_of_val(mat),
         _ => 0,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MipUploadLayout {
+    pub level: u32,
+    pub width: u32,
+    pub height: u32,
+    pub offset: usize,
+    pub size: usize,
+    pub bytes_per_row: u32,
+    pub rows_per_image: u32,
+}
+
+pub fn calc_mip_level_count(width: u32, height: u32) -> u32 {
+    (width.max(height) as f32).log2().floor() as u32 + 1
+}
+
+pub fn mip_level_data_size(format: wgpu::TextureFormat, width: u32, height: u32) -> usize {
+    let block_size = format.block_copy_size(None).unwrap_or(4) as usize;
+    let (block_w, block_h) = format.block_dimensions();
+    let blocks_w = ((width.max(1) + block_w - 1) / block_w).max(1);
+    let blocks_h = ((height.max(1) + block_h - 1) / block_h).max(1);
+    block_size * blocks_w as usize * blocks_h as usize
+}
+
+pub fn build_mip_uploads(
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    data_len: usize,
+    max_levels: u32,
+) -> (Vec<MipUploadLayout>, usize) {
+    let mut layouts = Vec::new();
+    let mut offset = 0usize;
+    let mut mip_width = width.max(1);
+    let mut mip_height = height.max(1);
+    for level in 0..max_levels {
+        let block_size = format.block_copy_size(None).unwrap_or(4);
+        let (block_w, block_h) = format.block_dimensions();
+        let blocks_w = ((mip_width + block_w - 1) / block_w).max(1);
+        let blocks_h = ((mip_height + block_h - 1) / block_h).max(1);
+        let bytes_per_row = block_size * blocks_w;
+        let rows_per_image = blocks_h;
+        let size = bytes_per_row as usize * rows_per_image as usize;
+        if offset + size > data_len {
+            break;
+        }
+        layouts.push(MipUploadLayout {
+            level,
+            width: mip_width,
+            height: mip_height,
+            offset,
+            size,
+            bytes_per_row,
+            rows_per_image,
+        });
+        offset += size;
+        mip_width = (mip_width / 2).max(1);
+        mip_height = (mip_height / 2).max(1);
+    }
+    (layouts, offset)
 }
 
 pub struct EguiRenderData {
@@ -1324,10 +1388,21 @@ pub struct StreamingCaps {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamingByteCaps {
+    pub global: u64,
+    pub mesh: u64,
+    pub material: u64,
+    pub texture: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StreamingTuning {
     pub caps_none: StreamingCaps,
     pub caps_soft: StreamingCaps,
     pub caps_hard: StreamingCaps,
+    pub caps_bytes_none: StreamingByteCaps,
+    pub caps_bytes_soft: StreamingByteCaps,
+    pub caps_bytes_hard: StreamingByteCaps,
     pub priority_floor_none: f32,
     pub priority_floor_soft: f32,
     pub priority_floor_hard: f32,
@@ -1358,6 +1433,9 @@ pub struct StreamingTuning {
     pub priority_critical: f32,
     pub inflight_cooldown_frames: u32,
     pub priority_bump_factor: f32,
+    pub fallback_mesh_bytes: u64,
+    pub fallback_material_bytes: u64,
+    pub fallback_texture_bytes: u64,
     pub evict_soft_grace_frames: u32,
     pub evict_hard_grace_frames: u32,
     pub evict_soft_protect_priority: f32,
@@ -1398,6 +1476,24 @@ impl Default for StreamingTuning {
                 material: 2_048,
                 texture: 4_096,
             },
+            caps_bytes_none: StreamingByteCaps {
+                global: 2 * 1024 * 1024 * 1024,
+                mesh: 1024 * 1024 * 1024,
+                material: 64 * 1024 * 1024,
+                texture: 1024 * 1024 * 1024,
+            },
+            caps_bytes_soft: StreamingByteCaps {
+                global: 1024 * 1024 * 1024,
+                mesh: 512 * 1024 * 1024,
+                material: 32 * 1024 * 1024,
+                texture: 512 * 1024 * 1024,
+            },
+            caps_bytes_hard: StreamingByteCaps {
+                global: 512 * 1024 * 1024,
+                mesh: 256 * 1024 * 1024,
+                material: 16 * 1024 * 1024,
+                texture: 256 * 1024 * 1024,
+            },
             priority_floor_none: 0.0,
             priority_floor_soft: 0.005,
             priority_floor_hard: 0.02,
@@ -1428,6 +1524,9 @@ impl Default for StreamingTuning {
             priority_critical: 0.28,
             inflight_cooldown_frames: 6,
             priority_bump_factor: 1.05,
+            fallback_mesh_bytes: 4 * 1024 * 1024,
+            fallback_material_bytes: std::mem::size_of::<MaterialGpuData>() as u64,
+            fallback_texture_bytes: 4 * 1024 * 1024,
             evict_soft_grace_frames: 8,
             evict_hard_grace_frames: 2,
             evict_soft_protect_priority: 0.05,

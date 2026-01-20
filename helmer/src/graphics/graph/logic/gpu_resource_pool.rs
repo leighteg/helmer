@@ -935,11 +935,10 @@ impl GpuResourcePool {
             if entry.last_used_frame == frame_index {
                 continue;
             }
-            let transient = entry.flags().contains(ResourceFlags::TRANSIENT);
-            if !transient && !entry.is_streaming() {
-                if entry.idle_frames(frame_index) < self.idle_frames_before_evict {
-                    continue;
-                }
+            if !entry.is_streaming()
+                && entry.idle_frames(frame_index) < self.idle_frames_before_evict
+            {
+                continue;
             }
 
             let id = entry.id;

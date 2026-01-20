@@ -3,9 +3,9 @@ use crate::{
         atmosphere::AtmospherePrecomputer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
-            InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
-            NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait, ShaderConstants,
-            ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
+            InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, MeshLodPayload,
+            ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait,
+            ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms, Vertex,
         },
         error::RendererError,
     },
@@ -1173,37 +1173,35 @@ impl ForwardRendererTA {
     pub fn add_mesh(
         &mut self,
         id: usize,
-        vertices: &[Vertex],
-        lod_indices: &[Arc<[u32]>],
+        lods: &[MeshLodPayload],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("mesh-vbo-{}", id)),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
         let mut gpu_lods = Vec::new();
-        for (lod_level, indices) in lod_indices.iter().enumerate() {
+        for lod in lods {
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("mesh-vbo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.vertices.as_ref()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             let index_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
-                    contents: bytemuck::cast_slice(indices.as_ref()),
+                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.indices.as_ref()),
                     usage: wgpu::BufferUsages::INDEX,
                 });
             gpu_lods.push(MeshLod {
+                vertex_buffer,
                 index_buffer,
-                index_count: indices.len() as u32,
+                index_count: lod.indices.len() as u32,
             });
         }
 
         self.meshes.insert(
             id,
             Mesh {
-                vertex_buffer,
                 lods: gpu_lods,
                 bounds,
             },
@@ -1553,7 +1551,7 @@ impl ForwardRendererTA {
                     if let Some(mesh) = self.meshes.get(mesh_id) {
                         let lod = &mesh.lods[*lod_index];
 
-                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_vertex_buffer(0, lod.vertex_buffer.slice(..));
                         shadow_pass.set_index_buffer(
                             lod.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
@@ -1913,7 +1911,7 @@ impl RenderTrait for ForwardRendererTA {
                     let lod = &mesh.lods[lod_index];
 
                     render_pass.set_bind_group(1, material_bg, &[]);
-                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    render_pass.set_vertex_buffer(0, lod.vertex_buffer.slice(..));
                     render_pass
                         .set_index_buffer(lod.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -2006,13 +2004,11 @@ impl RenderTrait for ForwardRendererTA {
         match message {
             RenderMessage::CreateMesh {
                 id,
-                vertices,
-                lod_indices,
-                meshlets: _,
+                total_lods: _,
+                lods,
                 bounds,
             } => {
-                self.add_mesh(id, vertices.as_ref(), &lod_indices, bounds)
-                    .unwrap();
+                self.add_mesh(id, &lods, bounds).unwrap();
             }
             RenderMessage::CreateTexture {
                 id,

@@ -1,17 +1,20 @@
 use crate::graphics::renderer_common::{
     common::{
-        Aabb, AssetStreamKind, AssetStreamingRequest, MeshletLodData, RenderMessage, Vertex,
+        Aabb, AssetStreamKind, AssetStreamingRequest, MeshLodPayload, MeshletLodData,
+        RenderMessage, Vertex, build_mip_uploads, calc_mip_level_count, mip_level_data_size,
         render_message_payload_bytes,
     },
     meshlets::{build_meshlet_lod, meshlet_lod_size_bytes},
 };
 use crate::runtime::runtime::RuntimeTuning;
 use base64::Engine;
+use basis_universal::encoding::{ColorSpace, Compressor, CompressorParams};
 use basis_universal::transcoding::{TranscodeParameters, Transcoder, TranscoderTextureFormat};
+use basis_universal::{BasisTextureFormat, UASTC_QUALITY_MIN};
 use crossbeam_channel::{Sender, TryRecvError, TrySendError, bounded};
 use glam::{Mat4, Vec3};
 use gltf::Texture as GltfTexture;
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use ktx2::Reader;
 use memmap2::MmapOptions;
 #[cfg(unix)]
@@ -149,7 +152,7 @@ fn decode_texture_bytes(
     let looks_like_ktx2 =
         matches!(hint.as_deref(), Some("image/ktx2") | Some("ktx2")) || is_ktx2_bytes(bytes);
     if looks_like_ktx2 {
-        return decode_ktx2(bytes);
+        return decode_ktx2(bytes, kind);
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
@@ -258,11 +261,9 @@ fn decode_data_uri(uri: &str) -> Result<Option<(Vec<u8>, Option<String>)>, Strin
 
 #[derive(Debug)]
 pub struct Mesh {
-    pub vertices: Arc<[Vertex]>,
-    pub base_indices: Arc<[u32]>,
-    pub lod_indices: RwLock<Vec<Arc<[u32]>>>,
-    pub meshlets: RwLock<Vec<MeshletLodData>>,
+    pub lods: RwLock<Vec<MeshLodPayload>>,
     pub bounds: Aabb,
+    pub total_lods: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -318,52 +319,66 @@ struct LowResTexture {
     pub dimensions: (u32, u32),
 }
 
-impl CachedTexture {
-    fn ensure_low_res(&self, max_dim: u32) -> LowResTexture {
-        if let Some(existing) = self.low_res.read().clone() {
-            return existing;
-        }
-        let generated = generate_low_res_texture(self, max_dim);
-        *self.low_res.write() = Some(generated.clone());
-        generated
-    }
-}
-
-fn generate_low_res_texture(tex: &CachedTexture, max_dim: u32) -> LowResTexture {
-    let block_size = tex.format.block_size(None).unwrap_or(4) as usize;
+fn generate_low_res_from_parts(
+    data: &[u8],
+    format: wgpu::TextureFormat,
+    dimensions: (u32, u32),
+    max_dim: u32,
+) -> LowResTexture {
     let max_dim = max_dim.max(1);
+    let (width, height) = dimensions;
+    let base_size = mip_level_data_size(format, width, height);
+
+    let mip_levels = calc_mip_level_count(width, height);
+    let (layouts, _) = build_mip_uploads(format, width, height, data.len(), mip_levels);
+    if let Some(layout) = layouts
+        .iter()
+        .rev()
+        .find(|layout| layout.width <= max_dim && layout.height <= max_dim)
+    {
+        let end = layout.offset.saturating_add(layout.size);
+        if end <= data.len() && layout.size > 0 {
+            return LowResTexture {
+                data: Arc::from(data[layout.offset..end].to_vec()),
+                format,
+                dimensions: (layout.width, layout.height),
+            };
+        }
+    }
+
+    let block_size = format.block_copy_size(None).unwrap_or(4) as usize;
 
     if block_size == 4 {
-        let (width, height) = tex.dimensions;
-        if let Some(img) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-            width,
-            height,
-            tex.data.as_ref().to_vec(),
-        ) {
-            let target_w = width.min(max_dim).max(1);
-            let target_h = height.min(max_dim).max(1);
-            let resized = if width > max_dim || height > max_dim {
-                image::imageops::resize(
-                    &img,
-                    target_w,
-                    target_h,
-                    image::imageops::FilterType::Triangle,
-                )
-            } else {
-                img
-            };
-            return LowResTexture {
-                data: Arc::from(resized.into_raw()),
-                format: tex.format,
-                dimensions: (target_w, target_h),
-            };
+        if base_size <= data.len() {
+            let base = &data[..base_size];
+            if let Some(img) =
+                image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, base.to_vec())
+            {
+                let target_w = width.min(max_dim).max(1);
+                let target_h = height.min(max_dim).max(1);
+                let resized = if width > max_dim || height > max_dim {
+                    image::imageops::resize(
+                        &img,
+                        target_w,
+                        target_h,
+                        image::imageops::FilterType::Triangle,
+                    )
+                } else {
+                    img
+                };
+                return LowResTexture {
+                    data: Arc::from(resized.into_raw()),
+                    format,
+                    dimensions: (target_w, target_h),
+                };
+            }
         }
     }
 
     let (width, height) = if block_size > 4 { (4, 4) } else { (1, 1) };
     LowResTexture {
         data: Arc::from(vec![0; block_size.max(1)]),
-        format: tex.format,
+        format,
         dimensions: (width, height),
     }
 }
@@ -516,14 +531,17 @@ impl BufferSource for StreamedBuffer {
     }
 }
 
-struct SceneBufferGuard<'a> {
-    server: &'a AssetServer,
+struct SceneBufferGuard {
     buffers: Arc<Vec<StreamedBuffer>>,
+    allow_release: bool,
 }
 
-impl<'a> SceneBufferGuard<'a> {
-    fn new(server: &'a AssetServer, buffers: Arc<Vec<StreamedBuffer>>) -> Self {
-        Self { server, buffers }
+impl SceneBufferGuard {
+    fn new(buffers: Arc<Vec<StreamedBuffer>>, allow_release: bool) -> Self {
+        Self {
+            buffers,
+            allow_release,
+        }
     }
 
     fn buffers(&self) -> &[StreamedBuffer] {
@@ -531,11 +549,25 @@ impl<'a> SceneBufferGuard<'a> {
     }
 }
 
-impl Drop for SceneBufferGuard<'_> {
+impl Drop for SceneBufferGuard {
     fn drop(&mut self) {
-        self.server
-            .release_scene_buffers_if_needed(self.buffers.as_ref());
+        if !self.allow_release {
+            return;
+        }
+        for buffer in self.buffers.iter() {
+            buffer.release_pages();
+        }
     }
+}
+
+enum SceneContextStatus {
+    Ready {
+        doc: Arc<gltf::Document>,
+        buffers: SceneBufferGuard,
+        base_path: Option<PathBuf>,
+    },
+    Pending,
+    Missing,
 }
 
 // --- WORKER THREAD COMMUNICATION ---
@@ -544,11 +576,13 @@ enum AssetLoadRequest {
     Mesh {
         id: usize,
         path: PathBuf,
+        tuning: AssetStreamingTuning,
     },
     ProceduralMesh {
         id: usize,
         vertices: Vec<Vertex>,
         indices: Vec<u32>,
+        tuning: AssetStreamingTuning,
     },
     Texture {
         id: usize,
@@ -563,17 +597,51 @@ enum AssetLoadRequest {
         id: usize,
         path: PathBuf,
     },
+    SceneBuffers {
+        scene_id: usize,
+        doc: Arc<gltf::Document>,
+        base_path: Option<PathBuf>,
+        scene_path: Option<PathBuf>,
+    },
+    StreamMesh {
+        id: usize,
+        scene_id: usize,
+        desc: MeshPrimitiveDesc,
+        doc: Arc<gltf::Document>,
+        buffers: SceneBufferGuard,
+        tuning: AssetStreamingTuning,
+    },
+    StreamTexture {
+        id: usize,
+        scene_id: usize,
+        tex_index: usize,
+        kind: AssetKind,
+        doc: Arc<gltf::Document>,
+        buffers: SceneBufferGuard,
+        base_path: Option<PathBuf>,
+    },
+    LowResTexture {
+        id: usize,
+        name: String,
+        kind: AssetKind,
+        data: Arc<[u8]>,
+        format: wgpu::TextureFormat,
+        dimensions: (u32, u32),
+        max_dim: u32,
+    },
 }
 
 enum AssetLoadResult {
     Mesh {
         id: usize,
-        vertices: Vec<Vertex>,
-        indices: Vec<u32>,
+        scene_id: Option<usize>,
+        lods: Vec<MeshLodPayload>,
+        total_lods: usize,
         bounds: Aabb,
     },
     Texture {
         id: usize,
+        scene_id: Option<usize>,
         name: String,
         kind: AssetKind,
         data: (Vec<u8>, wgpu::TextureFormat, (u32, u32)),
@@ -585,6 +653,25 @@ enum AssetLoadResult {
     Scene {
         id: usize,
         data: ParsedGltfScene,
+    },
+    SceneBuffers {
+        scene_id: usize,
+        buffers: Vec<StreamedBuffer>,
+        buffers_bytes: usize,
+    },
+    SceneBuffersFailed {
+        scene_id: usize,
+    },
+    LowResTexture {
+        id: usize,
+        name: String,
+        kind: AssetKind,
+        data: LowResTexture,
+    },
+    StreamFailure {
+        kind: AssetStreamKind,
+        id: usize,
+        scene_id: usize,
     },
 }
 
@@ -652,13 +739,16 @@ pub struct AssetServer {
     asset_sender: Sender<RenderMessage>,
     tuning: Arc<RuntimeTuning>,
     _worker_handles: Vec<JoinHandle<()>>,
+    pending_worker_requests: RwLock<VecDeque<AssetLoadRequest>>,
 
     stream_request_receiver: crossbeam_channel::Receiver<AssetStreamingRequest>,
     streaming_backlog: RwLock<VecDeque<AssetStreamingRequest>>,
     reupload_queue: RwLock<VecDeque<AssetStreamingRequest>>,
+    streaming_inflight: RwLock<HashMap<(AssetStreamKind, usize), AssetStreamingRequest>>,
     latest_streaming_plan: RwLock<HashMap<(AssetStreamKind, usize), f32>>,
     scene_contexts: RwLock<HashMap<usize, SceneAssetContext>>,
     scene_buffer_bytes: AtomicUsize,
+    scene_buffer_inflight: RwLock<HashSet<usize>>,
     texture_sources: RwLock<HashMap<usize, TextureSource>>,
     mesh_sources: RwLock<HashMap<usize, MeshSource>>,
     material_sources: RwLock<HashMap<usize, MaterialSource>>,
@@ -680,6 +770,8 @@ pub struct AssetServer {
     streaming_backlog_limit: usize,
     cache_idle_ms: u64,
     cache_eviction_limit: usize,
+    worker_queue_capacity: usize,
+    low_res_inflight: RwLock<HashSet<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -714,60 +806,75 @@ impl AssetServer {
                 while let Ok(request) = req_receiver.recv() {
                     let path_str = request_path(&request).to_string_lossy().to_string();
                     let result = match request {
-                        AssetLoadRequest::Mesh { id, path } => {
-                            if is_gltf_path(&path) {
+                        AssetLoadRequest::Mesh { id, path, tuning } => {
+                            let parsed = if is_gltf_path(&path) {
                                 match parse_mesh_from_gltf_path(&path) {
-                                    Ok((vertices, indices, bounds)) => {
-                                        Some(AssetLoadResult::Mesh {
-                                            id,
-                                            vertices,
-                                            indices,
-                                            bounds,
-                                        })
-                                    }
+                                    Ok(data) => Some(data),
                                     Err(e) => {
                                         warn!("Failed to parse glTF mesh '{}': {}", path_str, e);
                                         None
                                     }
                                 }
                             } else {
-                                load_and_parse(
-                                    id,
-                                    &path,
-                                    parse_glb,
-                                    |id, (vertices, indices, bounds)| AssetLoadResult::Mesh {
+                                match std::fs::read(&path) {
+                                    Ok(bytes) => match parse_glb(&bytes) {
+                                        Ok(data) => Some(data),
+                                        Err(e) => {
+                                            warn!("Failed to parse glb mesh '{}': {}", path_str, e);
+                                            None
+                                        }
+                                    },
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to read mesh file '{:?}' for handle {}: {}",
+                                            path, id, e
+                                        );
+                                        None
+                                    }
+                                }
+                            };
+
+                            parsed.and_then(|(vertices, indices, bounds)| {
+                                build_mesh_payload(vertices, indices, bounds, &tuning).map(
+                                    |payload| AssetLoadResult::Mesh {
                                         id,
-                                        vertices,
-                                        indices,
-                                        bounds,
+                                        scene_id: None,
+                                        lods: payload.lods,
+                                        total_lods: payload.total_lods,
+                                        bounds: payload.bounds,
                                     },
                                 )
-                            }
+                            })
                         }
                         AssetLoadRequest::ProceduralMesh {
                             id,
                             vertices,
                             indices,
+                            tuning,
                         } => {
                             let bounds = Aabb::calculate(&vertices);
-
-                            Some(AssetLoadResult::Mesh {
-                                id,
-                                vertices,
-                                indices,
-                                bounds,
-                            })
-                        }
-                        AssetLoadRequest::Texture { id, path, kind } => {
-                            load_and_parse(id, &path, decode_ktx2, |id, data| {
-                                AssetLoadResult::Texture {
+                            build_mesh_payload(vertices, indices, bounds, &tuning).map(|payload| {
+                                AssetLoadResult::Mesh {
                                     id,
-                                    name: path_str.clone(),
-                                    kind,
-                                    data,
+                                    scene_id: None,
+                                    lods: payload.lods,
+                                    total_lods: payload.total_lods,
+                                    bounds: payload.bounds,
                                 }
                             })
                         }
+                        AssetLoadRequest::Texture { id, path, kind } => load_and_parse(
+                            id,
+                            &path,
+                            |bytes| decode_ktx2(bytes, kind),
+                            |id, data| AssetLoadResult::Texture {
+                                id,
+                                scene_id: None,
+                                name: path_str.clone(),
+                                kind,
+                                data,
+                            },
+                        ),
                         AssetLoadRequest::Material { id, path } => {
                             load_and_parse(id, &path, parse_ron_material, |id, data| {
                                 AssetLoadResult::Material { id, data }
@@ -791,6 +898,155 @@ impl AssetServer {
                                     }
                                 }
                             }
+                        }
+                        AssetLoadRequest::SceneBuffers {
+                            scene_id,
+                            doc,
+                            base_path,
+                            scene_path,
+                        } => match load_scene_buffers(
+                            &doc,
+                            scene_path.as_deref(),
+                            base_path.as_deref(),
+                        ) {
+                            Ok(buffers) => {
+                                let buffers_bytes: usize =
+                                    buffers.iter().map(|buffer| buffer.len()).sum();
+                                Some(AssetLoadResult::SceneBuffers {
+                                    scene_id,
+                                    buffers,
+                                    buffers_bytes,
+                                })
+                            }
+                            Err(err) => {
+                                warn!("Failed to load buffers for scene {}: {}", scene_id, err);
+                                Some(AssetLoadResult::SceneBuffersFailed { scene_id })
+                            }
+                        },
+                        AssetLoadRequest::StreamMesh {
+                            id,
+                            scene_id,
+                            desc,
+                            doc,
+                            buffers,
+                            tuning,
+                        } => {
+                            let primitive = doc
+                                .meshes()
+                                .nth(desc.mesh_index)
+                                .and_then(|mesh| mesh.primitives().nth(desc.primitive_index));
+                            if let Some(primitive) = primitive {
+                                if let Some((vertices, indices, bounds)) =
+                                    process_primitive(&primitive, buffers.buffers())
+                                {
+                                    build_mesh_payload(vertices, indices, bounds, &tuning)
+                                        .map_or_else(
+                                            || {
+                                                Some(AssetLoadResult::StreamFailure {
+                                                    kind: AssetStreamKind::Mesh,
+                                                    id,
+                                                    scene_id,
+                                                })
+                                            },
+                                            |payload| {
+                                                Some(AssetLoadResult::Mesh {
+                                                    id,
+                                                    scene_id: Some(scene_id),
+                                                    lods: payload.lods,
+                                                    total_lods: payload.total_lods,
+                                                    bounds: payload.bounds,
+                                                })
+                                            },
+                                        )
+                                } else {
+                                    warn!(
+                                        "Failed to process mesh primitive {} for streamed mesh {}",
+                                        desc.primitive_index, id
+                                    );
+                                    Some(AssetLoadResult::StreamFailure {
+                                        kind: AssetStreamKind::Mesh,
+                                        id,
+                                        scene_id,
+                                    })
+                                }
+                            } else {
+                                warn!(
+                                    "Mesh {} primitive {} not found in scene {}",
+                                    desc.mesh_index, desc.primitive_index, scene_id
+                                );
+                                Some(AssetLoadResult::StreamFailure {
+                                    kind: AssetStreamKind::Mesh,
+                                    id,
+                                    scene_id,
+                                })
+                            }
+                        }
+                        AssetLoadRequest::StreamTexture {
+                            id,
+                            scene_id,
+                            tex_index,
+                            kind,
+                            doc,
+                            buffers,
+                            base_path,
+                        } => {
+                            if let Some(gltf_tex) = doc.textures().nth(tex_index) {
+                                let decoded = decode_texture_asset(
+                                    gltf_tex,
+                                    buffers.buffers(),
+                                    base_path.as_deref(),
+                                    kind,
+                                );
+                                decoded
+                                    .map(|(name, kind, data, format, dimensions)| {
+                                        AssetLoadResult::Texture {
+                                            id,
+                                            scene_id: Some(scene_id),
+                                            name,
+                                            kind,
+                                            data: (data, format, dimensions),
+                                        }
+                                    })
+                                    .or_else(|| {
+                                        Some(AssetLoadResult::StreamFailure {
+                                            kind: AssetStreamKind::Texture,
+                                            id,
+                                            scene_id,
+                                        })
+                                    })
+                            } else {
+                                warn!(
+                                    "Texture {} index {} missing in scene {}",
+                                    id, tex_index, scene_id
+                                );
+                                Some(AssetLoadResult::StreamFailure {
+                                    kind: AssetStreamKind::Texture,
+                                    id,
+                                    scene_id,
+                                })
+                            }
+                        }
+                        AssetLoadRequest::LowResTexture {
+                            id,
+                            name,
+                            kind,
+                            data,
+                            format,
+                            dimensions,
+                            max_dim,
+                        } => {
+                            let low = generate_low_res_from_parts(
+                                data.as_ref(),
+                                format,
+                                dimensions,
+                                max_dim,
+                            );
+                            Some(AssetLoadResult::LowResTexture {
+                                id,
+                                name,
+                                kind,
+                                data: low,
+                            })
                         }
                     };
                     if let Some(result) = result {
@@ -847,12 +1103,15 @@ impl AssetServer {
             asset_sender,
             tuning,
             _worker_handles: worker_handles,
+            pending_worker_requests: RwLock::new(VecDeque::new()),
             stream_request_receiver,
             streaming_backlog: RwLock::new(VecDeque::new()),
             reupload_queue: RwLock::new(VecDeque::new()),
+            streaming_inflight: RwLock::new(HashMap::new()),
             latest_streaming_plan: RwLock::new(HashMap::new()),
             scene_contexts: RwLock::new(HashMap::new()),
             scene_buffer_bytes: AtomicUsize::new(0),
+            scene_buffer_inflight: RwLock::new(HashSet::new()),
             texture_sources: RwLock::new(HashMap::new()),
             mesh_sources: RwLock::new(HashMap::new()),
             material_sources: RwLock::new(HashMap::new()),
@@ -872,6 +1131,8 @@ impl AssetServer {
             streaming_backlog_limit: 16_384,
             cache_idle_ms,
             cache_eviction_limit,
+            worker_queue_capacity,
+            low_res_inflight: RwLock::new(HashSet::new()),
         }
     }
 
@@ -1077,17 +1338,30 @@ impl AssetServer {
             return;
         }
 
+        let active_scenes = if budget == 0 || total > budget {
+            self.active_streaming_scene_ids()
+        } else {
+            HashSet::new()
+        };
+
         let mut contexts = self.scene_contexts.write();
 
         if budget == 0 {
-            for ctx in contexts.values_mut() {
+            for (scene_id, ctx) in contexts.iter_mut() {
+                if ctx.pending_assets > 0 {
+                    continue;
+                }
+                if active_scenes.contains(scene_id) {
+                    continue;
+                }
                 if let Some(buffers) = ctx.buffers.take() {
                     self.release_scene_buffers_if_needed(buffers.as_ref());
                     total = total.saturating_sub(ctx.buffers_bytes);
                     ctx.buffers_bytes = 0;
                 }
             }
-            self.scene_buffer_bytes.store(0, AtomicOrdering::Relaxed);
+            self.scene_buffer_bytes
+                .store(total, AtomicOrdering::Relaxed);
             return;
         }
 
@@ -1098,11 +1372,20 @@ impl AssetServer {
         let mut entries: Vec<(Instant, usize, usize)> = contexts
             .iter()
             .filter_map(|(scene_id, ctx)| {
+                if ctx.pending_assets > 0 {
+                    return None;
+                }
+                if active_scenes.contains(scene_id) {
+                    return None;
+                }
                 ctx.buffers
                     .as_ref()
                     .map(|_| (ctx.buffers_last_used, *scene_id, ctx.buffers_bytes))
             })
             .collect();
+        if entries.is_empty() {
+            return;
+        }
         entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         for (_last_used, scene_id, bytes) in entries {
@@ -1239,14 +1522,12 @@ impl AssetServer {
             id,
             vertices,
             indices,
+            tuning: self.asset_streaming_tuning,
         };
 
-        self.request_sender.send(request).unwrap_or_else(|e| {
-            warn!(
-                "Failed to send procedural mesh request to worker thread: {}",
-                e
-            );
-        });
+        if !self.enqueue_worker_request(request) {
+            warn!("Failed to queue procedural mesh request; worker thread offline");
+        }
 
         Handle::new(id)
     }
@@ -1376,12 +1657,6 @@ impl AssetServer {
             .collect();
         let mut mesh_meta = self.mesh_meta.write();
         for (id, mesh) in meshes {
-            {
-                let mut lods = mesh.lod_indices.write();
-                if lods.len() > 1 {
-                    lods.truncate(1);
-                }
-            }
             if let Some(meta) = mesh_meta.get_mut(&id) {
                 meta.size_bytes = mesh_size_bytes(mesh.as_ref());
             }
@@ -1509,13 +1784,52 @@ impl AssetServer {
             }
         }
     }
+
+    fn enqueue_worker_request(&self, request: AssetLoadRequest) -> bool {
+        match self.request_sender.try_send(request) {
+            Ok(()) => true,
+            Err(TrySendError::Full(request)) => {
+                self.pending_worker_requests.write().push_back(request);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn flush_worker_requests(&self) {
+        let mut pending = self.pending_worker_requests.write();
+        if pending.is_empty() {
+            return;
+        }
+        let mut budget = self.worker_queue_capacity.max(8);
+        while budget > 0 {
+            let Some(request) = pending.pop_front() else {
+                break;
+            };
+            match self.request_sender.try_send(request) {
+                Ok(()) => {
+                    budget = budget.saturating_sub(1);
+                }
+                Err(TrySendError::Full(request)) => {
+                    pending.push_front(request);
+                    break;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    break;
+                }
+            }
+        }
+    }
     pub fn load_mesh<P: AsRef<Path>>(&self, path: P) -> Handle<Mesh> {
         let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
         let request = AssetLoadRequest::Mesh {
             id,
             path: path.as_ref().to_path_buf(),
+            tuning: self.asset_streaming_tuning,
         };
-        self.request_sender.send(request).unwrap();
+        if !self.enqueue_worker_request(request) {
+            warn!("Failed to queue mesh request {}; worker thread offline", id);
+        }
         Handle {
             id,
             _phantom: PhantomData,
@@ -1529,7 +1843,12 @@ impl AssetServer {
             path: path.as_ref().to_path_buf(),
             kind,
         };
-        self.request_sender.send(request).unwrap();
+        if !self.enqueue_worker_request(request) {
+            warn!(
+                "Failed to queue texture request {}; worker thread offline",
+                id
+            );
+        }
         Handle {
             id,
             _phantom: PhantomData,
@@ -1542,7 +1861,12 @@ impl AssetServer {
             id,
             path: path.as_ref().to_path_buf(),
         };
-        self.request_sender.send(request).unwrap();
+        if !self.enqueue_worker_request(request) {
+            warn!(
+                "Failed to queue material request {}; worker thread offline",
+                id
+            );
+        }
         Handle {
             id,
             _phantom: PhantomData,
@@ -1555,7 +1879,12 @@ impl AssetServer {
             id,
             path: path.as_ref().to_path_buf(),
         };
-        self.request_sender.send(request).unwrap();
+        if !self.enqueue_worker_request(request) {
+            warn!(
+                "Failed to queue scene request {}; worker thread offline",
+                id
+            );
+        }
         Handle {
             id,
             _phantom: PhantomData,
@@ -1567,6 +1896,7 @@ impl AssetServer {
     }
 
     pub fn update(&self) {
+        self.flush_worker_requests();
         // --- 1. Drain all completed load results from workers ---
         let mut creation_budget = self.asset_creation_limit_per_frame;
         // Limit how many worker results we process per tick to avoid long stalls on huge loads.
@@ -1578,69 +1908,194 @@ impl AssetServer {
                     match result {
                         AssetLoadResult::Mesh {
                             id,
-                            vertices,
-                            indices,
+                            scene_id,
+                            lods,
+                            total_lods,
                             bounds,
                         } => {
-                            let base_lod = optimize_base_lod(&vertices, &indices);
-                            let vertices: Arc<[Vertex]> = Arc::from(vertices);
-                            let base_indices: Arc<[u32]> = Arc::from(indices);
-                            let base_lod: Arc<[u32]> = Arc::from(base_lod);
-                            let meshlet_lod =
-                                build_meshlet_lod(vertices.as_ref(), base_lod.as_ref());
                             let mesh_arc = Arc::new(Mesh {
-                                vertices: vertices.clone(),
-                                base_indices,
-                                lod_indices: RwLock::new(vec![base_lod.clone()]),
-                                meshlets: RwLock::new(vec![meshlet_lod.clone()]),
+                                lods: RwLock::new(lods.clone()),
                                 bounds,
+                                total_lods,
                             });
-                            let size_bytes = mesh_size_bytes(&mesh_arc);
-                            self.mesh_cache.write().insert(id, mesh_arc.clone());
-                            self.record_cache_entry(AssetStreamKind::Mesh, id, size_bytes);
-                            self.enforce_cache_budget(AssetStreamKind::Mesh);
-                            let lods_to_send =
-                                ensure_mesh_lods(&mesh_arc, Some(0), &self.asset_streaming_tuning);
-                            let _ = self.try_send_asset_message(RenderMessage::CreateMesh {
-                                id,
-                                vertices,
-                                lod_indices: lods_to_send,
-                                meshlets: vec![meshlet_lod],
-                                bounds,
-                            });
+
+                            let cached = self.mesh_budget > 0;
+                            if cached {
+                                let size_bytes = mesh_size_bytes(&mesh_arc);
+                                self.mesh_cache.write().insert(id, mesh_arc.clone());
+                                self.record_cache_entry(AssetStreamKind::Mesh, id, size_bytes);
+                                self.enforce_cache_budget(AssetStreamKind::Mesh);
+                            }
+
                             self.mesh_aabb_map.write().0.insert(id, bounds);
+                            if let Some(scene_id) = scene_id {
+                                self.mark_scene_asset_complete(scene_id);
+                            }
+
+                            let request = scene_id
+                                .and_then(|_| {
+                                    self.take_streaming_inflight(AssetStreamKind::Mesh, id)
+                                })
+                                .unwrap_or_else(|| AssetStreamingRequest {
+                                    id,
+                                    kind: AssetStreamKind::Mesh,
+                                    priority: 0.0,
+                                    max_lod: Some(0),
+                                    force_low_res: false,
+                                });
+
+                            let lods_to_send = {
+                                let lods = mesh_arc.lods.read();
+                                select_mesh_lod_payloads(&lods, request.max_lod)
+                            };
+                            if lods_to_send.is_empty() {
+                                continue;
+                            }
+
+                            match self.try_send_asset_message(RenderMessage::CreateMesh {
+                                id,
+                                total_lods: mesh_arc.total_lods,
+                                lods: lods_to_send,
+                                bounds,
+                            }) {
+                                Ok(()) => {
+                                    if cached {
+                                        self.touch_cache_entry(AssetStreamKind::Mesh, id);
+                                    }
+                                }
+                                Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                    self.requeue_stream_request(request);
+                                }
+                                Err(AssetSendError::Disconnected) => {
+                                    warn!("Failed to send mesh {}; render thread offline", id);
+                                }
+                            }
                         }
                         AssetLoadResult::Texture {
                             id,
+                            scene_id,
                             name,
                             kind,
                             data,
                         } => {
                             let (texture_data, format, (width, height)) = data;
                             let texture_data: Arc<[u8]> = Arc::from(texture_data);
-                            let size_bytes = texture_data.len();
-                            self.texture_cache.write().insert(
-                                id,
-                                Arc::new(CachedTexture {
-                                    name: name.clone(),
+                            let cached = self.texture_budget > 0;
+                            if cached {
+                                let size_bytes = texture_data.len();
+                                self.texture_cache.write().insert(
+                                    id,
+                                    Arc::new(CachedTexture {
+                                        name: name.clone(),
+                                        kind,
+                                        data: texture_data.clone(),
+                                        format,
+                                        dimensions: (width, height),
+                                        low_res: Arc::new(RwLock::new(None)),
+                                    }),
+                                );
+                                self.record_cache_entry(AssetStreamKind::Texture, id, size_bytes);
+                                self.enforce_cache_budget(AssetStreamKind::Texture);
+                            }
+
+                            if let Some(scene_id) = scene_id {
+                                self.mark_scene_asset_complete(scene_id);
+                            }
+
+                            let request = scene_id
+                                .and_then(|_| {
+                                    self.take_streaming_inflight(AssetStreamKind::Texture, id)
+                                })
+                                .unwrap_or_else(|| AssetStreamingRequest {
+                                    id,
+                                    kind: AssetStreamKind::Texture,
+                                    priority: 0.0,
+                                    max_lod: None,
+                                    force_low_res: false,
+                                });
+
+                            if request.force_low_res {
+                                let cached_tex = if cached {
+                                    self.texture_cache.read().get(&id).cloned()
+                                } else {
+                                    None
+                                };
+                                if let Some(tex) = cached_tex {
+                                    if let Some(low) = tex.low_res.read().clone() {
+                                        match self.try_send_asset_message(
+                                            RenderMessage::CreateTexture {
+                                                id,
+                                                name: tex.name.clone(),
+                                                kind: tex.kind,
+                                                data: low.data.clone(),
+                                                format: low.format,
+                                                width: low.dimensions.0,
+                                                height: low.dimensions.1,
+                                            },
+                                        ) {
+                                            Ok(()) => {
+                                                self.touch_cache_entry(
+                                                    AssetStreamKind::Texture,
+                                                    id,
+                                                );
+                                            }
+                                            Err(AssetSendError::Budget)
+                                            | Err(AssetSendError::Full) => {
+                                                self.requeue_stream_request(request);
+                                            }
+                                            Err(AssetSendError::Disconnected) => {
+                                                warn!(
+                                                    "Failed to send low-res texture {}; render thread offline",
+                                                    id
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        self.queue_low_res_generation(
+                                            id,
+                                            tex.name.clone(),
+                                            tex.kind,
+                                            tex.data.clone(),
+                                            tex.format,
+                                            tex.dimensions,
+                                        );
+                                    }
+                                } else {
+                                    self.queue_low_res_generation(
+                                        id,
+                                        name.clone(),
+                                        kind,
+                                        texture_data.clone(),
+                                        format,
+                                        (width, height),
+                                    );
+                                }
+                            } else {
+                                match self.try_send_asset_message(RenderMessage::CreateTexture {
+                                    id,
+                                    name,
                                     kind,
-                                    data: texture_data.clone(),
+                                    data: texture_data,
                                     format,
-                                    dimensions: (width, height),
-                                    low_res: Arc::new(RwLock::new(None)),
-                                }),
-                            );
-                            self.record_cache_entry(AssetStreamKind::Texture, id, size_bytes);
-                            self.enforce_cache_budget(AssetStreamKind::Texture);
-                            let _ = self.try_send_asset_message(RenderMessage::CreateTexture {
-                                id,
-                                name,
-                                kind,
-                                data: texture_data,
-                                format,
-                                width,
-                                height,
-                            });
+                                    width,
+                                    height,
+                                }) {
+                                    Ok(()) => {
+                                        if cached {
+                                            self.touch_cache_entry(AssetStreamKind::Texture, id);
+                                        }
+                                    }
+                                    Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                        self.requeue_stream_request(request);
+                                    }
+                                    Err(AssetSendError::Disconnected) => {
+                                        warn!(
+                                            "Failed to send texture {}; render thread offline",
+                                            id
+                                        );
+                                    }
+                                }
+                            }
                         }
                         AssetLoadResult::Material { id, data } => {
                             let material_gpu_data = self.resolve_material_dependencies(id, data);
@@ -1650,12 +2105,101 @@ impl AssetServer {
                                 .insert(id, Arc::new(material_gpu_data.clone()));
                             self.record_cache_entry(AssetStreamKind::Material, id, size_bytes);
                             self.enforce_cache_budget(AssetStreamKind::Material);
-                            let _ = self.try_send_asset_message(RenderMessage::CreateMaterial(
+                            let request = AssetStreamingRequest {
+                                id,
+                                kind: AssetStreamKind::Material,
+                                priority: 0.0,
+                                max_lod: None,
+                                force_low_res: false,
+                            };
+                            match self.try_send_asset_message(RenderMessage::CreateMaterial(
                                 material_gpu_data,
-                            ));
+                            )) {
+                                Ok(()) => {
+                                    self.touch_cache_entry(AssetStreamKind::Material, id);
+                                }
+                                Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                    self.requeue_stream_request(request);
+                                }
+                                Err(AssetSendError::Disconnected) => {
+                                    warn!("Failed to send material {}; render thread offline", id);
+                                }
+                            }
                         }
                         AssetLoadResult::Scene { id: scene_id, data } => {
                             self.register_scene(scene_id, data);
+                        }
+                        AssetLoadResult::SceneBuffers {
+                            scene_id,
+                            buffers,
+                            buffers_bytes,
+                        } => {
+                            self.scene_buffer_inflight.write().remove(&scene_id);
+                            let stored = {
+                                let mut contexts = self.scene_contexts.write();
+                                let mut stored = false;
+                                if let Some(ctx) = contexts.get_mut(&scene_id) {
+                                    if ctx.buffers.is_none() {
+                                        ctx.buffers = Some(Arc::new(buffers));
+                                        ctx.buffers_bytes = buffers_bytes;
+                                        stored = true;
+                                    }
+                                    ctx.buffers_last_used = Instant::now();
+                                }
+                                stored
+                            };
+                            if stored && buffers_bytes > 0 {
+                                self.scene_buffer_bytes
+                                    .fetch_add(buffers_bytes, AtomicOrdering::Relaxed);
+                                self.enforce_scene_buffer_budget();
+                            }
+                        }
+                        AssetLoadResult::SceneBuffersFailed { scene_id } => {
+                            self.scene_buffer_inflight.write().remove(&scene_id);
+                        }
+                        AssetLoadResult::LowResTexture {
+                            id,
+                            name,
+                            kind,
+                            data,
+                        } => {
+                            self.low_res_inflight.write().remove(&id);
+                            if let Some(tex) = self.texture_cache.read().get(&id) {
+                                *tex.low_res.write() = Some(data.clone());
+                                self.touch_cache_entry(AssetStreamKind::Texture, id);
+                            }
+
+                            let request = AssetStreamingRequest {
+                                id,
+                                kind: AssetStreamKind::Texture,
+                                priority: 0.0,
+                                max_lod: None,
+                                force_low_res: true,
+                            };
+                            match self.try_send_asset_message(RenderMessage::CreateTexture {
+                                id,
+                                name,
+                                kind,
+                                data: data.data.clone(),
+                                format: data.format,
+                                width: data.dimensions.0,
+                                height: data.dimensions.1,
+                            }) {
+                                Ok(()) => {}
+                                Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                    self.requeue_stream_request(request);
+                                }
+                                Err(AssetSendError::Disconnected) => {
+                                    warn!(
+                                        "Failed to send low-res texture {}; render thread offline",
+                                        id
+                                    );
+                                }
+                            }
+                        }
+                        AssetLoadResult::StreamFailure { kind, id, scene_id } => {
+                            self.take_streaming_inflight(kind, id);
+                            self.mark_scene_asset_complete(scene_id);
                         }
                     }
                 }
@@ -1821,43 +2365,54 @@ impl AssetServer {
         }
     }
 
-    fn scene_context(
-        &self,
-        scene_id: usize,
-    ) -> Option<(
-        Arc<gltf::Document>,
-        Arc<Vec<StreamedBuffer>>,
-        Option<PathBuf>,
-    )> {
+    fn scene_context_status(&self, scene_id: usize) -> SceneContextStatus {
         let (doc, base_path) = {
             let contexts = self.scene_contexts.read();
-            let ctx = contexts.get(&scene_id)?;
+            let Some(ctx) = contexts.get(&scene_id) else {
+                return SceneContextStatus::Missing;
+            };
             (ctx.doc.clone(), ctx.base_path.clone())
         };
-        let buffers = self.ensure_scene_buffers(scene_id)?;
-        Some((doc, buffers, base_path))
+
+        let Some(buffers) = self.try_scene_buffers(scene_id) else {
+            return SceneContextStatus::Pending;
+        };
+
+        let allow_release = self.scene_buffer_budget == 0;
+        SceneContextStatus::Ready {
+            doc,
+            buffers: SceneBufferGuard::new(buffers, allow_release),
+            base_path,
+        }
     }
 
-    fn ensure_scene_buffers(&self, scene_id: usize) -> Option<Arc<Vec<StreamedBuffer>>> {
-        let budget = self.scene_buffer_budget;
-        if budget == 0 {
-            self.drop_scene_buffers(scene_id);
-        }
-
+    fn try_scene_buffers(&self, scene_id: usize) -> Option<Arc<Vec<StreamedBuffer>>> {
         {
             let mut contexts = self.scene_contexts.write();
             let ctx = contexts.get_mut(&scene_id)?;
-            if budget > 0 {
-                if let Some(buffers) = ctx.buffers.clone() {
-                    ctx.buffers_last_used = Instant::now();
-                    return Some(buffers);
-                }
+            if let Some(buffers) = ctx.buffers.clone() {
+                ctx.buffers_last_used = Instant::now();
+                return Some(buffers);
+            }
+        }
+
+        let _ = self.queue_scene_buffer_load(scene_id);
+        None
+    }
+
+    fn queue_scene_buffer_load(&self, scene_id: usize) -> bool {
+        {
+            let inflight = self.scene_buffer_inflight.read();
+            if inflight.contains(&scene_id) {
+                return true;
             }
         }
 
         let (doc, base_path, scene_path) = {
             let contexts = self.scene_contexts.read();
-            let ctx = contexts.get(&scene_id)?;
+            let Some(ctx) = contexts.get(&scene_id) else {
+                return false;
+            };
             (
                 ctx.doc.clone(),
                 ctx.base_path.clone(),
@@ -1865,46 +2420,129 @@ impl AssetServer {
             )
         };
 
-        let buffers = match load_scene_buffers(&doc, scene_path.as_deref(), base_path.as_deref()) {
-            Ok(buffers) => buffers,
-            Err(err) => {
-                warn!("Failed to load buffers for scene {}: {}", scene_id, err);
-                return None;
-            }
+        let request = AssetLoadRequest::SceneBuffers {
+            scene_id,
+            doc,
+            base_path,
+            scene_path,
+        };
+        if !self.enqueue_worker_request(request) {
+            return false;
+        }
+
+        self.scene_buffer_inflight.write().insert(scene_id);
+        true
+    }
+
+    fn scene_has_streaming_activity(&self, scene_id: usize) -> bool {
+        if self.scene_buffer_inflight.read().contains(&scene_id) {
+            return true;
+        }
+
+        let inflight: Vec<(AssetStreamKind, usize)> = {
+            let inflight = self.streaming_inflight.read();
+            inflight.values().map(|req| (req.kind, req.id)).collect()
+        };
+        let backlog: Vec<(AssetStreamKind, usize)> = {
+            let backlog = self.streaming_backlog.read();
+            backlog.iter().map(|req| (req.kind, req.id)).collect()
         };
 
-        if budget == 0 {
-            return Some(Arc::new(buffers));
+        if inflight.is_empty() && backlog.is_empty() {
+            return false;
         }
 
-        let buffers_bytes: usize = buffers.iter().map(|b| b.len()).sum();
-        let buffers = Arc::new(buffers);
-
-        {
-            let mut contexts = self.scene_contexts.write();
-            let ctx = contexts.get_mut(&scene_id)?;
-            if let Some(existing) = ctx.buffers.clone() {
-                ctx.buffers_last_used = Instant::now();
-                return Some(existing);
+        let mesh_sources = self.mesh_sources.read();
+        let texture_sources = self.texture_sources.read();
+        for (kind, id) in inflight.into_iter().chain(backlog) {
+            match kind {
+                AssetStreamKind::Mesh => {
+                    if let Some(source) = mesh_sources.get(&id) {
+                        if source.scene_id == scene_id {
+                            return true;
+                        }
+                    }
+                }
+                AssetStreamKind::Texture => {
+                    if let Some(source) = texture_sources.get(&id) {
+                        if source.scene_id == scene_id {
+                            return true;
+                        }
+                    }
+                }
+                AssetStreamKind::Material => {}
             }
-            ctx.buffers = Some(buffers.clone());
-            ctx.buffers_bytes = buffers_bytes;
-            ctx.buffers_last_used = Instant::now();
         }
 
-        if buffers_bytes > 0 {
-            self.scene_buffer_bytes
-                .fetch_add(buffers_bytes, AtomicOrdering::Relaxed);
-            self.enforce_scene_buffer_budget();
+        false
+    }
+
+    fn active_streaming_scene_ids(&self) -> HashSet<usize> {
+        let mut active: HashSet<usize> = HashSet::new();
+        {
+            let inflight = self.scene_buffer_inflight.read();
+            for scene_id in inflight.iter() {
+                active.insert(*scene_id);
+            }
         }
 
-        Some(buffers)
+        let inflight: Vec<(AssetStreamKind, usize)> = {
+            let inflight = self.streaming_inflight.read();
+            inflight.values().map(|req| (req.kind, req.id)).collect()
+        };
+        let backlog: Vec<(AssetStreamKind, usize)> = {
+            let backlog = self.streaming_backlog.read();
+            backlog.iter().map(|req| (req.kind, req.id)).collect()
+        };
+
+        if inflight.is_empty() && backlog.is_empty() {
+            return active;
+        }
+
+        let mesh_sources = self.mesh_sources.read();
+        let texture_sources = self.texture_sources.read();
+        for (kind, id) in inflight.into_iter().chain(backlog) {
+            match kind {
+                AssetStreamKind::Mesh => {
+                    if let Some(source) = mesh_sources.get(&id) {
+                        active.insert(source.scene_id);
+                    }
+                }
+                AssetStreamKind::Texture => {
+                    if let Some(source) = texture_sources.get(&id) {
+                        active.insert(source.scene_id);
+                    }
+                }
+                AssetStreamKind::Material => {}
+            }
+        }
+
+        active
     }
 
     fn mark_scene_asset_complete(&self, scene_id: usize) {
-        if let Some(ctx) = self.scene_contexts.write().get_mut(&scene_id) {
-            if ctx.pending_assets > 0 {
-                ctx.pending_assets -= 1;
+        let budget = self.scene_buffer_budget;
+        let keep_buffers = budget == 0 && self.scene_has_streaming_activity(scene_id);
+        let mut contexts = self.scene_contexts.write();
+        let Some(ctx) = contexts.get_mut(&scene_id) else {
+            return;
+        };
+        if ctx.pending_assets > 0 {
+            ctx.pending_assets -= 1;
+        }
+        if budget == 0 && ctx.pending_assets == 0 && ctx.buffers.is_some() {
+            if keep_buffers {
+                return;
+            }
+            if let Some(buffers) = ctx.buffers.take() {
+                self.release_scene_buffers_if_needed(buffers.as_ref());
+                let bytes = ctx.buffers_bytes;
+                ctx.buffers_bytes = 0;
+                if bytes > 0 {
+                    let total = self.scene_buffer_bytes.load(AtomicOrdering::Relaxed);
+                    self.scene_buffer_bytes
+                        .store(total.saturating_sub(bytes), AtomicOrdering::Relaxed);
+                }
             }
         }
     }
@@ -1933,27 +2571,94 @@ impl AssetServer {
         }
     }
 
+    fn merge_stream_request(
+        existing: &mut AssetStreamingRequest,
+        incoming: &AssetStreamingRequest,
+    ) {
+        existing.priority = existing.priority.max(incoming.priority);
+        existing.max_lod = match (existing.max_lod, incoming.max_lod) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (None, _) | (_, None) => None,
+        };
+        existing.force_low_res &= incoming.force_low_res;
+    }
+
+    fn update_streaming_inflight(&self, request: &AssetStreamingRequest) {
+        let mut inflight = self.streaming_inflight.write();
+        inflight
+            .entry((request.kind, request.id))
+            .and_modify(|existing| Self::merge_stream_request(existing, request))
+            .or_insert_with(|| request.clone());
+    }
+
+    fn take_streaming_inflight(
+        &self,
+        kind: AssetStreamKind,
+        id: usize,
+    ) -> Option<AssetStreamingRequest> {
+        self.streaming_inflight.write().remove(&(kind, id))
+    }
+
+    fn is_streaming_inflight(&self, kind: AssetStreamKind, id: usize) -> bool {
+        self.streaming_inflight.read().contains_key(&(kind, id))
+    }
+
+    fn requeue_stream_request(&self, request: AssetStreamingRequest) {
+        let mut backlog = self.streaming_backlog.write();
+        backlog.push_front(request);
+        // Requeued requests already went out to the renderer; keep them to avoid inflight stalls.
+    }
+
+    fn queue_low_res_generation(
+        &self,
+        id: usize,
+        name: String,
+        kind: AssetKind,
+        data: Arc<[u8]>,
+        format: wgpu::TextureFormat,
+        dimensions: (u32, u32),
+    ) {
+        let mut inflight = self.low_res_inflight.write();
+        if !inflight.insert(id) {
+            return;
+        }
+        let request = AssetLoadRequest::LowResTexture {
+            id,
+            name,
+            kind,
+            data,
+            format,
+            dimensions,
+            max_dim: self.asset_streaming_tuning.low_res_max_dim,
+        };
+        if !self.enqueue_worker_request(request) {
+            inflight.remove(&id);
+            warn!(
+                "Failed to queue low-res texture request {}; worker thread offline",
+                id
+            );
+        }
+    }
+
     fn enqueue_stream_requests(&self) {
         let mut backlog = self.streaming_backlog.write();
+        let mut inflight = self.streaming_inflight.write();
         let mut merged: HashMap<(AssetStreamKind, usize), AssetStreamingRequest> = HashMap::new();
         let mut had_new = false;
 
+        let plan_len = self.latest_streaming_plan.read().len();
+        let limit = self.streaming_backlog_limit.max(plan_len);
         while let Ok(mut req) = self.stream_request_receiver.try_recv() {
             had_new = true;
             let boost = self.plan_priority(req.kind, req.id);
             req.priority = req.priority.max(boost);
+            if let Some(existing) = inflight.get_mut(&(req.kind, req.id)) {
+                Self::merge_stream_request(existing, &req);
+                continue;
+            }
             merged
                 .entry((req.kind, req.id))
-                .and_modify(|existing| {
-                    existing.priority = existing.priority.max(req.priority);
-                    existing.max_lod = match (existing.max_lod, req.max_lod) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (None, Some(b)) => Some(b),
-                        (Some(a), None) => Some(a),
-                        (None, None) => None,
-                    };
-                    existing.force_low_res |= req.force_low_res;
-                })
+                .and_modify(|existing| Self::merge_stream_request(existing, &req))
                 .or_insert(req);
         }
 
@@ -1961,21 +2666,20 @@ impl AssetServer {
             return;
         }
 
+        if limit == 0 {
+            return;
+        }
+
         for mut req in backlog.drain(..) {
             let boost = self.plan_priority(req.kind, req.id);
             req.priority = req.priority.max(boost);
+            if let Some(existing) = inflight.get_mut(&(req.kind, req.id)) {
+                Self::merge_stream_request(existing, &req);
+                continue;
+            }
             merged
                 .entry((req.kind, req.id))
-                .and_modify(|existing| {
-                    existing.priority = existing.priority.max(req.priority);
-                    existing.max_lod = match (existing.max_lod, req.max_lod) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (None, Some(b)) => Some(b),
-                        (Some(a), None) => Some(a),
-                        (None, None) => None,
-                    };
-                    existing.force_low_res |= req.force_low_res;
-                })
+                .and_modify(|existing| Self::merge_stream_request(existing, &req))
                 .or_insert(req);
         }
 
@@ -1987,10 +2691,7 @@ impl AssetServer {
                 .then_with(|| a.id.cmp(&b.id))
                 .then_with(|| Self::stream_kind_rank(a.kind).cmp(&Self::stream_kind_rank(b.kind)))
         });
-        let limit = self.streaming_backlog_limit;
-        if limit == 0 {
-            merged_vec.clear();
-        } else if merged_vec.len() > limit {
+        if merged_vec.len() > limit {
             merged_vec.truncate(limit);
         }
         *backlog = VecDeque::from(merged_vec);
@@ -2001,16 +2702,18 @@ impl AssetServer {
 
         let mut backlog = self.streaming_backlog.write();
         let mut sent = 0usize;
+        let mut attempts = 0usize;
+        let total = backlog.len();
 
-        while sent < limit {
+        while sent < limit && attempts < total {
             let Some(request) = backlog.pop_front() else {
                 break;
             };
+            attempts += 1;
             if self.dispatch_stream_request(&request, creation_budget) {
                 sent += 1;
             } else {
                 backlog.push_back(request);
-                break;
             }
         }
     }
@@ -2047,23 +2750,20 @@ impl AssetServer {
             AssetStreamKind::Mesh => {
                 let mesh_opt = self.mesh_cache.read().get(&request.id).cloned();
                 if let Some(mesh) = mesh_opt {
-                    let lod_indices =
-                        ensure_mesh_lods(&mesh, request.max_lod, &self.asset_streaming_tuning);
-                    let lod_indices = select_mesh_lods(&lod_indices, request.max_lod);
-                    let meshlets =
-                        ensure_mesh_meshlets(&mesh, request.max_lod, &self.asset_streaming_tuning);
-                    let meshlets = select_meshlet_lods(&meshlets, request.max_lod);
+                    let lods = {
+                        let lods = mesh.lods.read();
+                        select_mesh_lod_payloads(&lods, request.max_lod)
+                    };
 
-                    if lod_indices.is_empty() || meshlets.is_empty() {
+                    if lods.is_empty() {
                         return false;
                     }
                     self.sync_mesh_cache_size(request.id, &mesh);
 
                     match self.try_send_asset_message(RenderMessage::CreateMesh {
                         id: request.id,
-                        vertices: mesh.vertices.clone(),
-                        lod_indices,
-                        meshlets,
+                        total_lods: mesh.total_lods,
+                        lods,
                         bounds: mesh.bounds,
                     }) {
                         Ok(()) => {
@@ -2086,6 +2786,11 @@ impl AssetServer {
                     return false;
                 }
 
+                if self.is_streaming_inflight(AssetStreamKind::Mesh, request.id) {
+                    self.update_streaming_inflight(request);
+                    return true;
+                }
+
                 let pending = match self.mesh_sources.read().get(&request.id).copied() {
                     Some(p) => p,
                     None => {
@@ -2097,90 +2802,35 @@ impl AssetServer {
                     }
                 };
 
-                let Some((doc, buffers, _)) = self.scene_context(pending.scene_id) else {
-                    warn!(
-                        "Streaming request for mesh {} missing scene context",
-                        request.id
-                    );
-                    self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
-                    return true;
-                };
-                let buffers_guard = SceneBufferGuard::new(self, buffers);
-                let buffers = buffers_guard.buffers();
-
-                let primitive = doc
-                    .meshes()
-                    .nth(pending.desc.mesh_index)
-                    .and_then(|mesh| mesh.primitives().nth(pending.desc.primitive_index));
-                let Some(primitive) = primitive else {
-                    warn!(
-                        "Mesh {} primitive {} not found in scene {}",
-                        pending.desc.mesh_index, pending.desc.primitive_index, pending.scene_id
-                    );
-                    self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
-                    return true;
-                };
-
-                let Some((vertices, indices, bounds)) = process_primitive(&primitive, buffers)
-                else {
-                    warn!(
-                        "Failed to process mesh primitive {} for streamed mesh {}",
-                        pending.desc.primitive_index, request.id
-                    );
-                    self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
-                    return true;
-                };
-
-                let base_lod = optimize_base_lod(&vertices, &indices);
-                let vertices: Arc<[Vertex]> = Arc::from(vertices);
-                let base_indices: Arc<[u32]> = Arc::from(indices);
-                let base_lod: Arc<[u32]> = Arc::from(base_lod);
-                let meshlet_lod = build_meshlet_lod(vertices.as_ref(), base_lod.as_ref());
-                let mesh_arc = Arc::new(Mesh {
-                    vertices: vertices.clone(),
-                    base_indices,
-                    lod_indices: RwLock::new(vec![base_lod]),
-                    meshlets: RwLock::new(vec![meshlet_lod.clone()]),
-                    bounds,
-                });
-                let lod_indices =
-                    ensure_mesh_lods(&mesh_arc, request.max_lod, &self.asset_streaming_tuning);
-                let lod_indices = select_mesh_lods(&lod_indices, request.max_lod);
-                let meshlets =
-                    ensure_mesh_meshlets(&mesh_arc, request.max_lod, &self.asset_streaming_tuning);
-                let meshlets = select_meshlet_lods(&meshlets, request.max_lod);
-
-                self.mesh_aabb_map.write().0.insert(request.id, bounds);
-
-                if self.mesh_budget > 0 {
-                    self.mesh_cache.write().insert(request.id, mesh_arc.clone());
-                    let size_bytes = mesh_size_bytes(&mesh_arc);
-                    self.record_cache_entry(AssetStreamKind::Mesh, request.id, size_bytes);
-                    self.enforce_cache_budget(AssetStreamKind::Mesh);
-                }
-                self.mark_scene_asset_complete(pending.scene_id);
-                Self::consume_budget(creation_budget);
-
-                match self.try_send_asset_message(RenderMessage::CreateMesh {
-                    id: request.id,
-                    vertices,
-                    lod_indices,
-                    meshlets,
-                    bounds,
-                }) {
-                    Ok(()) => true,
-                    Err(AssetSendError::Budget) | Err(AssetSendError::Full) => false,
-                    Err(AssetSendError::Disconnected) => {
+                let (doc, buffers) = match self.scene_context_status(pending.scene_id) {
+                    SceneContextStatus::Ready { doc, buffers, .. } => (doc, buffers),
+                    SceneContextStatus::Pending => return false,
+                    SceneContextStatus::Missing => {
                         warn!(
-                            "Failed to send streamed mesh {}; render thread offline",
+                            "Streaming request for mesh {} missing scene context",
                             request.id
                         );
-                        false
+                        self.mark_scene_asset_complete(pending.scene_id);
+                        Self::consume_budget(creation_budget);
+                        return true;
                     }
+                };
+                self.update_streaming_inflight(request);
+                let queued = self.enqueue_worker_request(AssetLoadRequest::StreamMesh {
+                    id: request.id,
+                    scene_id: pending.scene_id,
+                    desc: pending.desc,
+                    doc,
+                    buffers,
+                    tuning: self.asset_streaming_tuning,
+                });
+                if !queued {
+                    self.take_streaming_inflight(AssetStreamKind::Mesh, request.id);
+                    self.mark_scene_asset_complete(pending.scene_id);
+                    return true;
                 }
+                Self::consume_budget(creation_budget);
+                true
             }
             AssetStreamKind::Material => {
                 let material_opt = self.material_cache.read().get(&request.id).cloned();
@@ -2241,41 +2891,40 @@ impl AssetServer {
                 let texture_opt = self.texture_cache.read().get(&request.id).cloned();
                 if let Some(tex) = texture_opt {
                     if request.force_low_res {
-                        let tex_id = request.id;
-                        let tex_kind = tex.kind;
-                        let tex_name = tex.name.clone();
-                        let asset_sender = self.asset_sender.clone();
-                        let tuning = Arc::clone(&self.tuning);
-                        let low_res_max_dim = self.asset_streaming_tuning.low_res_max_dim;
-                        thread::spawn(move || {
-                            let low = tex.ensure_low_res(low_res_max_dim);
-                            let message = RenderMessage::CreateTexture {
-                                id: tex_id,
-                                name: tex_name,
-                                kind: tex_kind,
+                        if let Some(low) = tex.low_res.read().clone() {
+                            match self.try_send_asset_message(RenderMessage::CreateTexture {
+                                id: request.id,
+                                name: tex.name.clone(),
+                                kind: tex.kind,
                                 data: low.data.clone(),
                                 format: low.format,
                                 width: low.dimensions.0,
                                 height: low.dimensions.1,
-                            };
-                            let bytes = render_message_payload_bytes(&message);
-                            if !tuning.try_reserve_asset_upload(bytes) {
-                                return;
-                            }
-                            match asset_sender.try_send(message) {
+                            }) {
                                 Ok(()) => {}
-                                Err(TrySendError::Full(_)) => {
-                                    tuning.release_asset_upload(bytes);
+                                Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                    return false;
                                 }
-                                Err(TrySendError::Disconnected(_)) => {
-                                    tuning.release_asset_upload(bytes);
+                                Err(AssetSendError::Disconnected) => {
                                     warn!(
-                                        "Failed to send low-res texture {}: render thread offline",
-                                        tex_id
+                                        "Failed to send low-res texture {}; render thread offline",
+                                        request.id
                                     );
+                                    return false;
                                 }
                             }
-                        });
+                        } else {
+                            self.queue_low_res_generation(
+                                request.id,
+                                tex.name.clone(),
+                                tex.kind,
+                                tex.data.clone(),
+                                tex.format,
+                                tex.dimensions,
+                            );
+                            self.touch_cache_entry(AssetStreamKind::Texture, request.id);
+                            return true;
+                        }
                     } else {
                         match self.try_send_asset_message(RenderMessage::CreateTexture {
                             id: request.id,
@@ -2307,6 +2956,11 @@ impl AssetServer {
                     return false;
                 }
 
+                if self.is_streaming_inflight(AssetStreamKind::Texture, request.id) {
+                    self.update_streaming_inflight(request);
+                    return true;
+                }
+
                 let pending = match self.texture_sources.read().get(&request.id).copied() {
                     Some(p) => p,
                     None => {
@@ -2318,189 +2972,38 @@ impl AssetServer {
                     }
                 };
 
-                let Some((doc, buffers, base_path)) = self.scene_context(pending.scene_id) else {
-                    warn!(
-                        "Streaming request for texture {} missing scene context",
-                        request.id
-                    );
-                    self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
-                    return true;
+                let (doc, buffers, base_path) = match self.scene_context_status(pending.scene_id) {
+                    SceneContextStatus::Ready {
+                        doc,
+                        buffers,
+                        base_path,
+                    } => (doc, buffers, base_path),
+                    SceneContextStatus::Pending => return false,
+                    SceneContextStatus::Missing => {
+                        warn!(
+                            "Streaming request for texture {} missing scene context",
+                            request.id
+                        );
+                        self.mark_scene_asset_complete(pending.scene_id);
+                        Self::consume_budget(creation_budget);
+                        return true;
+                    }
                 };
-                let buffers_guard = SceneBufferGuard::new(self, buffers);
-                let buffers = buffers_guard.buffers();
-
-                let Some(gltf_tex) = doc.textures().nth(pending.request.tex_index) else {
-                    warn!(
-                        "Texture {} index {} missing in scene {}",
-                        request.id, pending.request.tex_index, pending.scene_id
-                    );
-                    self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
-                    return true;
-                };
-
-                let decoded = decode_texture_asset(
-                    gltf_tex,
+                self.update_streaming_inflight(request);
+                let queued = self.enqueue_worker_request(AssetLoadRequest::StreamTexture {
+                    id: request.id,
+                    scene_id: pending.scene_id,
+                    tex_index: pending.request.tex_index,
+                    kind: pending.request.kind,
+                    doc,
                     buffers,
-                    base_path.as_deref(),
-                    pending.request.kind,
-                );
-                let Some((name, kind, tex_data, format, (width, height))) = decoded else {
-                    warn!(
-                        "Failed to decode texture {} for scene {}",
-                        request.id, pending.scene_id
-                    );
+                    base_path,
+                });
+                if !queued {
+                    self.take_streaming_inflight(AssetStreamKind::Texture, request.id);
                     self.mark_scene_asset_complete(pending.scene_id);
-                    Self::consume_budget(creation_budget);
                     return true;
-                };
-
-                let tex_data: Arc<[u8]> = Arc::from(tex_data);
-                if self.texture_budget > 0 {
-                    let tex = CachedTexture {
-                        name: name.clone(),
-                        kind,
-                        data: tex_data.clone(),
-                        format,
-                        dimensions: (width, height),
-                        low_res: Arc::new(RwLock::new(None)),
-                    };
-
-                    let size_bytes = tex_data.len();
-                    self.texture_cache
-                        .write()
-                        .insert(request.id, Arc::new(tex.clone()));
-                    self.record_cache_entry(AssetStreamKind::Texture, request.id, size_bytes);
-                    self.enforce_cache_budget(AssetStreamKind::Texture);
-
-                    if request.force_low_res {
-                        let tex_arc = self.texture_cache.read().get(&request.id).cloned();
-                        if let Some(tex_arc) = tex_arc {
-                            let tex_id = request.id;
-                            let asset_sender = self.asset_sender.clone();
-                            let tuning = Arc::clone(&self.tuning);
-                            let low_res_max_dim = self.asset_streaming_tuning.low_res_max_dim;
-                            thread::spawn(move || {
-                                let low = tex_arc.ensure_low_res(low_res_max_dim);
-                                let message = RenderMessage::CreateTexture {
-                                    id: tex_id,
-                                    name: tex_arc.name.clone(),
-                                    kind: tex_arc.kind,
-                                    data: low.data.clone(),
-                                    format: low.format,
-                                    width: low.dimensions.0,
-                                    height: low.dimensions.1,
-                                };
-                                let bytes = render_message_payload_bytes(&message);
-                                if !tuning.try_reserve_asset_upload(bytes) {
-                                    return;
-                                }
-                                match asset_sender.try_send(message) {
-                                    Ok(()) => {}
-                                    Err(TrySendError::Full(_)) => {
-                                        tuning.release_asset_upload(bytes);
-                                    }
-                                    Err(TrySendError::Disconnected(_)) => {
-                                        tuning.release_asset_upload(bytes);
-                                        warn!(
-                                            "Failed to send low-res texture {}: render thread offline",
-                                            tex_id
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                    } else {
-                        match self.try_send_asset_message(RenderMessage::CreateTexture {
-                            id: request.id,
-                            name,
-                            kind,
-                            data: tex_data,
-                            format,
-                            width,
-                            height,
-                        }) {
-                            Ok(()) => {}
-                            Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
-                                return false;
-                            }
-                            Err(AssetSendError::Disconnected) => {
-                                warn!(
-                                    "Failed to send streamed texture {}; render thread offline",
-                                    request.id
-                                );
-                                return false;
-                            }
-                        }
-                    }
-                } else if request.force_low_res {
-                    let tex_id = request.id;
-                    let tex_name = name.clone();
-                    let tex_data = tex_data.clone();
-                    let asset_sender = self.asset_sender.clone();
-                    let tuning = Arc::clone(&self.tuning);
-                    let low_res_max_dim = self.asset_streaming_tuning.low_res_max_dim;
-                    let temp = CachedTexture {
-                        name,
-                        kind,
-                        data: tex_data,
-                        format,
-                        dimensions: (width, height),
-                        low_res: Arc::new(RwLock::new(None)),
-                    };
-                    thread::spawn(move || {
-                        let low = temp.ensure_low_res(low_res_max_dim);
-                        let message = RenderMessage::CreateTexture {
-                            id: tex_id,
-                            name: tex_name,
-                            kind,
-                            data: low.data.clone(),
-                            format: low.format,
-                            width: low.dimensions.0,
-                            height: low.dimensions.1,
-                        };
-                        let bytes = render_message_payload_bytes(&message);
-                        if !tuning.try_reserve_asset_upload(bytes) {
-                            return;
-                        }
-                        match asset_sender.try_send(message) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                tuning.release_asset_upload(bytes);
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                tuning.release_asset_upload(bytes);
-                                warn!(
-                                    "Failed to send low-res texture {}: render thread offline",
-                                    tex_id
-                                );
-                            }
-                        }
-                    });
-                } else {
-                    match self.try_send_asset_message(RenderMessage::CreateTexture {
-                        id: request.id,
-                        name,
-                        kind,
-                        data: tex_data,
-                        format,
-                        width,
-                        height,
-                    }) {
-                        Ok(()) => {}
-                        Err(AssetSendError::Budget) | Err(AssetSendError::Full) => return false,
-                        Err(AssetSendError::Disconnected) => {
-                            warn!(
-                                "Failed to send streamed texture {}; render thread offline",
-                                request.id
-                            );
-                            return false;
-                        }
-                    }
                 }
-
-                self.mark_scene_asset_complete(pending.scene_id);
                 Self::consume_budget(creation_budget);
                 true
             }
@@ -2540,6 +3043,9 @@ fn request_path(req: &AssetLoadRequest) -> &Path {
         AssetLoadRequest::Texture { path, .. } => path,
         AssetLoadRequest::Material { path, .. } => path,
         AssetLoadRequest::Scene { path, .. } => path,
+        AssetLoadRequest::SceneBuffers { scene_path, .. } => {
+            scene_path.as_deref().unwrap_or_else(|| Path::new(""))
+        }
         _ => Path::new(""),
     }
 }
@@ -2700,10 +3206,58 @@ fn parse_scene_from_gltf_path(path: &Path) -> Result<ParsedGltfScene, String> {
     parse_scene_document(gltf.document, None, path.parent(), Some(path.to_path_buf()))
 }
 
-fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
+fn encode_basis_with_mips(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    kind: AssetKind,
+) -> Result<Vec<u8>, String> {
+    let expected_len = width.saturating_mul(height).saturating_mul(4) as usize;
+    if rgba.len() != expected_len {
+        return Err("Basis mip generation input size mismatch.".to_string());
+    }
+
+    let mut params = CompressorParams::new();
+    params.set_generate_mipmaps(true);
+    params.set_mipmap_smallest_dimension(1);
+    params.set_basis_format(BasisTextureFormat::UASTC4x4);
+    params.set_uastc_quality_level(UASTC_QUALITY_MIN);
+
+    match kind {
+        AssetKind::Normal => params.tune_for_normal_maps(),
+        AssetKind::Albedo | AssetKind::Emission => params.set_color_space(ColorSpace::Srgb),
+        _ => params.set_color_space(ColorSpace::Linear),
+    }
+
+    let mut image = params.source_image_mut(0);
+    image.init(rgba, width, height, 4);
+
+    let thread_count = std::thread::available_parallelism()
+        .map(|count| count.get() as u32)
+        .unwrap_or(1)
+        .min(4)
+        .max(1);
+    let mut compressor = Compressor::new(thread_count);
+    if !unsafe { compressor.init(&params) } {
+        return Err("Failed to initialize Basis compressor.".to_string());
+    }
+    unsafe {
+        compressor
+            .process()
+            .map_err(|e| format!("Basis encode failed: {:?}", e))?;
+    }
+
+    Ok(compressor.basis_file().to_vec())
+}
+
+fn decode_ktx2(
+    bytes: &[u8],
+    kind: AssetKind,
+) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
     let reader = Reader::new(bytes).map_err(|e| e.to_string())?;
     let header = reader.header();
     let mut dimensions = (header.pixel_width, header.pixel_height);
+    let forward_ta = std::env::var("HELMER_PATH") == Ok("forwardTA".to_string());
 
     // Handle uncompressed formats first
     if let Some(format) = header.format {
@@ -2712,10 +3266,19 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
             ktx2::Format::R8G8B8A8_SRGB => wgpu::TextureFormat::Rgba8UnormSrgb,
             _ => return Err(format!("Unsupported direct KTX2 format: {:?}", format)),
         };
-        let level_data = reader.levels().next().ok_or("No image levels found")?;
-        let mut data = level_data.data.to_vec();
+        let level_count = header.level_count.max(1);
+        let mut data = if level_count > 1 && !forward_ta {
+            let mut combined = Vec::new();
+            for level in reader.levels() {
+                combined.extend_from_slice(level.data);
+            }
+            combined
+        } else {
+            let level_data = reader.levels().next().ok_or("No image levels found")?;
+            level_data.data.to_vec()
+        };
 
-        if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
+        if forward_ta {
             if dimensions.0 != FORWARD_TA_TARGET_RES || dimensions.1 != FORWARD_TA_TARGET_RES {
                 // We assume R8G8B8A8 format here, which is 4 bytes per pixel.
                 if let Some(image_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
@@ -2747,55 +3310,104 @@ fn decode_ktx2(bytes: &[u8]) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)
         return Err("Failed to prepare Basis Universal transcoder.".to_string());
     }
 
+    let target_transcode_format = TranscoderTextureFormat::BC7_RGBA;
+    let target_wgpu_format = match kind {
+        AssetKind::Albedo | AssetKind::Emission => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        _ => wgpu::TextureFormat::Bc7RgbaUnorm,
+    };
+
     let transcode_params = TranscodeParameters {
         level_index: 0,
         ..Default::default()
     };
 
-    if std::env::var("HELMER_PATH") == Ok("forwardTA".to_string()) {
-        // Resize path: transcode to RGBA, resize, then use as uncompressed texture
-        match transcoder.transcode_image_level(
-            bytes,
-            TranscoderTextureFormat::RGBA32,
-            transcode_params,
-        ) {
-            Ok(transcoded_data) => {
-                let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                    dimensions.0,
-                    dimensions.1,
-                    transcoded_data,
-                )
-                .ok_or_else(|| {
-                    "Failed to create image buffer from transcoded KTX2 data".to_string()
-                })?;
+    if forward_ta {
+        let base_rgba = transcoder
+            .transcode_image_level(bytes, TranscoderTextureFormat::RGBA32, transcode_params)
+            .map_err(|e| format!("Failed to transcode KTX2 to RGBA: {:?}", e))?;
+        transcoder.end_transcoding();
+        let mut data = base_rgba;
 
-                let resized = image::imageops::resize(
-                    &image_buffer,
-                    FORWARD_TA_TARGET_RES,
-                    FORWARD_TA_TARGET_RES,
-                    image::imageops::FilterType::Lanczos3,
-                );
-                let final_data = resized.into_raw();
-                dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
+        if dimensions.0 != FORWARD_TA_TARGET_RES || dimensions.1 != FORWARD_TA_TARGET_RES {
+            let image_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                dimensions.0,
+                dimensions.1,
+                data,
+            )
+            .ok_or_else(|| "Failed to create image buffer from transcoded KTX2 data".to_string())?;
 
-                // Assuming sRGB for color textures, which is a reasonable default.
-                let final_format = wgpu::TextureFormat::Rgba8UnormSrgb;
-                Ok((final_data, final_format, dimensions))
-            }
-            Err(e) => Err(format!(
-                "Failed to transcode KTX2 to RGBA for resizing: {:?}",
-                e
-            )),
+            let resized = image::imageops::resize(
+                &image_buffer,
+                FORWARD_TA_TARGET_RES,
+                FORWARD_TA_TARGET_RES,
+                image::imageops::FilterType::Lanczos3,
+            );
+            data = resized.into_raw();
+            dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
         }
-    } else {
-        // Original path: transcode to a compressed format
-        let target_basis_format = TranscoderTextureFormat::BC7_RGBA;
-        let target_wgpu_format = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
-        match transcoder.transcode_image_level(bytes, target_basis_format, transcode_params) {
-            Ok(transcoded_data) => Ok((transcoded_data, target_wgpu_format, dimensions)),
-            Err(e) => Err(format!("Failed to transcode KTX2 image level: {:?}", e)),
-        }
+
+        let final_format = match kind {
+            AssetKind::Albedo | AssetKind::Emission => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        };
+        return Ok((data, final_format, dimensions));
     }
+
+    let level_count = transcoder.image_level_count(bytes, 0).max(1);
+    if level_count > 1 {
+        let mut combined = Vec::new();
+        for level in 0..level_count {
+            let level_data = transcoder
+                .transcode_image_level(
+                    bytes,
+                    target_transcode_format,
+                    TranscodeParameters {
+                        level_index: level,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| format!("Failed to transcode KTX2 image level {}: {:?}", level, e))?;
+            combined.extend_from_slice(&level_data);
+        }
+        transcoder.end_transcoding();
+        return Ok((combined, target_wgpu_format, dimensions));
+    }
+
+    let base_rgba = transcoder
+        .transcode_image_level(bytes, TranscoderTextureFormat::RGBA32, transcode_params)
+        .map_err(|e| {
+            format!(
+                "Failed to transcode KTX2 to RGBA for mip generation: {:?}",
+                e
+            )
+        })?;
+    transcoder.end_transcoding();
+
+    let basis_data = encode_basis_with_mips(&base_rgba, dimensions.0, dimensions.1, kind)?;
+
+    let mut mip_transcoder = Transcoder::new();
+    if mip_transcoder.prepare_transcoding(&basis_data).is_err() {
+        return Err("Failed to prepare Basis transcoder for mip generation.".to_string());
+    }
+
+    let mip_level_count = mip_transcoder.image_level_count(&basis_data, 0).max(1);
+    let mut combined = Vec::new();
+    for level in 0..mip_level_count {
+        let level_data = mip_transcoder
+            .transcode_image_level(
+                &basis_data,
+                target_transcode_format,
+                TranscodeParameters {
+                    level_index: level,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| format!("Failed to transcode generated mip level {}: {:?}", level, e))?;
+        combined.extend_from_slice(&level_data);
+    }
+    mip_transcoder.end_transcoding();
+
+    Ok((combined, target_wgpu_format, dimensions))
 }
 
 fn parse_ron_material(bytes: &[u8]) -> Result<MaterialFile, String> {
@@ -2809,21 +3421,14 @@ fn meshopt_enabled() -> bool {
 }
 
 fn mesh_size_bytes(mesh: &Mesh) -> usize {
-    let vertices = mesh.vertices.len() * std::mem::size_of::<Vertex>();
-    let base = mesh.base_indices.len() * std::mem::size_of::<u32>();
-    let lods: usize = mesh
-        .lod_indices
-        .read()
-        .iter()
-        .map(|l| l.len() * std::mem::size_of::<u32>())
-        .sum();
-    let meshlets: usize = mesh
-        .meshlets
-        .read()
-        .iter()
-        .map(meshlet_lod_size_bytes)
-        .sum();
-    vertices + base + lods + meshlets
+    let lods = mesh.lods.read();
+    let mut total = 0usize;
+    for lod in lods.iter() {
+        total = total.saturating_add(lod.vertices.len() * std::mem::size_of::<Vertex>());
+        total = total.saturating_add(lod.indices.len() * std::mem::size_of::<u32>());
+        total = total.saturating_add(meshlet_lod_size_bytes(&lod.meshlets));
+    }
+    total
 }
 
 fn optimize_base_lod(vertices: &[Vertex], indices: &[u32]) -> Vec<u32> {
@@ -2926,6 +3531,84 @@ fn generate_lods(
     lods
 }
 
+struct MeshPayload {
+    lods: Vec<MeshLodPayload>,
+    total_lods: usize,
+    bounds: Aabb,
+}
+
+fn compact_mesh_lod(
+    vertices: &[Vertex],
+    indices: &[u32],
+    lod_index: usize,
+) -> Option<MeshLodPayload> {
+    if vertices.is_empty() || indices.is_empty() {
+        return None;
+    }
+
+    let mut remap = vec![u32::MAX; vertices.len()];
+    let mut compact_vertices: Vec<Vertex> = Vec::new();
+    let mut compact_indices: Vec<u32> = Vec::with_capacity(indices.len());
+
+    for &idx in indices {
+        let src = idx as usize;
+        if src >= vertices.len() {
+            return None;
+        }
+        let mapped = remap[src];
+        let new_index = if mapped == u32::MAX {
+            let new_index = compact_vertices.len() as u32;
+            remap[src] = new_index;
+            compact_vertices.push(vertices[src]);
+            new_index
+        } else {
+            mapped
+        };
+        compact_indices.push(new_index);
+    }
+
+    if compact_vertices.is_empty() || compact_indices.is_empty() {
+        return None;
+    }
+
+    let meshlets = build_meshlet_lod(&compact_vertices, &compact_indices);
+    Some(MeshLodPayload {
+        lod_index,
+        vertices: Arc::from(compact_vertices),
+        indices: Arc::from(compact_indices),
+        meshlets,
+    })
+}
+
+fn build_mesh_payload(
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+    bounds: Aabb,
+    tuning: &AssetStreamingTuning,
+) -> Option<MeshPayload> {
+    if vertices.is_empty() || indices.is_empty() {
+        return None;
+    }
+    let lod_indices = generate_lods(&vertices, &indices, tuning);
+    if lod_indices.is_empty() {
+        return None;
+    }
+    let mut lods = Vec::with_capacity(lod_indices.len());
+    for (lod_index, lod_indices) in lod_indices.iter().enumerate() {
+        if let Some(lod) = compact_mesh_lod(&vertices, lod_indices, lod_index) {
+            lods.push(lod);
+        }
+    }
+    if lods.is_empty() {
+        return None;
+    }
+    Some(MeshPayload {
+        total_lods: lods.len(),
+        lods,
+        bounds,
+    })
+}
+
 fn estimate_primitive_bounds(doc: &gltf::Document, desc: &MeshPrimitiveDesc) -> Option<Aabb> {
     let mesh = doc.meshes().nth(desc.mesh_index)?;
     let primitive = mesh.primitives().nth(desc.primitive_index)?;
@@ -2949,85 +3632,67 @@ fn estimate_primitive_bounds(doc: &gltf::Document, desc: &MeshPrimitiveDesc) -> 
     Some(Aabb { min, max })
 }
 
-fn ensure_mesh_lods(
-    mesh: &Mesh,
+fn select_mesh_lod_payloads(
+    lods: &[MeshLodPayload],
     max_lod: Option<usize>,
-    tuning: &AssetStreamingTuning,
-) -> Vec<Arc<[u32]>> {
-    let target = max_lod.unwrap_or(0);
-    {
-        let existing = mesh.lod_indices.read();
-        if existing.len() > target {
-            return existing.clone();
-        }
-    }
-
-    let mut lods = mesh.lod_indices.write();
-    if lods.len() <= target {
-        let generated: Vec<Arc<[u32]>> =
-            generate_lods(mesh.vertices.as_ref(), mesh.base_indices.as_ref(), tuning)
-                .into_iter()
-                .map(Arc::from)
-                .collect();
-        if lods.is_empty() && !generated.is_empty() {
-            lods.push(generated[0].clone());
-        }
-        for lod in generated.into_iter().skip(lods.len()) {
-            lods.push(lod);
-            if lods.len() > target {
-                break;
-            }
-        }
-    }
-    lods.clone()
-}
-
-fn ensure_mesh_meshlets(
-    mesh: &Mesh,
-    max_lod: Option<usize>,
-    tuning: &AssetStreamingTuning,
-) -> Vec<MeshletLodData> {
-    let target = max_lod.unwrap_or(0);
-    {
-        let existing = mesh.meshlets.read();
-        if existing.len() > target {
-            return existing.clone();
-        }
-    }
-
-    let lods = ensure_mesh_lods(mesh, max_lod, tuning);
-    let mut meshlets = mesh.meshlets.write();
-    if meshlets.len() < lods.len() {
-        for lod in meshlets.len()..lods.len() {
-            let data = build_meshlet_lod(mesh.vertices.as_ref(), lods[lod].as_ref());
-            meshlets.push(data);
-        }
-    }
-    meshlets.clone()
-}
-
-fn select_mesh_lods(lods: &[Arc<[u32]>], max_lod: Option<usize>) -> Vec<Arc<[u32]>> {
+) -> Vec<MeshLodPayload> {
     if lods.is_empty() {
         return Vec::new();
     }
     let target = max_lod.unwrap_or(0);
-    if target < lods.len() {
-        vec![lods[target].clone()]
+    if let Some(lod) = lods.iter().find(|lod| lod.lod_index == target) {
+        return vec![lod.clone()];
+    }
+
+    let mut best: Option<&MeshLodPayload> = None;
+    for lod in lods.iter() {
+        if lod.lod_index <= target {
+            best = Some(lod);
+        }
+    }
+    if let Some(lod) = best {
+        vec![lod.clone()]
     } else {
-        vec![lods[lods.len().saturating_sub(1)].clone()]
+        vec![lods[0].clone()]
     }
 }
 
-fn select_meshlet_lods(meshlets: &[MeshletLodData], max_lod: Option<usize>) -> Vec<MeshletLodData> {
-    if meshlets.is_empty() {
+fn triangulate_strip(indices: &[u32]) -> Vec<u32> {
+    if indices.len() < 3 {
         return Vec::new();
     }
-    let target = max_lod.unwrap_or(0);
-    if target < meshlets.len() {
-        vec![meshlets[target].clone()]
-    } else {
-        vec![meshlets[meshlets.len().saturating_sub(1)].clone()]
+    let mut tris = Vec::with_capacity((indices.len() - 2) * 3);
+    for i in 0..(indices.len() - 2) {
+        let i0 = indices[i];
+        let i1 = indices[i + 1];
+        let i2 = indices[i + 2];
+        if i0 == i1 || i1 == i2 || i0 == i2 {
+            continue;
+        }
+        if i % 2 == 0 {
+            tris.extend_from_slice(&[i0, i1, i2]);
+        } else {
+            tris.extend_from_slice(&[i1, i0, i2]);
+        }
     }
+    tris
+}
+
+fn triangulate_fan(indices: &[u32]) -> Vec<u32> {
+    if indices.len() < 3 {
+        return Vec::new();
+    }
+    let mut tris = Vec::with_capacity((indices.len() - 2) * 3);
+    let base = indices[0];
+    for i in 1..(indices.len() - 1) {
+        let i1 = indices[i];
+        let i2 = indices[i + 1];
+        if base == i1 || i1 == i2 || base == i2 {
+            continue;
+        }
+        tris.extend_from_slice(&[base, i1, i2]);
+    }
+    tris
 }
 
 fn process_primitive<B: BufferSource>(
@@ -3035,6 +3700,7 @@ fn process_primitive<B: BufferSource>(
     buffers: &[B],
 ) -> Option<(Vec<Vertex>, Vec<u32>, Aabb)> {
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|b| b.as_slice()));
+    let mode = primitive.mode();
     let position_accessor = primitive.get(&gltf::Semantic::Positions)?;
     let vertex_count = position_accessor.count();
 
@@ -3088,16 +3754,46 @@ fn process_primitive<B: BufferSource>(
     if vertices.is_empty() {
         return None;
     }
-    let indices: Vec<u32> = reader.read_indices()?.into_u32().collect();
+    let mut indices: Vec<u32> = if let Some(read) = reader.read_indices() {
+        read.into_u32().collect()
+    } else {
+        (0..vertex_count as u32).collect()
+    };
     if indices.is_empty() {
         return None;
     }
-    if indices.len() % 3 != 0 {
-        warn!(
-            "Primitive {} has {} indices (not a multiple of 3); skipping.",
-            primitive.index(),
-            indices.len()
-        );
+    indices = match mode {
+        gltf::mesh::Mode::Triangles => {
+            let trimmed = indices.len() - (indices.len() % 3);
+            if trimmed == 0 {
+                return None;
+            }
+            if trimmed != indices.len() {
+                warn!(
+                    "Primitive {} has {} indices (trimming to {}).",
+                    primitive.index(),
+                    indices.len(),
+                    trimmed
+                );
+                indices.truncate(trimmed);
+            }
+            indices
+        }
+        gltf::mesh::Mode::TriangleStrip => triangulate_strip(&indices),
+        gltf::mesh::Mode::TriangleFan => triangulate_fan(&indices),
+        gltf::mesh::Mode::Points
+        | gltf::mesh::Mode::Lines
+        | gltf::mesh::Mode::LineStrip
+        | gltf::mesh::Mode::LineLoop => {
+            warn!(
+                "Primitive {} has unsupported mode {:?}; skipping.",
+                primitive.index(),
+                mode
+            );
+            return None;
+        }
+    };
+    if indices.is_empty() {
         return None;
     }
     let max_index = indices.iter().copied().max().unwrap_or(0) as usize;

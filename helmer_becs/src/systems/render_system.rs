@@ -1149,9 +1149,6 @@ fn render_worker_loop(
                 let Some(hints) = streaming_hints.as_mut() else {
                     return;
                 };
-                if entry.mesh_id == 0 || entry.material_id == 0 {
-                    return;
-                }
                 let hint_priority = {
                     let size = aabb.extents().length();
                     let distance = (stream_camera_pos - entry.transform.position).length();

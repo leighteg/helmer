@@ -109,14 +109,17 @@ impl CompiledPassNode for ForwardPass {
         // Draw meshes
         for mesh_handle in &self.mesh_handles {
             let mesh = resources.get_mesh(*mesh_handle).unwrap();
+            let Some(lod) = mesh.lods.first() else {
+                continue;
+            };
 
-            rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            rp.set_vertex_buffer(0, lod.vertex_buffer.slice(..));
+            rp.set_index_buffer(lod.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
             // Set per-material bind groups if needed
             // rp.set_bind_group(0, ...);
 
-            rp.draw_indexed(0..mesh.index_count, 0, 0..1);
+            rp.draw_indexed(0..lod.index_count, 0, 0..1);
         }
     }
 }

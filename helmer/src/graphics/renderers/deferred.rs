@@ -3,10 +3,10 @@ use crate::{
         atmosphere::AtmospherePrecomputer,
         common::{
             Aabb, CASCADE_SPLITS, CameraUniforms, CascadeUniform, EguiRenderData, FRAMES_IN_FLIGHT,
-            InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, ModelPushConstant,
-            NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait,
+            InstanceRaw, LightData, Material, MaterialShaderData, Mesh, MeshLod, MeshLodPayload,
+            ModelPushConstant, NUM_CASCADES, PbrConstants, RenderData, RenderMessage, RenderTrait,
             SHADOW_MAP_RESOLUTION, ShaderConstants, ShadowPipeline, ShadowUniforms, SkyUniforms,
-            TextureManager, Vertex,
+            TextureManager, Vertex, build_mip_uploads, calc_mip_level_count,
         },
         error::RendererError,
         mipmap::MipmapGenerator,
@@ -814,8 +814,31 @@ impl DeferredRenderer {
             depth_or_array_layers: 1,
         };
 
-        // calculate mip level count
-        let mip_level_count = (width.max(height) as f32).log2().floor() as u32 + 1;
+        let is_compressed = format.is_compressed();
+        let full_mip_levels = calc_mip_level_count(width, height);
+        let (uploads, used_bytes) =
+            build_mip_uploads(format, width, height, data.len(), full_mip_levels);
+        if uploads.is_empty() {
+            return Err(RendererError::ResourceCreation(
+                "Texture upload missing mip data.".into(),
+            ));
+        }
+        if used_bytes != data.len() {
+            warn!(
+                "Deferred texture upload size mismatch (used {}, provided {}).",
+                used_bytes,
+                data.len()
+            );
+        }
+        let provided_levels = uploads.len() as u32;
+        let mut mip_level_count = full_mip_levels;
+        if is_compressed && provided_levels < full_mip_levels {
+            warn!(
+                "Compressed deferred texture missing mip data ({} of {}).",
+                provided_levels, full_mip_levels
+            );
+            mip_level_count = provided_levels.max(1);
+        }
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             size: texture_size,
@@ -823,48 +846,55 @@ impl DeferredRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: {
+                let mut usage =
+                    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+                if !is_compressed {
+                    usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+                }
+                usage
+            },
             label: Some("Bindless Texture"),
             view_formats: &[],
         });
 
-        let block_dimensions = format.block_dimensions();
-        let block_size_bytes = format.block_copy_size(None).unwrap_or(4);
-        let width_in_blocks = width / block_dimensions.0;
-        let height_in_blocks = height / block_dimensions.1;
-        let bytes_per_row = width_in_blocks * block_size_bytes;
-
-        // Upload the base mip level (Mip 0)
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0, // write to Mip 0
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(height_in_blocks),
-            },
-            texture_size,
-        );
+        for upload in &uploads {
+            let end = upload.offset + upload.size;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: upload.level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data[upload.offset..end],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(upload.bytes_per_row),
+                    rows_per_image: Some(upload.rows_per_image),
+                },
+                wgpu::Extent3d {
+                    width: upload.width,
+                    height: upload.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         // Generate the rest of the mip chain
-        if mip_level_count > 1 {
+        if !is_compressed && mip_level_count > 1 && provided_levels < mip_level_count {
+            let start_level = provided_levels.saturating_sub(1);
             let mut mip_encoder =
                 self.device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("Mipmap Generation Encoder"),
                     });
 
-            self.mipmap_generator.generate_mips(
+            self.mipmap_generator.generate_mips_from(
                 &mut mip_encoder,
                 &self.device,
                 &texture,
+                start_level,
                 mip_level_count,
             );
 
@@ -883,37 +913,35 @@ impl DeferredRenderer {
     pub fn add_mesh(
         &mut self,
         id: usize,
-        vertices: &[Vertex],
-        lod_indices: &[Arc<[u32]>],
+        lods: &[MeshLodPayload],
         bounds: Aabb,
     ) -> Result<(), RendererError> {
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(&format!("mesh-vbo-{}", id)),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
         let mut gpu_lods = Vec::new();
-        for (lod_level, indices) in lod_indices.iter().enumerate() {
+        for lod in lods {
+            let vertex_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(&format!("mesh-vbo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.vertices.as_ref()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             let index_buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod_level)),
-                    contents: bytemuck::cast_slice(indices.as_ref()),
+                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod.lod_index)),
+                    contents: bytemuck::cast_slice(lod.indices.as_ref()),
                     usage: wgpu::BufferUsages::INDEX,
                 });
             gpu_lods.push(MeshLod {
+                vertex_buffer,
                 index_buffer,
-                index_count: indices.len() as u32,
+                index_count: lod.indices.len() as u32,
             });
         }
 
         self.meshes.insert(
             id,
             Mesh {
-                vertex_buffer,
                 lods: gpu_lods,
                 bounds,
             },
@@ -2654,7 +2682,7 @@ impl DeferredRenderer {
             if let Some(mesh) = self.meshes.get(&mesh_id) {
                 let lod = &mesh.lods[lod_index];
 
-                geometry_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                geometry_pass.set_vertex_buffer(0, lod.vertex_buffer.slice(..));
                 geometry_pass
                     .set_index_buffer(lod.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
@@ -3250,13 +3278,11 @@ impl RenderTrait for DeferredRenderer {
         match message {
             RenderMessage::CreateMesh {
                 id,
-                vertices,
-                lod_indices,
-                meshlets: _,
+                total_lods: _,
+                lods,
                 bounds,
             } => {
-                self.add_mesh(id, vertices.as_ref(), &lod_indices, bounds)
-                    .unwrap();
+                self.add_mesh(id, &lods, bounds).unwrap();
             }
             RenderMessage::CreateTexture {
                 id,

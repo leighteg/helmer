@@ -434,7 +434,7 @@ impl CascadedEVSMPass {
                     if let Some(mesh) = meshes.get(mesh_id) {
                         let lod = &mesh.lods[*lod_index];
 
-                        shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        shadow_pass.set_vertex_buffer(0, lod.vertex_buffer.slice(..));
                         shadow_pass.set_index_buffer(
                             lod.index_buffer.slice(..),
                             wgpu::IndexFormat::Uint32,

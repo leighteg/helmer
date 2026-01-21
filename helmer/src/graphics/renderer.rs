@@ -1330,6 +1330,9 @@ pub struct GraphRenderer {
     frames_in_flight: usize,
     buffer_cache: BufferCache,
     rt_state: RayTracingState,
+    rt_blas_targets: HashSet<usize>,
+    rt_blas_last_rebuild_frame: u32,
+    rt_requires_blas: bool,
     gpu_instance_buffer: Option<wgpu::Buffer>,
     gpu_instance_capacity: usize,
     gpu_visible_buffer: Option<wgpu::Buffer>,
@@ -2309,6 +2312,9 @@ impl GraphRenderer {
             frames_in_flight,
             buffer_cache: BufferCache::new(frames_in_flight),
             rt_state: RayTracingState::new(frames_in_flight, size),
+            rt_blas_targets: HashSet::new(),
+            rt_blas_last_rebuild_frame: 0,
+            rt_requires_blas: false,
             gpu_instance_buffer: None,
             gpu_instance_capacity: 0,
             gpu_visible_buffer: None,
@@ -3237,6 +3243,7 @@ impl GraphRenderer {
         self.streaming_requests = extra_requests;
         let request_budget = data.render_config.streaming_request_budget as usize;
         self.mark_streaming_plan_usage(&streaming_plan);
+        self.update_rt_blas_targets(data, &streaming_plan);
         self.process_streaming_plan(&streaming_plan, request_budget);
         let evicted = self.pool.tick_eviction(self.frame_index);
         self.track_evicted_resources(evicted);
@@ -3411,6 +3418,9 @@ impl GraphRenderer {
         self.streaming_request_cursor = 0;
         self.streaming_scan_cursor = 0;
         self.force_bindgroups_backend = false;
+        self.rt_blas_targets.clear();
+        self.rt_blas_last_rebuild_frame = self.frame_index;
+        self.rt_requires_blas = false;
 
         self.materials_dirty = true;
         self.instances_dirty = true;
@@ -3711,6 +3721,119 @@ impl GraphRenderer {
         self.rt_state.set_blas_budget(budget);
     }
 
+    fn reset_rt_blas(&mut self) {
+        self.rt_state.blas_nodes.clear();
+        self.rt_state.blas_indices.clear();
+        self.rt_state.blas_triangles.clear();
+        self.rt_state.blas_descs.clear();
+        self.rt_state.blas_descs.push(RtBlasDesc {
+            node_offset: 0,
+            node_count: 0,
+            index_offset: 0,
+            index_count: 0,
+            tri_offset: 0,
+            tri_count: 0,
+            _pad0: [0; 2],
+        });
+        self.rt_state.warned_blas_budget = false;
+        self.rt_state.blas_dirty = true;
+
+        let fallback_blas_index = if self.rt_state.blas_budget.max_descs > 1 {
+            let (vertices, indices) = Self::fallback_mesh_geometry();
+            self.rt_state.register_blas(build_blas(
+                vertices.as_slice(),
+                indices.as_slice(),
+                self.rt_state.blas_leaf_size.max(1),
+            ))
+        } else {
+            0
+        };
+        self.rt_state.fallback_blas_index = fallback_blas_index;
+
+        if let Some(fallback_mesh) = self.fallback_mesh.as_mut() {
+            for lod in &mut fallback_mesh.lods {
+                lod.rt_blas_index = fallback_blas_index;
+            }
+        }
+        for entry in &mut self.meshes.entries {
+            if let Some(mesh) = entry.as_mut() {
+                for lod in &mut mesh.lods {
+                    lod.rt_blas_index = fallback_blas_index;
+                }
+            }
+        }
+
+        self.rt_state.reset_accumulation = true;
+    }
+
+    fn update_rt_blas_targets(&mut self, data: &RenderData, plan: &StreamingPlan) {
+        let tracing_active = data.render_graph.name == "traced-graph";
+        self.rt_requires_blas = tracing_active;
+        if !tracing_active || plan.pressure != MemoryPressure::Hard {
+            self.rt_blas_targets.clear();
+            return;
+        }
+
+        let mut priorities: HashMap<usize, f32> = HashMap::new();
+        for req in &plan.requests {
+            if req.kind != AssetStreamKind::Mesh {
+                continue;
+            }
+            priorities
+                .entry(req.asset_id)
+                .and_modify(|prio| *prio = (*prio).max(req.priority))
+                .or_insert(req.priority);
+        }
+        if priorities.is_empty() {
+            self.rt_blas_targets.clear();
+            return;
+        }
+
+        let max_targets = self.rt_state.blas_budget.max_descs.saturating_sub(2);
+        if max_targets == 0 {
+            self.rt_blas_targets.clear();
+            return;
+        }
+
+        let mut prioritized: Vec<(usize, f32)> = priorities.into_iter().collect();
+        prioritized.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if prioritized.len() > max_targets {
+            prioritized.truncate(max_targets);
+        }
+
+        let mut next_targets = HashSet::with_capacity(prioritized.len());
+        for (id, _) in prioritized {
+            next_targets.insert(id);
+        }
+
+        if next_targets == self.rt_blas_targets {
+            return;
+        }
+
+        let cooldown = self.streaming_tuning.pressure_release_frames.max(1);
+        if !self.rt_blas_targets.is_empty()
+            && self
+                .frame_index
+                .saturating_sub(self.rt_blas_last_rebuild_frame)
+                < cooldown
+        {
+            return;
+        }
+
+        self.rt_blas_targets = next_targets;
+        self.reset_rt_blas();
+        self.rt_blas_last_rebuild_frame = self.frame_index;
+    }
+
+    fn mesh_rt_blas_ready(&self, mesh_id: usize) -> bool {
+        let fallback = self.rt_state.fallback_blas_index();
+        self.meshes
+            .get(mesh_id)
+            .and_then(|mesh| mesh.lods.first())
+            .map(|lod| lod.rt_blas_index != fallback)
+            .unwrap_or(false)
+    }
+
     fn register_rt_blas_for_mesh(&mut self, vertices: &[Vertex], indices: &[u32]) -> u32 {
         let tri_count = indices.len() / 3;
         if tri_count == 0 || vertices.is_empty() {
@@ -3913,11 +4036,7 @@ impl GraphRenderer {
         self.pool.mark_resident(id, self.frame_index);
     }
 
-    fn init_fallback_mesh(&mut self) {
-        if self.fallback_mesh.is_some() {
-            return;
-        }
-
+    fn fallback_mesh_geometry() -> (Vec<Vertex>, Vec<u32>) {
         let p = 0.5f32;
         let v = |position, normal, tex_coord, tangent| {
             Vertex::new(position, normal, tex_coord, tangent)
@@ -4059,7 +4178,7 @@ impl GraphRenderer {
                 [-1.0, 0.0, 0.0, 1.0],
             ),
         ];
-        let indices: [u32; 36] = [
+        let indices = vec![
             0, 1, 2, 0, 2, 3, // +X
             4, 5, 6, 4, 6, 7, // -X
             8, 9, 10, 8, 10, 11, // +Y
@@ -4067,6 +4186,16 @@ impl GraphRenderer {
             16, 17, 18, 16, 18, 19, // +Z
             20, 21, 22, 20, 22, 23, // -Z
         ];
+        (vertices, indices)
+    }
+
+    fn init_fallback_mesh(&mut self) {
+        if self.fallback_mesh.is_some() {
+            return;
+        }
+
+        let (vertices, indices) = Self::fallback_mesh_geometry();
+        let p = 0.5f32;
 
         let vertex_usage =
             wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
@@ -4083,7 +4212,7 @@ impl GraphRenderer {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("FallbackMesh/Indices"),
-                contents: bytemuck::cast_slice(&indices),
+                contents: bytemuck::cast_slice(indices.as_slice()),
                 usage: index_usage,
             });
 
@@ -4122,7 +4251,7 @@ impl GraphRenderer {
         self.insert_buffer_entry(vertex_id, vertex_desc, vertex_buffer, vertex_hints, None);
         self.insert_buffer_entry(index_id, index_desc, index_buffer, index_hints, None);
 
-        let meshlet_data = build_meshlet_lod(vertices.as_slice(), &indices);
+        let meshlet_data = build_meshlet_lod(vertices.as_slice(), indices.as_slice());
         let meshlet_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let empty_desc = MeshletDesc {
             vertex_offset: 0,
@@ -4216,7 +4345,7 @@ impl GraphRenderer {
 
         let rt_blas_index = self.rt_state.register_blas(build_blas(
             vertices.as_slice(),
-            &indices,
+            indices.as_slice(),
             self.rt_state.blas_leaf_size.max(1),
         ));
         self.rt_state.fallback_blas_index = rt_blas_index;
@@ -4446,18 +4575,23 @@ impl GraphRenderer {
 
         let mut gpu_lods = Vec::with_capacity(lods.len().saturating_add(existing_lods.len()));
         let primary_slot = lods.iter().position(|lod| lod.lod_index == 0).unwrap_or(0);
-        let rt_blas_index = existing_rt_blas.unwrap_or_else(|| {
-            lods.get(primary_slot)
-                .filter(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
-                .or_else(|| {
-                    lods.iter()
-                        .find(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
-                })
-                .map(|lod| {
-                    self.register_rt_blas_for_mesh(lod.vertices.as_ref(), lod.indices.as_ref())
-                })
-                .unwrap_or_else(|| self.rt_state.fallback_blas_index())
-        });
+        let allow_blas = self.rt_blas_targets.is_empty() || self.rt_blas_targets.contains(&id);
+        let rt_blas_index = if allow_blas {
+            existing_rt_blas.unwrap_or_else(|| {
+                lods.get(primary_slot)
+                    .filter(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
+                    .or_else(|| {
+                        lods.iter()
+                            .find(|lod| !lod.vertices.is_empty() && !lod.indices.is_empty())
+                    })
+                    .map(|lod| {
+                        self.register_rt_blas_for_mesh(lod.vertices.as_ref(), lod.indices.as_ref())
+                    })
+                    .unwrap_or_else(|| self.rt_state.fallback_blas_index())
+            })
+        } else {
+            self.rt_state.fallback_blas_index()
+        };
         for lod in lods.iter() {
             let lod_estimated_bytes = (lod.vertices.len() * std::mem::size_of::<Vertex>()
                 + lod.indices.len() * std::mem::size_of::<u32>()
@@ -5852,6 +5986,10 @@ impl GraphRenderer {
                 continue;
             }
             let mesh_request = req.kind == AssetStreamKind::Mesh;
+            let blas_required = mesh_request
+                && self.rt_requires_blas
+                && !self.rt_blas_targets.is_empty()
+                && self.rt_blas_targets.contains(&req.asset_id);
             let current_mesh_lod = if mesh_request {
                 self.mesh_lod_state.get(req.asset_id).copied()
             } else {
@@ -5892,6 +6030,8 @@ impl GraphRenderer {
             } else {
                 (false, false)
             };
+            let mesh_ready =
+                mesh_ready && (!blas_required || self.mesh_rt_blas_ready(req.asset_id));
             let texture_current_low = if req.kind == AssetStreamKind::Texture {
                 self.texture_low_res_state.get(req.asset_id).copied()
             } else {

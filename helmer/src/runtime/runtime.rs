@@ -750,8 +750,7 @@ impl<T: Send + 'static> Runtime<T> {
             let mut last_render = Instant::now();
             let mut asset_backlog: VecDeque<RenderMessage> = VecDeque::new();
             let mut asset_backlog_bytes: usize = 0;
-            let mut immediate_asset_batch: Vec<RenderMessage> = Vec::new();
-            let mut immediate_asset_bytes: Vec<usize> = Vec::new();
+            let mut immediate_backlog: VecDeque<(RenderMessage, usize)> = VecDeque::new();
             let mut upload_batch: Vec<RenderMessage> = Vec::new();
             let mut upload_bytes: Vec<usize> = Vec::new();
             let mut poll_frame: u32 = 0;
@@ -767,9 +766,6 @@ impl<T: Send + 'static> Runtime<T> {
                 } else {
                     None
                 };
-
-                immediate_asset_batch.clear();
-                immediate_asset_bytes.clear();
 
                 let dt = frame_start.duration_since(last_render).as_secs_f32();
                 let fps = (1.0 / dt).round() as u32;
@@ -805,8 +801,7 @@ impl<T: Send + 'static> Runtime<T> {
                                         asset_backlog_bytes.saturating_add(message_bytes);
                                     asset_backlog.push_back(message);
                                 } else {
-                                    immediate_asset_batch.push(message);
-                                    immediate_asset_bytes.push(message_bytes);
+                                    immediate_backlog.push_back((message, message_bytes));
                                 }
                                 should_render = true;
                             }
@@ -886,8 +881,7 @@ impl<T: Send + 'static> Runtime<T> {
                                         asset_backlog_bytes.saturating_add(message_bytes);
                                     asset_backlog.push_back(message);
                                 } else {
-                                    immediate_asset_batch.push(message);
-                                    immediate_asset_bytes.push(message_bytes);
+                                    immediate_backlog.push_back((message, message_bytes));
                                 }
                                 should_render = true;
                             }
@@ -899,14 +893,6 @@ impl<T: Send + 'static> Runtime<T> {
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
                     }
-                }
-
-                if !immediate_asset_batch.is_empty() {
-                    renderer.process_asset_batch(&mut immediate_asset_batch);
-                    for bytes in immediate_asset_bytes.drain(..) {
-                        tuning.release_asset_upload(bytes);
-                    }
-                    should_render = true;
                 }
 
                 if let Some(request) = pending_recreate.as_mut() {
@@ -984,6 +970,9 @@ impl<T: Send + 'static> Runtime<T> {
                         for message in asset_backlog.drain(..) {
                             tuning.release_asset_upload(render_message_payload_bytes(&message));
                         }
+                        for (_, bytes) in immediate_backlog.drain(..) {
+                            tuning.release_asset_upload(bytes);
+                        }
                         asset_backlog_bytes = 0;
                         should_render = true;
                     }
@@ -1000,15 +989,21 @@ impl<T: Send + 'static> Runtime<T> {
                 upload_batch.clear();
                 upload_bytes.clear();
                 while uploads_this_frame < uploads_per_frame {
+                    if let Some((msg, message_bytes)) = immediate_backlog.pop_front() {
+                        upload_batch.push(msg);
+                        upload_bytes.push(message_bytes);
+                        uploads_this_frame += 1;
+                        continue;
+                    }
                     if let Some(msg) = asset_backlog.pop_front() {
                         let message_bytes = render_message_payload_bytes(&msg);
                         asset_backlog_bytes = asset_backlog_bytes.saturating_sub(message_bytes);
                         upload_batch.push(msg);
                         upload_bytes.push(message_bytes);
                         uploads_this_frame += 1;
-                    } else {
-                        break;
+                        continue;
                     }
+                    break;
                 }
                 if !upload_batch.is_empty() {
                     renderer.process_asset_batch(&mut upload_batch);

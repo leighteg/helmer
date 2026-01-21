@@ -24,7 +24,6 @@ use parking_lot::RwLock;
 use serde::Deserialize;
 use std::{
     borrow::Cow,
-    cmp::Ordering,
     collections::VecDeque,
     fs::File,
     marker::PhantomData,
@@ -32,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -746,6 +745,9 @@ pub struct AssetServer {
     reupload_queue: RwLock<VecDeque<AssetStreamingRequest>>,
     streaming_inflight: RwLock<HashMap<(AssetStreamKind, usize), AssetStreamingRequest>>,
     latest_streaming_plan: RwLock<HashMap<(AssetStreamKind, usize), f32>>,
+    streaming_plan_epoch: AtomicU64,
+    streaming_backlog_epoch: AtomicU64,
+    streaming_backlog_dirty: AtomicBool,
     scene_contexts: RwLock<HashMap<usize, SceneAssetContext>>,
     scene_buffer_bytes: AtomicUsize,
     scene_buffer_inflight: RwLock<HashSet<usize>>,
@@ -779,6 +781,7 @@ struct CacheEntryMeta {
     last_used: Instant,
     size_bytes: usize,
     priority: f32,
+    plan_epoch: u64,
 }
 
 enum AssetSendError {
@@ -1109,6 +1112,9 @@ impl AssetServer {
             reupload_queue: RwLock::new(VecDeque::new()),
             streaming_inflight: RwLock::new(HashMap::new()),
             latest_streaming_plan: RwLock::new(HashMap::new()),
+            streaming_plan_epoch: AtomicU64::new(0),
+            streaming_backlog_epoch: AtomicU64::new(0),
+            streaming_backlog_dirty: AtomicBool::new(false),
             scene_contexts: RwLock::new(HashMap::new()),
             scene_buffer_bytes: AtomicUsize::new(0),
             scene_buffer_inflight: RwLock::new(HashSet::new()),
@@ -1165,6 +1171,10 @@ impl AssetServer {
                 }
             }
         }
+        let plan_epoch = self
+            .streaming_plan_epoch
+            .fetch_add(1, AtomicOrdering::Relaxed)
+            .wrapping_add(1);
         if !map.is_empty() {
             let now = Instant::now();
             let mut mesh_meta = self.mesh_meta.write();
@@ -1175,25 +1185,30 @@ impl AssetServer {
                     AssetStreamKind::Mesh => {
                         if let Some(meta) = mesh_meta.get_mut(id) {
                             meta.last_used = now;
-                            meta.priority = meta.priority.max(*priority);
+                            meta.priority = *priority;
+                            meta.plan_epoch = plan_epoch;
                         }
                     }
                     AssetStreamKind::Material => {
                         if let Some(meta) = material_meta.get_mut(id) {
                             meta.last_used = now;
-                            meta.priority = meta.priority.max(*priority);
+                            meta.priority = *priority;
+                            meta.plan_epoch = plan_epoch;
                         }
                     }
                     AssetStreamKind::Texture => {
                         if let Some(meta) = texture_meta.get_mut(id) {
                             meta.last_used = now;
-                            meta.priority = meta.priority.max(*priority);
+                            meta.priority = *priority;
+                            meta.plan_epoch = plan_epoch;
                         }
                     }
                 }
             }
         }
         *self.latest_streaming_plan.write() = map;
+        self.streaming_backlog_dirty
+            .store(true, AtomicOrdering::Relaxed);
     }
 
     fn stream_kind_rank(kind: AssetStreamKind) -> u8 {
@@ -1204,12 +1219,25 @@ impl AssetServer {
         }
     }
 
+    fn current_plan_epoch(&self) -> u64 {
+        self.streaming_plan_epoch.load(AtomicOrdering::Relaxed)
+    }
+
+    fn plan_entry(&self, kind: AssetStreamKind, id: usize) -> Option<f32> {
+        self.latest_streaming_plan.read().get(&(kind, id)).copied()
+    }
+
     fn plan_priority(&self, kind: AssetStreamKind, id: usize) -> f32 {
-        self.latest_streaming_plan
-            .read()
-            .get(&(kind, id))
-            .copied()
-            .unwrap_or(0.0)
+        self.plan_entry(kind, id).unwrap_or(0.0)
+    }
+
+    fn effective_priority(&self, meta: &CacheEntryMeta) -> f32 {
+        let current_epoch = self.current_plan_epoch();
+        if meta.plan_epoch == current_epoch {
+            meta.priority
+        } else {
+            0.0
+        }
     }
 
     fn material_texture_ids(&self, material_id: usize) -> Option<[Option<usize>; 4]> {
@@ -1253,7 +1281,10 @@ impl AssetServer {
     }
 
     fn record_cache_entry(&self, kind: AssetStreamKind, id: usize, size_bytes: usize) {
-        let priority = self.plan_priority(kind, id);
+        let current_epoch = self.current_plan_epoch();
+        let plan_priority = self.plan_entry(kind, id);
+        let priority = plan_priority.unwrap_or(0.0);
+        let plan_epoch = plan_priority.map(|_| current_epoch).unwrap_or(0);
         let (meta_map, _) = self.cache_meta_maps(kind);
         meta_map.write().insert(
             id,
@@ -1261,33 +1292,43 @@ impl AssetServer {
                 last_used: Instant::now(),
                 size_bytes,
                 priority,
+                plan_epoch,
             },
         );
     }
 
     fn update_cache_size(&self, kind: AssetStreamKind, id: usize, size_bytes: usize) {
-        let priority = self.plan_priority(kind, id);
+        let current_epoch = self.current_plan_epoch();
+        let plan_priority = self.plan_entry(kind, id);
         let (meta_map, _) = self.cache_meta_maps(kind);
         let mut meta = meta_map.write();
         meta.entry(id)
             .and_modify(|m| {
                 m.size_bytes = size_bytes;
                 m.last_used = Instant::now();
-                m.priority = m.priority.max(priority);
+                if let Some(priority) = plan_priority {
+                    m.priority = priority;
+                    m.plan_epoch = current_epoch;
+                }
             })
             .or_insert(CacheEntryMeta {
                 last_used: Instant::now(),
                 size_bytes,
-                priority,
+                priority: plan_priority.unwrap_or(0.0),
+                plan_epoch: plan_priority.map(|_| current_epoch).unwrap_or(0),
             });
     }
 
     fn touch_cache_entry(&self, kind: AssetStreamKind, id: usize) {
-        let priority = self.plan_priority(kind, id);
+        let current_epoch = self.current_plan_epoch();
+        let plan_priority = self.plan_entry(kind, id);
         let (meta_map, _) = self.cache_meta_maps(kind);
         if let Some(meta) = meta_map.write().get_mut(&id) {
             meta.last_used = Instant::now();
-            meta.priority = meta.priority.max(priority);
+            if let Some(priority) = plan_priority {
+                meta.priority = priority;
+                meta.plan_epoch = current_epoch;
+            }
         }
     }
 
@@ -1300,13 +1341,9 @@ impl AssetServer {
         }
         let mut entries: Vec<(f32, Instant, usize, usize)> = meta
             .iter()
-            .map(|(id, m)| (m.priority, m.last_used, *id, m.size_bytes))
+            .map(|(id, m)| (self.effective_priority(m), m.last_used, *id, m.size_bytes))
             .collect();
-        entries.sort_by(|a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
-        });
+        entries.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         for (_prio, _last, id, size) in entries {
             if total <= budget {
@@ -1554,6 +1591,8 @@ impl AssetServer {
 
     pub fn set_streaming_backlog_limit(&mut self, limit: usize) {
         self.streaming_backlog_limit = limit;
+        self.streaming_backlog_dirty
+            .store(true, AtomicOrdering::Relaxed);
     }
 
     pub fn cache_idle_ms(&self) -> u64 {
@@ -1671,7 +1710,10 @@ impl AssetServer {
             mesh_cache
                 .iter()
                 .map(|(id, mesh)| {
-                    let priority = mesh_meta.get(id).map(|m| m.priority).unwrap_or(0.0);
+                    let priority = mesh_meta
+                        .get(id)
+                        .map(|m| self.effective_priority(m))
+                        .unwrap_or(0.0);
                     (*id, mesh.bounds, mesh_size_bytes(mesh.as_ref()), priority)
                 })
                 .collect()
@@ -1682,7 +1724,10 @@ impl AssetServer {
             texture_cache
                 .keys()
                 .map(|id| {
-                    let priority = texture_meta.get(id).map(|m| m.priority).unwrap_or(0.0);
+                    let priority = texture_meta
+                        .get(id)
+                        .map(|m| self.effective_priority(m))
+                        .unwrap_or(0.0);
                     (*id, priority)
                 })
                 .collect()
@@ -1693,7 +1738,10 @@ impl AssetServer {
             material_cache
                 .keys()
                 .map(|id| {
-                    let priority = material_meta.get(id).map(|m| m.priority).unwrap_or(0.0);
+                    let priority = material_meta
+                        .get(id)
+                        .map(|m| self.effective_priority(m))
+                        .unwrap_or(0.0);
                     (*id, priority)
                 })
                 .collect()
@@ -2099,12 +2147,15 @@ impl AssetServer {
                         }
                         AssetLoadResult::Material { id, data } => {
                             let material_gpu_data = self.resolve_material_dependencies(id, data);
-                            let size_bytes = std::mem::size_of_val(&material_gpu_data);
-                            self.material_cache
-                                .write()
-                                .insert(id, Arc::new(material_gpu_data.clone()));
-                            self.record_cache_entry(AssetStreamKind::Material, id, size_bytes);
-                            self.enforce_cache_budget(AssetStreamKind::Material);
+                            let cached = self.material_budget > 0;
+                            if cached {
+                                let size_bytes = std::mem::size_of_val(&material_gpu_data);
+                                self.material_cache
+                                    .write()
+                                    .insert(id, Arc::new(material_gpu_data.clone()));
+                                self.record_cache_entry(AssetStreamKind::Material, id, size_bytes);
+                                self.enforce_cache_budget(AssetStreamKind::Material);
+                            }
                             let request = AssetStreamingRequest {
                                 id,
                                 kind: AssetStreamKind::Material,
@@ -2116,7 +2167,9 @@ impl AssetServer {
                                 material_gpu_data,
                             )) {
                                 Ok(()) => {
-                                    self.touch_cache_entry(AssetStreamKind::Material, id);
+                                    if cached {
+                                        self.touch_cache_entry(AssetStreamKind::Material, id);
+                                    }
                                 }
                                 Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
                                     self.requeue_stream_request(request);
@@ -2575,12 +2628,17 @@ impl AssetServer {
         existing: &mut AssetStreamingRequest,
         incoming: &AssetStreamingRequest,
     ) {
+        let existing_priority = existing.priority;
         existing.priority = existing.priority.max(incoming.priority);
         existing.max_lod = match (existing.max_lod, incoming.max_lod) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (None, _) | (_, None) => None,
         };
-        existing.force_low_res &= incoming.force_low_res;
+        if incoming.priority > existing_priority {
+            existing.force_low_res = incoming.force_low_res;
+        } else if incoming.priority == existing_priority {
+            existing.force_low_res &= incoming.force_low_res;
+        }
     }
 
     fn update_streaming_inflight(&self, request: &AssetStreamingRequest) {
@@ -2604,6 +2662,11 @@ impl AssetServer {
     }
 
     fn requeue_stream_request(&self, request: AssetStreamingRequest) {
+        if self.streaming_backlog_limit == 0 {
+            return;
+        }
+        self.streaming_backlog_dirty
+            .store(true, AtomicOrdering::Relaxed);
         let mut backlog = self.streaming_backlog.write();
         backlog.push_front(request);
         // Requeued requests already went out to the renderer; keep them to avoid inflight stalls.
@@ -2646,8 +2709,12 @@ impl AssetServer {
         let mut merged: HashMap<(AssetStreamKind, usize), AssetStreamingRequest> = HashMap::new();
         let mut had_new = false;
 
-        let plan_len = self.latest_streaming_plan.read().len();
-        let limit = self.streaming_backlog_limit.max(plan_len);
+        let plan_epoch = self.streaming_plan_epoch.load(AtomicOrdering::Relaxed);
+        let backlog_epoch = self.streaming_backlog_epoch.load(AtomicOrdering::Relaxed);
+        let backlog_dirty = self
+            .streaming_backlog_dirty
+            .swap(false, AtomicOrdering::Relaxed);
+        let limit = self.streaming_backlog_limit;
         while let Ok(mut req) = self.stream_request_receiver.try_recv() {
             had_new = true;
             let boost = self.plan_priority(req.kind, req.id);
@@ -2662,11 +2729,15 @@ impl AssetServer {
                 .or_insert(req);
         }
 
-        if !had_new {
+        if limit == 0 {
+            backlog.clear();
+            self.streaming_backlog_epoch
+                .store(plan_epoch, AtomicOrdering::Relaxed);
             return;
         }
 
-        if limit == 0 {
+        let plan_changed = plan_epoch != backlog_epoch;
+        if !had_new && !backlog_dirty && !plan_changed {
             return;
         }
 
@@ -2686,8 +2757,7 @@ impl AssetServer {
         let mut merged_vec: Vec<_> = merged.into_values().collect();
         merged_vec.sort_by(|a, b| {
             b.priority
-                .partial_cmp(&a.priority)
-                .unwrap_or(Ordering::Equal)
+                .total_cmp(&a.priority)
                 .then_with(|| a.id.cmp(&b.id))
                 .then_with(|| Self::stream_kind_rank(a.kind).cmp(&Self::stream_kind_rank(b.kind)))
         });
@@ -2695,6 +2765,8 @@ impl AssetServer {
             merged_vec.truncate(limit);
         }
         *backlog = VecDeque::from(merged_vec);
+        self.streaming_backlog_epoch
+            .store(plan_epoch, AtomicOrdering::Relaxed);
     }
 
     fn process_stream_requests(&self, limit: usize, creation_budget: &mut usize) {

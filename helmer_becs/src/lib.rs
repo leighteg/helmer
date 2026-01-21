@@ -12,7 +12,7 @@ use bevy_ecs::{
 };
 use bevy_reflect::{Reflect, TypeRegistry, TypeRegistryArc};
 use helmer::{
-    graphics::renderer_common::common::{RenderMessage, RendererStats, StreamingTuning},
+    graphics::common::renderer::{RenderMessage, RendererStats, StreamingTuning},
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
         asset_server::AssetServer,

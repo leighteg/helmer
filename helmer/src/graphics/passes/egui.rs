@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::graphics::{
+    common::renderer::{EguiRenderData, EguiTextureCache},
     graph::{
         definition::{render_pass::RenderPass, resource_id::ResourceId},
         logic::{
@@ -15,7 +16,6 @@ use crate::graphics::{
         },
     },
     passes::{FrameGlobals, SwapchainFrameInput},
-    renderer_common::common::{EguiRenderData, EguiTextureCache},
 };
 
 #[derive(Clone, Copy, Debug)]

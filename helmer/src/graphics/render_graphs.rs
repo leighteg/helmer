@@ -1,9 +1,12 @@
 use winit::dpi::PhysicalSize;
 
 use crate::graphics::{
-    config::{
-        DEBUG_FLAG_DIRECT, DEBUG_FLAG_EMISSION, DEBUG_FLAG_INDIRECT, DEBUG_FLAG_REFLECTIONS,
-        DEBUG_FLAG_SKY, DEBUG_FLAG_UNLIT, RenderConfig,
+    common::{
+        config::{
+            DEBUG_FLAG_DIRECT, DEBUG_FLAG_EMISSION, DEBUG_FLAG_INDIRECT, DEBUG_FLAG_REFLECTIONS,
+            DEBUG_FLAG_SKY, DEBUG_FLAG_UNLIT, RenderConfig,
+        },
+        graph::{RenderGraphBuildOutput, RenderGraphBuildParams, RenderGraphSpec},
     },
     graph::{
         definition::{
@@ -23,8 +26,10 @@ use crate::graphics::{
         gbuffer::{GBufferFormats, GBufferOutputs, GBufferPass},
         hiz::{HiZOutputs, HiZPass},
         lighting::{LightingOutputs, LightingPass},
-        raytracing::{RayTracingOutputs, RayTracingPass},
-        raytracing_composite::{RayTracingCompositeInputs, RayTracingCompositePass},
+        raytraced::{
+            raytracing::{RayTracingOutputs, RayTracingPass},
+            raytracing_composite::{RayTracingCompositeInputs, RayTracingCompositePass},
+        },
         shadow::{ShadowOutputs, ShadowPass},
         sky::{SkyOutputs, SkyPass},
         ssgi::{SsgiOutputs, SsgiPass},
@@ -32,7 +37,6 @@ use crate::graphics::{
         ssgi_upsample::{SsgiUpsampleOutputs, SsgiUpsamplePass},
         ssr::{SsrOutputs, SsrPass},
     },
-    renderer_common::graph::{RenderGraphBuildOutput, RenderGraphBuildParams, RenderGraphSpec},
 };
 
 #[derive(Clone, Copy, Debug)]

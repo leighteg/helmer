@@ -11,7 +11,6 @@ use tracing::{info, warn};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
-use crate::graphics::passes::gbuffer::GBufferPass;
 use crate::graphics::passes::shadow::ShadowPass;
 use crate::graphics::{
     backend::{
@@ -22,7 +21,29 @@ use crate::graphics::{
         bindless_fallback::BindlessFallbackBackend,
         bindless_modern::BindlessModernBackend,
     },
-    config::RenderConfig,
+    common::{
+        atmosphere::AtmospherePrecomputer,
+        config::RenderConfig,
+        error::RendererError,
+        graph::{RenderGraphBuildParams, RenderGraphConfigSignature, RenderGraphSpec},
+        meshlets::build_meshlet_lod,
+        mipmap::MipmapGenerator,
+        raytracing::{
+            BlasBuild, RT_FLAG_DIRECT_LIGHTING, RT_FLAG_SHADE_SMOOTH, RT_FLAG_SHADOWS,
+            RT_FLAG_USE_TEXTURES, RtBlasDesc, RtBvhNode, RtConstants, RtInstance, RtTriangle,
+            build_blas, build_tlas, transform_aabb,
+        },
+        renderer::{
+            Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
+            EguiTextureCache, InstanceRaw, LightData, MaterialShaderData, MeshLodPayload,
+            MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
+            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
+            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
+            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
+            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
+            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+        },
+    },
     graph::{
         definition::{
             resource_desc::ResourceDesc,
@@ -41,30 +62,9 @@ use crate::graphics::{
         BundleMode, FrameGlobals, GBufferBundleKey, IndirectDrawBatch, MaterialTextureSet,
         RayTracingFrameInput, RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput,
     },
-    raytracing::{
-        BlasBuild, RT_FLAG_DIRECT_LIGHTING, RT_FLAG_SHADE_SMOOTH, RT_FLAG_SHADOWS,
-        RT_FLAG_USE_TEXTURES, RtBlasDesc, RtBvhNode, RtConstants, RtInstance, RtTriangle,
-        build_blas, build_tlas, transform_aabb,
-    },
     render_graphs::default_graph_spec,
-    renderer_common::{
-        atmosphere::AtmospherePrecomputer,
-        common::{
-            Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            EguiTextureCache, InstanceRaw, LightData, MaterialShaderData, MeshLodPayload,
-            MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
-            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
-            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
-            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
-            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
-            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
-        },
-        error::RendererError,
-        graph::{RenderGraphBuildParams, RenderGraphConfigSignature, RenderGraphSpec},
-        meshlets::build_meshlet_lod,
-        mipmap::MipmapGenerator,
-    },
 };
+use crate::graphics::{common::constants::MAX_SHADOW_CASCADES, passes::gbuffer::GBufferPass};
 use crate::provided::components::{Camera, LightType, Transform};
 use crate::runtime::asset_server::MaterialGpuData;
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4Swizzles};
@@ -6540,10 +6540,10 @@ impl GraphRenderer {
             Some(buf) => Some(buf),
             None => {
                 let mut uniforms = ShadowUniforms::default();
-                uniforms.cascade_count = render_data.render_config.shadow_cascade_count.clamp(
-                    1,
-                    crate::graphics::renderer_common::common::MAX_SHADOW_CASCADES as u32,
-                );
+                uniforms.cascade_count = render_data
+                    .render_config
+                    .shadow_cascade_count
+                    .clamp(1, MAX_SHADOW_CASCADES as u32);
                 let buf = self.buffer_cache.shadow_uniforms.ensure(
                     &self.device,
                     std::mem::size_of::<ShadowUniforms>() as u64,
@@ -9879,7 +9879,7 @@ impl GraphRenderer {
         let tan_half_fovy = (render_data.camera_component.fov_y_rad / 2.0).tan();
         let scene_corners = scene_bounds.get_corners();
 
-        const MAX_CASCADES: usize = crate::graphics::renderer_common::common::MAX_SHADOW_CASCADES;
+        const MAX_CASCADES: usize = crate::graphics::common::constants::MAX_SHADOW_CASCADES;
         let cascade_count = render_data
             .render_config
             .shadow_cascade_count

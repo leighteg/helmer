@@ -7,8 +7,7 @@ pub mod forward;
 pub mod gbuffer;
 pub mod hiz;
 pub mod lighting;
-pub mod raytracing;
-pub mod raytracing_composite;
+pub mod raytraced;
 pub mod shadow;
 pub mod sky;
 pub mod ssgi;
@@ -21,11 +20,13 @@ use std::{ops::Range, sync::Arc};
 use glam::Mat4;
 use winit::dpi::PhysicalSize;
 
-use crate::graphics::backend::binding_backend::BindingBackendKind;
-use crate::graphics::config::RenderConfig;
-use crate::graphics::graph::definition::resource_id::ResourceId;
-use crate::graphics::renderer_common::common::{
-    LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms,
+use crate::graphics::{
+    backend::binding_backend::BindingBackendKind,
+    common::{
+        config::RenderConfig,
+        renderer::{LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms},
+    },
+    graph::definition::resource_id::ResourceId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3,9 +3,8 @@ use std::sync::{Arc, atomic::Ordering};
 use egui::ComboBox;
 use helmer::{
     graphics::{
-        config::RenderConfig,
+        common::{config::RenderConfig, renderer::ShaderConstants},
         render_graphs::{graph_templates, template_for_graph},
-        renderer_common::common::ShaderConstants,
     },
     provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
     runtime::{config::RuntimeConfig, runtime::PerformanceMetrics},

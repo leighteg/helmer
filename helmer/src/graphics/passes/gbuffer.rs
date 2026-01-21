@@ -19,11 +19,11 @@ use crate::graphics::graph::{
 };
 
 use crate::graphics::backend::binding_backend::BindingBackendKind;
-use crate::graphics::passes::{FrameGlobals, GBufferBundleKey};
-use crate::graphics::renderer_common::common::{
+use crate::graphics::common::renderer::{
     CameraUniforms, MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_task_tiling,
     transient_usage,
 };
+use crate::graphics::passes::{FrameGlobals, GBufferBundleKey};
 
 /// Resource IDs for the G-buffer attachments
 #[derive(Clone, Copy, Debug)]

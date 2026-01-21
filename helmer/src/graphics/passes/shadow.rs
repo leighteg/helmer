@@ -8,6 +8,10 @@ use std::{
 };
 
 use crate::graphics::{
+    common::{
+        constants::MAX_SHADOW_CASCADES,
+        renderer::{MeshDrawParams, MeshTaskTiling, mesh_task_tiling, transient_usage},
+    },
     graph::{
         definition::{
             render_pass::RenderPass, resource_desc::ResourceDesc, resource_flags::ResourceFlags,
@@ -19,9 +23,6 @@ use crate::graphics::{
         },
     },
     passes::{FrameGlobals, ShadowBundleKey},
-    renderer_common::common::{
-        MAX_SHADOW_CASCADES, MeshDrawParams, MeshTaskTiling, mesh_task_tiling, transient_usage,
-    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -391,7 +392,7 @@ impl ShadowPass {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
-                        crate::graphics::renderer_common::common::ShaderConstants,
+                        crate::graphics::common::renderer::ShaderConstants,
                     >() as u64),
                 },
                 count: None,
@@ -411,8 +412,8 @@ impl ShadowPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[
-                    crate::graphics::renderer_common::common::Vertex::desc(),
-                    crate::graphics::renderer_common::common::InstanceRaw::desc(),
+                    crate::graphics::common::renderer::Vertex::desc(),
+                    crate::graphics::common::renderer::InstanceRaw::desc(),
                 ],
                 compilation_options: Default::default(),
             },

@@ -1,10 +1,10 @@
-use crate::graphics::renderer_common::{
-    common::{
+use crate::graphics::common::{
+    meshlets::{build_meshlet_lod, meshlet_lod_size_bytes},
+    renderer::{
         Aabb, AssetStreamKind, AssetStreamingRequest, MeshLodPayload, MeshletLodData,
         RenderMessage, Vertex, build_mip_uploads, calc_mip_level_count, mip_level_data_size,
         render_message_payload_bytes,
     },
-    meshlets::{build_meshlet_lod, meshlet_lod_size_bytes},
 };
 use crate::runtime::runtime::RuntimeTuning;
 use base64::Engine;

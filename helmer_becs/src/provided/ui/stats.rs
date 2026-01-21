@@ -9,14 +9,17 @@ use hashbrown::HashSet;
 use helmer::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
-        config::RenderConfig,
+        common::{
+            config::RenderConfig,
+            constants::MAX_SHADOW_CASCADES,
+            renderer::{
+                OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
+                OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderMessage,
+                ShaderConstants, WgpuBackend,
+            },
+        },
         graph::definition::resource_id::ResourceKind,
         render_graphs::{graph_templates, template_for_graph},
-        renderer_common::common::{
-            MAX_SHADOW_CASCADES, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
-            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
-            RenderControl, RenderMessage, ShaderConstants, WgpuBackend,
-        },
     },
     provided::components::LightType,
     runtime::input_manager::InputManager,

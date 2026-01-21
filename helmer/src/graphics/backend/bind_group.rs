@@ -8,7 +8,7 @@ use crate::graphics::backend::binding_backend::{
 use crate::graphics::graph::{
     definition::resource_id::ResourceId, logic::gpu_resource_pool::GpuResourcePool,
 };
-use crate::graphics::renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
+use crate::graphics::legacy_renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
 
 /// Conventional bind-group backend (non-bindless).
 pub struct BindGroupBackend {

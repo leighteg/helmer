@@ -4,12 +4,12 @@ use hashbrown::HashMap;
 use wgpu::CommandEncoder;
 
 use crate::graphics::backend::binding_backend::RenderPassCtx;
+use crate::graphics::common::renderer::RenderPassTiming;
 use crate::graphics::graph::logic::frame_inputs::FrameInputHub;
 use crate::graphics::graph::logic::graph_exec_ctx::RenderGraphExecCtx;
 use crate::graphics::graph::logic::render_graph::{
     RenderGraph, RenderGraphCompilation, RenderGraphNode,
 };
-use crate::graphics::renderer_common::common::RenderPassTiming;
 
 use crate::graphics::graph::logic::gpu_resource_pool::GpuResourcePool;
 use std::time::Instant;

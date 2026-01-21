@@ -1,4 +1,3 @@
-// graphics/graph/definition/render_pass.rs
 #![allow(dead_code)]
 
 use std::any::Any;

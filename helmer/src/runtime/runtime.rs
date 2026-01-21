@@ -30,7 +30,7 @@ use winit::{
 use crate::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
-        renderer_common::common::{
+        common::renderer::{
             AssetStreamingRequest, EguiRenderData, EguiTextureCache, RenderControl, RenderDelta,
             RenderMessage, RendererStats, WgpuBackend, apply_egui_delta, build_full_egui_delta,
             initialize_renderer, render_message_payload_bytes,

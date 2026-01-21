@@ -6,6 +6,9 @@ use std::sync::{
 
 use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
+    common::renderer::{
+        MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_task_tiling, transient_usage,
+    },
     graph::{
         definition::{
             render_pass::RenderPass, resource_desc::ResourceDesc, resource_flags::ResourceFlags,
@@ -17,9 +20,6 @@ use crate::graphics::{
         },
     },
     passes::FrameGlobals,
-    renderer_common::common::{
-        MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_task_tiling, transient_usage,
-    },
 };
 
 use super::gbuffer::GBufferInstanceRaw;

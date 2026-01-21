@@ -1,4 +1,5 @@
 use crate::graphics::{
+    common::renderer::{ShaderConstants, color_load_op},
     graph::{
         definition::{
             render_pass::RenderPass, resource_desc::ResourceDesc, resource_id::ResourceId,
@@ -9,7 +10,6 @@ use crate::graphics::{
         },
     },
     passes::{FrameGlobals, SwapchainFrameInput},
-    renderer_common::common::{ShaderConstants, color_load_op},
 };
 use parking_lot::RwLock;
 use std::sync::Arc;

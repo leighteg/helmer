@@ -1,8 +1,6 @@
 use bevy_ecs::prelude::*;
 use egui::Context;
-use helmer::{
-    graphics::renderer_common::common::EguiRenderData, runtime::input_manager::InputManager,
-};
+use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
 use parking_lot::RwLock;
 use std::sync::{
     Arc,

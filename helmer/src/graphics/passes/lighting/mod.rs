@@ -1,4 +1,8 @@
 use crate::graphics::{
+    common::renderer::{
+        CameraUniforms, ShaderConstants, ShadowUniforms, SkyUniforms, color_load_op,
+        transient_usage,
+    },
     graph::{
         definition::{
             render_pass::RenderPass, resource_desc::ResourceDesc, resource_flags::ResourceFlags,
@@ -10,10 +14,6 @@ use crate::graphics::{
         },
     },
     passes::FrameGlobals,
-    renderer_common::common::{
-        CameraUniforms, ShaderConstants, ShadowUniforms, SkyUniforms, color_load_op,
-        transient_usage,
-    },
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -562,8 +562,7 @@ impl RenderPass for LightingPass {
         let lights_buffer = frame.lights_buffer.clone().unwrap_or_else(|| {
             ctx.device().create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Lighting/EmptyLights"),
-                size: std::mem::size_of::<crate::graphics::renderer_common::common::LightData>()
-                    as u64,
+                size: std::mem::size_of::<crate::graphics::common::renderer::LightData>() as u64,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             })

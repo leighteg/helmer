@@ -1,12 +1,12 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+use crate::graphics::common::renderer::{color_load_op, transient_usage};
 use crate::graphics::graph::{
     definition::{render_pass::RenderPass, resource_desc::ResourceDesc, resource_id::ResourceId},
     logic::{graph_context::RenderGraphContext, graph_exec_ctx::RenderGraphExecCtx},
 };
 use crate::graphics::passes::FrameGlobals;
-use crate::graphics::renderer_common::common::{color_load_op, transient_usage};
 
 #[derive(Clone, Copy, Debug)]
 pub struct DepthCopyOutputs {

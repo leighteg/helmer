@@ -6,13 +6,15 @@ use glam::{Mat4, Vec4, Vec4Swizzles};
 use hashbrown::HashMap;
 use helmer::{
     graphics::{
-        config::RenderConfig,
-        render_graphs::default_graph_spec,
-        renderer_common::common::{
-            Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
-            RenderLightDelta, RenderObjectDelta,
+        common::{
+            config::RenderConfig,
+            graph::RenderGraphSpec,
+            renderer::{
+                Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
+                RenderLightDelta, RenderObjectDelta,
+            },
         },
-        renderer_common::graph::RenderGraphSpec,
+        render_graphs::default_graph_spec,
     },
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager},

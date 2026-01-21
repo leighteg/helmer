@@ -1,6 +1,6 @@
 use crate::graphics::{
-    backend::binding_backend::BindingBackendChoice, config::RenderConfig,
-    renderer_common::common::WgpuBackend,
+    backend::binding_backend::BindingBackendChoice,
+    common::{config::RenderConfig, renderer::WgpuBackend},
 };
 use std::env;
 

@@ -1,9 +1,7 @@
 pub mod backend;
-pub mod config;
+pub mod common;
 pub mod graph;
+pub mod legacy_renderers;
 pub mod passes;
-pub mod raytracing;
 pub mod render_graphs;
 pub mod renderer;
-pub mod renderer_common;
-pub mod renderers;

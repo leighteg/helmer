@@ -14,7 +14,7 @@ use crate::graphics::graph::{
     logic::gpu_resource_pool::GpuResourcePool,
     logic::residency::Residency,
 };
-use crate::graphics::renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
+use crate::graphics::legacy_renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
 
 /// Fallback backend: emulates bindless via fixed-size arrays and indirection tables.
 /// Shaders still use indices, but those indices go through a small table.

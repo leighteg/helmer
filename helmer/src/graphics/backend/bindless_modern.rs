@@ -15,7 +15,7 @@ use crate::graphics::graph::{
     logic::residency::Residency,
 };
 
-use crate::graphics::renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
+use crate::graphics::legacy_renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
 
 /// Modern bindless backend: texture_binding_array + storage buffer arrays.
 /// Fully unified texture array (texture_2d<f32>) and buffer array.

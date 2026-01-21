@@ -10,13 +10,15 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::{HashMap, HashSet, hash_map::Entry};
 use helmer::{
     graphics::{
-        config::RenderConfig,
-        render_graphs::default_graph_spec,
-        renderer_common::common::{
-            Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
-            RenderLightDelta, RenderObjectDelta, StreamingTuning,
+        common::{
+            config::RenderConfig,
+            graph::RenderGraphSpec,
+            renderer::{
+                Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
+                RenderLightDelta, RenderObjectDelta, StreamingTuning,
+            },
         },
-        renderer_common::graph::RenderGraphSpec,
+        render_graphs::default_graph_spec,
     },
     provided::components::{Camera, Light, MeshRenderer, Transform},
     runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},

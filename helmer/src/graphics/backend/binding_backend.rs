@@ -6,7 +6,7 @@ use crate::graphics::graph::{
     definition::resource_id::ResourceId,
     logic::{frame_inputs::FrameInputHub, gpu_resource_pool::GpuResourcePool},
 };
-use crate::graphics::renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
+use crate::graphics::legacy_renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
 use wgpu::{Features, Limits};
 
 /// Which binding backend is active

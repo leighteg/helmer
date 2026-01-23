@@ -19,6 +19,8 @@ use crate::graphics::{
     },
     passes::{
         composite::{CompositeInputs, CompositePass},
+        ddgi_probe_update::{DdgiProbeOutputs, DdgiProbeUpdatePass},
+        ddgi_resample::{DdgiResampleOutputs, DdgiResamplePass},
         debug_composite::{DebugCompositeInputs, DebugCompositePass},
         depth_copy::{DepthCopyOutputs, DepthCopyPass},
         downsample::{DownsampleOutputs, DownsamplePass},
@@ -30,6 +32,9 @@ use crate::graphics::{
             raytracing::{RayTracingOutputs, RayTracingPass},
             raytracing_composite::{RayTracingCompositeInputs, RayTracingCompositePass},
         },
+        reflection_combine::{ReflectionCombineOutputs, ReflectionCombinePass},
+        rt_reflections::{RtReflectionsOutputs, RtReflectionsPass},
+        rt_reflections_denoise::{RtReflectionsDenoiseOutputs, RtReflectionsDenoisePass},
         shadow::{ShadowOutputs, ShadowPass},
         sky::{SkyOutputs, SkyPass},
         ssgi::{SsgiOutputs, SsgiPass},
@@ -48,6 +53,7 @@ pub enum RenderPassToggleFlag {
     Ssgi,
     SsgiDenoise,
     Ssr,
+    Ddgi,
     Egui,
     Occlusion,
 }
@@ -62,6 +68,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssgi => config.ssgi_pass,
             RenderPassToggleFlag::SsgiDenoise => config.ssgi_denoise_pass,
             RenderPassToggleFlag::Ssr => config.ssr_pass,
+            RenderPassToggleFlag::Ddgi => config.ddgi_pass,
             RenderPassToggleFlag::Egui => config.egui_pass,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling,
         }
@@ -76,6 +83,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssgi => config.ssgi_pass = value,
             RenderPassToggleFlag::SsgiDenoise => config.ssgi_denoise_pass = value,
             RenderPassToggleFlag::Ssr => config.ssr_pass = value,
+            RenderPassToggleFlag::Ddgi => config.ddgi_pass = value,
             RenderPassToggleFlag::Egui => config.egui_pass = value,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling = value,
         }
@@ -142,6 +150,37 @@ const DEFAULT_GRAPH_PASSES: &[RenderPassToggle] = &[
     },
 ];
 
+const HYBRID_GRAPH_PASSES: &[RenderPassToggle] = &[
+    RenderPassToggle {
+        label: "GBuffer",
+        toggle: RenderPassToggleFlag::GBuffer,
+    },
+    RenderPassToggle {
+        label: "Shadow",
+        toggle: RenderPassToggleFlag::Shadow,
+    },
+    RenderPassToggle {
+        label: "Direct Lighting",
+        toggle: RenderPassToggleFlag::DirectLighting,
+    },
+    RenderPassToggle {
+        label: "Sky",
+        toggle: RenderPassToggleFlag::Sky,
+    },
+    RenderPassToggle {
+        label: "DDGI Resampling",
+        toggle: RenderPassToggleFlag::Ddgi,
+    },
+    RenderPassToggle {
+        label: "Egui",
+        toggle: RenderPassToggleFlag::Egui,
+    },
+    RenderPassToggle {
+        label: "Occlusion (Hi-Z)",
+        toggle: RenderPassToggleFlag::Occlusion,
+    },
+];
+
 const DEBUG_GRAPH_FLAGS: &[DebugFlagToggle] = &[
     DebugFlagToggle {
         label: "unlit",
@@ -180,6 +219,13 @@ const GRAPH_TEMPLATES: &[RenderGraphTemplate] = &[
         label: "Default Graph",
         build: default_graph_spec,
         pass_toggles: DEFAULT_GRAPH_PASSES,
+        debug_flags: &[],
+    },
+    RenderGraphTemplate {
+        name: "hybrid-graph",
+        label: "Hybrid Graph",
+        build: hybrid_graph_spec,
+        pass_toggles: HYBRID_GRAPH_PASSES,
         debug_flags: &[],
     },
     RenderGraphTemplate {
@@ -281,6 +327,41 @@ impl PassResourceOutput for SsrOutputs {
     }
 }
 
+impl PassResourceOutput for DdgiResampleOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.diffuse, self.specular]
+    }
+}
+
+impl PassResourceOutput for DdgiProbeOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![
+            self.irradiance_a,
+            self.irradiance_b,
+            self.distance_a,
+            self.distance_b,
+        ]
+    }
+}
+
+impl PassResourceOutput for RtReflectionsOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.reflection]
+    }
+}
+
+impl PassResourceOutput for RtReflectionsDenoiseOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.reflection]
+    }
+}
+
+impl PassResourceOutput for ReflectionCombineOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.reflection]
+    }
+}
+
 impl PassResourceOutput for RayTracingOutputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.accumulation]
@@ -347,6 +428,13 @@ impl PassResourceOutput for EguiOutputs {
 pub fn default_graph_spec() -> RenderGraphSpec {
     RenderGraphSpec::unique("default-graph", |params, pool| {
         build_default_graph(params, pool)
+    })
+}
+
+/// Hybrid graph: raster passes w/ ray-traced DDGI resampling.
+pub fn hybrid_graph_spec() -> RenderGraphSpec {
+    RenderGraphSpec::unique("hybrid-graph", |params, pool| {
+        build_hybrid_graph(params, pool)
     })
 }
 
@@ -644,6 +732,312 @@ fn build_default_graph(
     if let Some(history) = ssgi_history {
         resource_ids.push(history);
     }
+    resource_ids.sort_by_key(|id| id.raw());
+    resource_ids.dedup_by_key(|id| id.raw());
+
+    RenderGraphBuildOutput {
+        graph,
+        swapchain_id,
+        resource_ids,
+        hiz_id,
+    }
+}
+
+fn build_hybrid_graph(
+    params: &RenderGraphBuildParams,
+    pool: &mut GpuResourcePool,
+) -> RenderGraphBuildOutput {
+    let size: PhysicalSize<u32> = params.surface_size;
+    let toggles = params.config;
+    let mut hiz_id = None;
+
+    let gbuffer_formats = GBufferFormats::select(
+        params
+            .device_caps
+            .limits
+            .max_color_attachment_bytes_per_sample,
+    );
+    let mut builder = PassGraphBuilder::new(pool);
+
+    builder.add::<ShadowPass, ShadowOutputs, _>(|pool, _| {
+        let pass = ShadowPass::new(
+            pool,
+            params.shadow_format,
+            params.shadow_map_resolution,
+            params.shadow_cascade_count,
+            params.config.use_transient_textures,
+            params.config.use_transient_aliasing,
+        );
+        let outputs = pass.outputs();
+        (pass, outputs)
+    });
+
+    builder.add::<GBufferPass, GBufferOutputs, _>(|pool, _| {
+        let pass = GBufferPass::new(
+            pool,
+            size.width,
+            size.height,
+            gbuffer_formats,
+            params.config.use_transient_textures,
+            params.config.use_transient_aliasing,
+        );
+        let outputs = pass.outputs();
+        (pass, outputs)
+    });
+
+    if !gbuffer_formats.output_depth_copy {
+        builder.add::<DepthCopyPass, DepthCopyOutputs, _>(|_, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let pass =
+                DepthCopyPass::new(gbuffer.depth, gbuffer.depth_copy, size.width, size.height);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
+    builder.add::<SkyPass, SkyOutputs, _>(|pool, store| {
+        let gbuffer = store
+            .outputs::<GBufferOutputs>()
+            .expect("G-buffer pass missing");
+        let pass = SkyPass::new(
+            pool,
+            gbuffer.depth_copy,
+            size.width,
+            size.height,
+            params.config.use_transient_textures,
+            params.config.use_transient_aliasing,
+        );
+        let outputs = pass.outputs();
+        (pass, outputs)
+    });
+
+    if toggles.occlusion_culling {
+        let hiz = builder.add::<HiZPass, HiZOutputs, _>(|pool, store| {
+            let gbuffer = store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let pass = HiZPass::new(pool, gbuffer.depth_copy, size.width, size.height);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+        hiz_id = Some(hiz.outputs.hiz);
+    }
+
+    builder.add::<LightingPass, LightingOutputs, _>(|pool, store| {
+        let gbuffer = *store
+            .outputs::<GBufferOutputs>()
+            .expect("G-buffer pass missing");
+        let shadow = *store
+            .outputs::<ShadowOutputs>()
+            .expect("Shadow pass missing");
+        let pass = LightingPass::new(
+            pool,
+            gbuffer,
+            shadow,
+            size.width,
+            size.height,
+            params.config.use_transient_textures,
+            params.config.use_transient_aliasing,
+        );
+        let outputs = pass.outputs();
+        (pass, outputs)
+    });
+
+    let mut ddgi_diffuse = None;
+    let mut ddgi_specular = None;
+    if toggles.ddgi_pass {
+        let mut counts = [
+            params.config.ddgi_probe_count_x.max(1),
+            params.config.ddgi_probe_count_y.max(1),
+            params.config.ddgi_probe_count_z.max(1),
+        ];
+        let mut probe_resolution = params
+            .config
+            .ddgi_probe_resolution
+            .max(1)
+            .min(params.device_caps.limits.max_texture_dimension_2d.max(1));
+        if probe_resolution == 0 {
+            probe_resolution = 1;
+        }
+        let max_layers = params.device_caps.limits.max_texture_array_layers.max(1);
+        let mut total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+        if total > max_layers as u64 {
+            let scale = (max_layers as f64 / total as f64).cbrt();
+            if scale.is_finite() && scale > 0.0 {
+                counts[0] = ((counts[0] as f64 * scale).floor() as u32).max(1);
+                counts[1] = ((counts[1] as f64 * scale).floor() as u32).max(1);
+                counts[2] = ((counts[2] as f64 * scale).floor() as u32).max(1);
+            }
+            total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+            while total > max_layers as u64 {
+                let mut largest = 0usize;
+                if counts[1] > counts[largest] {
+                    largest = 1;
+                }
+                if counts[2] > counts[largest] {
+                    largest = 2;
+                }
+                if counts[largest] <= 1 {
+                    break;
+                }
+                counts[largest] -= 1;
+                total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+            }
+        }
+
+        let probe_count = total.max(1) as u32;
+        let probe_update = builder.add::<DdgiProbeUpdatePass, DdgiProbeOutputs, _>(|pool, _| {
+            let pass = DdgiProbeUpdatePass::new(pool, probe_resolution, probe_count);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+
+        let ddgi = builder.add::<DdgiResamplePass, DdgiResampleOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let probes = *store
+                .outputs::<DdgiProbeOutputs>()
+                .expect("DDGI probe pass missing");
+            let pass = DdgiResamplePass::new(
+                pool,
+                probes,
+                gbuffer,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+        ddgi_diffuse = Some(ddgi.outputs.diffuse);
+        ddgi_specular = Some(ddgi.outputs.specular);
+    }
+
+    let mut primary_reflection = None;
+    let probe_reflection = ddgi_specular;
+    if toggles.ssr_pass && !params.config.rt_reflections {
+        let ssr = builder.add::<SsrPass, SsrOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let lighting = store
+                .outputs::<LightingOutputs>()
+                .expect("Lighting pass missing");
+            let pass = SsrPass::new(
+                pool,
+                gbuffer,
+                lighting.lighting,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+        primary_reflection = Some(ssr.outputs.reflection);
+    }
+
+    if params.config.rt_reflections {
+        let rt = builder.add::<RtReflectionsPass, RtReflectionsOutputs, _>(move |pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let pass = RtReflectionsPass::new(
+                pool,
+                gbuffer,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+        let rt_reflection = rt.outputs.reflection;
+        let denoise = builder.add::<RtReflectionsDenoisePass, RtReflectionsDenoiseOutputs, _>(
+            move |pool, store| {
+                let gbuffer = *store
+                    .outputs::<GBufferOutputs>()
+                    .expect("G-buffer pass missing");
+                let pass = RtReflectionsDenoisePass::new(
+                    pool,
+                    rt_reflection,
+                    gbuffer,
+                    size.width,
+                    size.height,
+                    params.config.use_transient_textures,
+                    params.config.use_transient_aliasing,
+                );
+                let outputs = pass.outputs();
+                (pass, outputs)
+            },
+        );
+        primary_reflection = Some(denoise.outputs.reflection);
+    }
+
+    let mut combined_reflection = None;
+    if let (Some(primary), Some(probe)) = (primary_reflection, probe_reflection) {
+        let combine = builder.add::<ReflectionCombinePass, ReflectionCombineOutputs, _>(
+            move |pool, _store| {
+                let pass = ReflectionCombinePass::new(
+                    pool,
+                    primary,
+                    probe,
+                    size.width,
+                    size.height,
+                    params.config.use_transient_textures,
+                    params.config.use_transient_aliasing,
+                );
+                let outputs = pass.outputs();
+                (pass, outputs)
+            },
+        );
+        combined_reflection = Some(combine.outputs.reflection);
+    } else if primary_reflection.is_some() {
+        combined_reflection = primary_reflection;
+    } else if probe_reflection.is_some() {
+        combined_reflection = probe_reflection;
+    }
+
+    let ddgi_tex = ddgi_diffuse;
+    let reflection_tex = combined_reflection;
+    let composite = builder.add::<CompositePass, CompositeInputs, _>(move |pool, store| {
+        let lighting = *store
+            .outputs::<LightingOutputs>()
+            .expect("Lighting pass missing");
+        let gbuffer = *store
+            .outputs::<GBufferOutputs>()
+            .expect("G-buffer pass missing");
+        let sky = *store.outputs::<SkyOutputs>().expect("Sky pass missing");
+        let pass = CompositePass::new(
+            pool,
+            lighting.lighting,
+            ddgi_tex,
+            reflection_tex,
+            gbuffer,
+            sky.sky,
+            params.surface_format,
+        );
+        let outputs = pass.inputs();
+        (pass, outputs)
+    });
+    let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.egui_pass {
+        builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
+            let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
+    let (graph, passes) = builder.into_parts();
+    let mut resource_ids: Vec<ResourceId> = passes.resource_ids().collect();
     resource_ids.sort_by_key(|id| id.raw());
     resource_ids.dedup_by_key(|id| id.raw());
 

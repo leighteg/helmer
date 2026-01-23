@@ -1822,6 +1822,354 @@ impl StatsUI {
                         });
 
                         ui.separator();
+                        ui.heading("Reflections");
+                        ui.checkbox(&mut render_cfg.rt_reflections, "use RT reflections");
+                        ui.label("(RT > SSR) + DDGI specular");
+                        ui.collapsing("rt reflection quality", |ui| {
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut render_cfg.rt_reflection_samples_per_frame,
+                                    1..=64,
+                                )
+                                .text("samples per frame"),
+                            );
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut render_cfg.rt_reflection_direct_light_samples,
+                                    1..=16,
+                                )
+                                .text("direct light samples"),
+                            );
+                            ui.checkbox(
+                                &mut render_cfg.rt_reflection_direct_lighting,
+                                "direct lighting",
+                            );
+                            ui.checkbox(&mut render_cfg.rt_reflection_shadows, "shadows");
+                        });
+                        ui.collapsing("rt reflection accumulation", |ui| {
+                            ui.checkbox(&mut render_cfg.rt_reflection_accumulation, "accumulation");
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_max_accumulation_frames,
+                                )
+                                .speed(1.0)
+                                .prefix("max accumulation frames: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_reflection_history_weight)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("history weight: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_history_depth_threshold,
+                                )
+                                .speed(0.001)
+                                .range(0.0..=1.0)
+                                .prefix("history depth thresh: "),
+                            );
+                        });
+                        ui.collapsing("rt reflection scaling", |ui| {
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_resolution_scale,
+                                )
+                                .speed(0.01)
+                                .range(0.05..=1.0)
+                                .prefix("resolution scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_reflection_ray_budget)
+                                    .speed(1000.0)
+                                    .prefix("ray budget: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_min_pixel_budget,
+                                )
+                                .speed(64.0)
+                                .prefix("min pixel budget: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_reflection_complexity_base)
+                                    .speed(256.0)
+                                    .prefix("complexity base: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_complexity_exponent,
+                                )
+                                .speed(0.05)
+                                .prefix("complexity exponent: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_reflection_interleave)
+                                    .speed(1.0)
+                                    .range(1..=8)
+                                    .prefix("interleave: "),
+                            );
+                        });
+                        ui.collapsing("rt reflection denoise", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_reflection_denoise_radius)
+                                    .speed(1.0)
+                                    .range(0..=8)
+                                    .prefix("radius: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_denoise_depth_sigma,
+                                )
+                                .speed(1.0)
+                                .range(0.0..=200.0)
+                                .prefix("depth sigma: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_denoise_normal_sigma,
+                                )
+                                .speed(1.0)
+                                .range(0.0..=200.0)
+                                .prefix("normal sigma: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.rt_reflection_denoise_color_sigma,
+                                )
+                                .speed(0.5)
+                                .range(0.0..=100.0)
+                                .prefix("color sigma: "),
+                            );
+                        });
+
+                        ui.separator();
+                        ui.heading("DDGI Resampling");
+                        ui.checkbox(&mut render_cfg.ddgi_pass, "enable ddgi");
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.ddgi_intensity)
+                                .speed(0.05)
+                                .range(0.0..=10.0)
+                                .prefix("indirect scale: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.ddgi_hysteresis)
+                                .speed(0.01)
+                                .range(0.0..=0.99)
+                                .prefix("hysteresis: "),
+                        );
+                        ui.collapsing("grid", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_count_x)
+                                    .speed(1.0)
+                                    .range(1..=512)
+                                    .prefix("count x: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_count_y)
+                                    .speed(1.0)
+                                    .range(1..=512)
+                                    .prefix("count y: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_count_z)
+                                    .speed(1.0)
+                                    .range(1..=512)
+                                    .prefix("count z: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_spacing)
+                                    .speed(0.1)
+                                    .range(0.1..=1000.0)
+                                    .prefix("spacing: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_resolution)
+                                    .speed(1.0)
+                                    .range(1..=64)
+                                    .prefix("probe resolution: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_probe_update_stride)
+                                    .speed(1.0)
+                                    .range(1..=64)
+                                    .prefix("update stride: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_max_distance)
+                                    .speed(0.5)
+                                    .range(0.1..=5000.0)
+                                    .prefix("max distance: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_normal_bias)
+                                    .speed(0.01)
+                                    .range(0.0..=5.0)
+                                    .prefix("normal bias: "),
+                            );
+                        });
+                        ui.collapsing("reservoir reuse", |ui| {
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_reservoir_temporal_weight,
+                                )
+                                .speed(0.01)
+                                .range(0.0..=1.0)
+                                .prefix("temporal weight: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_reservoir_spatial_weight)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("spatial weight: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_resample_spatial_samples)
+                                    .speed(1.0)
+                                    .range(0..=16)
+                                    .prefix("spatial samples: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_resample_spatial_radius)
+                                    .speed(1.0)
+                                    .range(0..=16)
+                                    .prefix("spatial radius: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_resample_reservoir_mix)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("reservoir mix: "),
+                            );
+                        });
+                        ui.collapsing("resample quality", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_resample_diffuse_samples)
+                                    .speed(1.0)
+                                    .range(1..=64)
+                                    .prefix("diffuse samples: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_resample_specular_samples,
+                                )
+                                .speed(1.0)
+                                .range(1..=64)
+                                .prefix("specular samples: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_resample_history_depth_threshold,
+                                )
+                                .speed(0.001)
+                                .range(0.0..=1.0)
+                                .prefix("history depth thresh: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_resample_min_candidate_weight,
+                                )
+                                .speed(0.00001)
+                                .range(0.0..=0.1)
+                                .prefix("min candidate weight: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_resample_specular_cone_angle,
+                                )
+                                .speed(0.01)
+                                .range(0.0..=3.14159)
+                                .prefix("spec cone angle (rad): "),
+                            );
+                        });
+                        ui.collapsing("visibility", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_normal_bias)
+                                    .speed(0.01)
+                                    .range(0.0..=5.0)
+                                    .prefix("normal bias: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_spacing_bias)
+                                    .speed(0.001)
+                                    .range(0.0..=1.0)
+                                    .prefix("spacing bias: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_max_bias)
+                                    .speed(0.01)
+                                    .range(0.0..=2.0)
+                                    .prefix("max bias: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_receiver_bias)
+                                    .speed(0.01)
+                                    .range(0.0..=2.0)
+                                    .prefix("receiver bias: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_visibility_variance_scale,
+                                )
+                                .speed(0.01)
+                                .range(0.0..=5.0)
+                                .prefix("variance scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_bleed_min)
+                                    .speed(0.005)
+                                    .range(0.0..=1.0)
+                                    .prefix("bleed min: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_visibility_bleed_max)
+                                    .speed(0.005)
+                                    .range(0.0..=1.0)
+                                    .prefix("bleed max: "),
+                            );
+                        });
+                        ui.collapsing("reflections fallback", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_reflection_strength)
+                                    .speed(0.05)
+                                    .range(0.0..=2.0)
+                                    .prefix("strength: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_reflection_fallback_mix)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("fallback mix: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_specular_scale)
+                                    .speed(0.05)
+                                    .range(0.0..=5.0)
+                                    .prefix("specular scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_specular_confidence)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("specular confidence: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut render_cfg.ddgi_reflection_roughness_start,
+                                )
+                                .speed(0.01)
+                                .range(0.0..=1.0)
+                                .prefix("roughness start: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.ddgi_reflection_roughness_end)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("roughness end: "),
+                            );
+                        });
+
+                        ui.separator();
                         ui.heading("wgpu");
                         let mut selected_backend = wgpu_backend;
                         ComboBox::from_label("backend")

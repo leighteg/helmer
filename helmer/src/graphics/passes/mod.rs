@@ -1,4 +1,6 @@
 pub mod composite;
+pub mod ddgi_probe_update;
+pub mod ddgi_resample;
 pub mod debug_composite;
 pub mod depth_copy;
 pub mod downsample;
@@ -8,6 +10,9 @@ pub mod gbuffer;
 pub mod hiz;
 pub mod lighting;
 pub mod raytraced;
+pub mod reflection_combine;
+pub mod rt_reflections;
+pub mod rt_reflections_denoise;
 pub mod shadow;
 pub mod sky;
 pub mod ssgi;
@@ -63,6 +68,7 @@ pub struct FrameGlobals {
     pub lights_buffer: Option<wgpu::Buffer>,
     pub lights_len: u32,
     pub render_constants_buffer: wgpu::Buffer,
+    pub ddgi_grid_buffer: wgpu::Buffer,
     pub shadow_uniforms_buffer: Option<wgpu::Buffer>,
     pub shadow_matrices_buffer: Option<wgpu::Buffer>,
     pub sky_buffer: wgpu::Buffer,
@@ -191,6 +197,7 @@ pub struct SwapchainFrameInput {
 #[derive(Clone)]
 pub struct RayTracingFrameInput {
     pub rt_extent: PhysicalSize<u32>,
+    pub tlas_node_count: u32,
     pub blas_nodes: wgpu::Buffer,
     pub blas_indices: wgpu::Buffer,
     pub blas_triangles: wgpu::Buffer,

@@ -35,13 +35,14 @@ use crate::graphics::{
         },
         renderer::{
             Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            EguiTextureCache, InstanceRaw, LightData, MaterialShaderData, MeshLodPayload,
-            MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
-            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
-            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
-            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
-            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
-            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            DdgiGridConstants, EguiTextureCache, InstanceRaw, LightData, MaterialShaderData,
+            MeshLodPayload, MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED,
+            OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES,
+            OCCLUSION_STATUS_RAN, RenderControl, RenderData, RenderDelta, RenderDeviceCaps,
+            RenderLight, RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta,
+            RenderPassTiming, RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms,
+            StreamingTuning, Vertex, apply_egui_delta, build_mip_uploads, calc_mip_level_count,
+            mesh_task_tiling,
         },
     },
     graph::{
@@ -380,6 +381,29 @@ struct RayTracingState {
     adaptive_error_count: u32,
     blas_leaf_size: usize,
     tlas_leaf_size: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DdgiState {
+    origin: Vec3,
+    counts: [u32; 3],
+    spacing: f32,
+    probe_resolution: u32,
+    max_distance: f32,
+    valid: bool,
+}
+
+impl DdgiState {
+    fn new() -> Self {
+        Self {
+            origin: Vec3::ZERO,
+            counts: [0; 3],
+            spacing: 0.0,
+            probe_resolution: 0,
+            max_distance: 0.0,
+            valid: false,
+        }
+    }
 }
 
 impl RayTracingState {
@@ -787,6 +811,7 @@ struct BufferCache {
     camera: ReusableBuffer,
     lights: ReusableBuffer,
     render_constants: ReusableBuffer,
+    ddgi_grid: ReusableBuffer,
     sky: ReusableBuffer,
     shadow_uniforms: ReusableBuffer,
     shadow_matrices: ReusableBuffer,
@@ -817,6 +842,7 @@ impl BufferCache {
                 "GraphRenderer/RenderConstants",
                 frames_in_flight,
             ),
+            ddgi_grid: ReusableBuffer::new("GraphRenderer/DdgiGrid", frames_in_flight),
             sky: ReusableBuffer::new("GraphRenderer/SkyUniforms", frames_in_flight),
             shadow_uniforms: ReusableBuffer::new("GraphRenderer/ShadowUniforms", frames_in_flight),
             shadow_matrices: ReusableBuffer::new("GraphRenderer/ShadowMatrices", frames_in_flight),
@@ -1330,6 +1356,7 @@ pub struct GraphRenderer {
     frames_in_flight: usize,
     buffer_cache: BufferCache,
     rt_state: RayTracingState,
+    ddgi_state: DdgiState,
     rt_blas_targets: HashSet<usize>,
     rt_blas_last_rebuild_frame: u32,
     rt_requires_blas: bool,
@@ -2312,6 +2339,7 @@ impl GraphRenderer {
             frames_in_flight,
             buffer_cache: BufferCache::new(frames_in_flight),
             rt_state: RayTracingState::new(frames_in_flight, size),
+            ddgi_state: DdgiState::new(),
             rt_blas_targets: HashSet::new(),
             rt_blas_last_rebuild_frame: 0,
             rt_requires_blas: false,
@@ -2462,7 +2490,9 @@ impl GraphRenderer {
         };
 
         let graph_spec = scene.data.render_graph.clone();
-        let tracing_active = graph_spec.name == "traced-graph";
+        let tracing_active = graph_spec.name == "traced-graph"
+            || (graph_spec.name == "hybrid-graph"
+                && (scene.data.render_config.ddgi_pass || scene.data.render_config.rt_reflections));
         let graph_sig = RenderGraphConfigSignature::from_render_config(&scene.data.render_config);
 
         if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig) {
@@ -3767,7 +3797,9 @@ impl GraphRenderer {
     }
 
     fn update_rt_blas_targets(&mut self, data: &RenderData, plan: &StreamingPlan) {
-        let tracing_active = data.render_graph.name == "traced-graph";
+        let tracing_active = data.render_graph.name == "traced-graph"
+            || (data.render_graph.name == "hybrid-graph"
+                && (data.render_config.ddgi_pass || data.render_config.rt_reflections));
         self.rt_requires_blas = tracing_active;
         if !tracing_active || plan.pressure != MemoryPressure::Hard {
             self.rt_blas_targets.clear();
@@ -6284,6 +6316,115 @@ impl GraphRenderer {
             buffer
         };
 
+        let ddgi_grid_buffer = {
+            let mut counts = [
+                frame_render_config.ddgi_probe_count_x.max(1),
+                frame_render_config.ddgi_probe_count_y.max(1),
+                frame_render_config.ddgi_probe_count_z.max(1),
+            ];
+            let mut spacing = frame_render_config.ddgi_probe_spacing;
+            if !spacing.is_finite() || spacing <= 0.0 {
+                spacing = 1.0;
+            }
+            let max_tex_dim = self.device_caps.limits.max_texture_dimension_2d.max(1);
+            let mut probe_resolution = frame_render_config
+                .ddgi_probe_resolution
+                .max(1)
+                .min(max_tex_dim);
+            if probe_resolution == 0 {
+                probe_resolution = 1;
+            }
+
+            let max_layers = self.device_caps.limits.max_texture_array_layers.max(1);
+            let mut total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+            if total > max_layers as u64 {
+                let scale = (max_layers as f64 / total as f64).cbrt();
+                if scale.is_finite() && scale > 0.0 {
+                    counts[0] = ((counts[0] as f64 * scale).floor() as u32).max(1);
+                    counts[1] = ((counts[1] as f64 * scale).floor() as u32).max(1);
+                    counts[2] = ((counts[2] as f64 * scale).floor() as u32).max(1);
+                }
+                total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+                while total > max_layers as u64 {
+                    let mut largest = 0usize;
+                    if counts[1] > counts[largest] {
+                        largest = 1;
+                    }
+                    if counts[2] > counts[largest] {
+                        largest = 2;
+                    }
+                    if counts[largest] <= 1 {
+                        break;
+                    }
+                    counts[largest] -= 1;
+                    total = counts[0] as u64 * counts[1] as u64 * counts[2] as u64;
+                }
+            }
+
+            let total_probes = total.max(1) as u32;
+            let mut max_distance = frame_render_config.ddgi_max_distance;
+            if !max_distance.is_finite() || max_distance <= 0.0 {
+                max_distance = spacing.max(1.0);
+            }
+            let normal_bias = frame_render_config.ddgi_normal_bias.max(0.0);
+            let hysteresis = frame_render_config.ddgi_hysteresis.clamp(0.0, 0.999);
+            let update_stride = frame_render_config.ddgi_probe_update_stride.max(1);
+
+            let camera_pos = Vec3::from(camera_uniforms.view_position);
+            let half = Vec3::new(
+                spacing * counts[0].saturating_sub(1) as f32 * 0.5,
+                spacing * counts[1].saturating_sub(1) as f32 * 0.5,
+                spacing * counts[2].saturating_sub(1) as f32 * 0.5,
+            );
+            let mut origin = camera_pos - half;
+            origin = (origin / spacing).floor() * spacing;
+
+            let reset = !self.ddgi_state.valid
+                || self.ddgi_state.origin != origin
+                || self.ddgi_state.counts != counts
+                || self.ddgi_state.spacing.to_bits() != spacing.to_bits()
+                || self.ddgi_state.probe_resolution != probe_resolution
+                || self.ddgi_state.max_distance.to_bits() != max_distance.to_bits();
+            self.ddgi_state = DdgiState {
+                origin,
+                counts,
+                spacing,
+                probe_resolution,
+                max_distance,
+                valid: true,
+            };
+
+            let constants = DdgiGridConstants {
+                origin: origin.to_array(),
+                spacing,
+                counts,
+                probe_resolution,
+                max_distance,
+                normal_bias,
+                hysteresis,
+                update_stride,
+                frame_index: self.frame_index,
+                reset: reset as u32,
+                total_probes,
+                _pad0: 0,
+            };
+            let (buf, reallocated) = {
+                let (buf, reallocated) = self.buffer_cache.ddgi_grid.ensure_with_status(
+                    &self.device,
+                    std::mem::size_of::<DdgiGridConstants>() as u64,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    self.frame_index,
+                );
+                (buf.clone(), reallocated)
+            };
+            self.queue
+                .write_buffer(&buf, 0, bytemuck::bytes_of(&constants));
+            if reallocated {
+                self.note_bundle_resource_change();
+            }
+            buf
+        };
+
         let sky_uniforms = self.build_sky_uniforms(render_data);
         let sky_buffer = {
             let buf = self.buffer_cache.sky.ensure(
@@ -6656,6 +6797,7 @@ impl GraphRenderer {
             lights_buffer,
             lights_len: lights.len() as u32,
             render_constants_buffer,
+            ddgi_grid_buffer,
             shadow_uniforms_buffer,
             shadow_matrices_buffer,
             sky_buffer,
@@ -7229,6 +7371,7 @@ impl GraphRenderer {
 
         Some(RayTracingFrameInput {
             rt_extent,
+            tlas_node_count: tlas.nodes.len() as u32,
             blas_nodes: blas_nodes.clone(),
             blas_indices: blas_indices.clone(),
             blas_triangles: blas_triangles.clone(),

@@ -733,8 +733,6 @@ pub struct ShaderConstants {
 
     pub pcf_max_distance: f32,
     pub ssgi_intensity: f32,
-
-    // Final padding only
     _final_padding: [f32; 2],
 
     pub ssr_jitter_strength: f32,
@@ -830,6 +828,23 @@ impl Default for ShaderConstants {
             _pad_end: [0.0; 3],
         }
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Default)]
+pub struct DdgiGridConstants {
+    pub origin: [f32; 3],
+    pub spacing: f32,
+    pub counts: [u32; 3],
+    pub probe_resolution: u32,
+    pub max_distance: f32,
+    pub normal_bias: f32,
+    pub hysteresis: f32,
+    pub update_stride: u32,
+    pub frame_index: u32,
+    pub reset: u32,
+    pub total_probes: u32,
+    pub _pad0: u32,
 }
 
 // --- SHARED HELPER STRUCTS ---

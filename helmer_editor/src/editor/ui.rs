@@ -107,6 +107,7 @@ pub enum EditorTabContent {
 pub struct EditorTabDrag {
     pub tab: EditorTab,
     pub source_window_id: u64,
+    pub source_was_single_tab: bool,
 }
 
 #[derive(Default, Debug, Clone, Resource)]
@@ -930,7 +931,7 @@ pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
     let mut interacted = false;
 
     let mut drop_on_tab: Option<usize> = None;
-    let can_drag_tabs = tabs_snapshot.len() > 1;
+    let can_drag_tabs = true;
     let tab_bar = egui::Frame::none().show(ui, |ui| {
         let old_spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing = Vec2::new(4.0, old_spacing.y);
@@ -2723,21 +2724,26 @@ fn begin_tab_drag(world: &mut World, window_id: u64, tab_index: usize) {
             return;
         };
 
-        let tab = {
+        let (tab, source_was_single_tab) = {
             let window = &mut workspace.windows[window_index];
             if tab_index >= window.tabs.len() {
                 return;
             }
-            let tab = window.tabs.remove(tab_index);
-            if window.active >= window.tabs.len() {
-                window.active = window.tabs.len().saturating_sub(1);
+            if window.tabs.len() == 1 {
+                (window.tabs[tab_index].clone(), true)
+            } else {
+                let tab = window.tabs.remove(tab_index);
+                if window.active >= window.tabs.len() {
+                    window.active = window.tabs.len().saturating_sub(1);
+                }
+                (tab, false)
             }
-            tab
         };
 
         workspace.dragging = Some(EditorTabDrag {
             tab,
             source_window_id: window_id,
+            source_was_single_tab,
         });
         workspace.drop_handled = false;
     });
@@ -2828,6 +2834,20 @@ fn accept_tab_drop(world: &mut World, target_window_id: u64, insert_index: Optio
             return;
         };
 
+        if dragging.source_was_single_tab && dragging.source_window_id == target_window_id {
+            workspace.last_focused_window = Some(target_window_id);
+            workspace.drop_handled = true;
+            return;
+        }
+
+        if dragging.source_was_single_tab {
+            remove_tab_from_window_by_id(
+                &mut workspace,
+                dragging.source_window_id,
+                dragging.tab.id,
+            );
+        }
+
         let mut placed_window_id = target_window_id;
         if let Some(window) = workspace
             .windows
@@ -2873,6 +2893,14 @@ fn drop_tab_into_new_window(world: &mut World) {
             return;
         };
 
+        if dragging.source_was_single_tab {
+            remove_tab_from_window_by_id(
+                &mut workspace,
+                dragging.source_window_id,
+                dragging.tab.id,
+            );
+        }
+
         let new_window_id = workspace.next_window_id;
         workspace.next_window_id += 1;
         workspace.windows.push(EditorTabWindow {
@@ -2900,6 +2928,31 @@ fn drop_tab_into_new_window(world: &mut World) {
 fn refresh_editor_window_titles(workspace: &mut EditorWorkspaceState) {
     for (index, window) in workspace.windows.iter_mut().enumerate() {
         window.title = format!("Editor {}", index + 1);
+    }
+}
+
+fn remove_tab_from_window_by_id(workspace: &mut EditorWorkspaceState, window_id: u64, tab_id: u64) {
+    let Some(window) = workspace
+        .windows
+        .iter_mut()
+        .find(|window| window.id == window_id)
+    else {
+        return;
+    };
+    if let Some(index) = window.tabs.iter().position(|tab| tab.id == tab_id) {
+        window.tabs.remove(index);
+        if window.active >= window.tabs.len() {
+            window.active = window.tabs.len().saturating_sub(1);
+        }
+    }
+    if window.tabs.is_empty() {
+        if let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        {
+            workspace.windows.remove(window_index);
+        }
     }
 }
 

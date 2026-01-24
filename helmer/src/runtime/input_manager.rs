@@ -50,9 +50,11 @@ pub struct InputManager {
     pub egui_pointer_pos: Mutex<Option<egui::Pos2>>,
     pub egui_pointer_down: Mutex<bool>,
     pub egui_pointer_down_secondary: Mutex<bool>,
+    pub egui_pointer_down_middle: Mutex<bool>,
     pub egui_last_pointer_pos: Mutex<Option<egui::Pos2>>,
     pub egui_last_pointer_down: Mutex<bool>,
     pub egui_last_pointer_down_secondary: Mutex<bool>,
+    pub egui_last_pointer_down_middle: Mutex<bool>,
     pub egui_wants_pointer: bool,
     pub egui_wants_key: bool,
 }
@@ -76,9 +78,11 @@ impl InputManager {
             egui_pointer_pos: Mutex::new(None),
             egui_pointer_down: Mutex::new(false),
             egui_pointer_down_secondary: Mutex::new(false),
+            egui_pointer_down_middle: Mutex::new(false),
             egui_last_pointer_pos: Mutex::new(None),
             egui_last_pointer_down: Mutex::new(false),
             egui_last_pointer_down_secondary: Mutex::new(false),
+            egui_last_pointer_down_middle: Mutex::new(false),
             egui_wants_pointer: false,
             egui_wants_key: false,
         }
@@ -285,6 +289,13 @@ impl InputManager {
             } => {
                 *self.egui_pointer_down_secondary.lock() = state.is_pressed();
             }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                *self.egui_pointer_down_middle.lock() = state.is_pressed();
+            }
 
             WindowEvent::ModifiersChanged(new_state) => {
                 let mut mods = self.egui_modifiers.lock();
@@ -370,9 +381,11 @@ impl InputManager {
         let pointer_pos = *self.egui_pointer_pos.lock();
         let pointer_down = *self.egui_pointer_down.lock();
         let pointer_down_secondary = *self.egui_pointer_down_secondary.lock();
+        let pointer_down_middle = *self.egui_pointer_down_middle.lock();
         let last_pointer_pos = *self.egui_last_pointer_pos.lock();
         let last_pointer_down = *self.egui_last_pointer_down.lock();
         let last_pointer_down_secondary = *self.egui_last_pointer_down_secondary.lock();
+        let last_pointer_down_middle = *self.egui_last_pointer_down_middle.lock();
         let modifiers = *self.egui_modifiers.lock();
 
         let mut events = self.egui_events.lock().drain(..).collect::<Vec<_>>();
@@ -405,9 +418,21 @@ impl InputManager {
             }
         }
 
+        if pointer_down_middle != last_pointer_down_middle {
+            if let Some(pos) = pointer_pos {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Middle,
+                    pressed: pointer_down_middle,
+                    modifiers,
+                });
+            }
+        }
+
         *self.egui_last_pointer_pos.lock() = pointer_pos;
         *self.egui_last_pointer_down.lock() = pointer_down;
         *self.egui_last_pointer_down_secondary.lock() = pointer_down_secondary;
+        *self.egui_last_pointer_down_middle.lock() = pointer_down_middle;
 
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -431,8 +456,10 @@ impl InputManager {
         self.egui_wants_key = false;
         self.egui_wants_pointer = false;
         *self.egui_pointer_down_secondary.lock() = false;
+        *self.egui_pointer_down_middle.lock() = false;
         *self.egui_last_pointer_down.lock() = false;
         *self.egui_last_pointer_down_secondary.lock() = false;
+        *self.egui_last_pointer_down_middle.lock() = false;
         *self.egui_last_pointer_pos.lock() = None;
         *self.egui_modifiers.lock() = egui::Modifiers::NONE;
     }

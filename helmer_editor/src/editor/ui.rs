@@ -2,13 +2,14 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Entity, Resource, With, World};
 use egui::{
-    Align, Align2, Color32, ComboBox, DragValue, FontId, Id, Layout, Order, Pos2, Rect, Response,
-    RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    Align, Align2, Color32, ComboBox, DragValue, FontId, Id, Layout, Modifiers, Order,
+    PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 use glam::{EulerRot, Mat3, Quat, Vec3};
 use helmer::graphics::{
@@ -17,6 +18,7 @@ use helmer::graphics::{
 };
 use helmer::provided::components::{Light, LightType, MeshRenderer};
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh};
+use helmer_becs::egui_integration::EguiResource;
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::scene_system::SceneRoot;
@@ -25,6 +27,7 @@ use helmer_becs::{
     BevyWrapper,
 };
 use ron::ser::PrettyConfig;
+use walkdir::WalkDir;
 
 use crate::editor::{
     EditorPlayCamera, EditorViewportCamera, EditorViewportState, Freecam,
@@ -134,6 +137,14 @@ impl AssetDragState {
     }
 }
 
+#[derive(Default, Debug, Resource)]
+pub struct MiddleDragUiState {
+    pub active: bool,
+    pub locked_window_id: Option<Id>,
+    pub start_pos: Pos2,
+    pub delta: Vec2,
+}
+
 #[derive(Debug, Clone, Resource)]
 pub struct HierarchyUiState {
     pub rename_entity: Option<Entity>,
@@ -157,6 +168,7 @@ impl Default for HierarchyUiState {
 
 pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Toolbar");
 
     let (scene_name, scene_dirty, world_state) = {
         let Some(scene) = world.get_resource::<EditorSceneState>() else {
@@ -170,405 +182,411 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
         .and_then(|project| project.root.as_ref())
         .is_some();
 
-    ui.horizontal(|ui| {
-        if ui.button("New Scene").clicked() {
-            push_command(world, EditorCommand::NewScene);
-        }
-
-        if ui.button("Save").clicked() {
-            push_command(world, EditorCommand::SaveScene);
-        }
-
-        if ui.button("Save As").clicked() {
-            if project_loaded {
-                if let Some(path) = next_available_scene_path(
-                    world
-                        .get_resource::<EditorProject>()
-                        .expect("Project missing"),
-                ) {
-                    push_command(world, EditorCommand::SaveSceneAs { path });
-                } else {
-                    set_status(world, "Unable to allocate a scene file name".to_string());
-                }
-            } else {
-                set_status(world, "Open a project before saving".to_string());
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.horizontal(|ui| {
+            if ui.button("New Scene").clicked() {
+                push_command(world, EditorCommand::NewScene);
             }
-        }
 
-        let play_label = match world_state {
-            WorldState::Edit => "Play",
-            WorldState::Play => "Stop",
-        };
-        if ui.button(play_label).clicked() {
-            push_command(world, EditorCommand::TogglePlayMode);
+            if ui.button("Save").clicked() {
+                push_command(world, EditorCommand::SaveScene);
+            }
+
+            if ui.button("Save As").clicked() {
+                if project_loaded {
+                    if let Some(path) = next_available_scene_path(
+                        world
+                            .get_resource::<EditorProject>()
+                            .expect("Project missing"),
+                    ) {
+                        push_command(world, EditorCommand::SaveSceneAs { path });
+                    } else {
+                        set_status(world, "Unable to allocate a scene file name".to_string());
+                    }
+                } else {
+                    set_status(world, "Open a project before saving".to_string());
+                }
+            }
+
+            let play_label = match world_state {
+                WorldState::Edit => "Play",
+                WorldState::Play => "Stop",
+            };
+            if ui.button(play_label).clicked() {
+                push_command(world, EditorCommand::TogglePlayMode);
+            }
+        });
+
+        ui.separator();
+
+        let dirty_marker = if scene_dirty { "*" } else { "" };
+        ui.label(format!("Scene: {}{}", scene_name, dirty_marker));
+
+        if let Some(status) = world
+            .get_resource::<EditorUiState>()
+            .and_then(|state| state.status.clone())
+        {
+            ui.label(RichText::new(status).small());
         }
     });
-
-    ui.separator();
-
-    let dirty_marker = if scene_dirty { "*" } else { "" };
-    ui.label(format!("Scene: {}{}", scene_name, dirty_marker));
-
-    if let Some(status) = world
-        .get_resource::<EditorUiState>()
-        .and_then(|state| state.status.clone())
-    {
-        ui.label(RichText::new(status).small());
-    }
 }
 
 pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Viewport");
 
-    ui.heading("Viewport");
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.heading("Viewport");
 
-    let templates = graph_templates();
-    let mut graph_template = world
-        .get_resource::<EditorViewportState>()
-        .map(|state| state.graph_template.clone())
-        .unwrap_or_else(|| {
-            templates
-                .first()
-                .map(|template| template.name.to_string())
-                .unwrap_or_else(|| "default-graph".to_string())
-        });
-    let previous_template = graph_template.clone();
+        let templates = graph_templates();
+        let mut graph_template = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.graph_template.clone())
+            .unwrap_or_else(|| {
+                templates
+                    .first()
+                    .map(|template| template.name.to_string())
+                    .unwrap_or_else(|| "default-graph".to_string())
+            });
+        let previous_template = graph_template.clone();
 
-    let mut gizmos_in_play = world
-        .get_resource::<EditorViewportState>()
-        .map(|state| state.gizmos_in_play)
-        .unwrap_or(false);
+        let mut gizmos_in_play = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.gizmos_in_play)
+            .unwrap_or(false);
 
-    let selected_label = templates
-        .iter()
-        .find(|template| template.name == graph_template)
-        .map(|template| template.label)
-        .unwrap_or(graph_template.as_str());
+        let selected_label = templates
+            .iter()
+            .find(|template| template.name == graph_template)
+            .map(|template| template.label)
+            .unwrap_or(graph_template.as_str());
 
-    ui.label("Render Graph");
-    ComboBox::from_id_source("viewport_graph_template")
-        .selected_text(selected_label)
-        .show_ui(ui, |ui| {
-            for template in templates {
-                if ui
-                    .selectable_label(template.name == graph_template, template.label)
-                    .clicked()
-                {
-                    graph_template = template.name.to_string();
+        ui.label("Render Graph");
+        ComboBox::from_id_source("viewport_graph_template")
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                for template in templates {
+                    if ui
+                        .selectable_label(template.name == graph_template, template.label)
+                        .clicked()
+                    {
+                        graph_template = template.name.to_string();
+                    }
                 }
-            }
-        });
+            });
 
-    if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-        viewport_state.graph_template = graph_template.clone();
-        viewport_state.gizmos_in_play = gizmos_in_play;
-    }
+        if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+            viewport_state.graph_template = graph_template.clone();
+            viewport_state.gizmos_in_play = gizmos_in_play;
+        }
 
-    if previous_template != graph_template {
-        if let Some(template) = template_for_graph(&graph_template) {
-            if let Some(mut graph_res) =
+        if previous_template != graph_template {
+            if let Some(template) = template_for_graph(&graph_template) {
+                if let Some(mut graph_res) =
                 world.get_resource_mut::<helmer_becs::systems::render_system::RenderGraphResource>()
             {
                 graph_res.0 = (template.build)();
             }
+            }
         }
-    }
 
-    ui.separator();
+        ui.separator();
 
-    ui.heading("Gizmos");
-    ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
-    if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-        viewport_state.gizmos_in_play = gizmos_in_play;
-    }
+        ui.heading("Gizmos");
+        ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
+        if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+            viewport_state.gizmos_in_play = gizmos_in_play;
+        }
 
-    let mut gizmo_mode = world
-        .get_resource::<EditorGizmoState>()
-        .map(|state| state.mode)
-        .unwrap_or(GizmoMode::None);
+        let mut gizmo_mode = world
+            .get_resource::<EditorGizmoState>()
+            .map(|state| state.mode)
+            .unwrap_or(GizmoMode::None);
 
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
-        ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
-        ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
-        ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale/Resize");
-    });
-
-    if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
-        gizmo_state.mode = gizmo_mode;
-    }
-
-    ui.separator();
-    if let Some(mut gizmo_settings) = world.get_resource_mut::<EditorGizmoSettings>() {
-        ui.collapsing("Gizmo Settings", |ui| {
-            if ui.button("Defaults").clicked() {
-                *gizmo_settings = EditorGizmoSettings::default();
-            }
-
-            if gizmo_settings.size_min > gizmo_settings.size_max {
-                let size_min = gizmo_settings.size_min;
-                gizmo_settings.size_min = gizmo_settings.size_max;
-                gizmo_settings.size_max = size_min;
-            }
-
-            ui.label("Sizing");
-            edit_float_range(
-                ui,
-                "Size Scale",
-                &mut gizmo_settings.size_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            let size_max_limit = gizmo_settings.size_max;
-            edit_float_range(
-                ui,
-                "Size Min",
-                &mut gizmo_settings.size_min,
-                0.01,
-                0.0..=size_max_limit,
-            );
-            let size_min_limit = gizmo_settings.size_min;
-            edit_float_range(
-                ui,
-                "Size Max",
-                &mut gizmo_settings.size_max,
-                1.0,
-                size_min_limit..=f32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Picking");
-            edit_float_range(
-                ui,
-                "Axis Pick Scale",
-                &mut gizmo_settings.axis_pick_radius_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Axis Pick Min",
-                &mut gizmo_settings.axis_pick_radius_min,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Center Pick Scale",
-                &mut gizmo_settings.center_pick_radius_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Center Pick Min",
-                &mut gizmo_settings.center_pick_radius_min,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Rotate Pick Scale",
-                &mut gizmo_settings.rotate_pick_radius_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Rotate Pick Min",
-                &mut gizmo_settings.rotate_pick_radius_min,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Scale Min",
-                &mut gizmo_settings.scale_min,
-                0.01,
-                0.0..=f32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Translate");
-            edit_float_range(
-                ui,
-                "Thickness Scale",
-                &mut gizmo_settings.translate_thickness_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Thickness Min",
-                &mut gizmo_settings.translate_thickness_min,
-                0.005,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Head Length Scale",
-                &mut gizmo_settings.translate_head_length_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Head Width Scale",
-                &mut gizmo_settings.translate_head_width_scale,
-                0.05,
-                0.0..=f32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Rotate");
-            edit_float_range(
-                ui,
-                "Ring Radius Scale",
-                &mut gizmo_settings.rotate_radius_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Ring Thickness Scale",
-                &mut gizmo_settings.rotate_thickness_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Ring Thickness Min",
-                &mut gizmo_settings.rotate_thickness_min,
-                0.005,
-                0.0..=f32::MAX,
-            );
-            edit_u32_range(
-                ui,
-                "Ring Segments",
-                &mut gizmo_settings.ring_segments,
-                1.0,
-                3..=u32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Scale");
-            edit_float_range(
-                ui,
-                "Thickness Scale",
-                &mut gizmo_settings.scale_thickness_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Thickness Min",
-                &mut gizmo_settings.scale_thickness_min,
-                0.005,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Head Length Scale",
-                &mut gizmo_settings.scale_head_length_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Box Scale",
-                &mut gizmo_settings.scale_box_scale,
-                0.05,
-                0.0..=f32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Origin");
-            edit_float_range(
-                ui,
-                "Size Scale",
-                &mut gizmo_settings.origin_size_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Size Min",
-                &mut gizmo_settings.origin_size_min,
-                0.005,
-                0.0..=f32::MAX,
-            );
-
-            ui.separator();
-            ui.label("Colors");
-            edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
-            edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
-            edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
-            edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
-
-            ui.separator();
-            ui.label("Selection Outline");
-            edit_float_range(
-                ui,
-                "Thickness Scale",
-                &mut gizmo_settings.selection_thickness_scale,
-                0.01,
-                0.0..=f32::MAX,
-            );
-            edit_float_range(
-                ui,
-                "Thickness Min",
-                &mut gizmo_settings.selection_thickness_min,
-                0.005,
-                0.0..=f32::MAX,
-            );
-            edit_color(ui, "Color", &mut gizmo_settings.selection_color);
-
-            ui.separator();
-            ui.label("Highlight");
-            edit_float_range(
-                ui,
-                "Hover Mix",
-                &mut gizmo_settings.hover_mix,
-                0.01,
-                0.0..=1.0,
-            );
-            edit_float_range(
-                ui,
-                "Active Mix",
-                &mut gizmo_settings.active_mix,
-                0.01,
-                0.0..=1.0,
-            );
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
+            ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
+            ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
+            ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale/Resize");
         });
-    }
 
-    ui.separator();
-
-    ui.heading("Camera");
-    let mut camera_query =
-        world.query_filtered::<(&mut BevyCamera, &mut BevyTransform), With<EditorViewportCamera>>();
-    if let Some((mut camera, mut transform)) = camera_query.iter_mut(world).next() {
-        let camera = &mut camera.0;
-        let transform = &mut transform.0;
-
-        let mut fov = camera.fov_y_rad.to_degrees();
-        if edit_float(ui, "FOV (deg)", &mut fov, 0.25) {
-            camera.fov_y_rad = fov.to_radians();
+        if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
+            gizmo_state.mode = gizmo_mode;
         }
-        edit_float(ui, "Near", &mut camera.near_plane, 0.01);
-        edit_float(ui, "Far", &mut camera.far_plane, 1.0);
 
-        let mut position = transform.position;
-        if edit_vec3(ui, "Position", &mut position, 0.1) {
-            transform.position = position;
+        ui.separator();
+        if let Some(mut gizmo_settings) = world.get_resource_mut::<EditorGizmoSettings>() {
+            ui.collapsing("Gizmo Settings", |ui| {
+                if ui.button("Defaults").clicked() {
+                    *gizmo_settings = EditorGizmoSettings::default();
+                }
+
+                if gizmo_settings.size_min > gizmo_settings.size_max {
+                    let size_min = gizmo_settings.size_min;
+                    gizmo_settings.size_min = gizmo_settings.size_max;
+                    gizmo_settings.size_max = size_min;
+                }
+
+                ui.label("Sizing");
+                edit_float_range(
+                    ui,
+                    "Size Scale",
+                    &mut gizmo_settings.size_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                let size_max_limit = gizmo_settings.size_max;
+                edit_float_range(
+                    ui,
+                    "Size Min",
+                    &mut gizmo_settings.size_min,
+                    0.01,
+                    0.0..=size_max_limit,
+                );
+                let size_min_limit = gizmo_settings.size_min;
+                edit_float_range(
+                    ui,
+                    "Size Max",
+                    &mut gizmo_settings.size_max,
+                    1.0,
+                    size_min_limit..=f32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Picking");
+                edit_float_range(
+                    ui,
+                    "Axis Pick Scale",
+                    &mut gizmo_settings.axis_pick_radius_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Axis Pick Min",
+                    &mut gizmo_settings.axis_pick_radius_min,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Center Pick Scale",
+                    &mut gizmo_settings.center_pick_radius_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Center Pick Min",
+                    &mut gizmo_settings.center_pick_radius_min,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Rotate Pick Scale",
+                    &mut gizmo_settings.rotate_pick_radius_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Rotate Pick Min",
+                    &mut gizmo_settings.rotate_pick_radius_min,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Scale Min",
+                    &mut gizmo_settings.scale_min,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Translate");
+                edit_float_range(
+                    ui,
+                    "Thickness Scale",
+                    &mut gizmo_settings.translate_thickness_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Thickness Min",
+                    &mut gizmo_settings.translate_thickness_min,
+                    0.005,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Head Length Scale",
+                    &mut gizmo_settings.translate_head_length_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Head Width Scale",
+                    &mut gizmo_settings.translate_head_width_scale,
+                    0.05,
+                    0.0..=f32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Rotate");
+                edit_float_range(
+                    ui,
+                    "Ring Radius Scale",
+                    &mut gizmo_settings.rotate_radius_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Ring Thickness Scale",
+                    &mut gizmo_settings.rotate_thickness_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Ring Thickness Min",
+                    &mut gizmo_settings.rotate_thickness_min,
+                    0.005,
+                    0.0..=f32::MAX,
+                );
+                edit_u32_range(
+                    ui,
+                    "Ring Segments",
+                    &mut gizmo_settings.ring_segments,
+                    1.0,
+                    3..=u32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Scale");
+                edit_float_range(
+                    ui,
+                    "Thickness Scale",
+                    &mut gizmo_settings.scale_thickness_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Thickness Min",
+                    &mut gizmo_settings.scale_thickness_min,
+                    0.005,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Head Length Scale",
+                    &mut gizmo_settings.scale_head_length_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Box Scale",
+                    &mut gizmo_settings.scale_box_scale,
+                    0.05,
+                    0.0..=f32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Origin");
+                edit_float_range(
+                    ui,
+                    "Size Scale",
+                    &mut gizmo_settings.origin_size_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Size Min",
+                    &mut gizmo_settings.origin_size_min,
+                    0.005,
+                    0.0..=f32::MAX,
+                );
+
+                ui.separator();
+                ui.label("Colors");
+                edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
+                edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
+                edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
+                edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
+
+                ui.separator();
+                ui.label("Selection Outline");
+                edit_float_range(
+                    ui,
+                    "Thickness Scale",
+                    &mut gizmo_settings.selection_thickness_scale,
+                    0.01,
+                    0.0..=f32::MAX,
+                );
+                edit_float_range(
+                    ui,
+                    "Thickness Min",
+                    &mut gizmo_settings.selection_thickness_min,
+                    0.005,
+                    0.0..=f32::MAX,
+                );
+                edit_color(ui, "Color", &mut gizmo_settings.selection_color);
+
+                ui.separator();
+                ui.label("Highlight");
+                edit_float_range(
+                    ui,
+                    "Hover Mix",
+                    &mut gizmo_settings.hover_mix,
+                    0.01,
+                    0.0..=1.0,
+                );
+                edit_float_range(
+                    ui,
+                    "Active Mix",
+                    &mut gizmo_settings.active_mix,
+                    0.01,
+                    0.0..=1.0,
+                );
+            });
         }
-    } else {
-        ui.label("Viewport camera missing.");
-    }
+
+        ui.separator();
+
+        ui.heading("Camera");
+        let mut camera_query = world
+            .query_filtered::<(&mut BevyCamera, &mut BevyTransform), With<EditorViewportCamera>>();
+        if let Some((mut camera, mut transform)) = camera_query.iter_mut(world).next() {
+            let camera = &mut camera.0;
+            let transform = &mut transform.0;
+
+            let mut fov = camera.fov_y_rad.to_degrees();
+            if edit_float(ui, "FOV (deg)", &mut fov, 0.25) {
+                camera.fov_y_rad = fov.to_radians();
+            }
+            edit_float(ui, "Near", &mut camera.near_plane, 0.01);
+            edit_float(ui, "Far", &mut camera.far_plane, 1.0);
+
+            let mut position = transform.position;
+            if edit_vec3(ui, "Position", &mut position, 0.1) {
+                transform.position = position;
+            }
+        } else {
+            ui.label("Viewport camera missing.");
+        }
+    });
 }
 
 pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Project");
 
     let project_snapshot = world.get_resource::<EditorProject>().cloned();
     let project_loaded = project_snapshot
@@ -576,311 +594,330 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
         .and_then(|project| project.root.as_ref())
         .is_some();
 
-    if !project_loaded {
-        ui.label("No project loaded");
-        ui.separator();
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        if !project_loaded {
+            ui.label("No project loaded");
+            ui.separator();
 
-        let mut open_request: Option<PathBuf> = None;
-        let mut create_request: Option<(String, PathBuf)> = None;
-        let mut browse_requested = false;
+            let mut open_request: Option<PathBuf> = None;
+            let mut create_request: Option<(String, PathBuf)> = None;
+            let mut browse_requested = false;
 
-        world.resource_scope::<EditorUiState, _>(|_world, mut state| {
-            if state.project_name.is_empty() {
-                state.project_name = "NewProject".to_string();
-            }
-            if state.project_path.is_empty() {
-                state.project_path = "./projects".to_string();
-            }
-            if state.open_project_path.is_empty() {
-                state.open_project_path = state.project_path.clone();
-            }
+            world.resource_scope::<EditorUiState, _>(|_world, mut state| {
+                if state.project_name.is_empty() {
+                    state.project_name = "NewProject".to_string();
+                }
+                if state.project_path.is_empty() {
+                    state.project_path = "./projects".to_string();
+                }
+                if state.open_project_path.is_empty() {
+                    state.open_project_path = state.project_path.clone();
+                }
 
-            ui.heading("Open Project");
-            ui.horizontal(|ui| {
-                ui.label("Path:");
-                ui.text_edit_singleline(&mut state.open_project_path);
-                if ui.button("Browse...").clicked() {
-                    browse_requested = true;
+                ui.heading("Open Project");
+                ui.horizontal(|ui| {
+                    ui.label("Path:");
+                    ui.text_edit_singleline(&mut state.open_project_path);
+                    if ui.button("Browse...").clicked() {
+                        browse_requested = true;
+                    }
+                });
+
+                if ui.button("Open").clicked() {
+                    open_request = Some(PathBuf::from(state.open_project_path.clone()));
+                }
+
+                ui.separator();
+                ui.heading("Recent Projects");
+                if state.recent_projects.is_empty() {
+                    ui.label("No recent projects yet.");
+                } else {
+                    for path in state.recent_projects.clone() {
+                        if ui.button(path.display().to_string()).clicked() {
+                            open_request = Some(path);
+                        }
+                    }
+                }
+
+                ui.separator();
+                ui.heading("Create Project");
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut state.project_name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Location:");
+                    ui.text_edit_singleline(&mut state.project_path);
+                });
+
+                if ui.button("Create Project").clicked() {
+                    let create_path = Path::new(&state.project_path).join(&state.project_name);
+                    create_request = Some((state.project_name.clone(), create_path));
                 }
             });
 
-            if ui.button("Open").clicked() {
-                open_request = Some(PathBuf::from(state.open_project_path.clone()));
+            if browse_requested {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
+                        state.open_project_path = path.to_string_lossy().into_owned();
+                    }
+                    open_request = Some(path);
+                }
             }
 
-            ui.separator();
-            ui.heading("Recent Projects");
-            if state.recent_projects.is_empty() {
-                ui.label("No recent projects yet.");
-            } else {
-                for path in state.recent_projects.clone() {
-                    if ui.button(path.display().to_string()).clicked() {
-                        open_request = Some(path);
+            if let Some(path) = open_request {
+                push_command(world, EditorCommand::OpenProject { path });
+            }
+            if let Some((name, path)) = create_request {
+                push_command(world, EditorCommand::CreateProject { name, path });
+            }
+        } else {
+            let (project_root, project_name) = project_snapshot
+                .as_ref()
+                .map(|project| {
+                    (
+                        project.root.clone(),
+                        project
+                            .config
+                            .as_ref()
+                            .map(|cfg| cfg.name.clone())
+                            .unwrap_or_else(|| "<unknown>".to_string()),
+                    )
+                })
+                .unwrap_or((None, "<unknown>".to_string()));
+
+            if let Some(root) = project_root {
+                ui.label(format!("Project: {}", project_name));
+                ui.label(root.display().to_string());
+                ui.separator();
+            }
+
+            let mut save_request: Option<(PathBuf, ProjectConfig)> = None;
+            let mut close_requested = false;
+
+            world.resource_scope::<EditorProject, _>(|_world, mut project| {
+                let root = match project.root.clone() {
+                    Some(root) => root,
+                    None => return,
+                };
+                let Some(config) = project.config.as_mut() else {
+                    return;
+                };
+
+                ui.heading("Project Preferences");
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut config.name);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Assets Dir:");
+                    ui.text_edit_singleline(&mut config.assets_dir);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Models Dir:");
+                    ui.text_edit_singleline(&mut config.models_dir);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Textures Dir:");
+                    ui.text_edit_singleline(&mut config.textures_dir);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Materials Dir:");
+                    ui.text_edit_singleline(&mut config.materials_dir);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Scenes Dir:");
+                    ui.text_edit_singleline(&mut config.scenes_dir);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Scripts Dir:");
+                    ui.text_edit_singleline(&mut config.scripts_dir);
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save Preferences").clicked() {
+                        save_request = Some((root.clone(), config.clone()));
+                    }
+                    if ui.button("Close Project").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+            if let Some((root, config)) = save_request {
+                match save_project_config(&root, &config) {
+                    Ok(()) => {
+                        set_status(world, "Project preferences saved".to_string());
+                    }
+                    Err(err) => {
+                        set_status(world, format!("Failed to save preferences: {}", err));
                     }
                 }
             }
 
-            ui.separator();
-            ui.heading("Create Project");
-            ui.horizontal(|ui| {
-                ui.label("Name:");
-                ui.text_edit_singleline(&mut state.project_name);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Location:");
-                ui.text_edit_singleline(&mut state.project_path);
-            });
-
-            if ui.button("Create Project").clicked() {
-                let create_path = Path::new(&state.project_path).join(&state.project_name);
-                create_request = Some((state.project_name.clone(), create_path));
-            }
-        });
-
-        if browse_requested {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
-                    state.open_project_path = path.to_string_lossy().into_owned();
-                }
-                open_request = Some(path);
+            if close_requested {
+                push_command(world, EditorCommand::CloseProject);
             }
         }
-
-        if let Some(path) = open_request {
-            push_command(world, EditorCommand::OpenProject { path });
-        }
-        if let Some((name, path)) = create_request {
-            push_command(world, EditorCommand::CreateProject { name, path });
-        }
-        return;
-    }
-
-    let (project_root, project_name) = project_snapshot
-        .as_ref()
-        .map(|project| {
-            (
-                project.root.clone(),
-                project
-                    .config
-                    .as_ref()
-                    .map(|cfg| cfg.name.clone())
-                    .unwrap_or_else(|| "<unknown>".to_string()),
-            )
-        })
-        .unwrap_or((None, "<unknown>".to_string()));
-
-    if let Some(root) = project_root {
-        ui.label(format!("Project: {}", project_name));
-        ui.label(root.display().to_string());
-        ui.separator();
-    }
-
-    let mut save_request: Option<(PathBuf, ProjectConfig)> = None;
-    let mut close_requested = false;
-
-    world.resource_scope::<EditorProject, _>(|_world, mut project| {
-        let root = match project.root.clone() {
-            Some(root) => root,
-            None => return,
-        };
-        let Some(config) = project.config.as_mut() else {
-            return;
-        };
-
-        ui.heading("Project Preferences");
-        ui.horizontal(|ui| {
-            ui.label("Name:");
-            ui.text_edit_singleline(&mut config.name);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Assets Dir:");
-            ui.text_edit_singleline(&mut config.assets_dir);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Models Dir:");
-            ui.text_edit_singleline(&mut config.models_dir);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Textures Dir:");
-            ui.text_edit_singleline(&mut config.textures_dir);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Materials Dir:");
-            ui.text_edit_singleline(&mut config.materials_dir);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Scenes Dir:");
-            ui.text_edit_singleline(&mut config.scenes_dir);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Scripts Dir:");
-            ui.text_edit_singleline(&mut config.scripts_dir);
-        });
-
-        ui.horizontal(|ui| {
-            if ui.button("Save Preferences").clicked() {
-                save_request = Some((root.clone(), config.clone()));
-            }
-            if ui.button("Close Project").clicked() {
-                close_requested = true;
-            }
-        });
     });
-
-    if let Some((root, config)) = save_request {
-        match save_project_config(&root, &config) {
-            Ok(()) => {
-                set_status(world, "Project preferences saved".to_string());
-            }
-            Err(err) => {
-                set_status(world, format!("Failed to save preferences: {}", err));
-            }
-        }
-    }
-
-    if close_requested {
-        push_command(world, EditorCommand::CloseProject);
-    }
 }
 
 pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Hierarchy Inspector");
 
-    ui.horizontal(|ui| {
-        ui.menu_button("Add", |ui| {
-            if ui.button("Empty").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::Empty,
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Camera").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::Camera,
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Directional Light").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::DirectionalLight,
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Point Light").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::PointLight,
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Spot Light").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::SpotLight,
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Cube").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::Primitive(PrimitiveKind::Cube),
-                    },
-                );
-                ui.close_menu();
-            }
-            if ui.button("Plane").clicked() {
-                push_command(
-                    world,
-                    EditorCommand::CreateEntity {
-                        kind: SpawnKind::Primitive(PrimitiveKind::Plane),
-                    },
-                );
-                ui.close_menu();
-            }
-            ui.separator();
-            ui.menu_button("Physics", |ui| {
-                if ui.button("Dynamic Body (Box)").clicked() {
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.horizontal(|ui| {
+            ui.menu_button("Add", |ui| {
+                if ui.button("Empty").clicked() {
                     push_command(
                         world,
                         EditorCommand::CreateEntity {
-                            kind: SpawnKind::DynamicBodyCuboid,
+                            kind: SpawnKind::Empty,
                         },
                     );
                     ui.close_menu();
                 }
-                if ui.button("Dynamic Body (Sphere)").clicked() {
+                if ui.button("Camera").clicked() {
                     push_command(
                         world,
                         EditorCommand::CreateEntity {
-                            kind: SpawnKind::DynamicBodySphere,
+                            kind: SpawnKind::Camera,
                         },
                     );
                     ui.close_menu();
                 }
-                if ui.button("Fixed Collider (Box)").clicked() {
+                if ui.button("Directional Light").clicked() {
                     push_command(
                         world,
                         EditorCommand::CreateEntity {
-                            kind: SpawnKind::FixedColliderCuboid,
+                            kind: SpawnKind::DirectionalLight,
                         },
                     );
                     ui.close_menu();
                 }
-                if ui.button("Fixed Collider (Sphere)").clicked() {
+                if ui.button("Point Light").clicked() {
                     push_command(
                         world,
                         EditorCommand::CreateEntity {
-                            kind: SpawnKind::FixedColliderSphere,
+                            kind: SpawnKind::PointLight,
                         },
                     );
                     ui.close_menu();
                 }
-            });
-            ui.menu_button("Provided", |ui| {
-                if ui.button("Freecam Camera").clicked() {
+                if ui.button("Spot Light").clicked() {
                     push_command(
                         world,
                         EditorCommand::CreateEntity {
-                            kind: SpawnKind::FreecamCamera,
+                            kind: SpawnKind::SpotLight,
                         },
                     );
                     ui.close_menu();
                 }
+                if ui.button("Cube").clicked() {
+                    push_command(
+                        world,
+                        EditorCommand::CreateEntity {
+                            kind: SpawnKind::Primitive(PrimitiveKind::Cube),
+                        },
+                    );
+                    ui.close_menu();
+                }
+                if ui.button("Plane").clicked() {
+                    push_command(
+                        world,
+                        EditorCommand::CreateEntity {
+                            kind: SpawnKind::Primitive(PrimitiveKind::Plane),
+                        },
+                    );
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.menu_button("Physics", |ui| {
+                    if ui.button("Dynamic Body (Box)").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::DynamicBodyCuboid,
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Dynamic Body (Sphere)").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::DynamicBodySphere,
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Fixed Collider (Box)").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::FixedColliderCuboid,
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Fixed Collider (Sphere)").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::FixedColliderSphere,
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Provided", |ui| {
+                    if ui.button("Freecam Camera").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::FreecamCamera,
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                });
             });
         });
-    });
 
-    ui.separator();
+        ui.separator();
 
-    ui.columns(2, |columns| {
-        columns[0].heading("Entities");
-        draw_hierarchy_panel(&mut columns[0], world);
+        ui.columns(2, |columns| {
+            columns[0].heading("Entities");
+            draw_hierarchy_panel(&mut columns[0], world);
 
-        let selection = world
-            .get_resource::<InspectorSelectedEntityResource>()
-            .and_then(|selection| selection.0);
-        columns[1].heading("Inspector");
-        draw_inspector_panel(&mut columns[1], world, selection);
+            let selection = world
+                .get_resource::<InspectorSelectedEntityResource>()
+                .and_then(|selection| selection.0);
+            columns[1].heading("Inspector");
+            draw_inspector_panel(&mut columns[1], world, selection);
+        });
     });
 }
 
 pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, &format!("editor_window_{}", window_id));
 
+    let middle_drag_active = world
+        .get_resource::<MiddleDragUiState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
+    if middle_drag_active {
+        ui.add_enabled_ui(false, |ui| {
+            draw_editor_window_contents(ui, world, window_id);
+        });
+    } else {
+        draw_editor_window_contents(ui, world, window_id);
+    }
+}
+
+fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
     let (tabs_snapshot, active_index, window_index, window_count) = {
         let Some(state) = world.get_resource::<EditorWorkspaceState>() else {
             ui.label("No editors available.");
@@ -1636,9 +1673,11 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 .response
                 .dnd_release_payload::<AssetDragPayload>()
             {
-                if is_model_file(&payload.path) {
-                    mesh_source = mesh_source_from_path(&project, &payload.path);
-                    mesh_changed = true;
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_model_file(path) {
+                        mesh_source = mesh_source_from_path(&project, path);
+                        mesh_changed = true;
+                    }
                 }
             }
             highlight_drop_target(ui, &mesh_source_button.response);
@@ -1675,9 +1714,11 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 .response
                 .dnd_release_payload::<AssetDragPayload>()
             {
-                if is_material_file(&payload.path) {
-                    material_path = material_path_from_project(&project, &payload.path);
-                    material_changed = true;
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_material_file(path) {
+                        material_path = material_path_from_project(&project, path);
+                        material_changed = true;
+                    }
                 }
             }
             highlight_drop_target(ui, &material_button.response);
@@ -1828,7 +1869,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 .response
                 .dnd_release_payload::<AssetDragPayload>()
             {
-                try_apply_scene_asset_path(world, entity, &payload.path);
+                if let Some(path) = payload_primary_path(&payload) {
+                    try_apply_scene_asset_path(world, entity, path);
+                }
             }
             highlight_drop_target(ui, &scene_asset_button.response);
         }
@@ -1877,11 +1920,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 }
 
                 if let Some(payload) = path_response.dnd_release_payload::<AssetDragPayload>() {
-                    if is_script_file(&payload.path) {
-                        updated_path = Some(payload.path.clone());
-                        path_string = payload.path.to_string_lossy().to_string();
-                    } else {
-                        set_status(world, "Select a script asset to assign".to_string());
+                    if let Some(path) = payload_primary_path(&payload) {
+                        if is_script_file(path) {
+                            updated_path = Some(path.clone());
+                            path_string = path.to_string_lossy().to_string();
+                        } else {
+                            set_status(world, "Select a script asset to assign".to_string());
+                        }
                     }
                 }
 
@@ -1957,6 +2002,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
 
 pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Content Browser");
 
     let root = match world
         .get_resource::<AssetBrowserState>()
@@ -1964,99 +2010,105 @@ pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
     {
         Some(root) => root,
         None => {
-            ui.label("Open a project to browse assets.");
+            with_middle_drag_blocked(ui, world, |ui, _world| {
+                ui.label("Open a project to browse assets.");
+            });
             return;
         }
     };
 
-    {
-        let mut state = world
-            .get_resource_mut::<AssetBrowserState>()
-            .expect("AssetBrowserState missing");
-        ui.horizontal(|ui| {
-            ui.label("Filter:");
-            if ui.text_edit_singleline(&mut state.filter).changed() {
-                state.refresh_requested = true;
-            }
-            if ui.button("Refresh").clicked() {
-                state.refresh_requested = true;
-            }
-            ui.separator();
-            ui.add(egui::Slider::new(&mut state.tile_size, 64.0..=220.0).text("Tile Size"));
-            state.tile_size = state.tile_size.clamp(64.0, 220.0);
-        });
-
-        if state
-            .current_dir
-            .as_ref()
-            .map(|path| !path.exists())
-            .unwrap_or(true)
+    with_middle_drag_blocked(ui, world, |ui, world| {
         {
-            state.current_dir = Some(root.clone());
-        }
-        if state.selected.is_none() {
-            state.selected = state.current_dir.clone();
-        }
-
-        let current_dir = state.current_dir.clone();
-        if let Some(current_dir) = current_dir.as_ref() {
-            let location_label = asset_path_label(&root, current_dir);
-            let breadcrumb_dirs = asset_breadcrumb_dirs(&root, current_dir);
-            let mut selected_dir: Option<PathBuf> = None;
+            let mut state = world
+                .get_resource_mut::<AssetBrowserState>()
+                .expect("AssetBrowserState missing");
             ui.horizontal(|ui| {
-                ui.label("Location:");
-                ComboBox::from_id_source("asset_location_dropdown")
-                    .selected_text(location_label)
-                    .show_ui(ui, |ui| {
-                        for entry in breadcrumb_dirs.iter() {
-                            let label = asset_path_label(&root, entry);
-                            if ui
-                                .selectable_label(entry.as_path() == current_dir.as_path(), label)
-                                .clicked()
-                            {
-                                selected_dir = Some(entry.clone());
-                            }
-                        }
-                    });
+                ui.label("Filter:");
+                if ui.text_edit_singleline(&mut state.filter).changed() {
+                    state.refresh_requested = true;
+                }
+                if ui.button("Refresh").clicked() {
+                    state.refresh_requested = true;
+                }
+                ui.separator();
+                ui.add(egui::Slider::new(&mut state.tile_size, 64.0..=220.0).text("Tile Size"));
+                state.tile_size = state.tile_size.clamp(64.0, 220.0);
             });
 
-            if let Some(selected_dir) = selected_dir {
-                state.current_dir = Some(selected_dir.clone());
-                state.selected = Some(selected_dir);
+            if state
+                .current_dir
+                .as_ref()
+                .map(|path| !path.exists())
+                .unwrap_or(true)
+            {
+                state.current_dir = Some(root.clone());
+            }
+            let current_dir = state.current_dir.clone();
+            if let Some(current_dir) = current_dir.as_ref() {
+                let location_label = asset_path_label(&root, current_dir);
+                let breadcrumb_dirs = asset_breadcrumb_dirs(&root, current_dir);
+                let mut selected_dir: Option<PathBuf> = None;
+                ui.horizontal(|ui| {
+                    ui.label("Location:");
+                    ComboBox::from_id_source("asset_location_dropdown")
+                        .selected_text(location_label)
+                        .show_ui(ui, |ui| {
+                            for entry in breadcrumb_dirs.iter() {
+                                let label = asset_path_label(&root, entry);
+                                if ui
+                                    .selectable_label(
+                                        entry.as_path() == current_dir.as_path(),
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    selected_dir = Some(entry.clone());
+                                }
+                            }
+                        });
+                });
+
+                if let Some(selected_dir) = selected_dir {
+                    state.current_dir = Some(selected_dir.clone());
+                    state.selected = Some(selected_dir.clone());
+                    state.selected_paths.clear();
+                    state.selected_paths.insert(selected_dir.clone());
+                    state.selection_anchor = Some(selected_dir);
+                }
+            }
+
+            if let Some(status) = state.status.clone() {
+                ui.label(RichText::new(status).small());
             }
         }
 
-        if let Some(status) = state.status.clone() {
-            ui.label(RichText::new(status).small());
-        }
-    }
-
-    ui.separator();
-    let content_height = ui.available_height();
-    ui.horizontal(|ui| {
-        let sidebar_width = 220.0;
-        ui.allocate_ui_with_layout(
-            Vec2::new(sidebar_width, content_height),
-            Layout::top_down(Align::Min),
-            |ui| {
-                ui.heading("Folders");
-                draw_asset_tree(ui, world, &root);
-            },
-        );
         ui.separator();
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), content_height),
-            Layout::top_down(Align::Min),
-            |ui| {
-                draw_asset_grid(ui, world, &root);
-            },
-        );
+        let content_height = ui.available_height();
+        ui.horizontal(|ui| {
+            let sidebar_width = 220.0;
+            ui.allocate_ui_with_layout(
+                Vec2::new(sidebar_width, content_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.heading("Folders");
+                    draw_asset_tree(ui, world, &root);
+                },
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), content_height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    draw_asset_grid(ui, world, &root);
+                },
+            );
+        });
     });
 }
 
 #[derive(Clone)]
 struct AssetDragPayload {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 fn highlight_drop_target(ui: &Ui, response: &Response) {
@@ -2101,13 +2153,98 @@ fn bring_window_to_front_if_dragging(ui: &Ui, world: &World) {
     if !dragging {
         return;
     }
-    let pointer_pos = ui.ctx().input(|input| input.pointer.hover_pos());
+    let pointer_pos = ui.ctx().input(|input| input.pointer.latest_pos());
     if let Some(pointer_pos) = pointer_pos {
         if let Some(layer_id) = ui.ctx().layer_id_at(pointer_pos) {
             if layer_id == ui.layer_id() {
                 ui.ctx().move_to_top(layer_id);
             }
         }
+    }
+}
+
+fn update_middle_drag_state(ui: &Ui, world: &mut World) {
+    let (middle_down, just_pressed, pos, delta) = ui.ctx().input(|input| {
+        (
+            input.pointer.button_down(PointerButton::Middle),
+            input.pointer.button_pressed(PointerButton::Middle),
+            input.pointer.latest_pos(),
+            input.pointer.delta(),
+        )
+    });
+
+    let mut state = world
+        .get_resource_mut::<MiddleDragUiState>()
+        .expect("MiddleDragUiState missing");
+
+    let was_active = state.active;
+    state.delta = if middle_down { delta } else { Vec2::ZERO };
+    state.active = middle_down;
+
+    if just_pressed && !was_active {
+        if let Some(pos) = pos {
+            state.start_pos = pos;
+            state.locked_window_id = ui.ctx().layer_id_at(pos).map(|layer| layer.id);
+        } else {
+            state.locked_window_id = None;
+        }
+    } else if !middle_down {
+        state.locked_window_id = None;
+    }
+}
+
+fn with_middle_drag_blocked(
+    ui: &mut Ui,
+    world: &mut World,
+    add_contents: impl FnOnce(&mut Ui, &mut World),
+) {
+    let active = world
+        .get_resource::<MiddleDragUiState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
+    if active {
+        ui.add_enabled_ui(false, |ui| add_contents(ui, world));
+    } else {
+        add_contents(ui, world);
+    }
+}
+
+fn drag_egui_window_on_middle_click(ui: &Ui, world: &mut World, window_id: &str) {
+    update_middle_drag_state(ui, world);
+    let (active, delta, start_pos, locked_window_id) = {
+        let drag_state = world
+            .get_resource::<MiddleDragUiState>()
+            .expect("MiddleDragUiState missing");
+        (
+            drag_state.active,
+            drag_state.delta,
+            drag_state.start_pos,
+            drag_state.locked_window_id,
+        )
+    };
+    if !active || delta == Vec2::ZERO {
+        return;
+    }
+    let rect = ui.ctx().memory(|mem| mem.area_rect(Id::new(window_id)));
+    let Some(rect) = rect else {
+        return;
+    };
+    if !rect.contains(start_pos) {
+        return;
+    }
+    let locked_ok = locked_window_id
+        .map(|id| id == Id::new(window_id))
+        .unwrap_or(false);
+    if !locked_ok {
+        return;
+    }
+    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+        let entry = egui_res
+            .window_positions
+            .entry(window_id.to_string())
+            .or_insert(rect.min);
+        *entry += delta;
+        egui_res.window_dragging.insert(window_id.to_string());
     }
 }
 
@@ -2166,7 +2303,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                     }
 
                     response.dnd_set_drag_payload(AssetDragPayload {
-                        path: entry.path.clone(),
+                        paths: vec![entry.path.clone()],
                     });
 
                     highlight_drop_target(ui, &response);
@@ -2181,7 +2318,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                     }
 
                     if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>() {
-                        move_asset(world, &payload.path, &entry.path);
+                        move_assets(world, &payload.paths, &entry.path);
                     }
 
                     response.context_menu(|ui| {
@@ -2193,7 +2330,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
 }
 
 fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
-    let (entries, current_dir, selected, rename_path, tile_size) = {
+    let (entries, current_dir, selected_paths, rename_path, tile_size) = {
         let state = world
             .get_resource::<AssetBrowserState>()
             .expect("AssetBrowserState missing");
@@ -2203,7 +2340,7 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
                 .current_dir
                 .clone()
                 .unwrap_or_else(|| root.to_path_buf()),
-            state.selected.clone(),
+            state.selected_paths.clone(),
             state.rename_path.clone(),
             state.tile_size,
         )
@@ -2232,15 +2369,50 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
         .show(ui, |ui| {
             let background_id = Id::new("asset_grid_background");
             let background_rect = ui.available_rect_before_wrap();
-            let background_response = ui.interact(background_rect, background_id, Sense::click());
+            let background_response =
+                ui.interact(background_rect, background_id, Sense::click_and_drag());
             background_response.context_menu(|ui| {
+                if ui.button("Open in File Browser").clicked() {
+                    open_in_file_browser(world, &current_dir);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if let Some(selection) = selected_assets_for_action(world, None) {
+                    if ui.button("Duplicate Selected").clicked() {
+                        duplicate_assets(world, &selection);
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete Selected").clicked() {
+                        delete_assets(world, &selection);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                }
                 asset_create_menu(world, ui, &current_dir);
             });
-            if background_response.clicked() {
+            if background_response.clicked_by(PointerButton::Primary) {
                 if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
                     state.selected = None;
+                    state.selected_paths.clear();
+                    state.selection_anchor = None;
+                    state.selection_drag_start = None;
                     state.rename_path = None;
                     state.rename_buffer.clear();
+                }
+            }
+            if background_response.drag_started_by(PointerButton::Primary) {
+                let modifiers = ui.input(|input| input.modifiers);
+                if let Some(pointer_pos) = ui.input(|input| input.pointer.interact_pos()) {
+                    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+                        state.selection_drag_start = Some(pointer_pos);
+                        if !(modifiers.command || modifiers.ctrl) {
+                            state.selected = None;
+                            state.selected_paths.clear();
+                            state.selection_anchor = None;
+                        }
+                        state.rename_path = None;
+                        state.rename_buffer.clear();
+                    }
                 }
             }
 
@@ -2254,6 +2426,7 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
                 .floor()
                 .max(1.0) as usize;
 
+            let mut tile_rects = Vec::new();
             let mut index = 0;
             while index < items.len() {
                 ui.horizontal(|ui| {
@@ -2262,12 +2435,47 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
                             break;
                         }
                         let entry = &items[index];
-                        let is_selected = selected.as_ref() == Some(&entry.path);
+                        let is_selected = selected_paths.contains(&entry.path);
                         let is_renaming = rename_path.as_ref() == Some(&entry.path);
-                        draw_asset_tile(ui, world, entry, is_selected, is_renaming, tile_size);
+                        let rect = draw_asset_tile(
+                            ui,
+                            world,
+                            entry,
+                            is_selected,
+                            is_renaming,
+                            tile_size,
+                            index,
+                            &items,
+                        );
+                        tile_rects.push((entry.path.clone(), rect));
                         index += 1;
                     }
                 });
+            }
+
+            if background_response.dragged_by(PointerButton::Primary)
+                || background_response.drag_stopped_by(PointerButton::Primary)
+            {
+                let pointer_pos = ui.input(|input| {
+                    input
+                        .pointer
+                        .interact_pos()
+                        .or_else(|| input.pointer.hover_pos())
+                });
+                let drag_start = world
+                    .get_resource::<AssetBrowserState>()
+                    .and_then(|state| state.selection_drag_start);
+                if let (Some(pointer_pos), Some(start)) = (pointer_pos, drag_start) {
+                    let rect = Rect::from_two_pos(start, pointer_pos);
+                    let modifiers = ui.input(|input| input.modifiers);
+                    update_drag_selection(world, &tile_rects, rect, modifiers);
+                    paint_selection_rect(ui, rect);
+                }
+                if background_response.drag_stopped_by(PointerButton::Primary) {
+                    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+                        state.selection_drag_start = None;
+                    }
+                }
             }
         });
 
@@ -2281,7 +2489,9 @@ fn draw_asset_tile(
     is_selected: bool,
     is_renaming: bool,
     tile_size: f32,
-) {
+    index: usize,
+    items: &[AssetEntry],
+) -> Rect {
     let tile_size = Vec2::new(tile_size, tile_size);
     let sense = if is_renaming {
         Sense::click()
@@ -2291,10 +2501,10 @@ fn draw_asset_tile(
     let (rect, response) = ui.allocate_exact_size(tile_size, sense);
 
     if let Some(mut drag_state) = world.get_resource_mut::<AssetDragState>() {
-        if response.drag_started() {
+        if response.drag_started_by(PointerButton::Primary) {
             drag_state.start_drag(entry.path.clone());
         }
-        if response.drag_stopped() {
+        if response.drag_stopped_by(PointerButton::Primary) {
             drag_state.stop_drag();
         }
     }
@@ -2310,9 +2520,7 @@ fn draw_asset_tile(
     ui.painter().rect_filled(rect, 6.0, bg_color);
 
     if !is_renaming {
-        response.dnd_set_drag_payload(AssetDragPayload {
-            path: entry.path.clone(),
-        });
+        response.dnd_set_drag_payload(asset_drag_payload(world, &entry.path));
     }
 
     if is_renaming {
@@ -2345,8 +2553,8 @@ fn draw_asset_tile(
     }
 
     let mut double_clicked = response.double_clicked();
-    if response.clicked() {
-        set_selected_asset(world, entry.path.clone());
+    if response.clicked_by(PointerButton::Primary) {
+        update_asset_selection(world, &entry.path, index, items);
         let click_time = ui.input(|input| input.time);
         if register_asset_click(world, &entry.path, click_time) {
             double_clicked = true;
@@ -2359,7 +2567,7 @@ fn draw_asset_tile(
 
     if entry.is_dir {
         if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>() {
-            move_asset(world, &payload.path, &entry.path);
+            move_assets(world, &payload.paths, &entry.path);
         }
     }
 
@@ -2371,11 +2579,28 @@ fn draw_asset_tile(
         }
     });
 
-    if response.dragged() {
+    if response.dragged_by(PointerButton::Primary) {
         if let Some(pointer_pos) = ui.ctx().input(|input| input.pointer.hover_pos()) {
-            paint_asset_drag_preview(ui, entry, tile_size, is_selected, pointer_pos);
+            let selection_count = if is_selected {
+                world
+                    .get_resource::<AssetBrowserState>()
+                    .map(|state| state.selected_paths.len())
+                    .unwrap_or(1)
+            } else {
+                1
+            };
+            paint_asset_drag_preview(
+                ui,
+                entry,
+                tile_size,
+                is_selected,
+                selection_count,
+                pointer_pos,
+            );
         }
     }
+
+    rect
 }
 
 fn paint_asset_drag_preview(
@@ -2383,6 +2608,7 @@ fn paint_asset_drag_preview(
     entry: &AssetEntry,
     tile_size: Vec2,
     is_selected: bool,
+    selection_count: usize,
     pointer_pos: Pos2,
 ) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
@@ -2396,7 +2622,7 @@ fn paint_asset_drag_preview(
     painter.rect_filled(
         rect.translate(shadow_offset),
         8.0,
-        Color32::from_black_alpha(90),
+        Color32::from_black_alpha(70),
     );
 
     let mut bg_color = if is_selected {
@@ -2404,7 +2630,26 @@ fn paint_asset_drag_preview(
     } else {
         ui.visuals().widgets.inactive.bg_fill
     };
-    bg_color = bg_color.gamma_multiply(1.1);
+    bg_color = bg_color.gamma_multiply(1.05);
+    let bg_color = Color32::from_rgba_unmultiplied(bg_color.r(), bg_color.g(), bg_color.b(), 170);
+
+    let stack_layers = selection_count.clamp(1, 5);
+    if stack_layers > 1 {
+        let max_offset = 10.0;
+        let step = max_offset / (stack_layers as f32 - 1.0);
+        for layer in (1..stack_layers).rev() {
+            let offset = Vec2::new(step * layer as f32, step * layer as f32);
+            let layer_rect = rect.translate(offset);
+            let layer_color = Color32::from_rgba_unmultiplied(
+                bg_color.r(),
+                bg_color.g(),
+                bg_color.b(),
+                (140u8).saturating_sub(layer as u8 * 12),
+            );
+            painter.rect_filled(layer_rect, 8.0, layer_color);
+        }
+    }
+
     painter.rect_filled(rect, 8.0, bg_color);
 
     let content_rect = rect.shrink(8.0);
@@ -2431,6 +2676,14 @@ fn paint_asset_drag_preview(
         FontId::proportional(12.0),
         ui.visuals().text_color(),
     );
+}
+
+fn paint_selection_rect(ui: &Ui, rect: Rect) {
+    let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.35);
+    let stroke = ui.visuals().selection.stroke;
+    ui.painter().rect_filled(rect, 2.0, fill);
+    ui.painter()
+        .rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
 }
 
 fn asset_display_name(path: &Path) -> String {
@@ -2543,14 +2796,26 @@ fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path) {
         set_current_dir(world, path.to_path_buf());
         ui.close_menu();
     }
+    if ui.button("Open in File Browser").clicked() {
+        open_in_file_browser(world, path);
+        ui.close_menu();
+    }
     asset_create_menu(world, ui, path);
     ui.separator();
+    if ui.button("Duplicate").clicked() {
+        if let Some(selection) = selected_assets_for_action(world, Some(path)) {
+            duplicate_assets(world, &selection);
+        }
+        ui.close_menu();
+    }
     if ui.button("Rename").clicked() {
         begin_asset_rename(world, path);
         ui.close_menu();
     }
     if ui.button("Delete").clicked() {
-        delete_asset(world, path);
+        if let Some(selection) = selected_assets_for_action(world, Some(path)) {
+            delete_assets(world, &selection);
+        }
         ui.close_menu();
     }
 }
@@ -2581,12 +2846,31 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
         ui.close_menu();
     }
 
+    if is_script_file(path) && ui.button("Open in Editor").clicked() {
+        open_in_external_editor(world, path);
+        ui.close_menu();
+    }
+
+    if ui.button("Open in File Browser").clicked() {
+        open_in_file_browser(world, path);
+        ui.close_menu();
+    }
+
+    if ui.button("Duplicate").clicked() {
+        if let Some(selection) = selected_assets_for_action(world, Some(path)) {
+            duplicate_assets(world, &selection);
+        }
+        ui.close_menu();
+    }
+
     if ui.button("Rename").clicked() {
         begin_asset_rename(world, path);
         ui.close_menu();
     }
     if ui.button("Delete").clicked() {
-        delete_asset(world, path);
+        if let Some(selection) = selected_assets_for_action(world, Some(path)) {
+            delete_assets(world, &selection);
+        }
         ui.close_menu();
     }
 }
@@ -2638,6 +2922,101 @@ fn asset_create_menu(world: &mut World, ui: &mut Ui, path: &Path) {
     }
 }
 
+fn open_in_file_browser(world: &mut World, path: &Path) {
+    if let Err(err) = open_in_file_browser_inner(path) {
+        set_status(world, format!("Open in file browser failed: {}", err));
+    }
+}
+
+fn open_in_file_browser_inner(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if path.is_dir() {
+            Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        } else {
+            Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if path.is_dir() {
+            Command::new("open")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        } else {
+            Command::new("open")
+                .arg("-R")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let target = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err("Unsupported platform".to_string())
+    }
+}
+
+fn open_in_external_editor(world: &mut World, path: &Path) {
+    if try_open_in_vscode(path) {
+        return;
+    }
+    if !open_with_default_app(path) {
+        set_status(world, format!("Unable to open {}", path.display()));
+    }
+}
+
+fn try_open_in_vscode(path: &Path) -> bool {
+    Command::new("code").arg(path).spawn().is_ok()
+}
+
+fn open_with_default_app(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).spawn().is_ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open").arg(path).spawn().is_ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
 fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
     if entry.is_dir {
         set_current_dir(world, entry.path.clone());
@@ -2658,6 +3037,8 @@ fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
         );
     } else if is_material_file(&entry.path) {
         open_material_editor_tab(world, entry.path.clone());
+    } else if is_script_file(&entry.path) {
+        open_in_external_editor(world, &entry.path);
     }
 }
 
@@ -3062,6 +3443,10 @@ fn delete_asset(world: &mut World, path: &Path) {
                 if state.selected.as_deref() == Some(path) {
                     state.selected = None;
                 }
+                state.selected_paths.remove(path);
+                if state.selection_anchor.as_deref() == Some(path) {
+                    state.selection_anchor = None;
+                }
                 if state.current_dir.as_deref() == Some(path) {
                     state.current_dir = state.root.clone();
                 }
@@ -3072,6 +3457,48 @@ fn delete_asset(world: &mut World, path: &Path) {
         Err(err) => {
             set_status(world, format!("Delete failed: {}", err));
         }
+    }
+}
+
+fn delete_assets(world: &mut World, paths: &[PathBuf]) {
+    let mut any_failed = false;
+    for path in paths {
+        if let Some(state) = world.get_resource::<AssetBrowserState>() {
+            if state.root.as_deref() == Some(path.as_path()) {
+                set_status(world, "Cannot delete project root".to_string());
+                return;
+            }
+        }
+        let result = if path.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+        if result.is_err() {
+            any_failed = true;
+        }
+    }
+
+    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+        for path in paths {
+            if state.selected.as_deref() == Some(path) {
+                state.selected = None;
+            }
+            state.selected_paths.remove(path);
+            if state.selection_anchor.as_deref() == Some(path) {
+                state.selection_anchor = None;
+            }
+            if state.current_dir.as_deref() == Some(path) {
+                state.current_dir = state.root.clone();
+            }
+        }
+        state.refresh_requested = true;
+    }
+
+    if any_failed {
+        set_status(world, "Delete failed for one or more items".to_string());
+    } else {
+        set_status(world, format!("Deleted {} item(s)", paths.len()));
     }
 }
 
@@ -3113,6 +3540,76 @@ fn move_asset(world: &mut World, source: &Path, target_dir: &Path) {
     }
 }
 
+fn move_assets(world: &mut World, sources: &[PathBuf], target_dir: &Path) {
+    for source in sources {
+        move_asset(world, source, target_dir);
+    }
+}
+
+fn duplicate_assets(world: &mut World, paths: &[PathBuf]) {
+    let mut any_failed = false;
+    for path in paths {
+        if duplicate_asset(world, path).is_err() {
+            any_failed = true;
+        }
+    }
+    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+        state.refresh_requested = true;
+    }
+    if any_failed {
+        set_status(world, "Duplicate failed for one or more items".to_string());
+    } else {
+        set_status(world, format!("Duplicated {} item(s)", paths.len()));
+    }
+}
+
+fn duplicate_asset(world: &mut World, path: &Path) -> Result<(), String> {
+    if let Some(state) = world.get_resource::<AssetBrowserState>() {
+        if state.root.as_deref() == Some(path) {
+            return Err("Cannot duplicate project root".to_string());
+        }
+    }
+    let Some(parent) = path.parent() else {
+        return Err("Asset has no parent directory".to_string());
+    };
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "Asset has no name".to_string())?;
+    let target_path = unique_path(&parent.join(file_name));
+    if path.is_dir() {
+        copy_dir_recursive(path, &target_path)
+    } else {
+        fs::copy(path, &target_path)
+            .map(|_| ())
+            .map_err(|err| format!("Duplicate failed: {}", err))
+    }
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    for entry in WalkDir::new(source)
+        .min_depth(0)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|_| "Failed to copy directory".to_string())?;
+        let target_path = target.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target_path).map_err(|err| format!("Duplicate failed: {}", err))?;
+        } else {
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent).map_err(|err| format!("Duplicate failed: {}", err))?;
+            }
+            fs::copy(entry.path(), &target_path)
+                .map(|_| ())
+                .map_err(|err| format!("Duplicate failed: {}", err))?;
+        }
+    }
+    Ok(())
+}
+
 fn remap_asset_state_paths(world: &mut World, from: &Path, to: &Path) {
     let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() else {
         return;
@@ -3122,6 +3619,16 @@ fn remap_asset_state_paths(world: &mut World, from: &Path, to: &Path) {
         .selected
         .clone()
         .map(|path| remap_asset_path(&path, from, to).unwrap_or(path));
+
+    let mut remapped_selected = HashSet::new();
+    for path in state.selected_paths.iter() {
+        remapped_selected.insert(remap_asset_path(path, from, to).unwrap_or_else(|| path.clone()));
+    }
+    state.selected_paths = remapped_selected;
+    state.selection_anchor = state
+        .selection_anchor
+        .clone()
+        .and_then(|path| remap_asset_path(&path, from, to));
 
     state.current_dir = state
         .current_dir
@@ -3365,7 +3872,9 @@ fn draw_add_component_menu(
                 ui.close_menu();
             }
             if let Some(payload) = scene_asset_button.dnd_release_payload::<AssetDragPayload>() {
-                try_apply_scene_asset_path(world, entity, &payload.path);
+                if let Some(path) = payload_primary_path(&payload) {
+                    try_apply_scene_asset_path(world, entity, path);
+                }
                 ui.close_menu();
             }
             highlight_drop_target(ui, &scene_asset_button);
@@ -4147,13 +4656,21 @@ fn set_selection(world: &mut World, entity: Option<Entity>) {
 fn set_current_dir(world: &mut World, path: PathBuf) {
     if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
         state.current_dir = Some(path.clone());
-        state.selected = Some(path);
+        state.selected = Some(path.clone());
+        state.selected_paths.clear();
+        state.selected_paths.insert(path.clone());
+        state.selection_anchor = Some(path);
+        state.selection_drag_start = None;
     }
 }
 
 fn set_selected_asset(world: &mut World, path: PathBuf) {
     if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
-        state.selected = Some(path);
+        state.selected = Some(path.clone());
+        state.selected_paths.clear();
+        state.selected_paths.insert(path.clone());
+        state.selection_anchor = Some(path);
+        state.selection_drag_start = None;
     }
 }
 
@@ -4168,6 +4685,138 @@ fn register_asset_click(world: &mut World, path: &Path, time: f64) -> bool {
     state.last_click_path = Some(path.to_path_buf());
     state.last_click_time = time;
     is_double
+}
+
+fn update_asset_selection(world: &mut World, path: &Path, index: usize, items: &[AssetEntry]) {
+    let modifiers = world
+        .get_resource::<EguiResource>()
+        .map(|res| res.ctx.input(|input| input.modifiers))
+        .unwrap_or_default();
+    let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() else {
+        return;
+    };
+    let additive = modifiers.command || modifiers.ctrl;
+    let shift = modifiers.shift;
+
+    if shift {
+        let anchor_path = state
+            .selection_anchor
+            .clone()
+            .or_else(|| state.selected.clone());
+        if let Some(anchor_path) = anchor_path {
+            if let Some(anchor_index) = items.iter().position(|entry| entry.path == anchor_path) {
+                let (start, end) = if anchor_index <= index {
+                    (anchor_index, index)
+                } else {
+                    (index, anchor_index)
+                };
+                let mut next = if additive {
+                    state.selected_paths.clone()
+                } else {
+                    HashSet::new()
+                };
+                for entry in &items[start..=end] {
+                    next.insert(entry.path.clone());
+                }
+                state.selected_paths = next;
+                state.selected = Some(path.to_path_buf());
+                if state.selection_anchor.is_none() {
+                    state.selection_anchor = Some(anchor_path);
+                }
+                return;
+            }
+        }
+    }
+
+    if additive {
+        if state.selected_paths.contains(path) {
+            state.selected_paths.remove(path);
+            if state.selected.as_deref() == Some(path) {
+                state.selected = state.selected_paths.iter().next().cloned();
+            }
+        } else {
+            state.selected_paths.insert(path.to_path_buf());
+            state.selected = Some(path.to_path_buf());
+        }
+        state.selection_anchor = state.selected.clone();
+    } else {
+        state.selected_paths.clear();
+        state.selected_paths.insert(path.to_path_buf());
+        state.selected = Some(path.to_path_buf());
+        state.selection_anchor = Some(path.to_path_buf());
+    }
+}
+
+fn update_drag_selection(
+    world: &mut World,
+    tile_rects: &[(PathBuf, Rect)],
+    selection_rect: Rect,
+    modifiers: Modifiers,
+) {
+    let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() else {
+        return;
+    };
+    let additive = modifiers.command || modifiers.ctrl;
+    let mut next = if additive {
+        state.selected_paths.clone()
+    } else {
+        HashSet::new()
+    };
+    let mut last_selected: Option<PathBuf> = None;
+    for (path, rect) in tile_rects {
+        if selection_rect.intersects(*rect) {
+            next.insert(path.clone());
+            last_selected = Some(path.clone());
+        }
+    }
+
+    state.selected_paths = next;
+    if let Some(last_selected) = last_selected {
+        state.selected = Some(last_selected.clone());
+        if !additive || state.selection_anchor.is_none() {
+            state.selection_anchor = Some(last_selected);
+        }
+    } else if !additive {
+        state.selected = None;
+        state.selection_anchor = None;
+    }
+}
+
+fn asset_drag_payload(world: &World, path: &Path) -> AssetDragPayload {
+    let mut paths = Vec::new();
+    if let Some(state) = world.get_resource::<AssetBrowserState>() {
+        if state.selected_paths.contains(path) && state.selected_paths.len() > 1 {
+            paths.extend(state.selected_paths.iter().cloned());
+        } else {
+            paths.push(path.to_path_buf());
+        }
+    } else {
+        paths.push(path.to_path_buf());
+    }
+    AssetDragPayload { paths }
+}
+
+fn payload_primary_path(payload: &AssetDragPayload) -> Option<&PathBuf> {
+    payload.paths.first()
+}
+
+fn selected_assets_for_action(world: &World, path: Option<&Path>) -> Option<Vec<PathBuf>> {
+    let state = world.get_resource::<AssetBrowserState>()?;
+    if let Some(path) = path {
+        if state.selected_paths.contains(path) {
+            let mut paths = state.selected_paths.iter().cloned().collect::<Vec<_>>();
+            paths.sort();
+            return Some(paths);
+        }
+        return Some(vec![path.to_path_buf()]);
+    }
+    if state.selected_paths.is_empty() {
+        None
+    } else {
+        let mut paths = state.selected_paths.iter().cloned().collect::<Vec<_>>();
+        paths.sort();
+        Some(paths)
+    }
 }
 
 fn toggle_expand(world: &mut World, path: PathBuf) {

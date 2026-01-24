@@ -5,6 +5,7 @@ use std::{
 };
 
 use bevy_ecs::prelude::{Component, Resource};
+use egui::Pos2;
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -53,6 +54,9 @@ pub struct AssetBrowserState {
     pub entries: Vec<AssetEntry>,
     pub expanded: HashSet<PathBuf>,
     pub selected: Option<PathBuf>,
+    pub selected_paths: HashSet<PathBuf>,
+    pub selection_anchor: Option<PathBuf>,
+    pub selection_drag_start: Option<Pos2>,
     pub current_dir: Option<PathBuf>,
     pub last_click_path: Option<PathBuf>,
     pub last_click_time: f64,
@@ -73,6 +77,9 @@ impl Default for AssetBrowserState {
             entries: Vec::new(),
             expanded: HashSet::new(),
             selected: None,
+            selected_paths: HashSet::new(),
+            selection_anchor: None,
+            selection_drag_start: None,
             current_dir: None,
             last_click_path: None,
             last_click_time: 0.0,

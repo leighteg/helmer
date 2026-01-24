@@ -10,10 +10,10 @@ use helmer_editor::editor::{
     AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand, EditorCommandQueue,
     EditorGizmoSettings, EditorGizmoState, EditorProject, EditorSceneState, EditorSelectionState,
     EditorUiState, EditorViewportState, EditorWorkspaceState, FileWatchState, HierarchyUiState,
-    InspectorNameEditState, MaterialEditorCache, ScriptRegistry, ScriptRunState, ScriptRuntime,
-    activate_viewport_camera, asset_scan_system, drag_drop_system, editor_command_system,
-    editor_physics_state_system, editor_shortcut_system, editor_ui_system, file_watch_system,
-    freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
+    InspectorNameEditState, MaterialEditorCache, MiddleDragUiState, ScriptRegistry, ScriptRunState,
+    ScriptRuntime, activate_viewport_camera, asset_scan_system, drag_drop_system,
+    editor_command_system, editor_physics_state_system, editor_shortcut_system, editor_ui_system,
+    file_watch_system, freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
     script_execution_system, script_registry_system, selection_system,
 };
 
@@ -48,6 +48,7 @@ fn editor_init(
     world.insert_resource(EditorAssetCache::default());
     world.insert_resource(AssetBrowserState::default());
     world.insert_resource(AssetDragState::default());
+    world.insert_resource(MiddleDragUiState::default());
     world.insert_resource(EditorCommandQueue::default());
     world.insert_resource(ScriptRegistry::default());
     world.insert_resource(FileWatchState::default());

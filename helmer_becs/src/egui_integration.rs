@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::*;
-use egui::Context;
+use egui::{Context, Id, Pos2};
 use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
 use parking_lot::RwLock;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -34,6 +34,8 @@ pub struct EguiResource {
     pub stats_ui: bool,
     pub inspector_ui: bool,
     pub render_graph_passes_state: RenderGraphPassesUiState,
+    pub window_positions: HashMap<String, Pos2>,
+    pub window_dragging: HashSet<String>,
 }
 
 pub struct RenderGraphPassesUiState {
@@ -70,7 +72,7 @@ pub fn egui_system(world: &mut World) {
 
     runtime_cfg.0.render_config.egui_pass = true;
 
-    let (do_toggle_stats, do_toggle_inspector, raw_input, window_size, pixels_per_point) = {
+    let (do_toggle_stats, do_toggle_inspector, mut raw_input, window_size, pixels_per_point) = {
         let input = input_arc.read();
 
         let is_control_active = input.is_key_active(KeyCode::ControlLeft);
@@ -96,6 +98,7 @@ pub fn egui_system(world: &mut World) {
         }
 
         egui_res.accepting_input = true;
+        egui_res.window_dragging.clear();
 
         if egui_res.stats_ui {
             StatsUI::add_windows(&mut egui_res);
@@ -123,23 +126,51 @@ pub fn egui_system(world: &mut World) {
             let window_id = egui::Id::new(spec.id.clone());
             if let Some(on_close) = close_actions.get_mut(&spec.id) {
                 let mut open = true;
-                egui::Window::new(spec.title.clone())
+                let mut window = egui::Window::new(spec.title.clone())
                     .id(window_id)
                     .constrain_to(screen_rect)
-                    .open(&mut open)
-                    .show(ctx, |ui| {
-                        elements(ui, world, &input_arc);
-                    });
+                    .open(&mut open);
+                if let Some(pos) = world
+                    .get_resource::<EguiResource>()
+                    .and_then(|res| res.window_positions.get(&spec.id).copied())
+                {
+                    window = window.current_pos(pos);
+                }
+                if let Some(inner) = window.show(ctx, |ui| {
+                    elements(ui, world, &input_arc);
+                }) {
+                    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+                        if !egui_res.window_dragging.contains(&spec.id) {
+                            egui_res
+                                .window_positions
+                                .insert(spec.id.clone(), inner.response.rect.min);
+                        }
+                    }
+                }
                 if !open {
                     on_close(world);
                 }
             } else {
-                egui::Window::new(spec.title.clone())
+                let mut window = egui::Window::new(spec.title.clone())
                     .id(window_id)
-                    .constrain_to(screen_rect)
-                    .show(ctx, |ui| {
-                        elements(ui, world, &input_arc);
-                    });
+                    .constrain_to(screen_rect);
+                if let Some(pos) = world
+                    .get_resource::<EguiResource>()
+                    .and_then(|res| res.window_positions.get(&spec.id).copied())
+                {
+                    window = window.current_pos(pos);
+                }
+                if let Some(inner) = window.show(ctx, |ui| {
+                    elements(ui, world, &input_arc);
+                }) {
+                    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+                        if !egui_res.window_dragging.contains(&spec.id) {
+                            egui_res
+                                .window_positions
+                                .insert(spec.id.clone(), inner.response.rect.min);
+                        }
+                    }
+                }
             }
         }
     });

@@ -91,7 +91,7 @@ pub fn load_project(root: &Path) -> Result<ProjectConfig, String> {
         let name = root
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("Helmer Project")
+            .unwrap_or("helmer Project")
             .to_string();
         let config = ProjectConfig::new(name);
         write_project_config(root, &config)?;

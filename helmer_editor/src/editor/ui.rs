@@ -1228,25 +1228,20 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 MeshSource::Primitive(PrimitiveKind::Cube) => "Mesh: Cube".to_string(),
                 MeshSource::Primitive(PrimitiveKind::Plane) => "Mesh: Plane".to_string(),
                 MeshSource::Asset { path } => {
-                    let name = Path::new(path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(path);
-                    format!("Mesh: {}", name)
+                    let relative = project_relative_path(&project, Path::new(path));
+                    format!("Mesh: {}", relative)
                 }
             };
-            ui.label(mesh_label);
+            ui.add(egui::Label::new(mesh_label).wrap_mode(egui::TextWrapMode::Extend));
 
-            ui.label(match &material_path {
-                Some(path) => {
-                    let name = Path::new(path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(path);
-                    format!("Material: {}", name)
-                }
+            let material_label = match material_path.as_deref() {
+                Some(path) => format!(
+                    "Material: {}",
+                    project_relative_path(&project, Path::new(path))
+                ),
                 None => "Material: <default>".to_string(),
-            });
+            };
+            ui.add(egui::Label::new(material_label).wrap_mode(egui::TextWrapMode::Extend));
 
             let mut mesh_changed = false;
             let mut material_changed = false;
@@ -1271,6 +1266,17 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                             ui.close_menu();
                         }
                     }
+                }
+
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Model", &["glb", "gltf"])
+                        .pick_file()
+                    {
+                        mesh_source = mesh_source_from_path(&project, &path);
+                        mesh_changed = true;
+                    }
+                    ui.close_menu();
                 }
             });
 
@@ -1299,6 +1305,17 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                             ui.close_menu();
                         }
                     }
+                }
+
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Material", &["ron"])
+                        .pick_file()
+                    {
+                        material_path = material_path_from_project(&project, &path);
+                        material_changed = true;
+                    }
+                    ui.close_menu();
                 }
             });
 
@@ -1409,7 +1426,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
         ui.separator();
     }
 
-    if world.get::<SceneRoot>(entity).is_some() {
+    if world.get::<SceneRoot>(entity).is_some() || world.get::<SceneAssetPath>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Scene Asset");
@@ -1422,20 +1439,46 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
             world.entity_mut(entity).remove::<SceneRoot>();
             world.entity_mut(entity).remove::<SceneAssetPath>();
         } else {
-            if let Some(path) = world.get::<SceneAssetPath>(entity) {
-                ui.label(format!("Path: {}", path.path.display()));
+            if let Some(scene_path) = world.get::<SceneAssetPath>(entity) {
+                let path_label = if scene_path.path.as_os_str().is_empty() {
+                    "Path: <none>".to_string()
+                } else {
+                    format!(
+                        "Path: {}",
+                        project_relative_path(&project, &scene_path.path)
+                    )
+                };
+                ui.add(egui::Label::new(path_label).wrap_mode(egui::TextWrapMode::Extend));
             }
 
-            if let Some(path) = selected_asset.as_ref() {
-                if is_model_file(path) {
-                    let use_selected_button = ui.button("Use Selected Asset");
-                    if use_selected_button.clicked() {
+            let scene_asset_button = ui.menu_button("Scene Source", |ui| {
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
+                    if ui.button("Use Selected Asset").clicked() {
                         apply_scene_asset(world, entity, path);
+                        ui.close_menu();
                     }
-                    try_apply_scene_asset_drop(world, entity, &use_selected_button);
-                    highlight_drop_target(ui, &use_selected_button);
+                } else {
+                    ui.label("Select a scene asset");
                 }
+
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Scene", &["glb", "gltf"])
+                        .pick_file()
+                    {
+                        apply_scene_asset(world, entity, &path);
+                    }
+                    ui.close_menu();
+                }
+            });
+
+            if let Some(payload) = scene_asset_button
+                .response
+                .dnd_release_payload::<AssetDragPayload>()
+            {
+                try_apply_scene_asset_path(world, entity, &payload.path);
             }
+            highlight_drop_target(ui, &scene_asset_button.response);
         }
         ui.separator();
     }
@@ -1690,9 +1733,11 @@ fn try_apply_scene_asset_path(world: &mut World, entity: Entity, path: &Path) ->
     }
 }
 
-fn try_apply_scene_asset_drop(world: &mut World, entity: Entity, response: &Response) {
-    if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>() {
-        try_apply_scene_asset_path(world, entity, &payload.path);
+fn ensure_scene_asset_placeholder(world: &mut World, entity: Entity) {
+    if world.get::<SceneAssetPath>(entity).is_none() {
+        world.entity_mut(entity).insert(SceneAssetPath {
+            path: PathBuf::new(),
+        });
     }
 }
 
@@ -2657,10 +2702,9 @@ fn draw_add_component_menu(
         if !has_scene {
             let scene_asset_button = ui.button("Scene Asset");
             if scene_asset_button.clicked() {
-                if let Some(path) = selected_asset.as_ref() {
+                ensure_scene_asset_placeholder(world, entity);
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
                     try_apply_scene_asset_path(world, entity, path);
-                } else {
-                    set_status(world, "Select a model asset to add".to_string());
                 }
                 ui.close_menu();
             }

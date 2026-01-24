@@ -458,6 +458,7 @@ impl System for RenderDataSystem {
             camera: None,
             render_config: None,
             render_graph: None,
+            gizmo: None,
             streaming_requests: None,
         };
 

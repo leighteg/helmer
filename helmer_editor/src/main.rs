@@ -1,156 +1,119 @@
-use std::{any::TypeId, collections::HashSet, env};
+use std::{env, path::PathBuf, sync::OnceLock};
 
-use glam::Quat;
-use helmer::provided::components::{
-    ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform,
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use helmer::graphics::render_graphs::template_for_graph;
+use helmer::runtime::asset_server::AssetServer;
+use helmer_becs::systems::render_system::RenderGizmoState;
+use helmer_becs::{egui_integration::EguiResource, helmer_becs_init};
+
+use helmer_editor::editor::{
+    AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand, EditorCommandQueue,
+    EditorGizmoSettings, EditorGizmoState, EditorProject, EditorSceneState, EditorSelectionState,
+    EditorUiState, EditorViewportState, FileWatchState, HierarchyUiState, InspectorNameEditState,
+    MaterialInspectorState, ScriptRegistry, ScriptRunState, ScriptRuntime,
+    activate_viewport_camera, asset_scan_system, drag_drop_system, editor_command_system,
+    editor_physics_state_system, editor_shortcut_system, editor_ui_system, file_watch_system,
+    freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
+    script_execution_system, script_registry_system, selection_system,
 };
-use helmer_ecs::{
-    egui_integration::EguiResource,
-    helmer_ecs_init,
-    physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
-};
-use helmer_editor::systems::{
-    core::state::{EditorStateResource, EditorStateSystem, WorldState},
-    interaction::freecam::FreecamSystem,
-    ui::inspector::InspectorSystem,
-};
+
+static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
+static DEFAULT_PROJECTS_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 fn main() {
-    let current_path = env::current_dir().expect("Failed to find executable path");
-    if current_path.ends_with("helmer-rs") {
-        env::set_current_dir(current_path.join("helmer_editor"))
-            .expect("Failed to change working directory");
+    #[cfg(target_os = "linux")]
+    unsafe {
+        env::set_var("HELMER_FORCE_UNIX_BACKEND", "x11")
+    };
+
+    let project_arg = env::args().nth(1).map(PathBuf::from);
+    let default_projects_root = env::current_dir()
+        .ok()
+        .map(|path| path.join("projects"))
+        .unwrap_or_else(|| PathBuf::from("./projects"));
+
+    let _ = PROJECT_ARG.set(project_arg);
+    let _ = DEFAULT_PROJECTS_ROOT.set(default_projects_root);
+
+    helmer_becs_init(editor_init);
+}
+
+fn editor_init(
+    world: &mut bevy_ecs::world::World,
+    schedule: &mut bevy_ecs::schedule::Schedule,
+    _asset_server: &AssetServer,
+) {
+    world.insert_resource(EditorProject::default());
+    world.insert_resource(EditorSceneState::default());
+    world.insert_resource(EditorAssetCache::default());
+    world.insert_resource(AssetBrowserState::default());
+    world.insert_resource(AssetDragState::default());
+    world.insert_resource(EditorCommandQueue::default());
+    world.insert_resource(ScriptRegistry::default());
+    world.insert_resource(FileWatchState::default());
+    world.insert_resource(ScriptRuntime::default());
+    world.insert_resource(ScriptRunState::default());
+    world.insert_resource(HierarchyUiState::default());
+    world.insert_resource(MaterialInspectorState::default());
+    world.insert_resource(InspectorNameEditState::default());
+    world.insert_resource(EditorGizmoState::default());
+    world.insert_resource(EditorGizmoSettings::default());
+    world.insert_resource(EditorSelectionState::default());
+    world.insert_resource(EditorViewportState::default());
+    world.insert_resource(RenderGizmoState::default());
+
+    activate_viewport_camera(world);
+
+    let projects_root = DEFAULT_PROJECTS_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("./projects"));
+
+    world.insert_resource(EditorUiState {
+        project_name: "NewProject".to_string(),
+        project_path: projects_root.to_string_lossy().into_owned(),
+        open_project_path: projects_root.to_string_lossy().into_owned(),
+        status: None,
+        recent_projects: load_recent_projects(),
+    });
+
+    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+        egui_res.inspector_ui = false;
     }
 
-    helmer_ecs_init(|ecs, scheduler, asset_server| {
-        ecs.add_resource(EditorStateResource {
-            world_state: WorldState::Edit,
-        });
+    let graph_template = world
+        .get_resource::<EditorViewportState>()
+        .map(|state| state.graph_template.clone())
+        .unwrap_or_else(|| "debug-graph".to_string());
+    if let Some(mut graph_res) =
+        world.get_resource_mut::<helmer_becs::systems::render_system::RenderGraphResource>()
+    {
+        if let Some(template) = template_for_graph(&graph_template) {
+            graph_res.0 = (template.build)();
+        }
+    }
 
-        scheduler.register_system(
-            EditorStateSystem {
-                last_world_state: WorldState::Edit,
-            },
-            0,
-            vec![],
-            HashSet::from([TypeId::of::<EditorStateResource>()]),
-            HashSet::from([TypeId::of::<EditorStateResource>()]),
-        );
+    if let Some(path) = PROJECT_ARG.get().and_then(|path| path.clone()) {
+        world
+            .get_resource_mut::<EditorCommandQueue>()
+            .expect("EditorCommandQueue missing")
+            .push(EditorCommand::OpenProject { path });
+    }
 
-        scheduler.register_system(
-            FreecamSystem::new(1.0, 0.5),
-            30,
-            vec![],
-            HashSet::from([TypeId::of::<Transform>()]),
-            HashSet::from([TypeId::of::<Transform>()]),
-        );
-
-        scheduler.register_system(
-            InspectorSystem {},
-            0,
-            vec![],
-            HashSet::from([]),
-            HashSet::from([TypeId::of::<EguiResource>()]),
-        );
-
-        let basic_material_handle =
-            asset_server.load_material("../test_game/assets/materials/basic.ron");
-        let blue_light_material_handle =
-            asset_server.load_material("../test_game/assets/materials/blue_light.ron");
-        let red_light_material_handle =
-            asset_server.load_material("../test_game/assets/materials/red_light.ron");
-
-        let cube_mesh = MeshAsset::cube("cube".to_owned());
-        let cube_handle = asset_server.add_mesh(cube_mesh.vertices.unwrap(), cube_mesh.indices);
-
-        let plane_mesh = MeshAsset::plane("plane".to_owned());
-        let plane_handle = asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
-
-        let camera_entity = ecs.create_entity();
-        ecs.add_component(
-            camera_entity,
-            Transform {
-                position: glam::Vec3::new(0.0, 0.0, -3.0),
-                rotation: glam::Quat::IDENTITY,
-                scale: glam::Vec3::ONE,
-            },
-        );
-        ecs.add_component(
-            camera_entity,
-            Camera {
-                far_plane: 300.0,
-                ..Default::default()
-            },
-        );
-        ecs.add_component(camera_entity, ActiveCamera {});
-
-        let sun_rotation = Quat::from_euler(
-            glam::EulerRot::YXZ,
-            20.0f32.to_radians(),
-            -50.0f32.to_radians(),
-            20.0f32.to_radians(),
-        );
-
-        let sun_entity: usize = ecs.create_entity();
-        ecs.add_component(
-            sun_entity,
-            Transform {
-                position: glam::Vec3::new(0.0, 0.0, 0.0),
-                rotation: sun_rotation,
-                scale: glam::Vec3::ONE,
-            },
-        );
-        ecs.add_component(
-            sun_entity,
-            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
-        );
-
-        let ground_entity = ecs.create_entity();
-        ecs.add_component(
-            ground_entity,
-            Transform {
-                position: glam::Vec3::new(0.0, -5.0, 0.0),
-                rotation: glam::Quat::default(),
-                scale: glam::Vec3::from([50.0, 0.001, 50.0]),
-            },
-        );
-        ecs.add_component(
-            ground_entity,
-            MeshRenderer::new(plane_handle.id, basic_material_handle.id, false, true),
-        );
-        ecs.add_component(ground_entity, ColliderShape::Cuboid);
-        ecs.add_component(ground_entity, FixedCollider {});
-
-        let cube_entity = ecs.create_entity();
-        ecs.add_component(
-            cube_entity,
-            Transform {
-                position: glam::Vec3::new(0.0, 0.0, 0.0),
-                rotation: glam::Quat::default(),
-                scale: glam::Vec3::ONE,
-            },
-        );
-        ecs.add_component(
-            cube_entity,
-            MeshRenderer::new(cube_handle.id, blue_light_material_handle.id, true, true),
-        );
-        ecs.add_component(cube_entity, ColliderShape::Cuboid);
-        ecs.add_component(cube_entity, DynamicRigidBody { mass: 1.0 });
-
-        let cube2_entity = ecs.create_entity();
-        ecs.add_component(
-            cube2_entity,
-            Transform {
-                position: glam::Vec3::new(3.0, 0.0, 0.0),
-                rotation: glam::Quat::default(),
-                scale: glam::Vec3::from_array([2.0; 3]),
-            },
-        );
-        ecs.add_component(
-            cube2_entity,
-            MeshRenderer::new(cube_handle.id, red_light_material_handle.id, true, true),
-        );
-        ecs.add_component(cube2_entity, ColliderShape::Cuboid);
-        ecs.add_component(cube2_entity, DynamicRigidBody { mass: 5.0 });
-    });
+    schedule.add_systems(editor_command_system);
+    schedule.add_systems(
+        editor_physics_state_system.before(helmer_becs::physics::systems::cleanup_physics_system),
+    );
+    schedule.add_systems(file_watch_system);
+    schedule.add_systems(asset_scan_system);
+    schedule.add_systems(drag_drop_system);
+    schedule.add_systems(editor_shortcut_system);
+    schedule.add_systems(scene_dirty_system);
+    schedule.add_systems(script_registry_system);
+    schedule.add_systems(script_execution_system);
+    schedule.add_systems(editor_ui_system.before(helmer_becs::egui_integration::egui_system));
+    schedule
+        .add_systems(gizmo_system.before(helmer_becs::systems::render_system::render_data_system));
+    schedule.add_systems(selection_system.after(gizmo_system));
+    schedule.add_systems(freecam_system);
 }

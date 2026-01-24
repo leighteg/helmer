@@ -23,6 +23,7 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - LOD/mip generation
 
 ## todo 😡
+- [ ] web/WASM support
 - [ ] promote statelessness of GraphRenderer
 - [ ] ditch monolithic ShaderConstants for modularized uniforms
 - [x] provide custom runtime hooks?
@@ -33,7 +34,7 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - [ ] helmer_ecs revamp ❓
 - [ ] custom types to relieve project reliance on engine dependencies (InputMan)
 - [x] ui implementation or integration
-- [ ] editor & project cli tools
+- [x] editor & ~~project cli tools~~ [partial]
 - [ ] taskable worker pool system/api for ecs (resource based? - asynchronously taskable by systems?)
 - [x] asset streaming
 - [x] AssetServer improved worker pool usage (scene parsing)

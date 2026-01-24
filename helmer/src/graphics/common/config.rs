@@ -11,6 +11,7 @@ pub struct RenderConfig {
     pub ssr_pass: bool,
     pub ddgi_pass: bool,
     pub egui_pass: bool,
+    pub gizmo_pass: bool,
 
     pub freeze_render_camera: bool,
 
@@ -170,6 +171,7 @@ impl Default for RenderConfig {
             ssr_pass: true,
             ddgi_pass: true,
             egui_pass: true,
+            gizmo_pass: true,
 
             freeze_render_camera: false,
 

@@ -7,6 +7,7 @@ pub mod downsample;
 pub mod egui;
 pub mod forward;
 pub mod gbuffer;
+pub mod gizmo;
 pub mod hiz;
 pub mod lighting;
 pub mod raytraced;
@@ -94,6 +95,8 @@ pub struct FrameGlobals {
     pub brdf_lut_sampler: wgpu::Sampler,
     pub atmosphere_bind_group: wgpu::BindGroup,
     pub debug_params_buffer: wgpu::Buffer,
+    pub gizmo_params_buffer: Option<wgpu::Buffer>,
+    pub gizmo_vertex_count: u32,
     pub gbuffer_instances: Option<InstanceBuffer>,
     pub gbuffer_batches: Arc<Vec<DrawBatch>>,
     pub gbuffer_indirect: Option<wgpu::Buffer>,
@@ -126,6 +129,34 @@ pub struct DebugCompositeParams {
     pub _pad0: [u32; 3],
     pub _pad1: [u32; 4],
     pub _pad2: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GizmoParams {
+    pub origin: [f32; 3],
+    pub mode: u32,
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+    pub size: f32,
+    pub hover_axis: u32,
+    pub active_axis: u32,
+    pub ring_segments: u32,
+    pub _pad0: u32,
+    pub translate_params: [f32; 4],
+    pub scale_params: [f32; 4],
+    pub rotate_params: [f32; 4],
+    pub origin_params: [f32; 4],
+    pub axis_color_x: [f32; 4],
+    pub axis_color_y: [f32; 4],
+    pub axis_color_z: [f32; 4],
+    pub origin_color: [f32; 4],
+    pub highlight_params: [f32; 4],
+    pub selection_min: [f32; 3],
+    pub selection_enabled: u32,
+    pub selection_max: [f32; 3],
+    pub selection_thickness: f32,
+    pub selection_color: [f32; 4],
 }
 
 #[derive(Clone)]

@@ -24,7 +24,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use crossbeam_channel::Sender;
 use egui::{Color32, ColorImage, Vec2 as EguiVec2};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 use std::{
@@ -452,6 +452,128 @@ pub struct RenderData {
     pub timestamp: Instant,
     pub render_config: RenderConfig,
     pub render_graph: RenderGraphSpec,
+    pub gizmo: GizmoData,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoMode {
+    None = 0,
+    Translate = 1,
+    Rotate = 2,
+    Scale = 3,
+}
+
+impl Default for GizmoMode {
+    fn default() -> Self {
+        GizmoMode::None
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoAxis {
+    None = 0,
+    X = 1,
+    Y = 2,
+    Z = 3,
+    Center = 4,
+}
+
+impl Default for GizmoAxis {
+    fn default() -> Self {
+        GizmoAxis::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GizmoStyle {
+    pub ring_segments: u32,
+    pub translate_thickness_scale: f32,
+    pub translate_thickness_min: f32,
+    pub translate_head_length_scale: f32,
+    pub translate_head_width_scale: f32,
+    pub scale_thickness_scale: f32,
+    pub scale_thickness_min: f32,
+    pub scale_head_length_scale: f32,
+    pub scale_box_scale: f32,
+    pub rotate_radius_scale: f32,
+    pub rotate_thickness_scale: f32,
+    pub rotate_thickness_min: f32,
+    pub origin_size_scale: f32,
+    pub origin_size_min: f32,
+    pub axis_color_x: [f32; 3],
+    pub axis_color_y: [f32; 3],
+    pub axis_color_z: [f32; 3],
+    pub origin_color: [f32; 3],
+    pub selection_thickness_scale: f32,
+    pub selection_thickness_min: f32,
+    pub selection_color: [f32; 3],
+    pub hover_mix: f32,
+    pub active_mix: f32,
+}
+
+impl Default for GizmoStyle {
+    fn default() -> Self {
+        Self {
+            ring_segments: 32,
+            translate_thickness_scale: 0.05,
+            translate_thickness_min: 0.015,
+            translate_head_length_scale: 0.22,
+            translate_head_width_scale: 2.6,
+            scale_thickness_scale: 0.05,
+            scale_thickness_min: 0.015,
+            scale_head_length_scale: 0.18,
+            scale_box_scale: 2.0,
+            rotate_radius_scale: 0.85,
+            rotate_thickness_scale: 0.03,
+            rotate_thickness_min: 0.01,
+            origin_size_scale: 0.06,
+            origin_size_min: 0.03,
+            axis_color_x: [1.0, 0.2, 0.2],
+            axis_color_y: [0.2, 1.0, 0.2],
+            axis_color_z: [0.2, 0.4, 1.0],
+            origin_color: [0.9, 0.9, 0.9],
+            selection_thickness_scale: 0.03,
+            selection_thickness_min: 0.01,
+            selection_color: [1.0, 0.85, 0.2],
+            hover_mix: 0.3,
+            active_mix: 0.5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GizmoData {
+    pub mode: GizmoMode,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+    pub size: f32,
+    pub hover_axis: GizmoAxis,
+    pub active_axis: GizmoAxis,
+    pub selection_enabled: bool,
+    pub selection_min: Vec3,
+    pub selection_max: Vec3,
+    pub style: GizmoStyle,
+}
+
+impl Default for GizmoData {
+    fn default() -> Self {
+        Self {
+            mode: GizmoMode::None,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            size: 0.0,
+            hover_axis: GizmoAxis::None,
+            active_axis: GizmoAxis::None,
+            selection_enabled: false,
+            selection_min: Vec3::ZERO,
+            selection_max: Vec3::ZERO,
+            style: GizmoStyle::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -489,6 +611,7 @@ pub struct RenderDelta {
     pub camera: Option<RenderCameraDelta>,
     pub render_config: Option<RenderConfig>,
     pub render_graph: Option<RenderGraphSpec>,
+    pub gizmo: Option<GizmoData>,
     pub streaming_requests: Option<Vec<AssetStreamingRequest>>,
 }
 
@@ -502,6 +625,7 @@ impl RenderDelta {
             && self.camera.is_none()
             && self.render_config.is_none()
             && self.render_graph.is_none()
+            && self.gizmo.is_none()
             && self.streaming_requests.is_none()
     }
 
@@ -553,6 +677,9 @@ impl RenderDelta {
         if other.render_graph.is_some() {
             self.render_graph = other.render_graph;
         }
+        if other.gizmo.is_some() {
+            self.gizmo = other.gizmo;
+        }
         if other.streaming_requests.is_some() {
             self.streaming_requests = other.streaming_requests;
         }
@@ -589,6 +716,9 @@ impl RenderDelta {
         }
         if delta.render_graph.is_some() {
             self.render_graph = delta.render_graph.clone();
+        }
+        if delta.gizmo.is_some() {
+            self.gizmo = delta.gizmo;
         }
         if delta.streaming_requests.is_some() {
             self.streaming_requests = delta.streaming_requests.clone();

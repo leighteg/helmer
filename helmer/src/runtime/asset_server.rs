@@ -21,7 +21,7 @@ use memmap2::MmapOptions;
 use memmap2::UncheckedAdvice;
 use meshopt::{SimplifyOptions, VertexDataAdapter, optimize_vertex_cache, simplify};
 use parking_lot::RwLock;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::VecDeque,
@@ -448,7 +448,7 @@ pub struct MaterialGpuData {
     pub emission_texture_id: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MaterialFile {
     pub albedo: [f32; 4],
     pub metallic: f32,

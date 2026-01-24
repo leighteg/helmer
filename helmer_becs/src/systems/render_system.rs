@@ -3,7 +3,7 @@ use bevy_ecs::{
         Added, Changed, DetectChanges, Entity, Or, Query, Ref, RemovedComponents, Res, ResMut,
         Resource, With,
     },
-    system::{Local, ParamSet},
+    system::{Local, ParamSet, SystemParam},
 };
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -14,8 +14,8 @@ use helmer::{
             config::RenderConfig,
             graph::RenderGraphSpec,
             renderer::{
-                Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
-                RenderLightDelta, RenderObjectDelta, StreamingTuning,
+                Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
+                RenderDelta, RenderLightDelta, RenderObjectDelta, StreamingTuning,
             },
         },
         render_graphs::default_graph_spec,
@@ -50,6 +50,15 @@ pub struct RenderGraphResource(pub RenderGraphSpec);
 impl Default for RenderGraphResource {
     fn default() -> Self {
         Self(default_graph_spec())
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct RenderGizmoState(pub GizmoData);
+
+impl Default for RenderGizmoState {
+    fn default() -> Self {
+        Self(GizmoData::default())
     }
 }
 
@@ -404,6 +413,19 @@ pub struct RenderWorkerState {
     last_streaming_tuning: Option<StreamingTuning>,
     last_lod_tuning: Option<LodTuning>,
     last_worker_tuning: Option<RenderWorkerTuning>,
+    last_gizmo: Option<GizmoData>,
+}
+
+#[derive(SystemParam)]
+pub struct RenderSystemResources<'w> {
+    asset_server: Option<Res<'w, BevyAssetServer>>,
+    runtime_config: Option<Res<'w, BevyRuntimeConfig>>,
+    render_graph: Option<Res<'w, RenderGraphResource>>,
+    gizmo_state: Option<Res<'w, RenderGizmoState>>,
+    streaming_tuning: Option<Res<'w, BevyStreamingTuning>>,
+    lod_tuning: Option<Res<'w, BevyLodTuning>>,
+    worker_tuning: Option<Res<'w, BevyRenderWorkerTuning>>,
+    runtime_profiling: Option<Res<'w, BevyRuntimeProfiling>>,
 }
 
 struct ProfilingScope {
@@ -1783,6 +1805,7 @@ fn render_worker_loop(
             camera: None,
             render_config: None,
             render_graph: None,
+            gizmo: None,
             streaming_requests: None,
         };
 
@@ -1850,13 +1873,7 @@ fn render_worker_loop(
 #[allow(clippy::too_many_arguments)]
 pub fn render_data_system(
     mut worker_state: Local<RenderWorkerState>,
-    asset_server_res: Option<Res<BevyAssetServer>>,
-    runtime_config_res: Option<Res<BevyRuntimeConfig>>,
-    render_graph_res: Option<Res<RenderGraphResource>>,
-    streaming_tuning_res: Option<Res<BevyStreamingTuning>>,
-    lod_tuning_res: Option<Res<BevyLodTuning>>,
-    worker_tuning_res: Option<Res<BevyRenderWorkerTuning>>,
-    runtime_profiling_res: Option<Res<BevyRuntimeProfiling>>,
+    resources: RenderSystemResources,
     mut render_packet: ResMut<RenderPacket>,
     mut render_object_count: ResMut<RenderObjectCount>,
     camera_query: Query<(Ref<BevyCamera>, Ref<BevyTransform>), With<BevyActiveCamera>>,
@@ -1889,8 +1906,8 @@ pub fn render_data_system(
     mut removed_lights: RemovedComponents<BevyLight>,
 ) {
     let (runtime_config, asset_server) = match (
-        runtime_config_res.as_ref(),
-        asset_server_res.as_ref(),
+        resources.runtime_config.as_ref(),
+        resources.asset_server.as_ref(),
     ) {
         (Some(config), Some(server)) => (config.0, server),
         _ => {
@@ -1901,9 +1918,14 @@ pub fn render_data_system(
         }
     };
 
-    let _profiling_scope = ProfilingScope::new(runtime_profiling_res.as_ref().map(|p| p.0.clone()));
+    let _profiling_scope =
+        ProfilingScope::new(resources.runtime_profiling.as_ref().map(|p| p.0.clone()));
 
-    let worker_tuning = worker_tuning_res.map(|t| t.0).unwrap_or_default();
+    let worker_tuning = resources
+        .worker_tuning
+        .as_ref()
+        .map(|t| t.0)
+        .unwrap_or_default();
     let change_capacity = worker_tuning.change_queue_capacity.max(1);
     let capacity_changed = worker_state
         .last_worker_tuning
@@ -1929,12 +1951,21 @@ pub fn render_data_system(
         None => return,
     };
 
-    let render_graph = render_graph_res
+    let render_graph = resources
+        .render_graph
         .as_ref()
         .map(|r| r.0.clone())
         .unwrap_or_else(default_graph_spec);
-    let streaming_tuning = streaming_tuning_res.map(|t| t.0).unwrap_or_default();
-    let lod_tuning = lod_tuning_res.map(|t| t.0).unwrap_or_default();
+    let streaming_tuning = resources
+        .streaming_tuning
+        .as_ref()
+        .map(|t| t.0)
+        .unwrap_or_default();
+    let lod_tuning = resources
+        .lod_tuning
+        .as_ref()
+        .map(|t| t.0)
+        .unwrap_or_default();
     let mut render_config = runtime_config.render_config;
     render_config.gpu_lod0_distance = lod_tuning.lod0_distance;
     render_config.gpu_lod1_distance = lod_tuning.lod1_distance;
@@ -2009,6 +2040,19 @@ pub fn render_data_system(
         } else {
             worker_state.config_sent = false;
         }
+    }
+
+    let gizmo_data = resources
+        .gizmo_state
+        .as_ref()
+        .map(|state| state.0)
+        .unwrap_or_default();
+    if worker_state
+        .last_gizmo
+        .map_or(true, |last| last != gizmo_data)
+    {
+        direct_delta.gizmo = Some(gizmo_data);
+        worker_state.last_gizmo = Some(gizmo_data);
     }
 
     let mut camera_available = false;

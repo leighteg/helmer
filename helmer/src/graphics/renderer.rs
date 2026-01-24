@@ -35,14 +35,14 @@ use crate::graphics::{
         },
         renderer::{
             Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            DdgiGridConstants, EguiTextureCache, InstanceRaw, LightData, MaterialShaderData,
-            MeshLodPayload, MeshletDesc, MeshletLodData, OCCLUSION_STATUS_DISABLED,
-            OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES,
-            OCCLUSION_STATUS_RAN, RenderControl, RenderData, RenderDelta, RenderDeviceCaps,
-            RenderLight, RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta,
-            RenderPassTiming, RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms,
-            StreamingTuning, Vertex, apply_egui_delta, build_mip_uploads, calc_mip_level_count,
-            mesh_task_tiling,
+            DdgiGridConstants, EguiTextureCache, GizmoMode, InstanceRaw, LightData,
+            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
+            OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
+            OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
+            RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
+            RenderObject, RenderObjectDelta, RenderPassTiming, RendererStats, ShaderConstants,
+            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
+            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -60,8 +60,9 @@ use crate::graphics::{
         },
     },
     passes::{
-        BundleMode, FrameGlobals, GBufferBundleKey, IndirectDrawBatch, MaterialTextureSet,
-        RayTracingFrameInput, RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput,
+        BundleMode, FrameGlobals, GBufferBundleKey, GizmoParams, IndirectDrawBatch,
+        MaterialTextureSet, RayTracingFrameInput, RayTracingTextureArrays, ShadowBundleKey,
+        SwapchainFrameInput,
     },
     render_graphs::default_graph_spec,
 };
@@ -817,6 +818,7 @@ struct BufferCache {
     shadow_matrices: ReusableBuffer,
     materials: ReusableBuffer,
     debug_params: ReusableBuffer,
+    gizmo_params: ReusableBuffer,
     occlusion_params: ReusableBuffer,
     gpu_cull_params: ReusableBuffer,
     gbuffer_instances: ReusableBuffer,
@@ -848,6 +850,7 @@ impl BufferCache {
             shadow_matrices: ReusableBuffer::new("GraphRenderer/ShadowMatrices", frames_in_flight),
             materials: ReusableBuffer::new("GraphRenderer/Materials", frames_in_flight),
             debug_params: ReusableBuffer::new("GraphRenderer/DebugParams", frames_in_flight),
+            gizmo_params: ReusableBuffer::new("GraphRenderer/GizmoParams", frames_in_flight),
             occlusion_params: ReusableBuffer::new(
                 "GraphRenderer/OcclusionParams",
                 frames_in_flight,
@@ -873,6 +876,7 @@ impl BufferCache {
         self.shadow_matrices.resize_slots(frames_in_flight);
         self.materials.resize_slots(frames_in_flight);
         self.debug_params.resize_slots(frames_in_flight);
+        self.gizmo_params.resize_slots(frames_in_flight);
         self.occlusion_params.resize_slots(frames_in_flight);
         self.gpu_cull_params.resize_slots(frames_in_flight);
         self.gbuffer_instances.resize_slots(frames_in_flight);
@@ -3045,6 +3049,7 @@ impl GraphRenderer {
             camera,
             render_config,
             render_graph,
+            gizmo,
             streaming_requests,
         } = delta;
         let mut objects_changed = full;
@@ -3070,6 +3075,7 @@ impl GraphRenderer {
                 timestamp: Instant::now(),
                 render_config: config,
                 render_graph: graph,
+                gizmo: gizmo.unwrap_or_default(),
             };
             self.current_render_data = Some(RenderSceneState::new(data));
         }
@@ -3109,6 +3115,9 @@ impl GraphRenderer {
         }
         if let Some(graph) = render_graph {
             state.data.render_graph = graph;
+        }
+        if let Some(gizmo) = gizmo {
+            state.data.gizmo = gizmo;
         }
         let gpu_driven =
             state.data.render_config.gpu_driven && self.supports_indirect_first_instance;
@@ -6760,6 +6769,103 @@ impl GraphRenderer {
             buf.clone()
         };
 
+        let (gizmo_params_buffer, gizmo_vertex_count) = {
+            let gizmo = render_data.gizmo;
+            if gizmo.mode == GizmoMode::None && !gizmo.selection_enabled {
+                (None, 0)
+            } else {
+                let style = gizmo.style;
+                let ring_segments = style.ring_segments.max(3);
+                let ring_verts_per_axis = ring_segments * 6;
+                let translate_verts_per_axis = 9;
+                let scale_verts_per_axis = 12;
+                let origin_verts = 6;
+                let gizmo_verts = match gizmo.mode {
+                    GizmoMode::Translate => translate_verts_per_axis * 3 + origin_verts,
+                    GizmoMode::Rotate => ring_verts_per_axis * 3 + origin_verts,
+                    GizmoMode::Scale => scale_verts_per_axis * 3 + origin_verts,
+                    GizmoMode::None => 0,
+                };
+                let selection_verts = if gizmo.selection_enabled { 12 * 6 } else { 0 };
+                let vertex_count = gizmo_verts + selection_verts;
+                let selection_thickness = (gizmo.size * style.selection_thickness_scale)
+                    .max(style.selection_thickness_min);
+                let params = GizmoParams {
+                    origin: gizmo.position.to_array(),
+                    mode: gizmo.mode as u32,
+                    rotation: gizmo.rotation.to_array(),
+                    scale: gizmo.scale.to_array(),
+                    size: gizmo.size,
+                    hover_axis: gizmo.hover_axis as u32,
+                    active_axis: gizmo.active_axis as u32,
+                    ring_segments,
+                    _pad0: 0,
+                    translate_params: [
+                        style.translate_thickness_scale,
+                        style.translate_thickness_min,
+                        style.translate_head_length_scale,
+                        style.translate_head_width_scale,
+                    ],
+                    scale_params: [
+                        style.scale_thickness_scale,
+                        style.scale_thickness_min,
+                        style.scale_head_length_scale,
+                        style.scale_box_scale,
+                    ],
+                    rotate_params: [
+                        style.rotate_radius_scale,
+                        style.rotate_thickness_scale,
+                        style.rotate_thickness_min,
+                        0.0,
+                    ],
+                    origin_params: [style.origin_size_scale, style.origin_size_min, 0.0, 0.0],
+                    axis_color_x: [
+                        style.axis_color_x[0],
+                        style.axis_color_x[1],
+                        style.axis_color_x[2],
+                        1.0,
+                    ],
+                    axis_color_y: [
+                        style.axis_color_y[0],
+                        style.axis_color_y[1],
+                        style.axis_color_y[2],
+                        1.0,
+                    ],
+                    axis_color_z: [
+                        style.axis_color_z[0],
+                        style.axis_color_z[1],
+                        style.axis_color_z[2],
+                        1.0,
+                    ],
+                    origin_color: [
+                        style.origin_color[0],
+                        style.origin_color[1],
+                        style.origin_color[2],
+                        1.0,
+                    ],
+                    highlight_params: [style.hover_mix, style.active_mix, 0.0, 0.0],
+                    selection_min: gizmo.selection_min.to_array(),
+                    selection_enabled: gizmo.selection_enabled as u32,
+                    selection_max: gizmo.selection_max.to_array(),
+                    selection_thickness,
+                    selection_color: [
+                        style.selection_color[0],
+                        style.selection_color[1],
+                        style.selection_color[2],
+                        1.0,
+                    ],
+                };
+                let buf = self.buffer_cache.gizmo_params.ensure(
+                    &self.device,
+                    std::mem::size_of::<GizmoParams>() as u64,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    self.frame_index,
+                );
+                self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&params));
+                (Some(buf.clone()), vertex_count)
+            }
+        };
+
         let occlusion_camera_stable = {
             let prev_pos = render_data.previous_camera_transform.position;
             let cur_pos = render_data.current_camera_transform.position;
@@ -6823,6 +6929,8 @@ impl GraphRenderer {
             brdf_lut_sampler: self.brdf_lut_sampler.clone(),
             atmosphere_bind_group: self.atmosphere_precomputer.sampling_bind_group.clone(),
             debug_params_buffer,
+            gizmo_params_buffer,
+            gizmo_vertex_count,
             gbuffer_instances,
             gbuffer_batches,
             gbuffer_indirect,

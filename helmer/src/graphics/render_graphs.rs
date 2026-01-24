@@ -26,6 +26,7 @@ use crate::graphics::{
         downsample::{DownsampleOutputs, DownsamplePass},
         egui::{EguiOutputs, EguiPass},
         gbuffer::{GBufferFormats, GBufferOutputs, GBufferPass},
+        gizmo::{GizmoOutputs, GizmoPass},
         hiz::{HiZOutputs, HiZPass},
         lighting::{LightingOutputs, LightingPass},
         raytraced::{
@@ -55,6 +56,7 @@ pub enum RenderPassToggleFlag {
     Ssr,
     Ddgi,
     Egui,
+    Gizmo,
     Occlusion,
 }
 
@@ -70,6 +72,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssr => config.ssr_pass,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass,
             RenderPassToggleFlag::Egui => config.egui_pass,
+            RenderPassToggleFlag::Gizmo => config.gizmo_pass,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling,
         }
     }
@@ -85,6 +88,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssr => config.ssr_pass = value,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass = value,
             RenderPassToggleFlag::Egui => config.egui_pass = value,
+            RenderPassToggleFlag::Gizmo => config.gizmo_pass = value,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling = value,
         }
     }
@@ -145,6 +149,10 @@ const DEFAULT_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Egui,
     },
     RenderPassToggle {
+        label: "Gizmo",
+        toggle: RenderPassToggleFlag::Gizmo,
+    },
+    RenderPassToggle {
         label: "Occlusion (Hi-Z)",
         toggle: RenderPassToggleFlag::Occlusion,
     },
@@ -174,6 +182,53 @@ const HYBRID_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
+    },
+    RenderPassToggle {
+        label: "Gizmo",
+        toggle: RenderPassToggleFlag::Gizmo,
+    },
+    RenderPassToggle {
+        label: "Occlusion (Hi-Z)",
+        toggle: RenderPassToggleFlag::Occlusion,
+    },
+];
+
+const DEBUG_GRAPH_PASSES: &[RenderPassToggle] = &[
+    RenderPassToggle {
+        label: "GBuffer",
+        toggle: RenderPassToggleFlag::GBuffer,
+    },
+    RenderPassToggle {
+        label: "Shadow",
+        toggle: RenderPassToggleFlag::Shadow,
+    },
+    RenderPassToggle {
+        label: "Direct Lighting",
+        toggle: RenderPassToggleFlag::DirectLighting,
+    },
+    RenderPassToggle {
+        label: "Sky",
+        toggle: RenderPassToggleFlag::Sky,
+    },
+    RenderPassToggle {
+        label: "SSGI",
+        toggle: RenderPassToggleFlag::Ssgi,
+    },
+    RenderPassToggle {
+        label: "SSGI Denoise",
+        toggle: RenderPassToggleFlag::SsgiDenoise,
+    },
+    RenderPassToggle {
+        label: "SSR",
+        toggle: RenderPassToggleFlag::Ssr,
+    },
+    RenderPassToggle {
+        label: "Egui",
+        toggle: RenderPassToggleFlag::Egui,
+    },
+    RenderPassToggle {
+        label: "Gizmo",
+        toggle: RenderPassToggleFlag::Gizmo,
     },
     RenderPassToggle {
         label: "Occlusion (Hi-Z)",
@@ -208,10 +263,16 @@ const DEBUG_GRAPH_FLAGS: &[DebugFlagToggle] = &[
     },
 ];
 
-const TRACED_GRAPH_PASSES: &[RenderPassToggle] = &[RenderPassToggle {
-    label: "Egui",
-    toggle: RenderPassToggleFlag::Egui,
-}];
+const TRACED_GRAPH_PASSES: &[RenderPassToggle] = &[
+    RenderPassToggle {
+        label: "Egui",
+        toggle: RenderPassToggleFlag::Egui,
+    },
+    RenderPassToggle {
+        label: "Gizmo",
+        toggle: RenderPassToggleFlag::Gizmo,
+    },
+];
 
 const GRAPH_TEMPLATES: &[RenderGraphTemplate] = &[
     RenderGraphTemplate {
@@ -232,7 +293,7 @@ const GRAPH_TEMPLATES: &[RenderGraphTemplate] = &[
         name: "debug-graph",
         label: "Debug Graph",
         build: debug_graph_spec,
-        pass_toggles: DEFAULT_GRAPH_PASSES,
+        pass_toggles: DEBUG_GRAPH_PASSES,
         debug_flags: DEBUG_GRAPH_FLAGS,
     },
     RenderGraphTemplate {
@@ -419,6 +480,12 @@ impl PassResourceOutput for RayTracingCompositeInputs {
 }
 
 impl PassResourceOutput for EguiOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.swapchain]
+    }
+}
+
+impl PassResourceOutput for GizmoOutputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.swapchain]
     }
@@ -718,6 +785,14 @@ fn build_default_graph(
         (pass, outputs)
     });
     let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.gizmo_pass {
+        builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
+            let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
 
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
@@ -1028,6 +1103,14 @@ fn build_hybrid_graph(
     });
     let swapchain_id = composite.outputs.swapchain;
 
+    if toggles.gizmo_pass {
+        builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
+            let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
             let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
@@ -1317,6 +1400,14 @@ fn build_debug_graph(
         });
     let swapchain_id = composite.outputs.swapchain;
 
+    if toggles.gizmo_pass {
+        builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
+            let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
             let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
@@ -1367,6 +1458,14 @@ fn build_traced_graph(
             (pass, outputs)
         });
     let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.gizmo_pass {
+        builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
+            let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
 
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {

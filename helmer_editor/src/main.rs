@@ -9,8 +9,8 @@ use helmer_becs::{egui_integration::EguiResource, helmer_becs_init};
 use helmer_editor::editor::{
     AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand, EditorCommandQueue,
     EditorGizmoSettings, EditorGizmoState, EditorProject, EditorSceneState, EditorSelectionState,
-    EditorUiState, EditorViewportState, FileWatchState, HierarchyUiState, InspectorNameEditState,
-    MaterialInspectorState, ScriptRegistry, ScriptRunState, ScriptRuntime,
+    EditorUiState, EditorViewportState, EditorWorkspaceState, FileWatchState, HierarchyUiState,
+    InspectorNameEditState, MaterialEditorCache, ScriptRegistry, ScriptRunState, ScriptRuntime,
     activate_viewport_camera, asset_scan_system, drag_drop_system, editor_command_system,
     editor_physics_state_system, editor_shortcut_system, editor_ui_system, file_watch_system,
     freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
@@ -54,7 +54,8 @@ fn editor_init(
     world.insert_resource(ScriptRuntime::default());
     world.insert_resource(ScriptRunState::default());
     world.insert_resource(HierarchyUiState::default());
-    world.insert_resource(MaterialInspectorState::default());
+    world.insert_resource(MaterialEditorCache::default());
+    world.insert_resource(EditorWorkspaceState::default());
     world.insert_resource(InspectorNameEditState::default());
     world.insert_resource(EditorGizmoState::default());
     world.insert_resource(EditorGizmoSettings::default());

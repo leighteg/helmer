@@ -44,13 +44,32 @@ use crate::editor::{
     scripting::{ScriptComponent, ScriptRegistry, load_script_asset},
     set_play_camera,
     ui::{
-        EditorUiState, draw_assets_window, draw_project_window, draw_scene_window, draw_toolbar,
-        draw_viewport_window,
+        EditorUiState, EditorWorkspaceState, draw_assets_window, draw_editor_window,
+        draw_project_window, draw_scene_window, draw_toolbar, draw_viewport_window,
     },
     watch::configure_file_watcher,
 };
 
-pub fn editor_ui_system(mut egui_res: ResMut<EguiResource>) {
+pub fn editor_ui_system(world: &mut World) {
+    let editor_windows = world
+        .get_resource::<EditorWorkspaceState>()
+        .map(|state| {
+            state
+                .windows
+                .iter()
+                .map(|window| (window.id, window.title.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
+        workspace.drop_handled = false;
+    }
+
+    let mut egui_res = world
+        .get_resource_mut::<EguiResource>()
+        .expect("EguiResource missing");
+
     egui_res.inspector_ui = false;
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
@@ -86,6 +105,15 @@ pub fn editor_ui_system(mut egui_res: ResMut<EguiResource>) {
         }),
         "Content Browser".to_string(),
     ));
+
+    for (window_id, title) in editor_windows {
+        egui_res.windows.push((
+            Box::new(move |ui: &mut Ui, world: &mut World, _| {
+                draw_editor_window(ui, world, window_id);
+            }),
+            title,
+        ));
+    }
 }
 
 pub fn editor_physics_state_system(
@@ -401,6 +429,15 @@ fn handle_close_project(world: &mut World) {
     if let Some(mut project) = world.get_resource_mut::<EditorProject>() {
         project.root = None;
         project.config = None;
+    }
+
+    if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
+        workspace.windows.clear();
+        workspace.dragging = None;
+        workspace.last_focused_window = None;
+        workspace.drop_handled = false;
+        workspace.next_window_id = 1;
+        workspace.next_tab_id = 1;
     }
 
     if let Some(mut assets) = world.get_resource_mut::<AssetBrowserState>() {

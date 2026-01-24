@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -50,10 +50,63 @@ pub struct EditorUiState {
 }
 
 #[derive(Default, Debug, Clone, Resource)]
-pub struct MaterialInspectorState {
-    pub path: Option<PathBuf>,
+pub struct MaterialEditorCache {
+    pub entries: HashMap<PathBuf, MaterialEditorEntry>,
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct MaterialEditorEntry {
     pub data: Option<MaterialFile>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorWorkspaceState {
+    pub next_window_id: u64,
+    pub next_tab_id: u64,
+    pub windows: Vec<EditorTabWindow>,
+    pub last_focused_window: Option<u64>,
+    pub dragging: Option<EditorTabDrag>,
+    pub drop_handled: bool,
+}
+
+impl Default for EditorWorkspaceState {
+    fn default() -> Self {
+        Self {
+            next_window_id: 1,
+            next_tab_id: 1,
+            windows: Vec::new(),
+            last_focused_window: None,
+            dragging: None,
+            drop_handled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorTabWindow {
+    pub id: u64,
+    pub title: String,
+    pub tabs: Vec<EditorTab>,
+    pub active: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorTab {
+    pub id: u64,
+    pub title: String,
+    pub content: EditorTabContent,
+}
+
+#[derive(Debug, Clone)]
+pub enum EditorTabContent {
+    Material { path: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorTabDrag {
+    pub tab: EditorTab,
+    pub source_window_id: u64,
 }
 
 #[derive(Default, Debug, Clone, Resource)]
@@ -824,6 +877,311 @@ pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
     });
 }
 
+pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
+    bring_window_to_front_if_dragging(ui, world);
+
+    let (tabs_snapshot, active_index, window_index, window_count) = {
+        let Some(state) = world.get_resource::<EditorWorkspaceState>() else {
+            ui.label("No editors available.");
+            return;
+        };
+        let Some((index, window)) = state
+            .windows
+            .iter()
+            .enumerate()
+            .find(|(_, window)| window.id == window_id)
+        else {
+            ui.label("Editor window missing.");
+            return;
+        };
+        (
+            window.tabs.clone(),
+            window.active,
+            index,
+            state.windows.len(),
+        )
+    };
+
+    if tabs_snapshot.is_empty() {
+        world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+            if let Some(index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == window_id)
+            {
+                let is_drag_source = workspace
+                    .dragging
+                    .as_ref()
+                    .map(|drag| drag.source_window_id == window_id)
+                    .unwrap_or(false);
+                if !is_drag_source {
+                    workspace.windows.remove(index);
+                }
+            }
+        });
+        return;
+    }
+
+    let mut activate_tab: Option<usize> = None;
+    let mut close_tab: Option<usize> = None;
+    let mut detach_tab: Option<usize> = None;
+    let mut drag_tab: Option<usize> = None;
+    let mut interacted = false;
+
+    let mut drop_on_tab: Option<usize> = None;
+    let can_drag_tabs = tabs_snapshot.len() > 1;
+    let tab_bar = egui::Frame::none().show(ui, |ui| {
+        let old_spacing = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, old_spacing.y);
+        ui.horizontal_wrapped(|ui| {
+            for (index, tab) in tabs_snapshot.iter().enumerate() {
+                let selected = index == active_index;
+                let visuals = ui.visuals().clone();
+                let text_color = if selected {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.text_color()
+                };
+                let galley = ui.painter().layout_no_wrap(
+                    tab.title.clone(),
+                    FontId::proportional(13.0),
+                    text_color,
+                );
+
+                let padding = Vec2::new(10.0, 4.0);
+                let close_width = 24.0;
+                let tab_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(galley.size().y + padding.y * 2.0);
+                let tab_width = galley.size().x + padding.x * 2.0 + close_width;
+
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(tab_width, tab_height),
+                    if can_drag_tabs {
+                        Sense::click_and_drag()
+                    } else {
+                        Sense::click()
+                    },
+                );
+
+                let base_fill = if selected {
+                    visuals.selection.bg_fill
+                } else if response.hovered() {
+                    visuals.widgets.hovered.bg_fill
+                } else {
+                    visuals.widgets.inactive.bg_fill
+                };
+                let stroke = if selected {
+                    visuals.selection.stroke
+                } else {
+                    visuals.widgets.inactive.bg_stroke
+                };
+                ui.painter().rect_filled(rect, 6.0, base_fill);
+                ui.painter()
+                    .rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
+
+                let text_pos = rect.min + padding;
+                ui.painter().galley(text_pos, galley, text_color);
+
+                let close_rect = Rect::from_min_size(
+                    Pos2::new(rect.max.x - close_width, rect.min.y),
+                    Vec2::new(close_width, rect.height()),
+                );
+                let close_center = close_rect.center();
+                let close_hovered = ui
+                    .ctx()
+                    .input(|input| input.pointer.hover_pos())
+                    .map(|pos| close_rect.contains(pos))
+                    .unwrap_or(false);
+                if close_hovered {
+                    let close_bg = visuals.warn_fg_color.linear_multiply(0.48);
+                    let close_rect = close_rect.shrink(2.0);
+                    ui.painter().rect_filled(close_rect, 4.0, close_bg);
+                }
+                ui.painter().text(
+                    close_center,
+                    Align2::CENTER_CENTER,
+                    "x",
+                    FontId::proportional(14.0),
+                    visuals.text_color(),
+                );
+
+                if can_drag_tabs {
+                    response.dnd_set_drag_payload(TabDragPayload);
+                }
+
+                if response.clicked() {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        if close_rect.contains(pointer_pos) {
+                            close_tab = Some(index);
+                        } else {
+                            activate_tab = Some(index);
+                        }
+                    } else {
+                        activate_tab = Some(index);
+                    }
+                    interacted = true;
+                }
+
+                if can_drag_tabs && response.drag_started() {
+                    drag_tab = Some(index);
+                    interacted = true;
+                }
+
+                if response.dnd_release_payload::<TabDragPayload>().is_some() {
+                    drop_on_tab = Some(index);
+                    interacted = true;
+                }
+
+                response.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close_tab = Some(index);
+                        interacted = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Detach").clicked() {
+                        detach_tab = Some(index);
+                        interacted = true;
+                        ui.close_menu();
+                    }
+                });
+            }
+        });
+        ui.spacing_mut().item_spacing = old_spacing;
+    });
+
+    if drop_on_tab.is_some() {
+        accept_tab_drop(world, window_id, drop_on_tab);
+        interacted = true;
+    } else if tab_bar
+        .response
+        .dnd_release_payload::<TabDragPayload>()
+        .is_some()
+    {
+        accept_tab_drop(world, window_id, None);
+        interacted = true;
+    }
+
+    ui.separator();
+
+    if let Some(index) = drag_tab {
+        begin_tab_drag(world, window_id, index);
+    }
+
+    if let Some(index) = detach_tab {
+        detach_tab_to_new_window(world, window_id, index);
+    }
+
+    if let Some(index) = close_tab {
+        close_tab_in_window(world, window_id, index);
+    }
+
+    let active_tab = world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let window_index = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)?;
+
+        if interacted {
+            workspace.last_focused_window = Some(window_id);
+        }
+
+        if let Some(index) = activate_tab {
+            if index < workspace.windows[window_index].tabs.len() {
+                workspace.windows[window_index].active = index;
+            }
+        }
+
+        let is_drag_source_empty = workspace.windows[window_index].tabs.is_empty()
+            && workspace
+                .dragging
+                .as_ref()
+                .map(|drag| drag.source_window_id == window_id)
+                .unwrap_or(false);
+        if workspace.windows[window_index].tabs.is_empty() && !is_drag_source_empty {
+            workspace.windows.remove(window_index);
+            return None;
+        }
+
+        if workspace.windows[window_index].tabs.is_empty() {
+            return None;
+        }
+
+        if workspace.windows[window_index].active >= workspace.windows[window_index].tabs.len() {
+            workspace.windows[window_index].active =
+                workspace.windows[window_index].tabs.len().saturating_sub(1);
+        }
+
+        Some(workspace.windows[window_index].tabs[workspace.windows[window_index].active].clone())
+    });
+
+    let Some(active_tab) = active_tab else {
+        if world
+            .get_resource::<EditorWorkspaceState>()
+            .and_then(|state| state.dragging.as_ref())
+            .map(|drag| drag.source_window_id == window_id)
+            .unwrap_or(false)
+        {
+            ui.label("Drop tab to close this editor.");
+        } else {
+            ui.label("No tabs open.");
+        }
+        return;
+    };
+
+    if let Some(dragging) = world
+        .get_resource::<EditorWorkspaceState>()
+        .and_then(|state| state.dragging.clone())
+    {
+        if let Some(pointer_pos) = ui.ctx().input(|input| input.pointer.hover_pos()) {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                Order::Tooltip,
+                Id::new("editor_tab_drag"),
+            ));
+            painter.rect_filled(
+                Rect::from_min_size(pointer_pos + Vec2::new(12.0, 12.0), Vec2::new(160.0, 28.0)),
+                6.0,
+                ui.visuals().widgets.active.bg_fill,
+            );
+            painter.text(
+                pointer_pos + Vec2::new(20.0, 26.0),
+                Align2::LEFT_CENTER,
+                dragging.tab.title,
+                FontId::proportional(13.0),
+                ui.visuals().text_color(),
+            );
+        }
+    }
+
+    if world
+        .get_resource::<EditorWorkspaceState>()
+        .map(|state| state.dragging.is_some() && !state.drop_handled)
+        .unwrap_or(false)
+        && ui.ctx().input(|input| input.pointer.any_released())
+    {
+        let over_this_window = ui
+            .ctx()
+            .input(|input| input.pointer.hover_pos())
+            .and_then(|pos| ui.ctx().layer_id_at(pos))
+            .map(|layer_id| layer_id == ui.layer_id())
+            .unwrap_or(false);
+        if over_this_window {
+            accept_tab_drop(world, window_id, None);
+        } else if window_index + 1 == window_count {
+            drop_tab_into_new_window(world);
+        }
+    }
+
+    let project = world.get_resource::<EditorProject>().cloned();
+    match active_tab.content {
+        EditorTabContent::Material { path } => {
+            draw_material_editor_tab(ui, world, &project, &path);
+        }
+    }
+}
+
 pub fn draw_hierarchy_window(ui: &mut Ui, world: &mut World) {
     draw_scene_window(ui, world);
 }
@@ -972,32 +1330,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
         .and_then(|state| state.selected.clone());
     let project = world.get_resource::<EditorProject>().cloned();
 
-    let mut drew_asset = false;
-    if let Some(path) = selected_asset
-        .as_ref()
-        .filter(|path| is_material_file(path))
-    {
-        draw_material_inspector(ui, world, &project, path);
-        drew_asset = true;
-    }
-
     let Some(entity) = selection else {
-        if !drew_asset {
-            ui.label("Select an entity to inspect.");
-        }
+        ui.label("Select an entity to inspect.");
         return;
     };
 
     if world.get_entity(entity).is_err() {
         set_selection(world, None);
-        if !drew_asset {
-            ui.label("Selected entity is no longer available.");
-        }
+        ui.label("Selected entity is no longer available.");
         return;
-    }
-
-    if drew_asset {
-        ui.separator();
     }
 
     let name_snapshot = world
@@ -1242,6 +1583,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 None => "Material: <default>".to_string(),
             };
             ui.add(egui::Label::new(material_label).wrap_mode(egui::TextWrapMode::Extend));
+            if let Some(path) = material_path
+                .as_deref()
+                .map(|path| resolve_asset_path(project.as_ref(), path))
+            {
+                if ui.button("Edit Material").clicked() {
+                    open_material_editor_tab(world, path);
+                }
+            }
 
             let mut mesh_changed = false;
             let mut material_changed = false;
@@ -2224,6 +2573,11 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
         ui.close_menu();
     }
 
+    if is_material_file(path) && ui.button("Open in Editor").clicked() {
+        open_material_editor_tab(world, path.to_path_buf());
+        ui.close_menu();
+    }
+
     if ui.button("Rename").clicked() {
         begin_asset_rename(world, path);
         ui.close_menu();
@@ -2299,7 +2653,226 @@ fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
                 kind: SpawnKind::SceneAsset(entry.path.clone()),
             },
         );
+    } else if is_material_file(&entry.path) {
+        open_material_editor_tab(world, entry.path.clone());
     }
+}
+
+fn open_material_editor_tab(world: &mut World, path: PathBuf) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        for window in workspace.windows.iter_mut() {
+            if let Some((index, _)) = window
+                .tabs
+                .iter()
+                .enumerate()
+                .find(|(_, tab)| matches!(&tab.content, EditorTabContent::Material { path: tab_path } if tab_path == &path))
+            {
+                window.active = index;
+                workspace.last_focused_window = Some(window.id);
+                return;
+            }
+        }
+
+        let title = asset_display_name(&path);
+        let tab = EditorTab {
+            id: workspace.next_tab_id,
+            title,
+            content: EditorTabContent::Material { path },
+        };
+        workspace.next_tab_id += 1;
+
+        let target_window_id = workspace
+            .last_focused_window
+            .and_then(|window_id| {
+                workspace
+                    .windows
+                    .iter()
+                    .find(|window| window.id == window_id)
+                    .map(|window| window.id)
+            })
+            .or_else(|| workspace.windows.last().map(|window| window.id));
+        if let Some(target_window_id) = target_window_id {
+            if let Some(window) = workspace
+                .windows
+                .iter_mut()
+                .find(|window| window.id == target_window_id)
+            {
+                window.tabs.push(tab);
+                window.active = window.tabs.len().saturating_sub(1);
+                workspace.last_focused_window = Some(window.id);
+                return;
+            }
+        }
+
+        let window_id = workspace.next_window_id;
+        workspace.next_window_id += 1;
+        workspace.windows.push(EditorTabWindow {
+            id: window_id,
+            title: format!("Editor {}", window_id),
+            tabs: vec![tab],
+            active: 0,
+        });
+        workspace.last_focused_window = Some(window_id);
+    });
+}
+
+#[derive(Clone)]
+struct TabDragPayload;
+
+fn begin_tab_drag(world: &mut World, window_id: u64, tab_index: usize) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        else {
+            return;
+        };
+
+        let tab = {
+            let window = &mut workspace.windows[window_index];
+            if tab_index >= window.tabs.len() {
+                return;
+            }
+            let tab = window.tabs.remove(tab_index);
+            if window.active >= window.tabs.len() {
+                window.active = window.tabs.len().saturating_sub(1);
+            }
+            tab
+        };
+
+        workspace.dragging = Some(EditorTabDrag {
+            tab,
+            source_window_id: window_id,
+        });
+        workspace.drop_handled = false;
+    });
+}
+
+fn detach_tab_to_new_window(world: &mut World, window_id: u64, tab_index: usize) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        else {
+            return;
+        };
+
+        let tab = {
+            let window = &mut workspace.windows[window_index];
+            if tab_index >= window.tabs.len() {
+                return;
+            }
+            let tab = window.tabs.remove(tab_index);
+            if window.active >= window.tabs.len() {
+                window.active = window.tabs.len().saturating_sub(1);
+            }
+            tab
+        };
+
+        let new_window_id = workspace.next_window_id;
+        workspace.next_window_id += 1;
+        workspace.windows.push(EditorTabWindow {
+            id: new_window_id,
+            title: format!("Editor {}", new_window_id),
+            tabs: vec![tab],
+            active: 0,
+        });
+        workspace.last_focused_window = Some(window_id);
+    });
+}
+
+fn close_tab_in_window(world: &mut World, window_id: u64, tab_index: usize) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let Some(window) = workspace
+            .windows
+            .iter_mut()
+            .find(|window| window.id == window_id)
+        else {
+            return;
+        };
+        if tab_index < window.tabs.len() {
+            window.tabs.remove(tab_index);
+        }
+
+        if window.active >= window.tabs.len() {
+            window.active = window.tabs.len().saturating_sub(1);
+        }
+    });
+}
+
+fn accept_tab_drop(world: &mut World, target_window_id: u64, insert_index: Option<usize>) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let Some(dragging) = workspace.dragging.take() else {
+            return;
+        };
+
+        let mut placed_window_id = target_window_id;
+        if let Some(window) = workspace
+            .windows
+            .iter_mut()
+            .find(|window| window.id == target_window_id)
+        {
+            let index = insert_index
+                .unwrap_or(window.tabs.len())
+                .min(window.tabs.len());
+            window.tabs.insert(index, dragging.tab);
+            window.active = index;
+        } else {
+            let new_window_id = workspace.next_window_id;
+            workspace.next_window_id += 1;
+            workspace.windows.push(EditorTabWindow {
+                id: new_window_id,
+                title: format!("Editor {}", new_window_id),
+                tabs: vec![dragging.tab],
+                active: 0,
+            });
+            placed_window_id = new_window_id;
+        }
+
+        workspace.last_focused_window = Some(placed_window_id);
+        workspace.drop_handled = true;
+
+        if let Some(index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == dragging.source_window_id)
+        {
+            if workspace.windows[index].tabs.is_empty() {
+                workspace.windows.remove(index);
+            }
+        }
+    });
+}
+
+fn drop_tab_into_new_window(world: &mut World) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        let Some(dragging) = workspace.dragging.take() else {
+            return;
+        };
+
+        let new_window_id = workspace.next_window_id;
+        workspace.next_window_id += 1;
+        workspace.windows.push(EditorTabWindow {
+            id: new_window_id,
+            title: format!("Editor {}", new_window_id),
+            tabs: vec![dragging.tab],
+            active: 0,
+        });
+        workspace.last_focused_window = Some(new_window_id);
+        workspace.drop_handled = true;
+
+        if let Some(index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == dragging.source_window_id)
+        {
+            if workspace.windows[index].tabs.is_empty() {
+                workspace.windows.remove(index);
+            }
+        }
+    });
 }
 
 fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {
@@ -2509,14 +3082,18 @@ fn apply_entity_name(world: &mut World, entity: Entity, name: &str) {
     }
 }
 
-fn draw_material_inspector(
+fn draw_material_editor_tab(
     ui: &mut Ui,
     world: &mut World,
     project: &Option<EditorProject>,
     path: &Path,
 ) {
     let path = path.to_path_buf();
-    world.resource_scope::<MaterialInspectorState, _>(|world, mut state| {
+    world.resource_scope::<MaterialEditorCache, _>(|world, mut cache| {
+        let entry = cache
+            .entries
+            .entry(path.clone())
+            .or_insert_with(MaterialEditorEntry::default);
         let mut reload_requested = false;
 
         ui.horizontal(|ui| {
@@ -2526,17 +3103,15 @@ fn draw_material_inspector(
             }
         });
 
-        if state.path.as_deref() != Some(path.as_path()) || reload_requested {
+        if reload_requested || entry.data.is_none() {
             match load_material_file(&path) {
                 Ok(data) => {
-                    state.path = Some(path.clone());
-                    state.data = Some(data);
-                    state.error = None;
+                    entry.data = Some(data);
+                    entry.error = None;
                 }
                 Err(err) => {
-                    state.path = Some(path.clone());
-                    state.data = None;
-                    state.error = Some(err);
+                    entry.data = None;
+                    entry.error = Some(err);
                 }
             }
         }
@@ -2547,11 +3122,11 @@ fn draw_material_inspector(
             ui.add(egui::Label::new(path_label).wrap_mode(egui::TextWrapMode::Extend));
         });
 
-        if let Some(error) = state.error.as_ref() {
+        if let Some(error) = entry.error.as_ref() {
             ui.label(RichText::new(error).small());
         }
 
-        let Some(data) = state.data.as_mut() else {
+        let Some(data) = entry.data.as_mut() else {
             return;
         };
 
@@ -2606,12 +3181,12 @@ fn draw_material_inspector(
         if changed {
             match save_material_file(&path, data) {
                 Ok(()) => {
-                    state.error = None;
+                    entry.error = None;
                     set_status(world, format!("Saved material {}", path.display()));
                     refresh_material_usage(world, project, &path);
                 }
                 Err(err) => {
-                    state.error = Some(err.clone());
+                    entry.error = Some(err.clone());
                     set_status(world, format!("Failed to save material: {}", err));
                 }
             }

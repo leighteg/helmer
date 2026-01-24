@@ -916,6 +916,7 @@ pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
                     .unwrap_or(false);
                 if !is_drag_source {
                     workspace.windows.remove(index);
+                    refresh_editor_window_titles(&mut workspace);
                 }
             }
         });
@@ -1102,6 +1103,7 @@ pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
                 .unwrap_or(false);
         if workspace.windows[window_index].tabs.is_empty() && !is_drag_source_empty {
             workspace.windows.remove(window_index);
+            refresh_editor_window_titles(&mut workspace);
             return None;
         }
 
@@ -2681,16 +2683,7 @@ fn open_material_editor_tab(world: &mut World, path: PathBuf) {
         };
         workspace.next_tab_id += 1;
 
-        let target_window_id = workspace
-            .last_focused_window
-            .and_then(|window_id| {
-                workspace
-                    .windows
-                    .iter()
-                    .find(|window| window.id == window_id)
-                    .map(|window| window.id)
-            })
-            .or_else(|| workspace.windows.last().map(|window| window.id));
+        let target_window_id = workspace.windows.last().map(|window| window.id);
         if let Some(target_window_id) = target_window_id {
             if let Some(window) = workspace
                 .windows
@@ -2712,6 +2705,7 @@ fn open_material_editor_tab(world: &mut World, path: PathBuf) {
             tabs: vec![tab],
             active: 0,
         });
+        refresh_editor_window_titles(&mut workspace);
         workspace.last_focused_window = Some(window_id);
     });
 }
@@ -2779,6 +2773,7 @@ fn detach_tab_to_new_window(world: &mut World, window_id: u64, tab_index: usize)
             tabs: vec![tab],
             active: 0,
         });
+        refresh_editor_window_titles(&mut workspace);
         workspace.last_focused_window = Some(window_id);
     });
 }
@@ -2799,6 +2794,31 @@ fn close_tab_in_window(world: &mut World, window_id: u64, tab_index: usize) {
         if window.active >= window.tabs.len() {
             window.active = window.tabs.len().saturating_sub(1);
         }
+    });
+}
+
+pub(crate) fn close_editor_window(world: &mut World, window_id: u64) {
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        if workspace
+            .dragging
+            .as_ref()
+            .map(|dragging| dragging.source_window_id == window_id)
+            .unwrap_or(false)
+        {
+            workspace.dragging = None;
+            workspace.drop_handled = false;
+        }
+
+        if let Some(index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        {
+            workspace.windows.remove(index);
+            refresh_editor_window_titles(&mut workspace);
+        }
+
+        workspace.last_focused_window = workspace.windows.last().map(|window| window.id);
     });
 }
 
@@ -2843,6 +2863,7 @@ fn accept_tab_drop(world: &mut World, target_window_id: u64, insert_index: Optio
                 workspace.windows.remove(index);
             }
         }
+        refresh_editor_window_titles(&mut workspace);
     });
 }
 
@@ -2872,7 +2893,14 @@ fn drop_tab_into_new_window(world: &mut World) {
                 workspace.windows.remove(index);
             }
         }
+        refresh_editor_window_titles(&mut workspace);
     });
+}
+
+fn refresh_editor_window_titles(workspace: &mut EditorWorkspaceState) {
+    for (index, window) in workspace.windows.iter_mut().enumerate() {
+        window.title = format!("Editor {}", index + 1);
+    }
 }
 
 fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {

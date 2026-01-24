@@ -11,7 +11,7 @@ use glam::{DVec2, Quat, Vec3};
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::provided::components::{Light, MeshRenderer, Transform};
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
-use helmer_becs::egui_integration::EguiResource;
+use helmer_becs::egui_integration::{EguiResource, EguiWindowSpec};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
@@ -44,8 +44,9 @@ use crate::editor::{
     scripting::{ScriptComponent, ScriptRegistry, load_script_asset},
     set_play_camera,
     ui::{
-        EditorUiState, EditorWorkspaceState, draw_assets_window, draw_editor_window,
-        draw_project_window, draw_scene_window, draw_toolbar, draw_viewport_window,
+        EditorUiState, EditorWorkspaceState, close_editor_window, draw_assets_window,
+        draw_editor_window, draw_project_window, draw_scene_window, draw_toolbar,
+        draw_viewport_window,
     },
     watch::configure_file_watcher,
 };
@@ -75,43 +76,68 @@ pub fn editor_ui_system(world: &mut World) {
         Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_toolbar(ui, world);
         }),
-        "Toolbar".to_string(),
+        EguiWindowSpec {
+            id: "Toolbar".to_string(),
+            title: "Toolbar".to_string(),
+        },
     ));
 
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_viewport_window(ui, world);
         }),
-        "Viewport".to_string(),
+        EguiWindowSpec {
+            id: "Viewport".to_string(),
+            title: "Viewport".to_string(),
+        },
     ));
 
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_project_window(ui, world);
         }),
-        "Project".to_string(),
+        EguiWindowSpec {
+            id: "Project".to_string(),
+            title: "Project".to_string(),
+        },
     ));
 
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_scene_window(ui, world);
         }),
-        "Hierarchy Inspector".to_string(),
+        EguiWindowSpec {
+            id: "Hierarchy Inspector".to_string(),
+            title: "Hierarchy Inspector".to_string(),
+        },
     ));
 
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_assets_window(ui, world);
         }),
-        "Content Browser".to_string(),
+        EguiWindowSpec {
+            id: "Content Browser".to_string(),
+            title: "Content Browser".to_string(),
+        },
     ));
 
     for (window_id, title) in editor_windows {
+        let window_key = format!("editor_window_{}", window_id);
+        egui_res.close_actions.insert(
+            window_key.clone(),
+            Box::new(move |world: &mut World| {
+                close_editor_window(world, window_id);
+            }),
+        );
         egui_res.windows.push((
             Box::new(move |ui: &mut Ui, world: &mut World, _| {
                 draw_editor_window(ui, world, window_id);
             }),
-            title,
+            EguiWindowSpec {
+                id: window_key,
+                title,
+            },
         ));
     }
 }

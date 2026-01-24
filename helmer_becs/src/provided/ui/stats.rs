@@ -31,7 +31,7 @@ use crate::{
     BevyPerformanceMetrics, BevyRenderSender, BevyRenderWorkerTuning, BevyRendererStats,
     BevyRuntimeConfig, BevyRuntimeProfiling, BevyRuntimeTuning, BevySceneTuning,
     BevyStreamingTuning, BevyTransform, DebugGraphHistory, ProfilingHistory,
-    egui_integration::EguiResource,
+    egui_integration::{EguiResource, EguiWindowSpec},
     physics::physics_resource::PhysicsResource,
     systems::render_system::{RenderGraphResource, RenderObjectCount},
 };
@@ -209,6 +209,13 @@ fn toggle_debug_flag(ui: &mut egui::Ui, flags: &mut u32, mask: u32, label: &str)
     }
 }
 
+fn window_spec(title: &str) -> EguiWindowSpec {
+    EguiWindowSpec {
+        id: title.to_string(),
+        title: title.to_string(),
+    }
+}
+
 pub struct StatsUI {}
 
 impl StatsUI {
@@ -324,7 +331,7 @@ impl StatsUI {
                     ],
                 );
             }),
-            "helmer metrics".to_string(),
+            window_spec("helmer metrics"),
         ));
 
         egui_res.windows.push((
@@ -1025,7 +1032,7 @@ impl StatsUI {
                         });
                     });
             }),
-            "profiling".to_string(),
+            window_spec("profiling"),
         ));
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
@@ -1222,7 +1229,7 @@ impl StatsUI {
                     ui.label("runtime tuning unavailable");
                 }
             }),
-            "runtime tuning".to_string(),
+            window_spec("runtime tuning"),
         ));
 
         egui_res.windows.push((
@@ -1374,7 +1381,7 @@ impl StatsUI {
                     ui.label("render worker tuning unavailable");
                 }
             }),
-            "render worker".to_string(),
+            window_spec("render worker"),
         ));
 
         egui_res.windows.push((
@@ -2317,7 +2324,7 @@ impl StatsUI {
                     });
                 }
             }),
-            "render config".to_string(),
+            window_spec("render config"),
         ));
 
         egui_res.windows.push((
@@ -2366,7 +2373,7 @@ impl StatsUI {
                     ui.label("renderer stats unavailable");
                 }
             }),
-            "occlusion culling".to_string(),
+            window_spec("occlusion culling"),
         ));
 
         egui_res.windows.push((
@@ -2395,7 +2402,7 @@ impl StatsUI {
                     ui.label("renderer stats unavailable");
                 }
             }),
-            "gpu driven".to_string(),
+            window_spec("gpu driven"),
         ));
 
         egui_res.windows.push((
@@ -3287,7 +3294,7 @@ impl StatsUI {
                     ui.label("asset server unavailable");
                 }
             }),
-            "render graph".to_string(),
+            window_spec("render graph"),
         ));
 
         egui_res.windows.push((
@@ -3428,7 +3435,7 @@ impl StatsUI {
                         });
                 }
             }),
-            "render graph passes".to_string(),
+            window_spec("render graph passes"),
         ));
 
         egui_res.windows.push((
@@ -3612,7 +3619,7 @@ impl StatsUI {
                     );
                 });
             }),
-            "scene".to_string(),
+            window_spec("scene"),
         ));
     }
 }

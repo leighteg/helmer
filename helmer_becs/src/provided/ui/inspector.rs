@@ -8,7 +8,7 @@ use egui::Id;
 use helmer::provided::components::{Light, LightType};
 use std::any::TypeId;
 
-use crate::egui_integration::EguiResource;
+use crate::egui_integration::{EguiResource, EguiWindowSpec};
 use crate::{BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform};
 
 #[derive(Resource, Default)]
@@ -457,7 +457,10 @@ impl InspectorUI {
                     }
                 });
             }),
-            "inspector".to_string(),
+            EguiWindowSpec {
+                id: "inspector".to_string(),
+                title: "inspector".to_string(),
+            },
         ));
     }
 }

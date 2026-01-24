@@ -2,9 +2,12 @@ use bevy_ecs::prelude::*;
 use egui::Context;
 use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
 use parking_lot::RwLock;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use winit::keyboard::KeyCode;
 
@@ -13,14 +16,20 @@ use crate::{
     provided::ui::{inspector::InspectorUI, stats::StatsUI},
 };
 
+pub struct EguiWindowSpec {
+    pub id: String,
+    pub title: String,
+}
+
 #[derive(Resource, Default)]
 pub struct EguiResource {
     pub ctx: Context,
     pub render_data: Option<EguiRenderData>,
     pub windows: Vec<(
         Box<dyn FnMut(&mut egui::Ui, &mut World, &Arc<RwLock<InputManager>>) + Send + Sync>,
-        String,
+        EguiWindowSpec,
     )>,
+    pub close_actions: HashMap<String, Box<dyn FnMut(&mut World) + Send + Sync>>,
     pub accepting_input: bool,
     pub stats_ui: bool,
     pub inspector_ui: bool,
@@ -104,17 +113,34 @@ pub fn egui_system(world: &mut World) {
             .expect("EguiResource resource not found");
 
         let windows = std::mem::take(&mut egui_res.windows);
+        let mut close_actions = std::mem::take(&mut egui_res.close_actions);
 
         drop(egui_res);
 
         let screen_rect = ctx.available_rect();
 
-        for (mut elements, name) in windows {
-            egui::Window::new(name.clone())
-                .constrain_to(screen_rect)
-                .show(ctx, |ui| {
-                    elements(ui, world, &input_arc);
-                });
+        for (mut elements, spec) in windows {
+            let window_id = egui::Id::new(spec.id.clone());
+            if let Some(on_close) = close_actions.get_mut(&spec.id) {
+                let mut open = true;
+                egui::Window::new(spec.title.clone())
+                    .id(window_id)
+                    .constrain_to(screen_rect)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        elements(ui, world, &input_arc);
+                    });
+                if !open {
+                    on_close(world);
+                }
+            } else {
+                egui::Window::new(spec.title.clone())
+                    .id(window_id)
+                    .constrain_to(screen_rect)
+                    .show(ctx, |ui| {
+                        elements(ui, world, &input_arc);
+                    });
+            }
         }
     });
 

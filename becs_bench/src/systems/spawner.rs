@@ -13,7 +13,7 @@ use glam::Vec3;
 use helmer::provided::components::{MeshRenderer, Transform};
 use helmer_becs::{
     BevyMeshRenderer, BevyTransform, DeltaTime,
-    egui_integration::EguiResource,
+    egui_integration::{EguiResource, EguiWindowSpec},
     physics::components::{ColliderShape, DynamicRigidBody},
 };
 use rand::Rng;
@@ -91,7 +91,10 @@ pub fn spawner_system(
                 }
             }
         }),
-        "spawn system".to_string(),
+        EguiWindowSpec {
+            id: "spawn system".to_string(),
+            title: "spawn system".to_string(),
+        },
     ));
 
     // --- ECS logic ---

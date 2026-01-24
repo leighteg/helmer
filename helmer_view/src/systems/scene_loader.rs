@@ -8,7 +8,8 @@ use bevy_ecs::{
 use glam::Quat;
 use helmer::provided::components::Transform;
 use helmer_becs::{
-    BevyAssetServer, BevyTransform, DraggedFile, egui_integration::EguiResource,
+    BevyAssetServer, BevyTransform, DraggedFile,
+    egui_integration::{EguiResource, EguiWindowSpec},
     systems::scene_system::SceneRoot,
 };
 
@@ -136,7 +137,10 @@ pub fn scene_loader_system(
                 });
             });
         }),
-        "Scene Loader".to_string(),
+        EguiWindowSpec {
+            id: "Scene Loader".to_string(),
+            title: "Scene Loader".to_string(),
+        },
     ));
 
     // Handle new file drag

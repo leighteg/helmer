@@ -823,6 +823,15 @@ pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
                     );
                     ui.close_menu();
                 }
+                if ui.button("UV Sphere").clicked() {
+                    push_command(
+                        world,
+                        EditorCommand::CreateEntity {
+                            kind: SpawnKind::Primitive(PrimitiveKind::UvSphere(12, 12)),
+                        },
+                    );
+                    ui.close_menu();
+                }
                 if ui.button("Plane").clicked() {
                     push_command(
                         world,
@@ -1283,6 +1292,7 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World) {
             let mesh_tag = editor_mesh
                 .map(|mesh| match &mesh.source {
                     MeshSource::Primitive(PrimitiveKind::Cube) => "Cube",
+                    MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => "UV Sphere",
                     MeshSource::Primitive(PrimitiveKind::Plane) => "Plane",
                     MeshSource::Asset { .. } => "Mesh",
                 })
@@ -1607,13 +1617,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
 
             let mesh_label = match &mesh_source {
                 MeshSource::Primitive(PrimitiveKind::Cube) => "Mesh: Cube".to_string(),
+                MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => {
+                    "Mesh: UV Sphere".to_string()
+                }
                 MeshSource::Primitive(PrimitiveKind::Plane) => "Mesh: Plane".to_string(),
                 MeshSource::Asset { path } => {
                     let relative = project_relative_path(&project, Path::new(path));
                     format!("Mesh: {}", relative)
                 }
             };
-            ui.add(egui::Label::new(mesh_label).wrap_mode(egui::TextWrapMode::Extend));
 
             let material_label = match material_path.as_deref() {
                 Some(path) => format!(
@@ -1622,22 +1634,25 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                 ),
                 None => "Material: <default>".to_string(),
             };
-            ui.add(egui::Label::new(material_label).wrap_mode(egui::TextWrapMode::Extend));
-            if let Some(path) = material_path
-                .as_deref()
-                .map(|path| resolve_asset_path(project.as_ref(), path))
-            {
-                if ui.button("Edit Material").clicked() {
-                    open_material_editor_tab(world, path);
-                }
-            }
 
             let mut mesh_changed = false;
             let mut material_changed = false;
 
-            let mesh_source_button = ui.menu_button("Mesh Source", |ui| {
+            let mesh_source_button = ui.menu_button(mesh_label, |ui| {
+                let (mut segments, mut rings) = match mesh_source {
+                    MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings)) => {
+                        (segments, rings)
+                    }
+                    _ => (12, 12),
+                };
+
                 if ui.button("Cube").clicked() {
                     mesh_source = MeshSource::Primitive(PrimitiveKind::Cube);
+                    mesh_changed = true;
+                    ui.close_menu();
+                }
+                if ui.button("UV Sphere").clicked() {
+                    mesh_source = MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings));
                     mesh_changed = true;
                     ui.close_menu();
                 }
@@ -1682,7 +1697,36 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
             }
             highlight_drop_target(ui, &mesh_source_button.response);
 
-            let material_button = ui.menu_button("Material", |ui| {
+            if let MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings)) = mesh_source {
+                let mut next_segments = segments;
+                let mut next_rings = rings;
+                ui.indent("uv_sphere_settings", |ui| {
+                    ui.label("UV Sphere");
+                    ui.horizontal(|ui| {
+                        ui.label("Segments");
+                        ui.add(
+                            egui::DragValue::new(&mut next_segments)
+                                .range(3..=128)
+                                .speed(1),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Rings");
+                        ui.add(
+                            egui::DragValue::new(&mut next_rings)
+                                .range(3..=128)
+                                .speed(1),
+                        );
+                    });
+                });
+                if next_segments != segments || next_rings != rings {
+                    mesh_source =
+                        MeshSource::Primitive(PrimitiveKind::UvSphere(next_segments, next_rings));
+                    mesh_changed = true;
+                }
+            }
+
+            let material_button = ui.menu_button(material_label, |ui| {
                 if ui.button("Use Default").clicked() {
                     material_path = None;
                     material_changed = true;
@@ -1709,6 +1753,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
                     ui.close_menu();
                 }
             });
+
+            if let Some(path) = material_path
+                .as_deref()
+                .map(|path| resolve_asset_path(project.as_ref(), path))
+            {
+                if ui.button("Edit Material").clicked() {
+                    open_material_editor_tab(world, path);
+                }
+            }
 
             if let Some(payload) = material_button
                 .response
@@ -4520,6 +4573,13 @@ fn load_primitive_mesh(
 
     let mesh_asset = match kind {
         PrimitiveKind::Cube => helmer::provided::components::MeshAsset::cube("cube".to_string()),
+        PrimitiveKind::UvSphere(segments, rings) => {
+            helmer::provided::components::MeshAsset::uv_sphere(
+                "uv sphere".to_string(),
+                segments,
+                rings,
+            )
+        }
         PrimitiveKind::Plane => helmer::provided::components::MeshAsset::plane("plane".to_string()),
     };
 

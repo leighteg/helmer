@@ -862,6 +862,9 @@ fn build_ecs_table(
                     MeshSource::Primitive(PrimitiveKind::Cube) => {
                         table.set("source", "Cube")?;
                     }
+                    MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => {
+                        table.set("source", "UV Sphere")?;
+                    }
                     MeshSource::Primitive(PrimitiveKind::Plane) => {
                         table.set("source", "Plane")?;
                     }
@@ -1556,6 +1559,9 @@ fn load_primitive_mesh(
 
     let mesh_asset = match kind {
         PrimitiveKind::Cube => MeshAsset::cube("cube".to_string()),
+        PrimitiveKind::UvSphere(segments, rings) => {
+            MeshAsset::uv_sphere("uv sphere".to_string(), segments, rings)
+        }
         PrimitiveKind::Plane => MeshAsset::plane("plane".to_string()),
     };
 

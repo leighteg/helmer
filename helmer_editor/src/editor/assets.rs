@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimitiveKind {
     Cube,
+    UvSphere(u32, u32),
     Plane,
 }
 

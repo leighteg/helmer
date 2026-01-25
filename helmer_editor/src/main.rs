@@ -11,9 +11,9 @@ use helmer_editor::editor::{
     EditorGizmoSettings, EditorGizmoState, EditorMeshOutlineCache, EditorProject, EditorSceneState,
     EditorSelectionState, EditorUiState, EditorUndoState, EditorViewportState,
     EditorWorkspaceState, FileWatchState, HierarchyUiState, InspectorNameEditState,
-    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState, ScriptRegistry,
-    ScriptRunState, ScriptRuntime, activate_viewport_camera, asset_scan_system, drag_drop_system,
-    editor_command_system, editor_layout_apply_system, editor_layout_save_system,
+    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState, ScriptInputState,
+    ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera, asset_scan_system,
+    drag_drop_system, editor_command_system, editor_layout_apply_system, editor_layout_save_system,
     editor_layout_update_system, editor_physics_state_system, editor_shortcut_system,
     editor_ui_system, editor_undo_request_system, file_watch_system, freecam_system, gizmo_system,
     load_layout_state, load_recent_projects, scene_dirty_system, script_execution_system,
@@ -58,6 +58,7 @@ fn editor_init(
     world.insert_resource(FileWatchState::default());
     world.insert_resource(ScriptRuntime::default());
     world.insert_resource(ScriptRunState::default());
+    world.insert_resource(ScriptInputState::default());
     world.insert_resource(HierarchyUiState::default());
     world.insert_resource(MaterialEditorCache::default());
     world.insert_resource(EditorWorkspaceState::default());

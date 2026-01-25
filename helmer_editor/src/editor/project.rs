@@ -179,10 +179,38 @@ end
 
 pub fn default_script_template_full() -> &'static str {
     r#"-- helmer Lua API (editor)
--- Entry points: on_start(), on_update(dt)
+-- Entry points: on_start(), on_update(dt), on_stop()
 -- Globals:
 --   entity_id : u64 id of the entity that owns this script
 --   print(...) : log values to the editor console
+-- input table:
+--   input.key_down(key) -> bool
+--   input.key_pressed(key) -> bool
+--   input.key_released(key) -> bool
+--   input.mouse_down(button) -> bool
+--   input.mouse_pressed(button) -> bool
+--   input.mouse_released(button) -> bool
+--   input.cursor() -> {x,y}
+--   input.cursor_delta() -> {x,y}
+--   input.wheel() -> {x,y}
+--   input.window_size() -> {x,y}
+--   input.scale_factor() -> number
+--   input.modifiers() -> {shift, ctrl, alt, super}
+--   input.wants_keyboard() -> bool
+--   input.wants_pointer() -> bool
+--   input.gamepad_ids() -> {id, ...}
+--   input.gamepad_count() -> number
+--   input.gamepad_axis(axis, id?) -> number
+--   input.gamepad_button_down(button, id?) -> bool
+--   input.gamepad_button_pressed(button, id?) -> bool
+--   input.gamepad_button_released(button, id?) -> bool
+--   input.gamepad_trigger(side, id?) -> number
+--   input.key(name) -> key|nil
+--   input.mouse_button(name) -> button|nil
+--   input.gamepad_button(name) -> button|nil
+--   input.gamepad_axis(name) -> axis|nil
+-- input constants:
+--   input.keys.<Name>, input.mouse_buttons.<Name>, input.gamepad_buttons.<Name>, input.gamepad_axes.<Name>
 -- ecs table:
 --   ecs.list_entities() -> {id, ...}
 --   ecs.spawn_entity(name?) -> id

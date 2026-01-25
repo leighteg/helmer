@@ -9,15 +9,17 @@ use std::{
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use bevy_ecs::query::With;
-use glam::{Quat, Vec3};
-use mlua::{Function, Lua, RegistryKey, Table, Value, Variadic};
+use glam::{DVec2, Quat, Vec2, Vec3};
+use mlua::{Function, Lua, RegistryKey, Table, UserData, Value, Variadic};
+use winit::{event::MouseButton, keyboard::KeyCode};
 
 use helmer::provided::components::{Light, LightType, MeshAsset, MeshRenderer};
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
+use helmer::runtime::input_manager::InputManager;
 use helmer_becs::systems::scene_system::SceneRoot;
 use helmer_becs::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform,
-    BevyWrapper, DeltaTime,
+    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
+    BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
@@ -157,6 +159,77 @@ impl Default for ScriptRunState {
     }
 }
 
+#[derive(Resource, Default)]
+pub struct ScriptInputState {
+    pub last_keys: HashSet<KeyCode>,
+    pub last_mouse_buttons: HashSet<MouseButton>,
+    pub last_gamepad_buttons: HashMap<usize, HashSet<gilrs::Button>>,
+    pub last_cursor_position: DVec2,
+    pub gamepad_map: HashMap<usize, gilrs::GamepadId>,
+    pub gamepad_ids: Vec<usize>,
+}
+
+impl ScriptInputState {
+    pub fn refresh_gamepad_cache(&mut self, input: &InputManager) {
+        self.gamepad_map.clear();
+        self.gamepad_ids.clear();
+
+        for id in input.controller_states.keys() {
+            let id_value = usize::from(*id);
+            self.gamepad_map.insert(id_value, *id);
+            self.gamepad_ids.push(id_value);
+        }
+
+        self.gamepad_ids.sort_unstable();
+    }
+
+    pub fn sync_last_state(&mut self, input: &InputManager) {
+        self.last_keys.clear();
+        self.last_keys.extend(input.active_keys.iter().copied());
+
+        self.last_mouse_buttons.clear();
+        self.last_mouse_buttons
+            .extend(input.active_mouse_buttons.iter().copied());
+
+        self.last_cursor_position = input.cursor_position;
+
+        let mut active_ids = HashSet::new();
+        for (id, state) in input.controller_states.iter() {
+            let id_value = usize::from(*id);
+            active_ids.insert(id_value);
+            let entry = self.last_gamepad_buttons.entry(id_value).or_default();
+            entry.clear();
+            entry.extend(state.active_buttons.iter().copied());
+        }
+
+        self.last_gamepad_buttons
+            .retain(|id, _| active_ids.contains(id));
+    }
+
+    pub fn reset(&mut self, input: Option<&InputManager>) {
+        self.last_keys.clear();
+        self.last_mouse_buttons.clear();
+        self.last_gamepad_buttons.clear();
+        self.last_cursor_position = DVec2::ZERO;
+
+        let Some(input) = input else {
+            return;
+        };
+
+        self.last_keys.extend(input.active_keys.iter().copied());
+        self.last_mouse_buttons
+            .extend(input.active_mouse_buttons.iter().copied());
+        self.last_cursor_position = input.cursor_position;
+
+        for (id, state) in input.controller_states.iter() {
+            let id_value = usize::from(*id);
+            let entry = self.last_gamepad_buttons.entry(id_value).or_default();
+            entry.clear();
+            entry.extend(state.active_buttons.iter().copied());
+        }
+    }
+}
+
 pub fn script_execution_system(world: &mut World) {
     let current_state = world
         .get_resource::<EditorSceneState>()
@@ -197,6 +270,17 @@ pub fn script_execution_system(world: &mut World) {
         entries
     };
 
+    let input_manager = world
+        .get_resource::<BevyInputManager>()
+        .map(|input| input.0.clone());
+
+    if let Some(input_manager) = input_manager.as_ref() {
+        let input_manager = input_manager.read();
+        if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+            input_state.refresh_gamepad_cache(&input_manager);
+        }
+    }
+
     let last_state = world
         .get_resource::<ScriptRunState>()
         .map(|state| state.last_state)
@@ -212,6 +296,15 @@ pub fn script_execution_system(world: &mut World) {
         let world_ptr = world as *mut World as usize;
 
         if last_state != current_state {
+            if let Some(input_manager) = input_manager.as_ref() {
+                let input_manager = input_manager.read();
+                if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+                    input_state.reset(Some(&input_manager));
+                }
+            } else if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+                input_state.reset(None);
+            }
+
             match (last_state, current_state) {
                 (WorldState::Edit, WorldState::Play) => {
                     runtime.instances.clear();
@@ -315,6 +408,13 @@ pub fn script_execution_system(world: &mut World) {
             }
         }
     });
+
+    if let Some(input_manager) = input_manager {
+        let input_manager = input_manager.read();
+        if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+            input_state.sync_last_state(&input_manager);
+        }
+    }
 }
 
 fn script_needs_reload(
@@ -426,6 +526,9 @@ fn register_script_api(
 
     let ecs = build_ecs_table(lua, world_ptr, owner, script_index)?;
     env.set("ecs", ecs)?;
+
+    let input = build_input_table(lua, world_ptr)?;
+    env.set("input", input)?;
     Ok(())
 }
 
@@ -1217,6 +1320,1243 @@ fn build_ecs_table(
     Ok(ecs)
 }
 
+fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
+    let input = lua.create_table()?;
+
+    let keys = lua.create_table()?;
+    fill_key_constants(lua, &keys)?;
+    input.set("keys", keys)?;
+
+    let mouse_buttons = lua.create_table()?;
+    fill_mouse_button_constants(lua, &mouse_buttons)?;
+    input.set("mouse_buttons", mouse_buttons)?;
+
+    let gamepad_buttons = lua.create_table()?;
+    fill_gamepad_button_constants(lua, &gamepad_buttons)?;
+    input.set("gamepad_buttons", gamepad_buttons)?;
+
+    let gamepad_axes = lua.create_table()?;
+    fill_gamepad_axis_constants(lua, &gamepad_axes)?;
+    input.set("gamepad_axes", gamepad_axes)?;
+
+    input.set(
+        "key",
+        lua.create_function(|lua, name: String| {
+            let Some(key) = parse_key_name(&name) else {
+                return Ok(None);
+            };
+            Ok(Some(lua.create_userdata(key)?))
+        })?,
+    )?;
+
+    input.set(
+        "mouse_button",
+        lua.create_function(|lua, name: String| {
+            let Some(button) = parse_mouse_button_name(&name) else {
+                return Ok(None);
+            };
+            Ok(Some(lua.create_userdata(LuaMouseButton(button))?))
+        })?,
+    )?;
+
+    input.set(
+        "gamepad_button",
+        lua.create_function(|lua, name: String| {
+            let Some(button) = parse_gamepad_button_name(&name) else {
+                return Ok(None);
+            };
+            Ok(Some(lua.create_userdata(LuaGamepadButton(button))?))
+        })?,
+    )?;
+
+    input.set(
+        "gamepad_axis",
+        lua.create_function(|lua, name: String| {
+            let Some(axis) = parse_gamepad_axis_name(&name) else {
+                return Ok(None);
+            };
+            Ok(Some(lua.create_userdata(LuaGamepadAxis(axis))?))
+        })?,
+    )?;
+
+    let world_ptr_key = world_ptr;
+    input.set(
+        "key_down",
+        lua.create_function(move |_, key: Value| {
+            let world = unsafe { &mut *(world_ptr_key as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_key {
+                return Ok(false);
+            }
+            let Some(key) = lua_key_from_value(key) else {
+                return Ok(false);
+            };
+            Ok(lua_key_is_active(&input_manager, key))
+        })?,
+    )?;
+
+    let world_ptr_key_pressed = world_ptr;
+    input.set(
+        "key_pressed",
+        lua.create_function(move |_, key: Value| {
+            let world = unsafe { &mut *(world_ptr_key_pressed as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_key {
+                return Ok(false);
+            }
+            let Some(key) = lua_key_from_value(key) else {
+                return Ok(false);
+            };
+            Ok(lua_key_is_just_pressed(&input_manager, key))
+        })?,
+    )?;
+
+    let world_ptr_key_released = world_ptr;
+    input.set(
+        "key_released",
+        lua.create_function(move |_, key: Value| {
+            let world = unsafe { &mut *(world_ptr_key_released as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_key {
+                return Ok(false);
+            }
+            let Some(key) = lua_key_from_value(key) else {
+                return Ok(false);
+            };
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(false);
+            };
+            Ok(lua_key_is_released(&input_manager, input_state, key))
+        })?,
+    )?;
+
+    let world_ptr_mouse = world_ptr;
+    input.set(
+        "mouse_down",
+        lua.create_function(move |_, button: Value| {
+            let world = unsafe { &mut *(world_ptr_mouse as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(false);
+            }
+            let Some(button) = lua_mouse_button_from_value(button) else {
+                return Ok(false);
+            };
+            Ok(input_manager.is_mouse_button_active(button))
+        })?,
+    )?;
+
+    let world_ptr_mouse_pressed = world_ptr;
+    input.set(
+        "mouse_pressed",
+        lua.create_function(move |_, button: Value| {
+            let world = unsafe { &mut *(world_ptr_mouse_pressed as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(false);
+            }
+            let Some(button) = lua_mouse_button_from_value(button) else {
+                return Ok(false);
+            };
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(false);
+            };
+            let is_down = input_manager.is_mouse_button_active(button);
+            let was_down = input_state.last_mouse_buttons.contains(&button);
+            Ok(is_down && !was_down)
+        })?,
+    )?;
+
+    let world_ptr_mouse_released = world_ptr;
+    input.set(
+        "mouse_released",
+        lua.create_function(move |_, button: Value| {
+            let world = unsafe { &mut *(world_ptr_mouse_released as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(false);
+            }
+            let Some(button) = lua_mouse_button_from_value(button) else {
+                return Ok(false);
+            };
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(false);
+            };
+            let is_down = input_manager.is_mouse_button_active(button);
+            let was_down = input_state.last_mouse_buttons.contains(&button);
+            Ok(!is_down && was_down)
+        })?,
+    )?;
+
+    let world_ptr_cursor = world_ptr;
+    input.set(
+        "cursor",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_cursor as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            let position = Vec2::new(
+                input_manager.cursor_position.x as f32,
+                input_manager.cursor_position.y as f32,
+            );
+            Ok(Some(vec2_to_table(lua, position)?))
+        })?,
+    )?;
+
+    let world_ptr_cursor_delta = world_ptr;
+    input.set(
+        "cursor_delta",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_cursor_delta as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(None);
+            };
+            let delta = input_manager.cursor_position - input_state.last_cursor_position;
+            let delta = Vec2::new(delta.x as f32, delta.y as f32);
+            Ok(Some(vec2_to_table(lua, delta)?))
+        })?,
+    )?;
+
+    let world_ptr_wheel = world_ptr;
+    input.set(
+        "wheel",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_wheel as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(Some(vec2_to_table(lua, input_manager.mouse_wheel)?))
+        })?,
+    )?;
+
+    let world_ptr_window = world_ptr;
+    input.set(
+        "window_size",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_window as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            let size = Vec2::new(
+                input_manager.window_size.x as f32,
+                input_manager.window_size.y as f32,
+            );
+            Ok(Some(vec2_to_table(lua, size)?))
+        })?,
+    )?;
+
+    let world_ptr_scale = world_ptr;
+    input.set(
+        "scale_factor",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_scale as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(Some(input_manager.scale_factor))
+        })?,
+    )?;
+
+    let world_ptr_mods = world_ptr;
+    input.set(
+        "modifiers",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_mods as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(None);
+            };
+            let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_key {
+                let table = lua.create_table()?;
+                table.set("shift", false)?;
+                table.set("ctrl", false)?;
+                table.set("alt", false)?;
+                table.set("super", false)?;
+                return Ok(Some(table));
+            }
+
+            let shift = input_manager.is_key_active(KeyCode::ShiftLeft)
+                || input_manager.is_key_active(KeyCode::ShiftRight);
+            let ctrl = input_manager.is_key_active(KeyCode::ControlLeft)
+                || input_manager.is_key_active(KeyCode::ControlRight);
+            let alt = input_manager.is_key_active(KeyCode::AltLeft)
+                || input_manager.is_key_active(KeyCode::AltRight);
+            let super_key = input_manager.is_key_active(KeyCode::SuperLeft)
+                || input_manager.is_key_active(KeyCode::SuperRight);
+
+            let table = lua.create_table()?;
+            table.set("shift", shift)?;
+            table.set("ctrl", ctrl)?;
+            table.set("alt", alt)?;
+            table.set("super", super_key)?;
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_wants_keyboard = world_ptr;
+    input.set(
+        "wants_keyboard",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_wants_keyboard as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(input_manager.egui_wants_key)
+        })?,
+    )?;
+
+    let world_ptr_wants_pointer = world_ptr;
+    input.set(
+        "wants_pointer",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_wants_pointer as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(input_manager.egui_wants_pointer)
+        })?,
+    )?;
+
+    let world_ptr_gamepad_ids = world_ptr;
+    input.set(
+        "gamepad_ids",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_gamepad_ids as *mut World) };
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(lua.create_table()?);
+            };
+            let list = lua.create_table()?;
+            for (index, id) in input_state.gamepad_ids.iter().enumerate() {
+                list.set(index + 1, *id as u64)?;
+            }
+            Ok(list)
+        })?,
+    )?;
+
+    let world_ptr_gamepad_count = world_ptr;
+    input.set(
+        "gamepad_count",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_gamepad_count as *mut World) };
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(0_u32);
+            };
+            Ok(input_state.gamepad_ids.len() as u32)
+        })?,
+    )?;
+
+    let world_ptr_gamepad_axis = world_ptr;
+    input.set(
+        "gamepad_axis",
+        lua.create_function(move |_, (axis, id): (Value, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_gamepad_axis as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(0.0);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(axis) = lua_gamepad_axis_from_value(axis) else {
+                return Ok(0.0);
+            };
+            let Some(gamepad_id) =
+                resolve_gamepad_id(world.get_resource::<ScriptInputState>(), &input_manager, id)
+            else {
+                return Ok(0.0);
+            };
+            Ok(input_manager.get_controller_axis(gamepad_id, axis))
+        })?,
+    )?;
+
+    let world_ptr_gamepad_down = world_ptr;
+    input.set(
+        "gamepad_button_down",
+        lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_gamepad_down as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(button) = lua_gamepad_button_from_value(button) else {
+                return Ok(false);
+            };
+            let Some(gamepad_id) =
+                resolve_gamepad_id(world.get_resource::<ScriptInputState>(), &input_manager, id)
+            else {
+                return Ok(false);
+            };
+            Ok(input_manager.is_controller_button_active(gamepad_id, button))
+        })?,
+    )?;
+
+    let world_ptr_gamepad_pressed = world_ptr;
+    input.set(
+        "gamepad_button_pressed",
+        lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_gamepad_pressed as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(button) = lua_gamepad_button_from_value(button) else {
+                return Ok(false);
+            };
+            let Some(gamepad_id) =
+                resolve_gamepad_id(world.get_resource::<ScriptInputState>(), &input_manager, id)
+            else {
+                return Ok(false);
+            };
+
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(false);
+            };
+            let id_value = usize::from(gamepad_id);
+            let was_down = input_state
+                .last_gamepad_buttons
+                .get(&id_value)
+                .map(|buttons| buttons.contains(&button))
+                .unwrap_or(false);
+            let is_down = input_manager.is_controller_button_active(gamepad_id, button);
+            Ok(is_down && !was_down)
+        })?,
+    )?;
+
+    let world_ptr_gamepad_released = world_ptr;
+    input.set(
+        "gamepad_button_released",
+        lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_gamepad_released as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(button) = lua_gamepad_button_from_value(button) else {
+                return Ok(false);
+            };
+            let Some(gamepad_id) =
+                resolve_gamepad_id(world.get_resource::<ScriptInputState>(), &input_manager, id)
+            else {
+                return Ok(false);
+            };
+
+            let Some(input_state) = world.get_resource::<ScriptInputState>() else {
+                return Ok(false);
+            };
+            let id_value = usize::from(gamepad_id);
+            let was_down = input_state
+                .last_gamepad_buttons
+                .get(&id_value)
+                .map(|buttons| buttons.contains(&button))
+                .unwrap_or(false);
+            let is_down = input_manager.is_controller_button_active(gamepad_id, button);
+            Ok(!is_down && was_down)
+        })?,
+    )?;
+
+    let world_ptr_trigger = world_ptr;
+    input.set(
+        "gamepad_trigger",
+        lua.create_function(move |_, (side, id): (Value, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_trigger as *mut World) };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(0.0);
+            };
+            let input_manager = input_manager.0.read();
+            let Some(side) = parse_trigger_side(side) else {
+                return Ok(0.0);
+            };
+            let Some(gamepad_id) =
+                resolve_gamepad_id(world.get_resource::<ScriptInputState>(), &input_manager, id)
+            else {
+                return Ok(0.0);
+            };
+
+            let value = match side {
+                TriggerSide::Left => input_manager.get_left_trigger_value(gamepad_id),
+                TriggerSide::Right => input_manager.get_right_trigger_value(gamepad_id),
+            };
+            Ok(value)
+        })?,
+    )?;
+
+    Ok(input)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LuaKey {
+    Code(KeyCode),
+    AnyShift,
+    AnyCtrl,
+    AnyAlt,
+    AnySuper,
+}
+
+impl UserData for LuaKey {}
+
+#[derive(Clone, Copy, Debug)]
+struct LuaMouseButton(MouseButton);
+
+impl UserData for LuaMouseButton {}
+
+#[derive(Clone, Copy, Debug)]
+struct LuaGamepadButton(gilrs::Button);
+
+impl UserData for LuaGamepadButton {}
+
+#[derive(Clone, Copy, Debug)]
+struct LuaGamepadAxis(gilrs::Axis);
+
+impl UserData for LuaGamepadAxis {}
+
+#[derive(Clone, Copy, Debug)]
+enum TriggerSide {
+    Left,
+    Right,
+}
+
+fn fill_key_constants(lua: &Lua, table: &Table) -> mlua::Result<()> {
+    add_key_constant(lua, table, "Shift", LuaKey::AnyShift)?;
+    add_key_constant(lua, table, "Ctrl", LuaKey::AnyCtrl)?;
+    add_key_constant(lua, table, "Control", LuaKey::AnyCtrl)?;
+    add_key_constant(lua, table, "Alt", LuaKey::AnyAlt)?;
+    add_key_constant(lua, table, "Super", LuaKey::AnySuper)?;
+
+    add_key_constant(lua, table, "LeftShift", LuaKey::Code(KeyCode::ShiftLeft))?;
+    add_key_constant(lua, table, "RightShift", LuaKey::Code(KeyCode::ShiftRight))?;
+    add_key_constant(lua, table, "LeftCtrl", LuaKey::Code(KeyCode::ControlLeft))?;
+    add_key_constant(lua, table, "RightCtrl", LuaKey::Code(KeyCode::ControlRight))?;
+    add_key_constant(lua, table, "LeftAlt", LuaKey::Code(KeyCode::AltLeft))?;
+    add_key_constant(lua, table, "RightAlt", LuaKey::Code(KeyCode::AltRight))?;
+    add_key_constant(lua, table, "LeftSuper", LuaKey::Code(KeyCode::SuperLeft))?;
+    add_key_constant(lua, table, "RightSuper", LuaKey::Code(KeyCode::SuperRight))?;
+
+    add_key_constant(lua, table, "Space", LuaKey::Code(KeyCode::Space))?;
+    add_key_constant(lua, table, "Enter", LuaKey::Code(KeyCode::Enter))?;
+    add_key_constant(lua, table, "Escape", LuaKey::Code(KeyCode::Escape))?;
+    add_key_constant(lua, table, "Tab", LuaKey::Code(KeyCode::Tab))?;
+    add_key_constant(lua, table, "Backspace", LuaKey::Code(KeyCode::Backspace))?;
+    add_key_constant(lua, table, "Delete", LuaKey::Code(KeyCode::Delete))?;
+    add_key_constant(lua, table, "Insert", LuaKey::Code(KeyCode::Insert))?;
+    add_key_constant(lua, table, "Home", LuaKey::Code(KeyCode::Home))?;
+    add_key_constant(lua, table, "End", LuaKey::Code(KeyCode::End))?;
+    add_key_constant(lua, table, "PageUp", LuaKey::Code(KeyCode::PageUp))?;
+    add_key_constant(lua, table, "PageDown", LuaKey::Code(KeyCode::PageDown))?;
+    add_key_constant(lua, table, "Up", LuaKey::Code(KeyCode::ArrowUp))?;
+    add_key_constant(lua, table, "Down", LuaKey::Code(KeyCode::ArrowDown))?;
+    add_key_constant(lua, table, "Left", LuaKey::Code(KeyCode::ArrowLeft))?;
+    add_key_constant(lua, table, "Right", LuaKey::Code(KeyCode::ArrowRight))?;
+
+    add_key_constant(lua, table, "CapsLock", LuaKey::Code(KeyCode::CapsLock))?;
+    add_key_constant(lua, table, "NumLock", LuaKey::Code(KeyCode::NumLock))?;
+    add_key_constant(lua, table, "ScrollLock", LuaKey::Code(KeyCode::ScrollLock))?;
+    add_key_constant(
+        lua,
+        table,
+        "PrintScreen",
+        LuaKey::Code(KeyCode::PrintScreen),
+    )?;
+    add_key_constant(lua, table, "Pause", LuaKey::Code(KeyCode::Pause))?;
+    add_key_constant(
+        lua,
+        table,
+        "ContextMenu",
+        LuaKey::Code(KeyCode::ContextMenu),
+    )?;
+
+    add_key_constant(lua, table, "Minus", LuaKey::Code(KeyCode::Minus))?;
+    add_key_constant(lua, table, "Equal", LuaKey::Code(KeyCode::Equal))?;
+    add_key_constant(lua, table, "Comma", LuaKey::Code(KeyCode::Comma))?;
+    add_key_constant(lua, table, "Period", LuaKey::Code(KeyCode::Period))?;
+    add_key_constant(lua, table, "Slash", LuaKey::Code(KeyCode::Slash))?;
+    add_key_constant(lua, table, "Backslash", LuaKey::Code(KeyCode::Backslash))?;
+    add_key_constant(lua, table, "Semicolon", LuaKey::Code(KeyCode::Semicolon))?;
+    add_key_constant(lua, table, "Quote", LuaKey::Code(KeyCode::Quote))?;
+    add_key_constant(lua, table, "Backquote", LuaKey::Code(KeyCode::Backquote))?;
+    add_key_constant(
+        lua,
+        table,
+        "LeftBracket",
+        LuaKey::Code(KeyCode::BracketLeft),
+    )?;
+    add_key_constant(
+        lua,
+        table,
+        "RightBracket",
+        LuaKey::Code(KeyCode::BracketRight),
+    )?;
+
+    for letter in b'A'..=b'Z' {
+        let name = (letter as char).to_string();
+        if let Some(code) = keycode_from_letter(letter.to_ascii_lowercase()) {
+            add_key_constant(lua, table, &name, LuaKey::Code(code))?;
+            let alias = format!("Key{}", name);
+            add_key_constant(lua, table, &alias, LuaKey::Code(code))?;
+        }
+    }
+
+    for digit in 0..=9 {
+        let name = digit.to_string();
+        if let Some(code) = keycode_from_digit(b'0' + digit) {
+            add_key_constant(lua, table, &name, LuaKey::Code(code))?;
+            let alias = format!("Digit{}", digit);
+            add_key_constant(lua, table, &alias, LuaKey::Code(code))?;
+        }
+
+        if let Some(code) = keycode_from_numpad_digit(b'0' + digit) {
+            let alias = format!("Numpad{}", digit);
+            add_key_constant(lua, table, &alias, LuaKey::Code(code))?;
+            let short = format!("Num{}", digit);
+            add_key_constant(lua, table, &short, LuaKey::Code(code))?;
+        }
+    }
+
+    for num in 1..=24 {
+        if let Some(code) = keycode_from_function(num) {
+            let name = format!("F{}", num);
+            add_key_constant(lua, table, &name, LuaKey::Code(code))?;
+        }
+    }
+
+    add_key_constant(lua, table, "NumpadAdd", LuaKey::Code(KeyCode::NumpadAdd))?;
+    add_key_constant(
+        lua,
+        table,
+        "NumpadSub",
+        LuaKey::Code(KeyCode::NumpadSubtract),
+    )?;
+    add_key_constant(
+        lua,
+        table,
+        "NumpadMul",
+        LuaKey::Code(KeyCode::NumpadMultiply),
+    )?;
+    add_key_constant(lua, table, "NumpadDiv", LuaKey::Code(KeyCode::NumpadDivide))?;
+    add_key_constant(
+        lua,
+        table,
+        "NumpadEnter",
+        LuaKey::Code(KeyCode::NumpadEnter),
+    )?;
+    add_key_constant(
+        lua,
+        table,
+        "NumpadDecimal",
+        LuaKey::Code(KeyCode::NumpadDecimal),
+    )?;
+
+    Ok(())
+}
+
+fn fill_mouse_button_constants(lua: &Lua, table: &Table) -> mlua::Result<()> {
+    add_mouse_button_constant(lua, table, "Left", MouseButton::Left)?;
+    add_mouse_button_constant(lua, table, "Right", MouseButton::Right)?;
+    add_mouse_button_constant(lua, table, "Middle", MouseButton::Middle)?;
+    add_mouse_button_constant(lua, table, "Back", MouseButton::Back)?;
+    add_mouse_button_constant(lua, table, "Forward", MouseButton::Forward)?;
+    add_mouse_button_constant(lua, table, "Primary", MouseButton::Left)?;
+    add_mouse_button_constant(lua, table, "Secondary", MouseButton::Right)?;
+    Ok(())
+}
+
+fn fill_gamepad_button_constants(lua: &Lua, table: &Table) -> mlua::Result<()> {
+    use gilrs::Button;
+
+    add_gamepad_button_constant(lua, table, "South", Button::South)?;
+    add_gamepad_button_constant(lua, table, "East", Button::East)?;
+    add_gamepad_button_constant(lua, table, "North", Button::North)?;
+    add_gamepad_button_constant(lua, table, "West", Button::West)?;
+    add_gamepad_button_constant(lua, table, "A", Button::South)?;
+    add_gamepad_button_constant(lua, table, "B", Button::East)?;
+    add_gamepad_button_constant(lua, table, "X", Button::West)?;
+    add_gamepad_button_constant(lua, table, "Y", Button::North)?;
+
+    add_gamepad_button_constant(lua, table, "LeftTrigger", Button::LeftTrigger)?;
+    add_gamepad_button_constant(lua, table, "RightTrigger", Button::RightTrigger)?;
+    add_gamepad_button_constant(lua, table, "LeftTrigger2", Button::LeftTrigger2)?;
+    add_gamepad_button_constant(lua, table, "RightTrigger2", Button::RightTrigger2)?;
+    add_gamepad_button_constant(lua, table, "LB", Button::LeftTrigger)?;
+    add_gamepad_button_constant(lua, table, "RB", Button::RightTrigger)?;
+    add_gamepad_button_constant(lua, table, "LT", Button::LeftTrigger2)?;
+    add_gamepad_button_constant(lua, table, "RT", Button::RightTrigger2)?;
+
+    add_gamepad_button_constant(lua, table, "Select", Button::Select)?;
+    add_gamepad_button_constant(lua, table, "Start", Button::Start)?;
+    add_gamepad_button_constant(lua, table, "Mode", Button::Mode)?;
+    add_gamepad_button_constant(lua, table, "Back", Button::Select)?;
+    add_gamepad_button_constant(lua, table, "Menu", Button::Start)?;
+    add_gamepad_button_constant(lua, table, "Guide", Button::Mode)?;
+
+    add_gamepad_button_constant(lua, table, "LeftThumb", Button::LeftThumb)?;
+    add_gamepad_button_constant(lua, table, "RightThumb", Button::RightThumb)?;
+    add_gamepad_button_constant(lua, table, "LS", Button::LeftThumb)?;
+    add_gamepad_button_constant(lua, table, "RS", Button::RightThumb)?;
+    add_gamepad_button_constant(lua, table, "L3", Button::LeftThumb)?;
+    add_gamepad_button_constant(lua, table, "R3", Button::RightThumb)?;
+
+    add_gamepad_button_constant(lua, table, "DPadUp", Button::DPadUp)?;
+    add_gamepad_button_constant(lua, table, "DPadDown", Button::DPadDown)?;
+    add_gamepad_button_constant(lua, table, "DPadLeft", Button::DPadLeft)?;
+    add_gamepad_button_constant(lua, table, "DPadRight", Button::DPadRight)?;
+
+    add_gamepad_button_constant(lua, table, "C", Button::C)?;
+    add_gamepad_button_constant(lua, table, "Z", Button::Z)?;
+
+    Ok(())
+}
+
+fn fill_gamepad_axis_constants(lua: &Lua, table: &Table) -> mlua::Result<()> {
+    use gilrs::Axis;
+
+    add_gamepad_axis_constant(lua, table, "LeftX", Axis::LeftStickX)?;
+    add_gamepad_axis_constant(lua, table, "LeftY", Axis::LeftStickY)?;
+    add_gamepad_axis_constant(lua, table, "RightX", Axis::RightStickX)?;
+    add_gamepad_axis_constant(lua, table, "RightY", Axis::RightStickY)?;
+    add_gamepad_axis_constant(lua, table, "LeftZ", Axis::LeftZ)?;
+    add_gamepad_axis_constant(lua, table, "RightZ", Axis::RightZ)?;
+    add_gamepad_axis_constant(lua, table, "DPadX", Axis::DPadX)?;
+    add_gamepad_axis_constant(lua, table, "DPadY", Axis::DPadY)?;
+    add_gamepad_axis_constant(lua, table, "LeftStickX", Axis::LeftStickX)?;
+    add_gamepad_axis_constant(lua, table, "LeftStickY", Axis::LeftStickY)?;
+    add_gamepad_axis_constant(lua, table, "RightStickX", Axis::RightStickX)?;
+    add_gamepad_axis_constant(lua, table, "RightStickY", Axis::RightStickY)?;
+
+    Ok(())
+}
+
+fn add_key_constant(lua: &Lua, table: &Table, name: &str, key: LuaKey) -> mlua::Result<()> {
+    table.set(name, lua.create_userdata(key)?)?;
+    Ok(())
+}
+
+fn add_mouse_button_constant(
+    lua: &Lua,
+    table: &Table,
+    name: &str,
+    button: MouseButton,
+) -> mlua::Result<()> {
+    table.set(name, lua.create_userdata(LuaMouseButton(button))?)?;
+    Ok(())
+}
+
+fn add_gamepad_button_constant(
+    lua: &Lua,
+    table: &Table,
+    name: &str,
+    button: gilrs::Button,
+) -> mlua::Result<()> {
+    table.set(name, lua.create_userdata(LuaGamepadButton(button))?)?;
+    Ok(())
+}
+
+fn add_gamepad_axis_constant(
+    lua: &Lua,
+    table: &Table,
+    name: &str,
+    axis: gilrs::Axis,
+) -> mlua::Result<()> {
+    table.set(name, lua.create_userdata(LuaGamepadAxis(axis))?)?;
+    Ok(())
+}
+
+fn lua_key_from_value(value: Value) -> Option<LuaKey> {
+    match value {
+        Value::UserData(userdata) => userdata.borrow::<LuaKey>().ok().map(|key| *key),
+        Value::String(value) => parse_key_name(&value.to_string_lossy()),
+        Value::Integer(value) => {
+            if value >= 0 && value <= 9 {
+                keycode_from_digit(b'0' + value as u8).map(LuaKey::Code)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn lua_mouse_button_from_value(value: Value) -> Option<MouseButton> {
+    match value {
+        Value::UserData(userdata) => userdata
+            .borrow::<LuaMouseButton>()
+            .ok()
+            .map(|button| button.0),
+        Value::String(value) => parse_mouse_button_name(&value.to_string_lossy()),
+        Value::Integer(value) => mouse_button_from_int(value),
+        _ => None,
+    }
+}
+
+fn lua_gamepad_button_from_value(value: Value) -> Option<gilrs::Button> {
+    match value {
+        Value::UserData(userdata) => userdata
+            .borrow::<LuaGamepadButton>()
+            .ok()
+            .map(|button| button.0),
+        Value::String(value) => parse_gamepad_button_name(&value.to_string_lossy()),
+        _ => None,
+    }
+}
+
+fn lua_gamepad_axis_from_value(value: Value) -> Option<gilrs::Axis> {
+    match value {
+        Value::UserData(userdata) => userdata.borrow::<LuaGamepadAxis>().ok().map(|axis| axis.0),
+        Value::String(value) => parse_gamepad_axis_name(&value.to_string_lossy()),
+        _ => None,
+    }
+}
+
+fn lua_key_is_active(input: &InputManager, key: LuaKey) -> bool {
+    match key {
+        LuaKey::Code(code) => input.is_key_active(code),
+        LuaKey::AnyShift => {
+            input.is_key_active(KeyCode::ShiftLeft) || input.is_key_active(KeyCode::ShiftRight)
+        }
+        LuaKey::AnyCtrl => {
+            input.is_key_active(KeyCode::ControlLeft) || input.is_key_active(KeyCode::ControlRight)
+        }
+        LuaKey::AnyAlt => {
+            input.is_key_active(KeyCode::AltLeft) || input.is_key_active(KeyCode::AltRight)
+        }
+        LuaKey::AnySuper => {
+            input.is_key_active(KeyCode::SuperLeft) || input.is_key_active(KeyCode::SuperRight)
+        }
+    }
+}
+
+fn lua_key_is_just_pressed(input: &InputManager, key: LuaKey) -> bool {
+    match key {
+        LuaKey::Code(code) => input.was_just_pressed(code),
+        LuaKey::AnyShift => {
+            input.was_just_pressed(KeyCode::ShiftLeft)
+                || input.was_just_pressed(KeyCode::ShiftRight)
+        }
+        LuaKey::AnyCtrl => {
+            input.was_just_pressed(KeyCode::ControlLeft)
+                || input.was_just_pressed(KeyCode::ControlRight)
+        }
+        LuaKey::AnyAlt => {
+            input.was_just_pressed(KeyCode::AltLeft) || input.was_just_pressed(KeyCode::AltRight)
+        }
+        LuaKey::AnySuper => {
+            input.was_just_pressed(KeyCode::SuperLeft)
+                || input.was_just_pressed(KeyCode::SuperRight)
+        }
+    }
+}
+
+fn lua_key_is_released(input: &InputManager, state: &ScriptInputState, key: LuaKey) -> bool {
+    let was_down = match key {
+        LuaKey::Code(code) => state.last_keys.contains(&code),
+        LuaKey::AnyShift => {
+            state.last_keys.contains(&KeyCode::ShiftLeft)
+                || state.last_keys.contains(&KeyCode::ShiftRight)
+        }
+        LuaKey::AnyCtrl => {
+            state.last_keys.contains(&KeyCode::ControlLeft)
+                || state.last_keys.contains(&KeyCode::ControlRight)
+        }
+        LuaKey::AnyAlt => {
+            state.last_keys.contains(&KeyCode::AltLeft)
+                || state.last_keys.contains(&KeyCode::AltRight)
+        }
+        LuaKey::AnySuper => {
+            state.last_keys.contains(&KeyCode::SuperLeft)
+                || state.last_keys.contains(&KeyCode::SuperRight)
+        }
+    };
+
+    let is_down = lua_key_is_active(input, key);
+    was_down && !is_down
+}
+
+fn parse_key_name(name: &str) -> Option<LuaKey> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.len() == 1 {
+        let byte = trimmed.as_bytes()[0];
+        if byte.is_ascii_alphabetic() {
+            return keycode_from_letter(byte.to_ascii_lowercase()).map(LuaKey::Code);
+        }
+        if byte.is_ascii_digit() {
+            return keycode_from_digit(byte).map(LuaKey::Code);
+        }
+        return match byte {
+            b' ' => Some(LuaKey::Code(KeyCode::Space)),
+            b'`' => Some(LuaKey::Code(KeyCode::Backquote)),
+            b'-' => Some(LuaKey::Code(KeyCode::Minus)),
+            b'=' => Some(LuaKey::Code(KeyCode::Equal)),
+            b'[' => Some(LuaKey::Code(KeyCode::BracketLeft)),
+            b']' => Some(LuaKey::Code(KeyCode::BracketRight)),
+            b'\\' => Some(LuaKey::Code(KeyCode::Backslash)),
+            b';' => Some(LuaKey::Code(KeyCode::Semicolon)),
+            b'\'' => Some(LuaKey::Code(KeyCode::Quote)),
+            b',' => Some(LuaKey::Code(KeyCode::Comma)),
+            b'.' => Some(LuaKey::Code(KeyCode::Period)),
+            b'/' => Some(LuaKey::Code(KeyCode::Slash)),
+            _ => None,
+        };
+    }
+
+    let normalized = normalize_name(trimmed);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    match normalized.as_str() {
+        "shift" => return Some(LuaKey::AnyShift),
+        "ctrl" | "control" => return Some(LuaKey::AnyCtrl),
+        "alt" | "option" => return Some(LuaKey::AnyAlt),
+        "super" | "meta" | "command" | "cmd" | "win" | "windows" => return Some(LuaKey::AnySuper),
+        "space" => return Some(LuaKey::Code(KeyCode::Space)),
+        "enter" | "return" => return Some(LuaKey::Code(KeyCode::Enter)),
+        "escape" | "esc" => return Some(LuaKey::Code(KeyCode::Escape)),
+        "tab" => return Some(LuaKey::Code(KeyCode::Tab)),
+        "backspace" => return Some(LuaKey::Code(KeyCode::Backspace)),
+        "delete" | "del" => return Some(LuaKey::Code(KeyCode::Delete)),
+        "insert" | "ins" => return Some(LuaKey::Code(KeyCode::Insert)),
+        "home" => return Some(LuaKey::Code(KeyCode::Home)),
+        "end" => return Some(LuaKey::Code(KeyCode::End)),
+        "pageup" | "pgup" => return Some(LuaKey::Code(KeyCode::PageUp)),
+        "pagedown" | "pgdn" => return Some(LuaKey::Code(KeyCode::PageDown)),
+        "up" | "arrowup" => return Some(LuaKey::Code(KeyCode::ArrowUp)),
+        "down" | "arrowdown" => return Some(LuaKey::Code(KeyCode::ArrowDown)),
+        "left" | "arrowleft" => return Some(LuaKey::Code(KeyCode::ArrowLeft)),
+        "right" | "arrowright" => return Some(LuaKey::Code(KeyCode::ArrowRight)),
+        "capslock" => return Some(LuaKey::Code(KeyCode::CapsLock)),
+        "numlock" => return Some(LuaKey::Code(KeyCode::NumLock)),
+        "scrolllock" => return Some(LuaKey::Code(KeyCode::ScrollLock)),
+        "printscreen" | "prtsc" => return Some(LuaKey::Code(KeyCode::PrintScreen)),
+        "pause" => return Some(LuaKey::Code(KeyCode::Pause)),
+        "contextmenu" | "menu" => return Some(LuaKey::Code(KeyCode::ContextMenu)),
+        "lshift" | "shiftleft" | "leftshift" => return Some(LuaKey::Code(KeyCode::ShiftLeft)),
+        "rshift" | "shiftright" | "rightshift" => return Some(LuaKey::Code(KeyCode::ShiftRight)),
+        "lctrl" | "ctrlleft" | "leftctrl" => return Some(LuaKey::Code(KeyCode::ControlLeft)),
+        "rctrl" | "ctrlright" | "rightctrl" => return Some(LuaKey::Code(KeyCode::ControlRight)),
+        "lalt" | "altleft" | "leftalt" => return Some(LuaKey::Code(KeyCode::AltLeft)),
+        "ralt" | "altright" | "rightalt" => return Some(LuaKey::Code(KeyCode::AltRight)),
+        "lsuper" | "superleft" | "leftsuper" | "lmeta" | "metaleft" => {
+            return Some(LuaKey::Code(KeyCode::SuperLeft));
+        }
+        "rsuper" | "superright" | "rightsuper" | "rmeta" | "metaright" => {
+            return Some(LuaKey::Code(KeyCode::SuperRight));
+        }
+        "minus" => return Some(LuaKey::Code(KeyCode::Minus)),
+        "equal" | "equals" => return Some(LuaKey::Code(KeyCode::Equal)),
+        "comma" => return Some(LuaKey::Code(KeyCode::Comma)),
+        "period" | "dot" => return Some(LuaKey::Code(KeyCode::Period)),
+        "slash" => return Some(LuaKey::Code(KeyCode::Slash)),
+        "backslash" => return Some(LuaKey::Code(KeyCode::Backslash)),
+        "semicolon" => return Some(LuaKey::Code(KeyCode::Semicolon)),
+        "quote" | "apostrophe" => return Some(LuaKey::Code(KeyCode::Quote)),
+        "backquote" | "grave" => return Some(LuaKey::Code(KeyCode::Backquote)),
+        "leftbracket" | "lbracket" => return Some(LuaKey::Code(KeyCode::BracketLeft)),
+        "rightbracket" | "rbracket" => return Some(LuaKey::Code(KeyCode::BracketRight)),
+        "numpadadd" => return Some(LuaKey::Code(KeyCode::NumpadAdd)),
+        "numpadsub" | "numpadminus" => return Some(LuaKey::Code(KeyCode::NumpadSubtract)),
+        "numpadmul" | "numpadmultiply" => return Some(LuaKey::Code(KeyCode::NumpadMultiply)),
+        "numpaddiv" | "numpaddivide" => return Some(LuaKey::Code(KeyCode::NumpadDivide)),
+        "numpadenter" => return Some(LuaKey::Code(KeyCode::NumpadEnter)),
+        "numpaddecimal" | "numpaddot" => return Some(LuaKey::Code(KeyCode::NumpadDecimal)),
+        _ => {}
+    }
+
+    if let Some(rest) = normalized.strip_prefix("key") {
+        if rest.len() == 1 {
+            let byte = rest.as_bytes()[0];
+            if byte.is_ascii_alphabetic() {
+                return keycode_from_letter(byte).map(LuaKey::Code);
+            }
+        }
+    }
+
+    if let Some(rest) = normalized.strip_prefix("digit") {
+        if rest.len() == 1 {
+            let byte = rest.as_bytes()[0];
+            if byte.is_ascii_digit() {
+                return keycode_from_digit(byte).map(LuaKey::Code);
+            }
+        }
+    }
+
+    if let Some(rest) = normalized.strip_prefix("numpad") {
+        if rest.len() == 1 {
+            let byte = rest.as_bytes()[0];
+            if byte.is_ascii_digit() {
+                return keycode_from_numpad_digit(byte).map(LuaKey::Code);
+            }
+        }
+    }
+
+    if let Some(rest) = normalized.strip_prefix("f") {
+        if let Ok(number) = rest.parse::<u8>() {
+            return keycode_from_function(number).map(LuaKey::Code);
+        }
+    }
+
+    None
+}
+
+fn parse_mouse_button_name(name: &str) -> Option<MouseButton> {
+    let normalized = normalize_name(name);
+    match normalized.as_str() {
+        "left" | "primary" | "button1" => Some(MouseButton::Left),
+        "right" | "secondary" | "button2" => Some(MouseButton::Right),
+        "middle" | "button3" => Some(MouseButton::Middle),
+        "back" | "button4" => Some(MouseButton::Back),
+        "forward" | "button5" => Some(MouseButton::Forward),
+        _ => {
+            if let Some(rest) = normalized.strip_prefix("button") {
+                if let Ok(value) = rest.parse::<i64>() {
+                    return mouse_button_from_int(value);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn parse_gamepad_button_name(name: &str) -> Option<gilrs::Button> {
+    let normalized = normalize_name(name);
+    match normalized.as_str() {
+        "south" | "a" => Some(gilrs::Button::South),
+        "east" | "b" => Some(gilrs::Button::East),
+        "north" | "y" => Some(gilrs::Button::North),
+        "west" | "x" => Some(gilrs::Button::West),
+        "lefttrigger" | "lb" | "l1" => Some(gilrs::Button::LeftTrigger),
+        "righttrigger" | "rb" | "r1" => Some(gilrs::Button::RightTrigger),
+        "lefttrigger2" | "lt" | "l2" => Some(gilrs::Button::LeftTrigger2),
+        "righttrigger2" | "rt" | "r2" => Some(gilrs::Button::RightTrigger2),
+        "leftthumb" | "leftstick" | "ls" | "l3" => Some(gilrs::Button::LeftThumb),
+        "rightthumb" | "rightstick" | "rs" | "r3" => Some(gilrs::Button::RightThumb),
+        "select" | "back" => Some(gilrs::Button::Select),
+        "start" | "menu" => Some(gilrs::Button::Start),
+        "mode" | "guide" => Some(gilrs::Button::Mode),
+        "dpadup" | "up" => Some(gilrs::Button::DPadUp),
+        "dpaddown" | "down" => Some(gilrs::Button::DPadDown),
+        "dpadleft" | "left" => Some(gilrs::Button::DPadLeft),
+        "dpadright" | "right" => Some(gilrs::Button::DPadRight),
+        "c" => Some(gilrs::Button::C),
+        "z" => Some(gilrs::Button::Z),
+        _ => None,
+    }
+}
+
+fn parse_gamepad_axis_name(name: &str) -> Option<gilrs::Axis> {
+    let normalized = normalize_name(name);
+    match normalized.as_str() {
+        "leftx" | "lx" | "leftstickx" => Some(gilrs::Axis::LeftStickX),
+        "lefty" | "ly" | "leftsticky" => Some(gilrs::Axis::LeftStickY),
+        "rightx" | "rx" | "rightstickx" => Some(gilrs::Axis::RightStickX),
+        "righty" | "ry" | "rightsticky" => Some(gilrs::Axis::RightStickY),
+        "leftz" | "lz" => Some(gilrs::Axis::LeftZ),
+        "rightz" | "rz" => Some(gilrs::Axis::RightZ),
+        "dpadx" | "dx" => Some(gilrs::Axis::DPadX),
+        "dpady" | "dy" => Some(gilrs::Axis::DPadY),
+        _ => None,
+    }
+}
+
+fn parse_trigger_side(value: Value) -> Option<TriggerSide> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "left" | "lt" | "l2" | "lefttrigger" | "lefttrigger2" => Some(TriggerSide::Left),
+                "right" | "rt" | "r2" | "righttrigger" | "righttrigger2" => {
+                    Some(TriggerSide::Right)
+                }
+                _ => None,
+            }
+        }
+        Value::UserData(userdata) => {
+            if let Ok(button) = userdata.borrow::<LuaGamepadButton>() {
+                return match button.0 {
+                    gilrs::Button::LeftTrigger | gilrs::Button::LeftTrigger2 => {
+                        Some(TriggerSide::Left)
+                    }
+                    gilrs::Button::RightTrigger | gilrs::Button::RightTrigger2 => {
+                        Some(TriggerSide::Right)
+                    }
+                    _ => None,
+                };
+            }
+            if let Ok(axis) = userdata.borrow::<LuaGamepadAxis>() {
+                return match axis.0 {
+                    gilrs::Axis::LeftZ => Some(TriggerSide::Left),
+                    gilrs::Axis::RightZ => Some(TriggerSide::Right),
+                    _ => None,
+                };
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn resolve_gamepad_id(
+    input_state: Option<&ScriptInputState>,
+    input_manager: &InputManager,
+    id: Option<u64>,
+) -> Option<gilrs::GamepadId> {
+    if let Some(id) = id {
+        return input_state.and_then(|state| state.gamepad_map.get(&(id as usize)).copied());
+    }
+
+    input_manager.first_gamepad_id()
+}
+
+fn normalize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        let normalized = byte.to_ascii_lowercase();
+        if normalized.is_ascii_alphanumeric() {
+            out.push(normalized as char);
+        }
+    }
+    out
+}
+
+fn mouse_button_from_int(value: i64) -> Option<MouseButton> {
+    if value <= 0 {
+        return None;
+    }
+    if value > u16::MAX as i64 {
+        return None;
+    }
+    let value = value as u16;
+    Some(match value {
+        1 => MouseButton::Left,
+        2 => MouseButton::Right,
+        3 => MouseButton::Middle,
+        4 => MouseButton::Back,
+        5 => MouseButton::Forward,
+        _ => MouseButton::Other(value),
+    })
+}
+
+fn keycode_from_letter(letter: u8) -> Option<KeyCode> {
+    match letter {
+        b'a' => Some(KeyCode::KeyA),
+        b'b' => Some(KeyCode::KeyB),
+        b'c' => Some(KeyCode::KeyC),
+        b'd' => Some(KeyCode::KeyD),
+        b'e' => Some(KeyCode::KeyE),
+        b'f' => Some(KeyCode::KeyF),
+        b'g' => Some(KeyCode::KeyG),
+        b'h' => Some(KeyCode::KeyH),
+        b'i' => Some(KeyCode::KeyI),
+        b'j' => Some(KeyCode::KeyJ),
+        b'k' => Some(KeyCode::KeyK),
+        b'l' => Some(KeyCode::KeyL),
+        b'm' => Some(KeyCode::KeyM),
+        b'n' => Some(KeyCode::KeyN),
+        b'o' => Some(KeyCode::KeyO),
+        b'p' => Some(KeyCode::KeyP),
+        b'q' => Some(KeyCode::KeyQ),
+        b'r' => Some(KeyCode::KeyR),
+        b's' => Some(KeyCode::KeyS),
+        b't' => Some(KeyCode::KeyT),
+        b'u' => Some(KeyCode::KeyU),
+        b'v' => Some(KeyCode::KeyV),
+        b'w' => Some(KeyCode::KeyW),
+        b'x' => Some(KeyCode::KeyX),
+        b'y' => Some(KeyCode::KeyY),
+        b'z' => Some(KeyCode::KeyZ),
+        _ => None,
+    }
+}
+
+fn keycode_from_digit(digit: u8) -> Option<KeyCode> {
+    match digit {
+        b'0' => Some(KeyCode::Digit0),
+        b'1' => Some(KeyCode::Digit1),
+        b'2' => Some(KeyCode::Digit2),
+        b'3' => Some(KeyCode::Digit3),
+        b'4' => Some(KeyCode::Digit4),
+        b'5' => Some(KeyCode::Digit5),
+        b'6' => Some(KeyCode::Digit6),
+        b'7' => Some(KeyCode::Digit7),
+        b'8' => Some(KeyCode::Digit8),
+        b'9' => Some(KeyCode::Digit9),
+        _ => None,
+    }
+}
+
+fn keycode_from_numpad_digit(digit: u8) -> Option<KeyCode> {
+    match digit {
+        b'0' => Some(KeyCode::Numpad0),
+        b'1' => Some(KeyCode::Numpad1),
+        b'2' => Some(KeyCode::Numpad2),
+        b'3' => Some(KeyCode::Numpad3),
+        b'4' => Some(KeyCode::Numpad4),
+        b'5' => Some(KeyCode::Numpad5),
+        b'6' => Some(KeyCode::Numpad6),
+        b'7' => Some(KeyCode::Numpad7),
+        b'8' => Some(KeyCode::Numpad8),
+        b'9' => Some(KeyCode::Numpad9),
+        _ => None,
+    }
+}
+
+fn keycode_from_function(number: u8) -> Option<KeyCode> {
+    match number {
+        1 => Some(KeyCode::F1),
+        2 => Some(KeyCode::F2),
+        3 => Some(KeyCode::F3),
+        4 => Some(KeyCode::F4),
+        5 => Some(KeyCode::F5),
+        6 => Some(KeyCode::F6),
+        7 => Some(KeyCode::F7),
+        8 => Some(KeyCode::F8),
+        9 => Some(KeyCode::F9),
+        10 => Some(KeyCode::F10),
+        11 => Some(KeyCode::F11),
+        12 => Some(KeyCode::F12),
+        13 => Some(KeyCode::F13),
+        14 => Some(KeyCode::F14),
+        15 => Some(KeyCode::F15),
+        16 => Some(KeyCode::F16),
+        17 => Some(KeyCode::F17),
+        18 => Some(KeyCode::F18),
+        19 => Some(KeyCode::F19),
+        20 => Some(KeyCode::F20),
+        21 => Some(KeyCode::F21),
+        22 => Some(KeyCode::F22),
+        23 => Some(KeyCode::F23),
+        24 => Some(KeyCode::F24),
+        _ => None,
+    }
+}
+
 fn lua_value_to_string(value: Value) -> String {
     match value {
         Value::Nil => "nil".to_string(),
@@ -1267,6 +2607,15 @@ fn ensure_transform(world: &mut World, entity: Entity) {
     if world.get::<BevyTransform>(entity).is_none() {
         world.entity_mut(entity).insert(BevyTransform::default());
     }
+}
+
+fn vec2_to_table(lua: &Lua, value: Vec2) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("x", value.x)?;
+    table.set("y", value.y)?;
+    table.set(1, value.x)?;
+    table.set(2, value.y)?;
+    Ok(table)
 }
 
 fn vec3_to_table(lua: &Lua, value: Vec3) -> mlua::Result<Table> {

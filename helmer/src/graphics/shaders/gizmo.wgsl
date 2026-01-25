@@ -12,9 +12,6 @@ struct CameraUniforms {
     _pad_end: vec4<u32>,
 }
 
-const MAX_GIZMO_ICONS: u32 = 64u;
-const MAX_GIZMO_LINES: u32 = 1024u;
-
 struct GizmoIcon {
     position: vec3<f32>,
     kind: u32,
@@ -57,15 +54,23 @@ struct GizmoParams {
     selection_color: vec4<f32>,
     icon_meta: vec4<u32>,
     icon_line_params: vec4<f32>,
-    icons: array<GizmoIcon, MAX_GIZMO_ICONS>,
     outline_meta: vec4<u32>,
     outline_line_params: vec4<f32>,
     outline_color: vec4<f32>,
-    outline_lines: array<GizmoLine, MAX_GIZMO_LINES>,
+}
+
+struct GizmoIconBuffer {
+    icons: array<GizmoIcon>,
+}
+
+struct GizmoLineBuffer {
+    lines: array<GizmoLine>,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
 @group(1) @binding(0) var<uniform> gizmo: GizmoParams;
+@group(1) @binding(1) var<storage, read> gizmo_icons: GizmoIconBuffer;
+@group(1) @binding(2) var<storage, read> gizmo_outline_lines: GizmoLineBuffer;
 
 struct VertexOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -118,14 +123,14 @@ fn axis_dir(axis_index: u32) -> vec3<f32> {
     return vec3<f32>(0.0, 0.0, 1.0);
 }
 
-fn axis_color(axis_index: u32) -> vec3<f32> {
+fn axis_color(axis_index: u32) -> vec4<f32> {
     if (axis_index == 0u) {
-        return gizmo.axis_color_x.xyz;
+        return gizmo.axis_color_x;
     }
     if (axis_index == 1u) {
-        return gizmo.axis_color_y.xyz;
+        return gizmo.axis_color_y;
     }
-    return gizmo.axis_color_z.xyz;
+    return gizmo.axis_color_z;
 }
 
 const SELECTION_EDGE_STARTS: array<u32, 12> = array<u32, 12>(
@@ -476,7 +481,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                 }
 
                 pos = gizmo.origin + ring_offset;
-                color = highlight_color(axis_color(axis_index), axis_id);
+                let axis = axis_color(axis_index);
+                color = highlight_color(axis.xyz, axis_id);
+                alpha = axis.w;
             } else if (vertex_index < rotate_total + ORIGIN_VERTS) {
                 let local_index = vertex_index - rotate_total;
                 let basis = billboard_basis(view_dir);
@@ -485,7 +492,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                 pos = gizmo.origin
                     + basis.right * (corner.x * dot_size)
                     + basis.up * (corner.y * dot_size);
-                color = highlight_color(gizmo.origin_color.xyz, CENTER_AXIS_ID);
+                let origin_color = gizmo.origin_color;
+                color = highlight_color(origin_color.xyz, CENTER_AXIS_ID);
+                alpha = origin_color.w;
             } else {
                 alpha = 0.0;
             }
@@ -515,7 +524,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                         + basis.up * (corner.y * box_half);
                 }
 
-                color = highlight_color(axis_color(axis_index), axis_id);
+                let axis = axis_color(axis_index);
+                color = highlight_color(axis.xyz, axis_id);
+                alpha = axis.w;
             } else if (vertex_index < scale_total + ORIGIN_VERTS) {
                 let local_index = vertex_index - scale_total;
                 let basis = billboard_basis(view_dir);
@@ -524,7 +535,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                 pos = gizmo.origin
                     + basis.right * (corner.x * dot_size)
                     + basis.up * (corner.y * dot_size);
-                color = highlight_color(gizmo.origin_color.xyz, CENTER_AXIS_ID);
+                let origin_color = gizmo.origin_color;
+                color = highlight_color(origin_color.xyz, CENTER_AXIS_ID);
+                alpha = origin_color.w;
             } else {
                 alpha = 0.0;
             }
@@ -557,7 +570,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                     }
                 }
 
-                color = highlight_color(axis_color(axis_index), axis_id);
+                let axis = axis_color(axis_index);
+                color = highlight_color(axis.xyz, axis_id);
+                alpha = axis.w;
             } else if (vertex_index < translate_total + ORIGIN_VERTS) {
                 let local_index = vertex_index - translate_total;
                 let basis = billboard_basis(view_dir);
@@ -566,7 +581,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
                 pos = gizmo.origin
                     + basis.right * (corner.x * dot_size)
                     + basis.up * (corner.y * dot_size);
-                color = highlight_color(gizmo.origin_color.xyz, CENTER_AXIS_ID);
+                let origin_color = gizmo.origin_color;
+                color = highlight_color(origin_color.xyz, CENTER_AXIS_ID);
+                alpha = origin_color.w;
             } else {
                 alpha = 0.0;
             }
@@ -593,7 +610,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
         let corner_index = local_index % OUTLINE_VERTS_PER_LINE;
 
         if (line_index < gizmo.outline_meta.x) {
-            let line = gizmo.outline_lines[line_index];
+            let line = gizmo_outline_lines.lines[line_index];
             let start_world = gizmo.origin + quat_rotate(gizmo.rotation, line.start * gizmo.scale);
             let end_world = gizmo.origin + quat_rotate(gizmo.rotation, line.end * gizmo.scale);
             let thickness = max(gizmo.size * gizmo.outline_line_params.x, gizmo.outline_line_params.y);
@@ -611,7 +628,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
         let corner_index = icon_local % ICON_VERTS_PER_EDGE;
 
         if (icon_index < gizmo.icon_meta.x) {
-            let icon = gizmo.icons[icon_index];
+            let icon = gizmo_icons.icons[icon_index];
             let thickness = max(icon.size_params.x * gizmo.icon_line_params.x, gizmo.icon_line_params.y);
             let edge = icon_edge(icon.kind, edge_index, icon.size_params.x, icon.params);
             if (edge.valid) {

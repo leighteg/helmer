@@ -70,16 +70,38 @@ impl GizmoPass {
 
         let gizmo_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GizmoPass/GizmoBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -149,6 +171,14 @@ impl RenderPass for GizmoPass {
             Some(buf) => buf,
             None => return,
         };
+        let gizmo_icons = match frame.gizmo_icon_buffer.as_ref() {
+            Some(buf) => buf,
+            None => return,
+        };
+        let gizmo_outline = match frame.gizmo_outline_buffer.as_ref() {
+            Some(buf) => buf,
+            None => return,
+        };
         let swapchain = match ctx.rpctx.frame_inputs.get::<SwapchainFrameInput>() {
             Some(v) => v,
             None => return,
@@ -168,10 +198,20 @@ impl RenderPass for GizmoPass {
         let gizmo_bg = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GizmoPass/GizmoBG"),
             layout: self.gizmo_bgl.read().as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: gizmo_params.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: gizmo_params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: gizmo_icons.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: gizmo_outline.as_entire_binding(),
+                },
+            ],
         });
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

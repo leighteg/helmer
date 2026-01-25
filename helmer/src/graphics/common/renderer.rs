@@ -486,9 +486,6 @@ impl Default for GizmoAxis {
     }
 }
 
-pub const MAX_GIZMO_ICONS: usize = 64;
-pub const MAX_GIZMO_LINES: usize = 1024;
-
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GizmoIconKind {
@@ -510,6 +507,7 @@ pub struct GizmoIcon {
     pub rotation: Quat,
     pub size: f32,
     pub color: Vec3,
+    pub alpha: f32,
     pub kind: GizmoIconKind,
     pub params: [f32; 4],
 }
@@ -521,6 +519,7 @@ impl Default for GizmoIcon {
             rotation: Quat::IDENTITY,
             size: 0.0,
             color: Vec3::ZERO,
+            alpha: 1.0,
             kind: GizmoIconKind::Camera,
             params: [0.0; 4],
         }
@@ -562,12 +561,16 @@ pub struct GizmoStyle {
     pub axis_color_y: [f32; 3],
     pub axis_color_z: [f32; 3],
     pub origin_color: [f32; 3],
+    pub axis_alpha: f32,
+    pub origin_alpha: f32,
     pub selection_thickness_scale: f32,
     pub selection_thickness_min: f32,
     pub selection_color: [f32; 3],
+    pub selection_alpha: f32,
     pub outline_thickness_scale: f32,
     pub outline_thickness_min: f32,
     pub outline_color: [f32; 3],
+    pub outline_alpha: f32,
     pub icon_thickness_scale: f32,
     pub icon_thickness_min: f32,
     pub hover_mix: f32,
@@ -595,12 +598,16 @@ impl Default for GizmoStyle {
             axis_color_y: [0.2, 1.0, 0.2],
             axis_color_z: [0.2, 0.4, 1.0],
             origin_color: [0.9, 0.9, 0.9],
+            axis_alpha: 1.0,
+            origin_alpha: 1.0,
             selection_thickness_scale: 0.03,
             selection_thickness_min: 0.01,
             selection_color: [1.0, 0.85, 0.2],
+            selection_alpha: 1.0,
             outline_thickness_scale: 0.02,
             outline_thickness_min: 0.006,
             outline_color: [0.35, 0.85, 1.0],
+            outline_alpha: 1.0,
             icon_thickness_scale: 0.025,
             icon_thickness_min: 0.008,
             hover_mix: 0.3,
@@ -609,7 +616,7 @@ impl Default for GizmoStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct GizmoData {
     pub mode: GizmoMode,
     pub position: Vec3,
@@ -621,10 +628,10 @@ pub struct GizmoData {
     pub selection_enabled: bool,
     pub selection_min: Vec3,
     pub selection_max: Vec3,
-    pub outline_lines: [GizmoLine; MAX_GIZMO_LINES],
-    pub outline_line_count: u32,
-    pub icons: [GizmoIcon; MAX_GIZMO_ICONS],
-    pub icon_count: u32,
+    pub outline_lines: std::sync::Arc<[GizmoLine]>,
+    pub outline_revision: u64,
+    pub icons: Vec<GizmoIcon>,
+    pub icons_revision: u64,
     pub style: GizmoStyle,
 }
 
@@ -641,12 +648,45 @@ impl Default for GizmoData {
             selection_enabled: false,
             selection_min: Vec3::ZERO,
             selection_max: Vec3::ZERO,
-            outline_lines: [GizmoLine::default(); MAX_GIZMO_LINES],
-            outline_line_count: 0,
-            icons: [GizmoIcon::default(); MAX_GIZMO_ICONS],
-            icon_count: 0,
+            outline_lines: std::sync::Arc::from(Vec::new()),
+            outline_revision: 0,
+            icons: Vec::new(),
+            icons_revision: 0,
             style: GizmoStyle::default(),
         }
+    }
+}
+
+impl PartialEq for GizmoData {
+    fn eq(&self, other: &Self) -> bool {
+        let outline_equal = if self.outline_lines.is_empty() && other.outline_lines.is_empty() {
+            true
+        } else if self.outline_revision != 0 || other.outline_revision != 0 {
+            self.outline_revision == other.outline_revision
+                && self.outline_lines.len() == other.outline_lines.len()
+        } else {
+            std::sync::Arc::ptr_eq(&self.outline_lines, &other.outline_lines)
+        };
+        let icons_equal = if self.icons.is_empty() && other.icons.is_empty() {
+            true
+        } else if self.icons_revision != 0 || other.icons_revision != 0 {
+            self.icons_revision == other.icons_revision && self.icons.len() == other.icons.len()
+        } else {
+            self.icons == other.icons
+        };
+        self.mode == other.mode
+            && self.position == other.position
+            && self.rotation == other.rotation
+            && self.scale == other.scale
+            && self.size == other.size
+            && self.hover_axis == other.hover_axis
+            && self.active_axis == other.active_axis
+            && self.selection_enabled == other.selection_enabled
+            && self.selection_min == other.selection_min
+            && self.selection_max == other.selection_max
+            && outline_equal
+            && icons_equal
+            && self.style == other.style
     }
 }
 
@@ -792,7 +832,7 @@ impl RenderDelta {
             self.render_graph = delta.render_graph.clone();
         }
         if delta.gizmo.is_some() {
-            self.gizmo = delta.gizmo;
+            self.gizmo = delta.gizmo.clone();
         }
         if delta.streaming_requests.is_some() {
             self.streaming_requests = delta.streaming_requests.clone();

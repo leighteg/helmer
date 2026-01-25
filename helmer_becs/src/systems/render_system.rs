@@ -53,7 +53,7 @@ impl Default for RenderGraphResource {
     }
 }
 
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct RenderGizmoState(pub GizmoData);
 
 impl Default for RenderGizmoState {
@@ -2045,13 +2045,14 @@ pub fn render_data_system(
     let gizmo_data = resources
         .gizmo_state
         .as_ref()
-        .map(|state| state.0)
+        .map(|state| state.0.clone())
         .unwrap_or_default();
-    if worker_state
+    let gizmo_changed = worker_state
         .last_gizmo
-        .map_or(true, |last| last != gizmo_data)
-    {
-        direct_delta.gizmo = Some(gizmo_data);
+        .as_ref()
+        .map_or(true, |last| last != &gizmo_data);
+    if gizmo_changed {
+        direct_delta.gizmo = Some(gizmo_data.clone());
         worker_state.last_gizmo = Some(gizmo_data);
     }
 

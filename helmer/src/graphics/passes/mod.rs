@@ -30,10 +30,7 @@ use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
     common::{
         config::RenderConfig,
-        renderer::{
-            LightData, MAX_GIZMO_ICONS, MAX_GIZMO_LINES, RenderDeviceCaps, ShaderConstants,
-            SkyUniforms,
-        },
+        renderer::{LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms},
     },
     graph::definition::resource_id::ResourceId,
 };
@@ -99,6 +96,8 @@ pub struct FrameGlobals {
     pub atmosphere_bind_group: wgpu::BindGroup,
     pub debug_params_buffer: wgpu::Buffer,
     pub gizmo_params_buffer: Option<wgpu::Buffer>,
+    pub gizmo_icon_buffer: Option<wgpu::Buffer>,
+    pub gizmo_outline_buffer: Option<wgpu::Buffer>,
     pub gizmo_vertex_count: u32,
     pub gbuffer_instances: Option<InstanceBuffer>,
     pub gbuffer_batches: Arc<Vec<DrawBatch>>,
@@ -206,11 +205,9 @@ pub struct GizmoParams {
     pub selection_color: [f32; 4],
     pub icon_meta: [u32; 4],
     pub icon_line_params: [f32; 4],
-    pub icons: [GizmoIconParams; MAX_GIZMO_ICONS],
     pub outline_meta: [u32; 4],
     pub outline_line_params: [f32; 4],
     pub outline_color: [f32; 4],
-    pub outline_lines: [GizmoLineParams; MAX_GIZMO_LINES],
 }
 
 #[derive(Clone)]

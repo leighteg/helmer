@@ -35,14 +35,14 @@ use crate::graphics::{
         },
         renderer::{
             Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            DdgiGridConstants, EguiTextureCache, GizmoMode, InstanceRaw, LightData,
-            MAX_GIZMO_ICONS, MAX_GIZMO_LINES, MaterialShaderData, MeshLodPayload, MeshletDesc,
-            MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
-            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
-            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
-            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
-            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
-            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            DdgiGridConstants, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw, LightData,
+            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
+            OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
+            OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
+            RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
+            RenderObject, RenderObjectDelta, RenderPassTiming, RendererStats, ShaderConstants,
+            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
+            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -276,6 +276,81 @@ impl ReusableBuffer {
 
         (buffer.as_ref().expect("buffer must exist"), needs_realloc)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GizmoUploadCache {
+    key: u64,
+    len: usize,
+    dirty_slots: usize,
+}
+
+impl GizmoUploadCache {
+    fn new() -> Self {
+        Self {
+            key: 0,
+            len: 0,
+            dirty_slots: 0,
+        }
+    }
+
+    fn mark_if_changed(&mut self, key: u64, len: usize, frames_in_flight: usize) {
+        if self.key != key || self.len != len {
+            self.key = key;
+            self.len = len;
+            self.dirty_slots = if len == 0 { 0 } else { frames_in_flight.max(1) };
+        }
+    }
+
+    fn reset_slots(&mut self, frames_in_flight: usize) {
+        if self.len > 0 {
+            self.dirty_slots = frames_in_flight.max(1);
+        }
+    }
+
+    fn should_upload(&mut self, len: usize) -> bool {
+        if len == 0 {
+            return false;
+        }
+        if self.dirty_slots == 0 {
+            return false;
+        }
+        self.dirty_slots = self.dirty_slots.saturating_sub(1);
+        true
+    }
+}
+
+fn hash_u32(state: &mut u64, value: u32) {
+    const FNV_PRIME: u64 = 0x100000001b3;
+    *state ^= value as u64;
+    *state = state.wrapping_mul(FNV_PRIME);
+}
+
+fn hash_f32(state: &mut u64, value: f32) {
+    hash_u32(state, value.to_bits());
+}
+
+fn hash_gizmo_icons(icons: &[GizmoIcon]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for icon in icons {
+        hash_f32(&mut hash, icon.position.x);
+        hash_f32(&mut hash, icon.position.y);
+        hash_f32(&mut hash, icon.position.z);
+        hash_f32(&mut hash, icon.rotation.x);
+        hash_f32(&mut hash, icon.rotation.y);
+        hash_f32(&mut hash, icon.rotation.z);
+        hash_f32(&mut hash, icon.rotation.w);
+        hash_f32(&mut hash, icon.size);
+        hash_f32(&mut hash, icon.color.x);
+        hash_f32(&mut hash, icon.color.y);
+        hash_f32(&mut hash, icon.color.z);
+        hash_f32(&mut hash, icon.alpha);
+        hash_u32(&mut hash, icon.kind as u32);
+        for param in icon.params {
+            hash_f32(&mut hash, param);
+        }
+    }
+    hash
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -819,6 +894,8 @@ struct BufferCache {
     materials: ReusableBuffer,
     debug_params: ReusableBuffer,
     gizmo_params: ReusableBuffer,
+    gizmo_icons: ReusableBuffer,
+    gizmo_lines: ReusableBuffer,
     occlusion_params: ReusableBuffer,
     gpu_cull_params: ReusableBuffer,
     gbuffer_instances: ReusableBuffer,
@@ -851,6 +928,8 @@ impl BufferCache {
             materials: ReusableBuffer::new("GraphRenderer/Materials", frames_in_flight),
             debug_params: ReusableBuffer::new("GraphRenderer/DebugParams", frames_in_flight),
             gizmo_params: ReusableBuffer::new("GraphRenderer/GizmoParams", frames_in_flight),
+            gizmo_icons: ReusableBuffer::new("GraphRenderer/GizmoIcons", frames_in_flight),
+            gizmo_lines: ReusableBuffer::new("GraphRenderer/GizmoLines", frames_in_flight),
             occlusion_params: ReusableBuffer::new(
                 "GraphRenderer/OcclusionParams",
                 frames_in_flight,
@@ -877,6 +956,8 @@ impl BufferCache {
         self.materials.resize_slots(frames_in_flight);
         self.debug_params.resize_slots(frames_in_flight);
         self.gizmo_params.resize_slots(frames_in_flight);
+        self.gizmo_icons.resize_slots(frames_in_flight);
+        self.gizmo_lines.resize_slots(frames_in_flight);
         self.occlusion_params.resize_slots(frames_in_flight);
         self.gpu_cull_params.resize_slots(frames_in_flight);
         self.gbuffer_instances.resize_slots(frames_in_flight);
@@ -1359,6 +1440,8 @@ pub struct GraphRenderer {
     shadow_format: wgpu::TextureFormat,
     frames_in_flight: usize,
     buffer_cache: BufferCache,
+    gizmo_icon_cache: GizmoUploadCache,
+    gizmo_outline_cache: GizmoUploadCache,
     rt_state: RayTracingState,
     ddgi_state: DdgiState,
     rt_blas_targets: HashSet<usize>,
@@ -2342,6 +2425,8 @@ impl GraphRenderer {
             shadow_format,
             frames_in_flight,
             buffer_cache: BufferCache::new(frames_in_flight),
+            gizmo_icon_cache: GizmoUploadCache::new(),
+            gizmo_outline_cache: GizmoUploadCache::new(),
             rt_state: RayTracingState::new(frames_in_flight, size),
             ddgi_state: DdgiState::new(),
             rt_blas_targets: HashSet::new(),
@@ -3058,6 +3143,7 @@ impl GraphRenderer {
         let config_changed = render_config.is_some();
         let mut materials_needed = false;
         let material_version = self.material_version;
+        let gizmo_value = gizmo.clone().unwrap_or_default();
 
         if self.current_render_data.is_none() {
             let config = render_config.unwrap_or_else(RenderConfig::default);
@@ -3075,7 +3161,7 @@ impl GraphRenderer {
                 timestamp: Instant::now(),
                 render_config: config,
                 render_graph: graph,
-                gizmo: gizmo.unwrap_or_default(),
+                gizmo: gizmo_value,
             };
             self.current_render_data = Some(RenderSceneState::new(data));
         }
@@ -6223,6 +6309,8 @@ impl GraphRenderer {
             self.frames_in_flight = frames_in_flight;
             self.buffer_cache.resize(frames_in_flight);
             self.rt_state.resize(frames_in_flight);
+            self.gizmo_icon_cache.reset_slots(frames_in_flight);
+            self.gizmo_outline_cache.reset_slots(frames_in_flight);
         }
         if frame_render_config.gpu_driven && !self.supports_indirect_first_instance {
             if !self.warned_indirect_first_instance_missing {
@@ -6769,63 +6857,114 @@ impl GraphRenderer {
             buf.clone()
         };
 
-        let (gizmo_params_buffer, gizmo_vertex_count) = {
-            let gizmo = render_data.gizmo;
+        let (gizmo_params_buffer, gizmo_vertex_count, gizmo_icon_buffer, gizmo_outline_buffer) = {
+            let gizmo = &render_data.gizmo;
+            let icon_len = gizmo.icons.len();
+            let outline_len = gizmo.outline_lines.len();
             if gizmo.mode == GizmoMode::None
                 && !gizmo.selection_enabled
-                && gizmo.icon_count == 0
-                && gizmo.outline_line_count == 0
+                && icon_len == 0
+                && outline_len == 0
             {
-                (None, 0)
+                (None, 0, None, None)
             } else {
                 let style = gizmo.style;
                 let ring_segments = style.ring_segments.max(3);
                 let ring_verts_per_axis = ring_segments * 6;
-                let translate_verts_per_axis = 9;
-                let scale_verts_per_axis = 12;
-                let origin_verts = 6;
+                let translate_verts_per_axis: u32 = 9;
+                let scale_verts_per_axis: u32 = 12;
+                let origin_verts: u32 = 6;
                 let gizmo_verts = match gizmo.mode {
                     GizmoMode::Translate => translate_verts_per_axis * 3 + origin_verts,
                     GizmoMode::Rotate => ring_verts_per_axis * 3 + origin_verts,
                     GizmoMode::Scale => scale_verts_per_axis * 3 + origin_verts,
                     GizmoMode::None => 0,
                 };
-                let selection_verts = if gizmo.selection_enabled { 12 * 6 } else { 0 };
-                let icon_edge_count = 16;
+                let selection_verts: u32 = if gizmo.selection_enabled { 12 * 6 } else { 0 };
+                let icon_edge_count: u32 = 16;
                 let icon_verts_per_gizmo = icon_edge_count * 6;
-                let icon_count = gizmo.icon_count.min(MAX_GIZMO_ICONS as u32);
-                let icon_verts = icon_count * icon_verts_per_gizmo;
-                let outline_line_count = gizmo.outline_line_count.min(MAX_GIZMO_LINES as u32);
-                let outline_verts = outline_line_count * 6;
-                let vertex_count = gizmo_verts + selection_verts + icon_verts + outline_verts;
+                let icon_count = icon_len.min(u32::MAX as usize) as u32;
+                let icon_verts = icon_count.saturating_mul(icon_verts_per_gizmo);
+                let outline_line_count = outline_len.min(u32::MAX as usize) as u32;
+                let outline_verts = outline_line_count.saturating_mul(6);
+                let vertex_count = gizmo_verts
+                    .saturating_add(selection_verts)
+                    .saturating_add(icon_verts)
+                    .saturating_add(outline_verts);
                 let selection_thickness = (gizmo.size * style.selection_thickness_scale)
                     .max(style.selection_thickness_min);
 
-                let mut icon_params = [GizmoIconParams::default(); MAX_GIZMO_ICONS];
-                for (index, icon) in gizmo.icons.iter().take(icon_count as usize).enumerate() {
-                    icon_params[index] = GizmoIconParams {
-                        position: icon.position.to_array(),
-                        kind: icon.kind as u32,
-                        rotation: icon.rotation.to_array(),
-                        color: [icon.color.x, icon.color.y, icon.color.z, 0.9],
-                        params: icon.params,
-                        size_params: [icon.size, 0.0, 0.0, 0.0],
-                    };
+                let icon_key = if icon_len == 0 {
+                    0
+                } else if gizmo.icons_revision != 0 {
+                    gizmo.icons_revision
+                } else {
+                    hash_gizmo_icons(&gizmo.icons)
+                };
+                self.gizmo_icon_cache
+                    .mark_if_changed(icon_key, icon_len, self.frames_in_flight);
+                let upload_icons = self.gizmo_icon_cache.should_upload(icon_len);
+
+                let outline_key = if outline_len == 0 {
+                    0
+                } else if gizmo.outline_revision != 0 {
+                    gizmo.outline_revision
+                } else {
+                    gizmo.outline_lines.as_ptr() as usize as u64
+                };
+                self.gizmo_outline_cache.mark_if_changed(
+                    outline_key,
+                    outline_len,
+                    self.frames_in_flight,
+                );
+                let upload_outline = self.gizmo_outline_cache.should_upload(outline_len);
+
+                let icon_buffer_len = icon_len.max(1);
+                let icon_buffer_size =
+                    (icon_buffer_len * std::mem::size_of::<GizmoIconParams>()) as u64;
+                let icon_buf = self.buffer_cache.gizmo_icons.ensure(
+                    &self.device,
+                    icon_buffer_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    self.frame_index,
+                );
+                if upload_icons {
+                    let mut icon_params = Vec::with_capacity(icon_count as usize);
+                    for icon in gizmo.icons.iter().take(icon_count as usize) {
+                        icon_params.push(GizmoIconParams {
+                            position: icon.position.to_array(),
+                            kind: icon.kind as u32,
+                            rotation: icon.rotation.to_array(),
+                            color: [icon.color.x, icon.color.y, icon.color.z, icon.alpha],
+                            params: icon.params,
+                            size_params: [icon.size, 0.0, 0.0, 0.0],
+                        });
+                    }
+                    self.queue
+                        .write_buffer(icon_buf, 0, bytemuck::cast_slice(&icon_params));
                 }
 
-                let mut outline_lines = [GizmoLineParams::default(); MAX_GIZMO_LINES];
-                for (index, line) in gizmo
-                    .outline_lines
-                    .iter()
-                    .take(outline_line_count as usize)
-                    .enumerate()
-                {
-                    outline_lines[index] = GizmoLineParams {
-                        start: line.start.to_array(),
-                        _pad0: 0.0,
-                        end: line.end.to_array(),
-                        _pad1: 0.0,
-                    };
+                let outline_buffer_len = outline_len.max(1);
+                let outline_buffer_size =
+                    (outline_buffer_len * std::mem::size_of::<GizmoLineParams>()) as u64;
+                let outline_buf = self.buffer_cache.gizmo_lines.ensure(
+                    &self.device,
+                    outline_buffer_size,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    self.frame_index,
+                );
+                if upload_outline {
+                    let mut outline_lines = Vec::with_capacity(outline_line_count as usize);
+                    for line in gizmo.outline_lines.iter().take(outline_line_count as usize) {
+                        outline_lines.push(GizmoLineParams {
+                            start: line.start.to_array(),
+                            _pad0: 0.0,
+                            end: line.end.to_array(),
+                            _pad1: 0.0,
+                        });
+                    }
+                    self.queue
+                        .write_buffer(outline_buf, 0, bytemuck::cast_slice(&outline_lines));
                 }
 
                 let params = GizmoParams {
@@ -6861,25 +7000,25 @@ impl GraphRenderer {
                         style.axis_color_x[0],
                         style.axis_color_x[1],
                         style.axis_color_x[2],
-                        1.0,
+                        style.axis_alpha,
                     ],
                     axis_color_y: [
                         style.axis_color_y[0],
                         style.axis_color_y[1],
                         style.axis_color_y[2],
-                        1.0,
+                        style.axis_alpha,
                     ],
                     axis_color_z: [
                         style.axis_color_z[0],
                         style.axis_color_z[1],
                         style.axis_color_z[2],
-                        1.0,
+                        style.axis_alpha,
                     ],
                     origin_color: [
                         style.origin_color[0],
                         style.origin_color[1],
                         style.origin_color[2],
-                        1.0,
+                        style.origin_alpha,
                     ],
                     highlight_params: [style.hover_mix, style.active_mix, 0.0, 0.0],
                     selection_min: gizmo.selection_min.to_array(),
@@ -6890,7 +7029,7 @@ impl GraphRenderer {
                         style.selection_color[0],
                         style.selection_color[1],
                         style.selection_color[2],
-                        1.0,
+                        style.selection_alpha,
                     ],
                     icon_meta: [icon_count, 0, 0, 0],
                     icon_line_params: [
@@ -6899,7 +7038,6 @@ impl GraphRenderer {
                         0.0,
                         0.0,
                     ],
-                    icons: icon_params,
                     outline_meta: [outline_line_count, 0, 0, 0],
                     outline_line_params: [
                         style.outline_thickness_scale,
@@ -6911,9 +7049,8 @@ impl GraphRenderer {
                         style.outline_color[0],
                         style.outline_color[1],
                         style.outline_color[2],
-                        1.0,
+                        style.outline_alpha,
                     ],
-                    outline_lines,
                 };
                 let buf = self.buffer_cache.gizmo_params.ensure(
                     &self.device,
@@ -6922,7 +7059,12 @@ impl GraphRenderer {
                     self.frame_index,
                 );
                 self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&params));
-                (Some(buf.clone()), vertex_count)
+                (
+                    Some(buf.clone()),
+                    vertex_count,
+                    Some(icon_buf.clone()),
+                    Some(outline_buf.clone()),
+                )
             }
         };
 
@@ -6990,6 +7132,8 @@ impl GraphRenderer {
             atmosphere_bind_group: self.atmosphere_precomputer.sampling_bind_group.clone(),
             debug_params_buffer,
             gizmo_params_buffer,
+            gizmo_icon_buffer,
+            gizmo_outline_buffer,
             gizmo_vertex_count,
             gbuffer_instances,
             gbuffer_batches,

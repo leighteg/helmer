@@ -706,6 +706,20 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                     edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
                     edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
                     edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
+                    edit_float_range(
+                        ui,
+                        "Axis Alpha",
+                        &mut gizmo_settings.axis_alpha,
+                        0.01,
+                        0.0..=1.0,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Origin Alpha",
+                        &mut gizmo_settings.origin_alpha,
+                        0.01,
+                        0.0..=1.0,
+                    );
                 });
 
                 ui.collapsing("Bounds Outline", |ui| {
@@ -728,6 +742,13 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         0.0..=f32::MAX,
                     );
                     edit_color(ui, "Color", &mut gizmo_settings.selection_color);
+                    edit_float_range(
+                        ui,
+                        "Alpha",
+                        &mut gizmo_settings.selection_alpha,
+                        0.01,
+                        0.0..=1.0,
+                    );
                 });
 
                 ui.collapsing("Mesh Outline", |ui| {
@@ -754,6 +775,13 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         0..=u32::MAX,
                     );
                     edit_color(ui, "Color", &mut gizmo_settings.outline_color);
+                    edit_float_range(
+                        ui,
+                        "Alpha",
+                        &mut gizmo_settings.outline_alpha,
+                        0.01,
+                        0.0..=1.0,
+                    );
                 });
 
                 ui.collapsing("Icons", |ui| {
@@ -777,6 +805,20 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         &mut gizmo_settings.icon_thickness_min,
                         0.005,
                         0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Camera Alpha",
+                        &mut gizmo_settings.camera_icon_alpha,
+                        0.01,
+                        0.0..=1.0,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Light Alpha",
+                        &mut gizmo_settings.light_icon_alpha,
+                        0.01,
+                        0.0..=1.0,
                     );
                     edit_color(ui, "Camera Color", &mut gizmo_settings.camera_icon_color);
                     edit_color(

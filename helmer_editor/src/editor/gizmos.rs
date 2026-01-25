@@ -1,10 +1,10 @@
-use bevy_ecs::prelude::{Entity, Query, Res, ResMut, Resource, With};
+use bevy_ecs::prelude::{DetectChanges, Entity, Query, Ref, Res, ResMut, Resource, With};
 use glam::{Mat4, Quat, Vec3};
 use winit::event::MouseButton;
 
 use helmer::graphics::common::renderer::{
     Aabb, GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoLine, GizmoMode, GizmoStyle,
-    MAX_GIZMO_ICONS, MAX_GIZMO_LINES, MeshLodPayload,
+    MeshLodPayload,
 };
 use helmer::provided::components::{Camera, LightType, Transform};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
@@ -26,6 +26,8 @@ pub struct EditorGizmoState {
     pub mode: GizmoMode,
     pub hover_axis: GizmoAxis,
     pub active_axis: GizmoAxis,
+    icon_revision: u64,
+    outline_revision: u64,
     last_mouse_down: bool,
     drag: Option<GizmoDragState>,
 }
@@ -36,6 +38,8 @@ impl Default for EditorGizmoState {
             mode: GizmoMode::Translate,
             hover_axis: GizmoAxis::None,
             active_axis: GizmoAxis::None,
+            icon_revision: 0,
+            outline_revision: 0,
             last_mouse_down: false,
             drag: None,
         }
@@ -63,7 +67,7 @@ pub struct EditorMeshOutlineCache {
 #[derive(Debug)]
 struct MeshOutlineEntry {
     max_lines: usize,
-    lines: Vec<GizmoLine>,
+    lines: std::sync::Arc<[GizmoLine]>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -99,19 +103,25 @@ pub struct EditorGizmoSettings {
     pub axis_color_y: [f32; 3],
     pub axis_color_z: [f32; 3],
     pub origin_color: [f32; 3],
+    pub axis_alpha: f32,
+    pub origin_alpha: f32,
     pub show_bounds_outline: bool,
     pub selection_thickness_scale: f32,
     pub selection_thickness_min: f32,
     pub selection_color: [f32; 3],
+    pub selection_alpha: f32,
     pub show_mesh_outline: bool,
     pub outline_thickness_scale: f32,
     pub outline_thickness_min: f32,
     pub outline_max_lines: u32,
     pub outline_color: [f32; 3],
+    pub outline_alpha: f32,
     pub icon_thickness_scale: f32,
     pub icon_thickness_min: f32,
     pub camera_icon_color: [f32; 3],
+    pub camera_icon_alpha: f32,
     pub active_camera_icon_color: [f32; 3],
+    pub light_icon_alpha: f32,
     pub hover_mix: f32,
     pub active_mix: f32,
 }
@@ -150,19 +160,25 @@ impl Default for EditorGizmoSettings {
             axis_color_y: [0.2, 1.0, 0.2],
             axis_color_z: [0.2, 0.4, 1.0],
             origin_color: [0.9, 0.9, 0.9],
+            axis_alpha: 1.0,
+            origin_alpha: 1.0,
             show_bounds_outline: true,
             selection_thickness_scale: 0.03,
             selection_thickness_min: 0.01,
             selection_color: [1.0, 0.85, 0.2],
+            selection_alpha: 1.0,
             show_mesh_outline: true,
             outline_thickness_scale: 0.02,
             outline_thickness_min: 0.006,
-            outline_max_lines: 512,
+            outline_max_lines: 9999999,
             outline_color: [0.35, 0.85, 1.0],
+            outline_alpha: 1.0,
             icon_thickness_scale: 0.025,
             icon_thickness_min: 0.008,
             camera_icon_color: [0.75, 0.9, 1.0],
+            camera_icon_alpha: 0.9,
             active_camera_icon_color: [1.0, 0.6, 0.2],
+            light_icon_alpha: 0.9,
             hover_mix: 0.3,
             active_mix: 0.5,
         }
@@ -190,12 +206,16 @@ impl EditorGizmoSettings {
             axis_color_y: self.axis_color_y,
             axis_color_z: self.axis_color_z,
             origin_color: self.origin_color,
+            axis_alpha: self.axis_alpha,
+            origin_alpha: self.origin_alpha,
             selection_thickness_scale: self.selection_thickness_scale,
             selection_thickness_min: self.selection_thickness_min,
             selection_color: self.selection_color,
+            selection_alpha: self.selection_alpha,
             outline_thickness_scale: self.outline_thickness_scale,
             outline_thickness_min: self.outline_thickness_min,
             outline_color: self.outline_color,
+            outline_alpha: self.outline_alpha,
             icon_thickness_scale: self.icon_thickness_scale,
             icon_thickness_min: self.icon_thickness_min,
             hover_mix: self.hover_mix,
@@ -218,10 +238,14 @@ impl EditorGizmoSettings {
         if self.ring_segments < 3 {
             self.ring_segments = 3;
         }
-        let max_lines = MAX_GIZMO_LINES as u32;
-        if self.outline_max_lines > max_lines {
-            self.outline_max_lines = max_lines;
-        }
+        self.axis_alpha = self.axis_alpha.clamp(0.0, 1.0);
+        self.origin_alpha = self.origin_alpha.clamp(0.0, 1.0);
+        self.selection_alpha = self.selection_alpha.clamp(0.0, 1.0);
+        self.outline_alpha = self.outline_alpha.clamp(0.0, 1.0);
+        self.camera_icon_alpha = self.camera_icon_alpha.clamp(0.0, 1.0);
+        self.light_icon_alpha = self.light_icon_alpha.clamp(0.0, 1.0);
+        self.hover_mix = self.hover_mix.clamp(0.0, 1.0);
+        self.active_mix = self.active_mix.clamp(0.0, 1.0);
     }
 }
 
@@ -270,9 +294,12 @@ pub fn gizmo_system(
     asset_server: Res<BevyAssetServer>,
     mesh_query: Query<&BevyMeshRenderer>,
     mut transforms: Query<&mut BevyTransform>,
-    camera_query: Query<(Entity, &BevyCamera), With<BevyActiveCamera>>,
-    camera_icon_query: Query<(Entity, &BevyCamera, Option<&EditorPlayCamera>), With<EditorEntity>>,
-    light_icon_query: Query<(Entity, &BevyLight), With<EditorEntity>>,
+    camera_query: Query<(Entity, Ref<BevyCamera>), With<BevyActiveCamera>>,
+    camera_icon_query: Query<
+        (Entity, Ref<BevyCamera>, Option<Ref<EditorPlayCamera>>),
+        With<EditorEntity>,
+    >,
+    light_icon_query: Query<(Entity, Ref<BevyLight>), With<EditorEntity>>,
 ) {
     let show_gizmos = scene_state.world_state == WorldState::Edit || viewport_state.gizmos_in_play;
     if !show_gizmos {
@@ -280,6 +307,8 @@ pub fn gizmo_system(
         return;
     }
     let allow_undo = scene_state.world_state == WorldState::Edit;
+    let prev_icon_count = render_gizmo.0.icons.len();
+    let prev_outline_lines = render_gizmo.0.outline_lines.clone();
 
     let Some((camera_entity, camera)) = camera_query.iter().next() else {
         if state.drag.is_some() && allow_undo {
@@ -290,7 +319,7 @@ pub fn gizmo_system(
     };
 
     let camera_transform = match transforms.get_mut(camera_entity) {
-        Ok(transform) => transform.0,
+        Ok(transform) => transform,
         Err(_) => {
             if state.drag.is_some() && allow_undo {
                 request_end_undo_group(&mut undo_state);
@@ -299,15 +328,23 @@ pub fn gizmo_system(
             return;
         }
     };
+    let camera_transform_changed = camera_transform.is_changed();
+    let camera_transform = camera_transform.0;
 
-    let (icons, icon_count) = collect_icon_gizmos(
+    let mut icons_dirty =
+        settings.is_changed() || viewport_state.is_changed() || camera_transform_changed;
+    let icons = collect_icon_gizmos(
         &viewport_state,
         &settings,
         &camera_transform,
         &mut transforms,
         &camera_icon_query,
         &light_icon_query,
+        &mut icons_dirty,
     );
+    if icons_dirty || icons.len() != prev_icon_count {
+        bump_revision(&mut state.icon_revision);
+    }
 
     let Some(entity) = selection.0 else {
         if state.drag.is_some() && allow_undo {
@@ -318,7 +355,8 @@ pub fn gizmo_system(
         state.active_axis = GizmoAxis::None;
         render_gizmo.0 = GizmoData {
             icons,
-            icon_count,
+            icons_revision: state.icon_revision,
+            outline_revision: state.outline_revision,
             style: settings.to_style(),
             ..GizmoData::default()
         };
@@ -336,7 +374,8 @@ pub fn gizmo_system(
             state.active_axis = GizmoAxis::None;
             render_gizmo.0 = GizmoData {
                 icons,
-                icon_count,
+                icons_revision: state.icon_revision,
+                outline_revision: state.outline_revision,
                 style: settings.to_style(),
                 ..GizmoData::default()
             };
@@ -458,16 +497,18 @@ pub fn gizmo_system(
     } else {
         (false, Vec3::ZERO, Vec3::ZERO)
     };
-    let (outline_lines, outline_line_count) = match collect_mesh_outline_lines(
+    let outline_lines = collect_mesh_outline_lines(
         &asset_server,
         &mesh_query,
         &settings,
         &mut outline_cache,
         entity,
-    ) {
-        Some((lines, count)) => (lines, count),
-        None => ([GizmoLine::default(); MAX_GIZMO_LINES], 0),
-    };
+    );
+    let outline_equal = std::sync::Arc::ptr_eq(&prev_outline_lines, &outline_lines)
+        || (prev_outline_lines.is_empty() && outline_lines.is_empty());
+    if !outline_equal {
+        bump_revision(&mut state.outline_revision);
+    }
     let selection_enabled = settings.show_bounds_outline && bounds_enabled;
 
     if let Ok(mut transform) = transforms.get_mut(entity) {
@@ -486,9 +527,9 @@ pub fn gizmo_system(
         selection_min,
         selection_max,
         outline_lines,
-        outline_line_count,
+        outline_revision: state.outline_revision,
         icons,
-        icon_count,
+        icons_revision: state.icon_revision,
         style: settings.to_style(),
     };
 }
@@ -574,6 +615,14 @@ pub fn selection_system(
     selection.0 = best.map(|(entity, _)| entity);
 }
 
+fn bump_revision(value: &mut u64) {
+    *value = value.wrapping_add(1);
+    if *value == 0 {
+        // reserve 0 to indicate "no revision" for fallback hashing
+        *value = 1;
+    }
+}
+
 fn clear_gizmo(
     state: &mut EditorGizmoState,
     render_gizmo: &mut RenderGizmoState,
@@ -594,14 +643,16 @@ fn collect_mesh_outline_lines(
     settings: &EditorGizmoSettings,
     outline_cache: &mut EditorMeshOutlineCache,
     entity: Entity,
-) -> Option<([GizmoLine; MAX_GIZMO_LINES], u32)> {
+) -> std::sync::Arc<[GizmoLine]> {
     if !settings.show_mesh_outline {
-        return None;
+        return std::sync::Arc::from(Vec::new());
     }
-    let renderer = mesh_query.get(entity).ok()?;
-    let max_lines = settings.outline_max_lines.min(MAX_GIZMO_LINES as u32) as usize;
+    let Ok(renderer) = mesh_query.get(entity) else {
+        return std::sync::Arc::from(Vec::new());
+    };
+    let max_lines = settings.outline_max_lines as usize;
     if max_lines == 0 {
-        return None;
+        return std::sync::Arc::from(Vec::new());
     }
 
     let mesh_id = renderer.0.mesh_id;
@@ -613,24 +664,30 @@ fn collect_mesh_outline_lines(
         let mesh = {
             let asset_server = asset_server.0.lock();
             asset_server.get_mesh(mesh_id)
-        }?;
-        let payload = select_outline_lod(mesh.as_ref(), max_lines)?;
+        };
+        let mesh = match mesh {
+            Some(mesh) => mesh,
+            None => return std::sync::Arc::from(Vec::new()),
+        };
+        let payload = match select_outline_lod(mesh.as_ref(), max_lines) {
+            Some(payload) => payload,
+            None => return std::sync::Arc::from(Vec::new()),
+        };
         let lines = build_outline_lines(&payload, max_lines);
-        outline_cache
-            .entries
-            .insert(mesh_id, MeshOutlineEntry { max_lines, lines });
+        outline_cache.entries.insert(
+            mesh_id,
+            MeshOutlineEntry {
+                max_lines,
+                lines: std::sync::Arc::from(lines),
+            },
+        );
     }
 
-    let entry = outline_cache.entries.get(&mesh_id)?;
-    if entry.lines.is_empty() {
-        return None;
-    }
-    let mut lines = [GizmoLine::default(); MAX_GIZMO_LINES];
-    let count = entry.lines.len().min(MAX_GIZMO_LINES);
-    for (index, line) in entry.lines.iter().take(count).enumerate() {
-        lines[index] = *line;
-    }
-    Some((lines, count as u32))
+    outline_cache
+        .entries
+        .get(&mesh_id)
+        .map(|entry| entry.lines.clone())
+        .unwrap_or_else(|| std::sync::Arc::from(Vec::new()))
 }
 
 fn select_outline_lod(
@@ -689,37 +746,33 @@ fn build_outline_lines(payload: &MeshLodPayload, max_lines: usize) -> Vec<GizmoL
     lines
 }
 
-fn push_icon(icons: &mut [GizmoIcon; MAX_GIZMO_ICONS], icon_count: &mut u32, icon: GizmoIcon) {
-    let index = *icon_count as usize;
-    if index < MAX_GIZMO_ICONS {
-        icons[index] = icon;
-        *icon_count += 1;
-    }
-}
-
 fn collect_icon_gizmos(
     viewport_state: &EditorViewportState,
     settings: &EditorGizmoSettings,
     camera_transform: &Transform,
     transforms: &mut Query<&mut BevyTransform>,
-    camera_query: &Query<(Entity, &BevyCamera, Option<&EditorPlayCamera>), With<EditorEntity>>,
-    light_query: &Query<(Entity, &BevyLight), With<EditorEntity>>,
-) -> ([GizmoIcon; MAX_GIZMO_ICONS], u32) {
-    let mut icons = [GizmoIcon::default(); MAX_GIZMO_ICONS];
-    let mut icon_count = 0u32;
-
+    camera_query: &Query<
+        (Entity, Ref<BevyCamera>, Option<Ref<EditorPlayCamera>>),
+        With<EditorEntity>,
+    >,
+    light_query: &Query<(Entity, Ref<BevyLight>), With<EditorEntity>>,
+    icons_dirty: &mut bool,
+) -> Vec<GizmoIcon> {
+    let mut icons = Vec::new();
     if !viewport_state.show_camera_gizmos
         && !viewport_state.show_directional_light_gizmos
         && !viewport_state.show_point_light_gizmos
         && !viewport_state.show_spot_light_gizmos
     {
-        return (icons, icon_count);
+        return icons;
     }
 
     let icon_scale = settings.icon_size_scale.max(0.0);
     if icon_scale <= 0.0 {
-        return (icons, icon_count);
+        return icons;
     }
+    let camera_alpha = settings.camera_icon_alpha.clamp(0.0, 1.0);
+    let light_alpha = settings.light_icon_alpha.clamp(0.0, 1.0);
     let (size_min, size_max) = settings.size_bounds();
     let mut icon_min = size_min * icon_scale;
     let mut icon_max = size_max * icon_scale;
@@ -729,12 +782,16 @@ fn collect_icon_gizmos(
 
     if viewport_state.show_camera_gizmos {
         for (entity, camera, play_camera) in camera_query.iter() {
-            if icon_count as usize >= MAX_GIZMO_ICONS {
-                break;
-            }
             let Ok(transform) = transforms.get_mut(entity) else {
                 continue;
             };
+            let transform_changed = transform.is_changed();
+            let play_camera_changed = play_camera
+                .as_ref()
+                .map_or(false, |play_camera| play_camera.is_changed());
+            if camera.is_changed() || transform_changed || play_camera_changed {
+                *icons_dirty = true;
+            }
             let distance = camera_transform
                 .position
                 .distance(transform.0.position)
@@ -760,10 +817,11 @@ fn collect_icon_gizmos(
                 rotation: transform.0.rotation,
                 size,
                 color,
+                alpha: camera_alpha,
                 kind: GizmoIconKind::Camera,
                 params: [camera.0.fov_y_rad, camera.0.aspect_ratio, near_ratio, 0.0],
             };
-            push_icon(&mut icons, &mut icon_count, icon);
+            icons.push(icon);
         }
     }
 
@@ -772,12 +830,12 @@ fn collect_icon_gizmos(
         || viewport_state.show_spot_light_gizmos
     {
         for (entity, light) in light_query.iter() {
-            if icon_count as usize >= MAX_GIZMO_ICONS {
-                break;
-            }
             let Ok(transform) = transforms.get_mut(entity) else {
                 continue;
             };
+            if light.is_changed() || transform.is_changed() {
+                *icons_dirty = true;
+            }
 
             let (kind, params, allowed) = match light.0.light_type {
                 LightType::Directional => (
@@ -812,14 +870,15 @@ fn collect_icon_gizmos(
                 rotation: transform.0.rotation,
                 size,
                 color,
+                alpha: light_alpha,
                 kind,
                 params,
             };
-            push_icon(&mut icons, &mut icon_count, icon);
+            icons.push(icon);
         }
     }
 
-    (icons, icon_count)
+    icons
 }
 
 fn pick_icon_entity(

@@ -2629,14 +2629,13 @@ fn with_middle_drag_blocked(
 
 fn drag_egui_window_on_middle_click(ui: &Ui, world: &mut World, window_id: &str) {
     update_middle_drag_state(ui, world);
-    let (active, delta, start_pos, locked_window_id) = {
+    let (active, delta, locked_window_id) = {
         let drag_state = world
             .get_resource::<MiddleDragUiState>()
             .expect("MiddleDragUiState missing");
         (
             drag_state.active,
             drag_state.delta,
-            drag_state.start_pos,
             drag_state.locked_window_id,
         )
     };
@@ -2647,9 +2646,6 @@ fn drag_egui_window_on_middle_click(ui: &Ui, world: &mut World, window_id: &str)
     let Some(rect) = rect else {
         return;
     };
-    if !rect.contains(start_pos) {
-        return;
-    }
     let locked_ok = locked_window_id
         .map(|id| id == Id::new(window_id))
         .unwrap_or(false);

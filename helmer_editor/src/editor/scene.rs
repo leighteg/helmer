@@ -58,20 +58,20 @@ impl Default for EditorSceneState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneDocument {
     pub version: u32,
     pub entities: Vec<SceneEntityData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneEntityData {
     pub name: Option<String>,
     pub transform: SerializedTransform,
     pub components: SceneComponents,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SceneComponents {
     pub mesh: Option<MeshComponentData>,
     pub light: Option<LightComponentData>,
@@ -85,19 +85,19 @@ pub struct SceneComponents {
     pub physics: Option<PhysicsComponentData>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhysicsComponentData {
     pub collider_shape: SceneColliderShape,
     pub body_kind: PhysicsBodyKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PhysicsBodyKind {
     Dynamic { mass: f32 },
     Fixed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SceneColliderShape {
     Cuboid,
     Sphere,
@@ -121,7 +121,7 @@ impl SceneColliderShape {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeshComponentData {
     pub source: MeshSource,
     pub material: Option<String>,
@@ -129,21 +129,21 @@ pub struct MeshComponentData {
     pub visible: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum LightKind {
     Directional,
     Point,
     Spot { angle: f32 },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightComponentData {
     pub kind: LightKind,
     pub color: [f32; 3],
     pub intensity: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraComponentData {
     pub fov_y_rad: f32,
     pub aspect_ratio: f32,
@@ -152,18 +152,18 @@ pub struct CameraComponentData {
     pub active: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneAssetData {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScriptComponentData {
     pub path: String,
     pub language: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SerializedTransform {
     pub position: [f32; 3],
     pub rotation: [f32; 4],

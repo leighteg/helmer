@@ -7,6 +7,7 @@ pub mod scene;
 pub mod scripting;
 pub mod systems;
 pub mod ui;
+pub mod undo;
 pub mod viewport;
 pub mod watch;
 
@@ -19,5 +20,6 @@ pub use scene::*;
 pub use scripting::*;
 pub use systems::*;
 pub use ui::*;
+pub use undo::*;
 pub use viewport::*;
 pub use watch::*;

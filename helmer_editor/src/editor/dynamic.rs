@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use bevy_ecs::prelude::Component;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicComponent {
     pub name: String,
     pub fields: Vec<DynamicField>,
@@ -17,13 +17,13 @@ impl DynamicComponent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicField {
     pub name: String,
     pub value: DynamicValue,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DynamicValue {
     Bool(bool),
     Float(f32),
@@ -53,7 +53,7 @@ impl DynamicValueKind {
     }
 }
 
-#[derive(Component, Debug, Clone, Default)]
+#[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct DynamicComponents {
     pub components: Vec<DynamicComponent>,
 }

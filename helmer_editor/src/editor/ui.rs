@@ -30,15 +30,19 @@ use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
 
 use crate::editor::{
-    EditorPlayCamera, EditorViewportCamera, EditorViewportState, Freecam,
+    EditorPlayCamera, EditorUndoState, EditorViewportCamera, EditorViewportState, Freecam,
+    UndoEntry,
     assets::{
         AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind,
         SceneAssetPath, is_entry_visible,
     },
+    begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue, DynamicValueKind},
+    end_material_undo_group, end_undo_group, enforce_undo_cap,
     gizmos::{EditorGizmoSettings, EditorGizmoState},
     project::{EditorProject, ProjectConfig, default_script_template, save_project_config},
+    push_undo_snapshot,
     scene::{EditorEntity, EditorSceneState, WorldState, next_available_scene_path},
     scripting::{ScriptComponent, ScriptEntry},
 };
@@ -187,8 +191,38 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
         .and_then(|project| project.root.as_ref())
         .is_some();
 
+    let (can_undo, undo_label, can_redo, redo_label) = world
+        .get_resource::<EditorUndoState>()
+        .map(|state| {
+            (
+                state.can_undo(),
+                state.undo_label().map(|label| label.to_string()),
+                state.can_redo(),
+                state.redo_label().map(|label| label.to_string()),
+            )
+        })
+        .unwrap_or((false, None, false, None));
+
     with_middle_drag_blocked(ui, world, |ui, world| {
         ui.horizontal(|ui| {
+            let undo_button = ui.add_enabled(can_undo, egui::Button::new("Undo"));
+            let undo_button = match undo_label.as_deref() {
+                Some(label) => undo_button.on_hover_text(format!("Undo {}", label)),
+                None => undo_button,
+            };
+            if undo_button.clicked() {
+                push_command(world, EditorCommand::Undo);
+            }
+
+            let redo_button = ui.add_enabled(can_redo, egui::Button::new("Redo"));
+            let redo_button = match redo_label.as_deref() {
+                Some(label) => redo_button.on_hover_text(format!("Redo {}", label)),
+                None => redo_button,
+            };
+            if redo_button.clicked() {
+                push_command(world, EditorCommand::Redo);
+            }
+
             if ui.button("New Scene").clicked() {
                 push_command(world, EditorCommand::NewScene);
             }
@@ -234,6 +268,108 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
             ui.label(RichText::new(status).small());
         }
     });
+}
+
+pub fn draw_history_window(ui: &mut Ui, world: &mut World) {
+    bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "History");
+
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.heading("History");
+
+        let mut max_entries = world
+            .get_resource::<EditorUndoState>()
+            .map(|state| state.max_entries)
+            .unwrap_or(128);
+        let mut cap_changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Cap");
+            let response = ui.add(DragValue::new(&mut max_entries).clamp_range(1..=4096));
+            if response.changed() {
+                cap_changed = true;
+            }
+        });
+        if cap_changed {
+            if let Some(mut state) = world.get_resource_mut::<EditorUndoState>() {
+                state.max_entries = max_entries.max(1);
+                enforce_undo_cap(&mut state);
+            }
+        }
+
+        let (entries, cursor, max_entries) = world
+            .get_resource::<EditorUndoState>()
+            .map(|state| (state.entries.clone(), state.cursor, state.max_entries))
+            .unwrap_or((Vec::new(), 0, max_entries));
+        let project = world.get_resource::<EditorProject>().cloned();
+
+        let can_undo = world
+            .get_resource::<EditorUndoState>()
+            .map(|state| state.can_undo())
+            .unwrap_or(false);
+        let can_redo = world
+            .get_resource::<EditorUndoState>()
+            .map(|state| state.can_redo())
+            .unwrap_or(false);
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(can_undo, egui::Button::new("Undo"))
+                .clicked()
+            {
+                push_command(world, EditorCommand::Undo);
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("Redo"))
+                .clicked()
+            {
+                push_command(world, EditorCommand::Redo);
+            }
+        });
+
+        if entries.is_empty() {
+            ui.label("No history entries");
+            return;
+        }
+
+        ui.label(format!(
+            "Entries: {} / {} (Current: {})",
+            entries.len(),
+            max_entries,
+            cursor + 1
+        ));
+        ui.separator();
+
+        let available_height = ui.available_height();
+        egui::ScrollArea::vertical()
+            .id_source("history_entries")
+            .auto_shrink([false, false])
+            .max_height(available_height)
+            .show(ui, |ui| {
+                for (index, entry) in entries.iter().enumerate().rev() {
+                    let label = history_entry_label(entry, &project);
+                    let is_current = index == cursor;
+                    let _ = ui.selectable_label(is_current, label);
+                }
+            });
+    });
+}
+
+fn history_entry_label(entry: &UndoEntry, project: &Option<EditorProject>) -> String {
+    match entry {
+        UndoEntry::Scene(snapshot) => snapshot
+            .label
+            .clone()
+            .unwrap_or_else(|| "Scene".to_string()),
+        UndoEntry::Material(snapshot) => {
+            let path_label = project_relative_path(project, &snapshot.path);
+            let base_label = snapshot.label.as_deref().unwrap_or("Material");
+            if base_label.contains(&path_label) {
+                base_label.to_string()
+            } else {
+                format!("{} ({})", base_label, path_label)
+            }
+        }
+    }
 }
 
 pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
@@ -573,14 +709,16 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             let transform = &mut transform.0;
 
             let mut fov = camera.fov_y_rad.to_degrees();
-            if edit_float(ui, "FOV (deg)", &mut fov, 0.25) {
+            let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
+            if fov_response.changed {
                 camera.fov_y_rad = fov.to_radians();
             }
-            edit_float(ui, "Near", &mut camera.near_plane, 0.01);
-            edit_float(ui, "Far", &mut camera.far_plane, 1.0);
+            let _ = edit_float(ui, "Near", &mut camera.near_plane, 0.01);
+            let _ = edit_float(ui, "Far", &mut camera.far_plane, 1.0);
 
             let mut position = transform.position;
-            if edit_vec3(ui, "Position", &mut position, 0.1) {
+            let position_response = edit_vec3(ui, "Position", &mut position, 0.1);
+            if position_response.changed {
                 transform.position = position;
             }
         } else {
@@ -1509,29 +1647,46 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<BevyTransform>();
-        } else if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-            let transform = &mut transform.0;
-
+            push_undo_snapshot(world, "Remove Transform");
+        } else if let Some(transform) = world
+            .get::<BevyTransform>(entity)
+            .map(|transform| transform.0)
+        {
             let mut position = transform.position;
-            if edit_vec3(ui, "Position", &mut position, 0.1) {
-                transform.position = position;
+            let position_response = edit_vec3(ui, "Position", &mut position, 0.1);
+            begin_edit_undo(world, "Move", position_response);
+            if position_response.changed {
+                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+                    transform.0.position = position;
+                }
             }
+            end_edit_undo(world, position_response);
 
             let (yaw, pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
             let mut rotation = Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees());
-            if edit_vec3(ui, "Rotation", &mut rotation, 0.5) {
-                transform.rotation = Quat::from_euler(
-                    EulerRot::YXZ,
-                    rotation.x.to_radians(),
-                    rotation.y.to_radians(),
-                    rotation.z.to_radians(),
-                );
+            let rotation_response = edit_vec3(ui, "Rotation", &mut rotation, 0.5);
+            begin_edit_undo(world, "Rotate", rotation_response);
+            if rotation_response.changed {
+                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+                    transform.0.rotation = Quat::from_euler(
+                        EulerRot::YXZ,
+                        rotation.x.to_radians(),
+                        rotation.y.to_radians(),
+                        rotation.z.to_radians(),
+                    );
+                }
             }
+            end_edit_undo(world, rotation_response);
 
             let mut scale = transform.scale;
-            if edit_vec3(ui, "Scale", &mut scale, 0.05) {
-                transform.scale = scale;
+            let scale_response = edit_vec3(ui, "Scale", &mut scale, 0.05);
+            begin_edit_undo(world, "Scale", scale_response);
+            if scale_response.changed {
+                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+                    transform.0.scale = scale;
+                }
             }
+            end_edit_undo(world, scale_response);
         }
         ui.separator();
     }
@@ -1550,6 +1705,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             world.entity_mut(entity).remove::<EditorPlayCamera>();
             world.entity_mut(entity).remove::<BevyActiveCamera>();
             world.entity_mut(entity).remove::<Freecam>();
+            push_undo_snapshot(world, "Remove Camera");
         } else {
             let is_active = world.get::<EditorPlayCamera>(entity).is_some();
             if !is_active {
@@ -1560,15 +1716,46 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.label("Game Camera");
             }
 
-            if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
-                let camera = &mut camera.0;
+            if let Some(camera) = world.get::<BevyCamera>(entity).map(|camera| camera.0) {
                 let mut fov = camera.fov_y_rad.to_degrees();
-                if edit_float(ui, "FOV (deg)", &mut fov, 0.25) {
-                    camera.fov_y_rad = fov.to_radians();
+                let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
+                begin_edit_undo(world, "Camera", fov_response);
+                if fov_response.changed {
+                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+                        camera.0.fov_y_rad = fov.to_radians();
+                    }
                 }
-                edit_float(ui, "Aspect Ratio", &mut camera.aspect_ratio, 0.01);
-                edit_float(ui, "Near", &mut camera.near_plane, 0.01);
-                edit_float(ui, "Far", &mut camera.far_plane, 1.0);
+                end_edit_undo(world, fov_response);
+
+                let mut aspect_ratio = camera.aspect_ratio;
+                let aspect_response = edit_float(ui, "Aspect Ratio", &mut aspect_ratio, 0.01);
+                begin_edit_undo(world, "Camera", aspect_response);
+                if aspect_response.changed {
+                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+                        camera.0.aspect_ratio = aspect_ratio;
+                    }
+                }
+                end_edit_undo(world, aspect_response);
+
+                let mut near_plane = camera.near_plane;
+                let near_response = edit_float(ui, "Near", &mut near_plane, 0.01);
+                begin_edit_undo(world, "Camera", near_response);
+                if near_response.changed {
+                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+                        camera.0.near_plane = near_plane;
+                    }
+                }
+                end_edit_undo(world, near_response);
+
+                let mut far_plane = camera.far_plane;
+                let far_response = edit_float(ui, "Far", &mut far_plane, 1.0);
+                begin_edit_undo(world, "Camera", far_response);
+                if far_response.changed {
+                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+                        camera.0.far_plane = far_plane;
+                    }
+                }
+                end_edit_undo(world, far_response);
             }
         }
         ui.separator();
@@ -1584,6 +1771,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
         if remove {
             world.entity_mut(entity).remove::<Freecam>();
+            push_undo_snapshot(world, "Remove Freecam");
         }
         ui.separator();
     }
@@ -1599,9 +1787,11 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<BevyLight>();
-        } else if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-            let light = &mut light.0;
-            let current_label = match light.light_type {
+            push_undo_snapshot(world, "Remove Light");
+        } else if let Some(light) = world.get::<BevyLight>(entity).map(|light| light.0) {
+            let mut light_type = light.light_type;
+            let mut type_changed = false;
+            let current_label = match light_type {
                 LightType::Directional => "Directional",
                 LightType::Point => "Point",
                 LightType::Spot { .. } => "Spot",
@@ -1612,48 +1802,77 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 .show_ui(ui, |ui| {
                     if ui
                         .selectable_label(
-                            matches!(light.light_type, LightType::Directional),
+                            matches!(light_type, LightType::Directional),
                             "Directional",
                         )
                         .clicked()
                     {
-                        light.light_type = LightType::Directional;
+                        light_type = LightType::Directional;
+                        type_changed = true;
                     }
                     if ui
-                        .selectable_label(matches!(light.light_type, LightType::Point), "Point")
+                        .selectable_label(matches!(light_type, LightType::Point), "Point")
                         .clicked()
                     {
-                        light.light_type = LightType::Point;
+                        light_type = LightType::Point;
+                        type_changed = true;
                     }
                     if ui
-                        .selectable_label(
-                            matches!(light.light_type, LightType::Spot { .. }),
-                            "Spot",
-                        )
+                        .selectable_label(matches!(light_type, LightType::Spot { .. }), "Spot")
                         .clicked()
                     {
-                        let angle = match light.light_type {
+                        let angle = match light_type {
                             LightType::Spot { angle } => angle,
                             _ => 45.0_f32.to_radians(),
                         };
-                        light.light_type = LightType::Spot { angle };
+                        light_type = LightType::Spot { angle };
+                        type_changed = true;
                     }
                 });
 
-            let mut color = [light.color.x, light.color.y, light.color.z];
-            ui.horizontal(|ui| {
-                ui.label("Color");
-                if ui.color_edit_button_rgb(&mut color).changed() {
-                    light.color = Vec3::new(color[0], color[1], color[2]);
+            if type_changed {
+                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+                    light.0.light_type = light_type;
                 }
-            });
-            edit_float(ui, "Intensity", &mut light.intensity, 0.1);
+                push_undo_snapshot(world, "Light Type");
+            }
 
-            if let LightType::Spot { angle } = &mut light.light_type {
-                let mut angle_deg = angle.to_degrees();
-                if edit_float(ui, "Spot Angle", &mut angle_deg, 0.5) {
-                    *angle = angle_deg.to_radians();
+            let mut color = [light.color.x, light.color.y, light.color.z];
+            let color_response = ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.color_edit_button_rgb(&mut color)
+            });
+            let color_response = EditResponse::from_response(&color_response.inner);
+            begin_edit_undo(world, "Light", color_response);
+            if color_response.changed {
+                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+                    light.0.color = Vec3::new(color[0], color[1], color[2]);
                 }
+            }
+            end_edit_undo(world, color_response);
+
+            let mut intensity = light.intensity;
+            let intensity_response = edit_float(ui, "Intensity", &mut intensity, 0.1);
+            begin_edit_undo(world, "Light", intensity_response);
+            if intensity_response.changed {
+                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+                    light.0.intensity = intensity;
+                }
+            }
+            end_edit_undo(world, intensity_response);
+
+            if let LightType::Spot { angle } = light_type {
+                let mut angle_deg = angle.to_degrees();
+                let angle_response = edit_float(ui, "Spot Angle", &mut angle_deg, 0.5);
+                begin_edit_undo(world, "Light", angle_response);
+                if angle_response.changed {
+                    if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+                        light.0.light_type = LightType::Spot {
+                            angle: angle_deg.to_radians(),
+                        };
+                    }
+                }
+                end_edit_undo(world, angle_response);
             }
         }
         ui.separator();
@@ -1671,6 +1890,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         if remove {
             world.entity_mut(entity).remove::<BevyMeshRenderer>();
             world.entity_mut(entity).remove::<EditorMesh>();
+            push_undo_snapshot(world, "Remove Mesh");
         } else {
             let mesh_state = world
                 .get::<EditorMesh>(entity)
@@ -1712,6 +1932,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             let mut mesh_changed = false;
             let mut material_changed = false;
+            let mut uv_edit_response = EditResponse::default();
 
             let mesh_source_button = ui.menu_button(mesh_label, |ui| {
                 let (mut segments, mut rings) = match mesh_source {
@@ -1779,21 +2000,24 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label("UV Sphere");
                     ui.horizontal(|ui| {
                         ui.label("Segments");
-                        ui.add(
+                        let response = ui.add(
                             egui::DragValue::new(&mut next_segments)
                                 .range(3..=128)
                                 .speed(1),
                         );
+                        uv_edit_response.merge(EditResponse::from_response(&response));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Rings");
-                        ui.add(
+                        let response = ui.add(
                             egui::DragValue::new(&mut next_rings)
                                 .range(3..=128)
                                 .speed(1),
                         );
+                        uv_edit_response.merge(EditResponse::from_response(&response));
                     });
                 });
+                begin_edit_undo(world, "Mesh", uv_edit_response);
                 if next_segments != segments || next_rings != rings {
                     mesh_source =
                         MeshSource::Primitive(PrimitiveKind::UvSphere(next_segments, next_rings));
@@ -1855,11 +2079,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
                     renderer.0.casts_shadow = casts_shadow;
                 }
+                push_undo_snapshot(world, "Mesh");
             }
             if ui.checkbox(&mut visible, "Visible").changed() {
                 if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
                     renderer.0.visible = visible;
                 }
+                push_undo_snapshot(world, "Mesh");
             }
 
             if mesh_changed || material_changed {
@@ -1872,6 +2098,18 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     casts_shadow,
                     visible,
                 );
+            }
+
+            let uv_editing = uv_edit_response.changed
+                || uv_edit_response.drag_started
+                || uv_edit_response.drag_released
+                || uv_edit_response.lost_focus;
+            if uv_editing {
+                end_edit_undo(world, uv_edit_response);
+            }
+            if (mesh_changed || material_changed) && !uv_editing {
+                let label = if mesh_changed { "Mesh" } else { "Material" };
+                push_undo_snapshot(world, label);
             }
         }
         ui.separator();
@@ -1888,8 +2126,17 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<DynamicRigidBody>();
-        } else if let Some(mut body) = world.get_mut::<DynamicRigidBody>(entity) {
-            edit_float(ui, "Mass", &mut body.mass, 0.1);
+            push_undo_snapshot(world, "Remove Dynamic Body");
+        } else if let Some(body) = world.get::<DynamicRigidBody>(entity) {
+            let mut mass = body.mass;
+            let mass_response = edit_float(ui, "Mass", &mut mass, 0.1);
+            begin_edit_undo(world, "Physics", mass_response);
+            if mass_response.changed {
+                if let Some(mut body) = world.get_mut::<DynamicRigidBody>(entity) {
+                    body.mass = mass;
+                }
+            }
+            end_edit_undo(world, mass_response);
         }
         ui.separator();
     }
@@ -1905,6 +2152,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<FixedCollider>();
+            push_undo_snapshot(world, "Remove Fixed Collider");
         }
         ui.separator();
     }
@@ -1920,8 +2168,10 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<ColliderShape>();
-        } else if let Some(mut shape) = world.get_mut::<ColliderShape>(entity) {
-            let mut current = *shape;
+            push_undo_snapshot(world, "Remove Collider");
+        } else if let Some(shape) = world.get::<ColliderShape>(entity).copied() {
+            let mut current = shape;
+            let mut shape_changed = false;
             let label = match current {
                 ColliderShape::Cuboid => "Box",
                 ColliderShape::Sphere => "Sphere",
@@ -1934,15 +2184,22 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .clicked()
                     {
                         current = ColliderShape::Cuboid;
+                        shape_changed = true;
                     }
                     if ui
                         .selectable_label(matches!(current, ColliderShape::Sphere), "Sphere")
                         .clicked()
                     {
                         current = ColliderShape::Sphere;
+                        shape_changed = true;
                     }
                 });
-            *shape = current;
+            if shape_changed {
+                if let Some(mut shape) = world.get_mut::<ColliderShape>(entity) {
+                    *shape = current;
+                }
+                push_undo_snapshot(world, "Collider Shape");
+            }
         }
         ui.separator();
     }
@@ -1959,7 +2216,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         if remove {
             world.entity_mut(entity).remove::<SceneRoot>();
             world.entity_mut(entity).remove::<SceneAssetPath>();
+            push_undo_snapshot(world, "Remove Scene Asset");
         } else {
+            let mut scene_asset_changed = false;
             if let Some(scene_path) = world.get::<SceneAssetPath>(entity) {
                 let path_label = if scene_path.path.as_os_str().is_empty() {
                     "Path: <none>".to_string()
@@ -1976,6 +2235,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
                     if ui.button("Use Selected Asset").clicked() {
                         apply_scene_asset(world, entity, path);
+                        scene_asset_changed = true;
                         ui.close_menu();
                     }
                 } else {
@@ -1988,6 +2248,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .pick_file()
                     {
                         apply_scene_asset(world, entity, &path);
+                        scene_asset_changed = true;
                     }
                     ui.close_menu();
                 }
@@ -1998,10 +2259,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 .dnd_release_payload::<AssetDragPayload>()
             {
                 if let Some(path) = payload_primary_path(&payload) {
-                    try_apply_scene_asset_path(world, entity, path);
+                    if try_apply_scene_asset_path(world, entity, path) {
+                        scene_asset_changed = true;
+                    }
                 }
             }
             highlight_drop_target(ui, &scene_asset_button.response);
+            if scene_asset_changed {
+                push_undo_snapshot(world, "Scene Asset");
+            }
         }
         ui.separator();
     }
@@ -2017,9 +2283,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove_component {
             world.entity_mut(entity).remove::<ScriptComponent>();
+            push_undo_snapshot(world, "Remove Scripts");
         } else {
             let mut scripts = script_component.scripts;
             let mut remove_indices = Vec::new();
+            let mut scripts_changed = false;
+            let mut script_edit_response = EditResponse::default();
 
             for (index, script) in scripts.iter_mut().enumerate() {
                 ui.separator();
@@ -2027,6 +2296,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label(format!("Script {}", index + 1));
                     if ui.button("Remove").clicked() {
                         remove_indices.push(index);
+                        scripts_changed = true;
                     }
                 });
 
@@ -2036,9 +2306,16 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     .map(|path| path.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let path_response = ui.text_edit_singleline(&mut path_string);
+                let mut edit_response = EditResponse::from_response(&path_response);
+                if path_response.has_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                {
+                    edit_response.lost_focus = true;
+                }
+                begin_edit_undo(world, "Scripts", edit_response);
 
                 let mut updated_path = script.path.clone();
-                if path_response.changed() {
+                if edit_response.changed {
                     let trimmed = path_string.trim();
                     updated_path = if trimmed.is_empty() {
                         None
@@ -2046,12 +2323,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         Some(PathBuf::from(trimmed))
                     };
                 }
+                script_edit_response.merge(edit_response);
 
                 if let Some(payload) = path_response.dnd_release_payload::<AssetDragPayload>() {
                     if let Some(path) = payload_primary_path(&payload) {
                         if is_script_file(path) {
                             updated_path = Some(path.clone());
                             path_string = path.to_string_lossy().to_string();
+                            scripts_changed = true;
                         } else {
                             set_status(world, "Select a script asset to assign".to_string());
                         }
@@ -2067,12 +2346,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .pick_file()
                     {
                         script.path = Some(path);
+                        scripts_changed = true;
                     }
                 }
 
                 if let Some(path) = selected_asset.as_ref() {
                     if is_script_file(path) && ui.button("Use Selected Script").clicked() {
                         script.path = Some(path.clone());
+                        scripts_changed = true;
                     }
                 }
 
@@ -2080,6 +2361,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     if let Some(project) = project.as_ref() {
                         if let Some(path) = create_script_asset(world, project) {
                             script.path = Some(path);
+                            scripts_changed = true;
                         }
                     } else {
                         set_status(world, "Open a project before creating scripts".to_string());
@@ -2097,12 +2379,19 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             if ui.button("Add Script").clicked() {
                 scripts.push(ScriptEntry::new());
+                scripts_changed = true;
             }
 
             if scripts.is_empty() {
                 world.entity_mut(entity).remove::<ScriptComponent>();
+                scripts_changed = true;
             } else {
                 world.entity_mut(entity).insert(ScriptComponent { scripts });
+            }
+
+            end_edit_undo(world, script_edit_response);
+            if scripts_changed {
+                push_undo_snapshot(world, "Scripts");
             }
         }
         ui.separator();
@@ -2119,6 +2408,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<DynamicComponents>();
+            push_undo_snapshot(world, "Remove Dynamic Components");
         } else {
             draw_dynamic_components_section(ui, world, entity);
         }
@@ -3792,6 +4082,13 @@ fn begin_rename(world: &mut World, entity: Entity) {
 
 fn apply_entity_name(world: &mut World, entity: Entity, name: &str) {
     let trimmed = name.trim();
+    let current = world
+        .get::<Name>(entity)
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    if trimmed == current {
+        return;
+    }
     if trimmed.is_empty() {
         world.entity_mut(entity).remove::<Name>();
     } else {
@@ -3804,6 +4101,7 @@ fn apply_entity_name(world: &mut World, entity: Entity, name: &str) {
             name_state.buffer = trimmed.to_string();
         }
     }
+    push_undo_snapshot(world, "Rename");
 }
 
 fn draw_material_editor_tab(
@@ -3855,52 +4153,94 @@ fn draw_material_editor_tab(
         };
 
         let mut changed = false;
+        let mut edit_response = EditResponse::default();
+        let undo_label = format!("Material {}", project_relative_path(project, &path));
 
         ui.separator();
         ui.label("Surface");
-        ui.horizontal(|ui| {
+        let albedo_response = ui.horizontal(|ui| {
             ui.label("Albedo");
             let mut albedo = data.albedo;
-            if ui
-                .color_edit_button_rgba_unmultiplied(&mut albedo)
-                .changed()
-            {
+            let response = ui.color_edit_button_rgba_unmultiplied(&mut albedo);
+            if response.changed() {
                 data.albedo = albedo;
                 changed = true;
             }
+            response
         });
-        changed |= edit_float_range(ui, "Metallic", &mut data.metallic, 0.01, 0.0..=1.0);
-        changed |= edit_float_range(ui, "Roughness", &mut data.roughness, 0.01, 0.0..=1.0);
-        changed |= edit_float_range(ui, "AO", &mut data.ao, 0.01, 0.0..=1.0);
+        let mut albedo_response = EditResponse::from_response(&albedo_response.inner);
+        if albedo_response.changed {
+            albedo_response.lost_focus = true;
+        }
+        edit_response.merge(albedo_response);
+
+        let metallic_response =
+            edit_float_range(ui, "Metallic", &mut data.metallic, 0.01, 0.0..=1.0);
+        changed |= metallic_response.changed;
+        edit_response.merge(metallic_response);
+
+        let roughness_response =
+            edit_float_range(ui, "Roughness", &mut data.roughness, 0.01, 0.0..=1.0);
+        changed |= roughness_response.changed;
+        edit_response.merge(roughness_response);
+
+        let ao_response = edit_float_range(ui, "AO", &mut data.ao, 0.01, 0.0..=1.0);
+        changed |= ao_response.changed;
+        edit_response.merge(ao_response);
 
         ui.separator();
         ui.label("Emission");
-        ui.horizontal(|ui| {
+        let emission_color_response = ui.horizontal(|ui| {
             ui.label("Color");
             let mut color = data.emission_color;
-            if ui.color_edit_button_rgb(&mut color).changed() {
+            let response = ui.color_edit_button_rgb(&mut color);
+            if response.changed() {
                 data.emission_color = color;
                 changed = true;
             }
+            response
         });
-        changed |= edit_float_range(
+        let mut emission_color_response =
+            EditResponse::from_response(&emission_color_response.inner);
+        if emission_color_response.changed {
+            emission_color_response.lost_focus = true;
+        }
+        edit_response.merge(emission_color_response);
+
+        let emission_strength_response = edit_float_range(
             ui,
             "Strength",
             &mut data.emission_strength,
             0.05,
             0.0..=100.0,
         );
+        changed |= emission_strength_response.changed;
+        edit_response.merge(emission_strength_response);
 
         ui.separator();
         ui.label("Textures");
-        changed |= edit_material_texture(ui, "Albedo", &mut data.albedo_texture);
-        changed |= edit_material_texture(ui, "Normal", &mut data.normal_texture);
-        changed |= edit_material_texture(
+        let albedo_texture_response = edit_material_texture(ui, "Albedo", &mut data.albedo_texture);
+        changed |= albedo_texture_response.changed;
+        edit_response.merge(albedo_texture_response);
+
+        let normal_texture_response = edit_material_texture(ui, "Normal", &mut data.normal_texture);
+        changed |= normal_texture_response.changed;
+        edit_response.merge(normal_texture_response);
+
+        let metallic_texture_response = edit_material_texture(
             ui,
             "Metallic/Roughness",
             &mut data.metallic_roughness_texture,
         );
-        changed |= edit_material_texture(ui, "Emission", &mut data.emission_texture);
+        changed |= metallic_texture_response.changed;
+        edit_response.merge(metallic_texture_response);
+
+        let emission_texture_response =
+            edit_material_texture(ui, "Emission", &mut data.emission_texture);
+        changed |= emission_texture_response.changed;
+        edit_response.merge(emission_texture_response);
+
+        begin_material_edit_undo(world, &path, &undo_label, edit_response);
 
         if changed {
             match save_material_file(&path, data) {
@@ -3915,6 +4255,8 @@ fn draw_material_editor_tab(
                 }
             }
         }
+
+        end_material_edit_undo(world, edit_response);
     });
 }
 
@@ -3948,11 +4290,13 @@ fn draw_add_component_menu(
     ui.menu_button("Add Component", |ui| {
         if !has_transform && ui.button("Transform").clicked() {
             world.entity_mut(entity).insert(BevyTransform::default());
+            push_undo_snapshot(world, "Add Transform");
             ui.close_menu();
         }
         if !has_camera && ui.button("Camera").clicked() {
             ensure_transform(world, entity);
             world.entity_mut(entity).insert(BevyCamera::default());
+            push_undo_snapshot(world, "Add Camera");
             ui.close_menu();
         }
         if !has_light {
@@ -3962,6 +4306,7 @@ fn draw_add_component_menu(
                     world
                         .entity_mut(entity)
                         .insert(BevyWrapper(Light::directional(Vec3::ONE, 25.0)));
+                    push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
                 if ui.button("Point").clicked() {
@@ -3969,6 +4314,7 @@ fn draw_add_component_menu(
                     world
                         .entity_mut(entity)
                         .insert(BevyWrapper(Light::point(Vec3::ONE, 10.0)));
+                    push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
                 if ui.button("Spot").clicked() {
@@ -3978,6 +4324,7 @@ fn draw_add_component_menu(
                         10.0,
                         45.0_f32.to_radians(),
                     )));
+                    push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
             });
@@ -3996,6 +4343,7 @@ fn draw_add_component_menu(
                 true,
                 true,
             );
+            push_undo_snapshot(world, "Add Mesh");
             ui.close_menu();
         }
         if !has_scene {
@@ -4005,11 +4353,14 @@ fn draw_add_component_menu(
                 if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
                     try_apply_scene_asset_path(world, entity, path);
                 }
+                push_undo_snapshot(world, "Add Scene Asset");
                 ui.close_menu();
             }
             if let Some(payload) = scene_asset_button.dnd_release_payload::<AssetDragPayload>() {
                 if let Some(path) = payload_primary_path(&payload) {
-                    try_apply_scene_asset_path(world, entity, path);
+                    if try_apply_scene_asset_path(world, entity, path) {
+                        push_undo_snapshot(world, "Add Scene Asset");
+                    }
                 }
                 ui.close_menu();
             }
@@ -4017,6 +4368,7 @@ fn draw_add_component_menu(
         }
         if ui.button("Script").clicked() {
             add_script_component(world, entity);
+            push_undo_snapshot(world, "Add Script");
             ui.close_menu();
         }
         ui.menu_button("Provided", |ui| {
@@ -4026,6 +4378,7 @@ fn draw_add_component_menu(
                     world.entity_mut(entity).insert(BevyCamera::default());
                 }
                 world.entity_mut(entity).insert(Freecam::default());
+                push_undo_snapshot(world, "Add Freecam");
                 ui.close_menu();
             }
         });
@@ -4037,6 +4390,7 @@ fn draw_add_component_menu(
                         .entity_mut(entity)
                         .insert(DynamicRigidBody { mass: 1.0 });
                     world.entity_mut(entity).insert(ColliderShape::Cuboid);
+                    push_undo_snapshot(world, "Add Dynamic Body");
                     ui.close_menu();
                 }
                 if ui.button("Dynamic Body (Sphere)").clicked() {
@@ -4045,6 +4399,7 @@ fn draw_add_component_menu(
                         .entity_mut(entity)
                         .insert(DynamicRigidBody { mass: 1.0 });
                     world.entity_mut(entity).insert(ColliderShape::Sphere);
+                    push_undo_snapshot(world, "Add Dynamic Body");
                     ui.close_menu();
                 }
                 ui.separator();
@@ -4052,12 +4407,14 @@ fn draw_add_component_menu(
                     ensure_transform(world, entity);
                     world.entity_mut(entity).insert(FixedCollider);
                     world.entity_mut(entity).insert(ColliderShape::Cuboid);
+                    push_undo_snapshot(world, "Add Fixed Collider");
                     ui.close_menu();
                 }
                 if ui.button("Fixed Collider (Sphere)").clicked() {
                     ensure_transform(world, entity);
                     world.entity_mut(entity).insert(FixedCollider);
                     world.entity_mut(entity).insert(ColliderShape::Sphere);
+                    push_undo_snapshot(world, "Add Fixed Collider");
                     ui.close_menu();
                 }
             } else if has_dynamic_body {
@@ -4073,6 +4430,7 @@ fn draw_add_component_menu(
                 .clicked()
             {
                 world.entity_mut(entity).insert(ColliderShape::Cuboid);
+                push_undo_snapshot(world, "Collider Shape");
                 ui.close_menu();
             }
             if ui
@@ -4083,6 +4441,7 @@ fn draw_add_component_menu(
                 .clicked()
             {
                 world.entity_mut(entity).insert(ColliderShape::Sphere);
+                push_undo_snapshot(world, "Collider Shape");
                 ui.close_menu();
             }
         });
@@ -4090,17 +4449,22 @@ fn draw_add_component_menu(
             world
                 .entity_mut(entity)
                 .insert(DynamicComponents::default());
+            push_undo_snapshot(world, "Add Dynamic Components");
             ui.close_menu();
         }
     });
 }
 
 fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entity) {
-    world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
-        let Some(mut dynamic) = world.get_mut::<DynamicComponents>(entity) else {
-            return;
-        };
+    let Some(dynamic_snapshot) = world.get::<DynamicComponents>(entity).cloned() else {
+        return;
+    };
 
+    let mut dynamic = dynamic_snapshot.clone();
+    let mut edit_response = EditResponse::default();
+    let mut discrete_changed = false;
+
+    world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
         if dynamic.components.is_empty() {
             ui.label("No dynamic components yet.");
         }
@@ -4109,9 +4473,21 @@ fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entit
         for (component_index, component) in dynamic.components.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.label("Component");
-                ui.text_edit_singleline(&mut component.name);
+                let mut name = component.name.clone();
+                let response = ui.text_edit_singleline(&mut name);
+                let mut field_response = EditResponse::from_response(&response);
+                if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    field_response.lost_focus = true;
+                }
+                begin_edit_undo(world, "Dynamic", field_response);
+                if field_response.changed {
+                    component.name = name;
+                }
+                edit_response.merge(field_response);
+
                 if ui.button("Remove").clicked() {
                     remove_component_index = Some(component_index);
+                    discrete_changed = true;
                 }
             });
 
@@ -4119,11 +4495,31 @@ fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entit
             for (field_index, field) in component.fields.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label("Field");
-                    ui.text_edit_singleline(&mut field.name);
+                    let mut name = field.name.clone();
+                    let response = ui.text_edit_singleline(&mut name);
+                    let mut name_response = EditResponse::from_response(&response);
+                    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        name_response.lost_focus = true;
+                    }
+                    begin_edit_undo(world, "Dynamic", name_response);
+                    if name_response.changed {
+                        field.name = name;
+                    }
+                    edit_response.merge(name_response);
+
                     ui.label(dynamic_value_label(&field.value));
-                    edit_dynamic_value(ui, &mut field.value);
+                    let mut value = field.value.clone();
+                    let value_response = edit_dynamic_value(ui, &mut value);
+                    begin_edit_undo(world, "Dynamic", value_response);
+                    if value_response.changed {
+                        field.value = value;
+                    }
+                    edit_response.merge(value_response);
+
                     if ui.button("Remove").clicked() {
                         remove_field_index = Some(field_index);
+                        discrete_changed = true;
                     }
                 });
             }
@@ -4172,6 +4568,7 @@ fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entit
                             value: ui_state.new_dynamic_field_kind.default_value(),
                         });
                         ui_state.new_dynamic_field_name.clear();
+                        discrete_changed = true;
                     }
                 }
             });
@@ -4199,21 +4596,80 @@ fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entit
                         .components
                         .push(DynamicComponent::new(name.to_string()));
                     ui_state.new_dynamic_component_name.clear();
+                    discrete_changed = true;
                 }
             }
         });
     });
+
+    if dynamic != dynamic_snapshot {
+        world.entity_mut(entity).insert(dynamic);
+    }
+
+    end_edit_undo(world, edit_response);
+    if discrete_changed {
+        push_undo_snapshot(world, "Dynamic");
+    }
 }
 
-fn edit_float(ui: &mut Ui, label: &str, value: &mut f32, speed: f32) -> bool {
-    let mut changed = false;
+#[derive(Default, Copy, Clone)]
+struct EditResponse {
+    changed: bool,
+    drag_started: bool,
+    drag_released: bool,
+    lost_focus: bool,
+}
+
+impl EditResponse {
+    fn from_response(response: &Response) -> Self {
+        Self {
+            changed: response.changed(),
+            drag_started: response.drag_started(),
+            drag_released: response.drag_stopped(),
+            lost_focus: response.lost_focus(),
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.changed |= other.changed;
+        self.drag_started |= other.drag_started;
+        self.drag_released |= other.drag_released;
+        self.lost_focus |= other.lost_focus;
+    }
+}
+
+fn begin_edit_undo(world: &mut World, label: &str, response: EditResponse) {
+    if response.drag_started || response.changed {
+        begin_undo_group(world, label);
+    }
+}
+
+fn end_edit_undo(world: &mut World, response: EditResponse) {
+    if response.drag_released || response.lost_focus {
+        end_undo_group(world);
+    }
+}
+
+fn begin_material_edit_undo(world: &mut World, path: &Path, label: &str, response: EditResponse) {
+    if response.drag_started || response.changed {
+        begin_material_undo_group(world, path, label);
+    }
+}
+
+fn end_material_edit_undo(world: &mut World, response: EditResponse) {
+    if response.drag_released || response.lost_focus {
+        end_material_undo_group(world);
+    }
+}
+
+fn edit_float(ui: &mut Ui, label: &str, value: &mut f32, speed: f32) -> EditResponse {
+    let mut response = EditResponse::default();
     ui.horizontal(|ui| {
         ui.label(label);
-        if ui.add(DragValue::new(value).speed(speed)).changed() {
-            changed = true;
-        }
+        let drag_response = ui.add(DragValue::new(value).speed(speed));
+        response.merge(EditResponse::from_response(&drag_response));
     });
-    changed
+    response
 }
 
 fn edit_float_range(
@@ -4222,18 +4678,14 @@ fn edit_float_range(
     value: &mut f32,
     speed: f32,
     range: std::ops::RangeInclusive<f32>,
-) -> bool {
-    let mut changed = false;
+) -> EditResponse {
+    let mut response = EditResponse::default();
     ui.horizontal(|ui| {
         ui.label(label);
-        if ui
-            .add(DragValue::new(value).speed(speed).range(range))
-            .changed()
-        {
-            changed = true;
-        }
+        let drag_response = ui.add(DragValue::new(value).speed(speed).range(range));
+        response.merge(EditResponse::from_response(&drag_response));
     });
-    changed
+    response
 }
 
 fn edit_u32_range(
@@ -4242,18 +4694,14 @@ fn edit_u32_range(
     value: &mut u32,
     speed: f32,
     range: std::ops::RangeInclusive<u32>,
-) -> bool {
-    let mut changed = false;
+) -> EditResponse {
+    let mut response = EditResponse::default();
     ui.horizontal(|ui| {
         ui.label(label);
-        if ui
-            .add(DragValue::new(value).speed(speed).range(range))
-            .changed()
-        {
-            changed = true;
-        }
+        let drag_response = ui.add(DragValue::new(value).speed(speed).range(range));
+        response.merge(EditResponse::from_response(&drag_response));
     });
-    changed
+    response
 }
 
 fn edit_color(ui: &mut Ui, label: &str, color: &mut [f32; 3]) -> bool {
@@ -4267,20 +4715,21 @@ fn edit_color(ui: &mut Ui, label: &str, color: &mut [f32; 3]) -> bool {
     changed
 }
 
-fn edit_material_texture(ui: &mut Ui, label: &str, value: &mut Option<String>) -> bool {
-    let mut changed = false;
+fn edit_material_texture(ui: &mut Ui, label: &str, value: &mut Option<String>) -> EditResponse {
+    let mut response = EditResponse::default();
     let mut buffer = value.clone().unwrap_or_default();
 
     ui.horizontal(|ui| {
         ui.label(label);
-        if ui.text_edit_singleline(&mut buffer).changed() {
+        let text_response = ui.text_edit_singleline(&mut buffer);
+        response.merge(EditResponse::from_response(&text_response));
+        if text_response.changed() {
             let trimmed = buffer.trim();
             if trimmed.is_empty() {
                 *value = None;
             } else {
                 *value = Some(trimmed.to_string());
             }
-            changed = true;
         }
         if ui.button("Browse...").clicked() {
             if let Some(path) = rfd::FileDialog::new()
@@ -4288,63 +4737,71 @@ fn edit_material_texture(ui: &mut Ui, label: &str, value: &mut Option<String>) -
                 .pick_file()
             {
                 *value = Some(path.to_string_lossy().to_string());
-                changed = true;
+                response.changed = true;
+                response.lost_focus = true;
             }
         }
         if ui.button("Clear").clicked() {
             *value = None;
-            changed = true;
+            response.changed = true;
+            response.lost_focus = true;
         }
     });
 
-    changed
+    response
 }
 
-fn edit_vec3(ui: &mut Ui, label: &str, value: &mut Vec3, speed: f32) -> bool {
-    let mut changed = false;
+fn edit_vec3(ui: &mut Ui, label: &str, value: &mut Vec3, speed: f32) -> EditResponse {
+    let mut response = EditResponse::default();
     ui.horizontal(|ui| {
         ui.label(label);
-        if ui.add(DragValue::new(&mut value.x).speed(speed)).changed() {
-            changed = true;
-        }
-        if ui.add(DragValue::new(&mut value.y).speed(speed)).changed() {
-            changed = true;
-        }
-        if ui.add(DragValue::new(&mut value.z).speed(speed)).changed() {
-            changed = true;
-        }
+        let x_response = ui.add(DragValue::new(&mut value.x).speed(speed));
+        response.merge(EditResponse::from_response(&x_response));
+        let y_response = ui.add(DragValue::new(&mut value.y).speed(speed));
+        response.merge(EditResponse::from_response(&y_response));
+        let z_response = ui.add(DragValue::new(&mut value.z).speed(speed));
+        response.merge(EditResponse::from_response(&z_response));
     });
-    changed
+    response
 }
 
-fn edit_vec3_inline(ui: &mut Ui, value: &mut Vec3, speed: f32) -> bool {
-    let mut changed = false;
-    if ui.add(DragValue::new(&mut value.x).speed(speed)).changed() {
-        changed = true;
-    }
-    if ui.add(DragValue::new(&mut value.y).speed(speed)).changed() {
-        changed = true;
-    }
-    if ui.add(DragValue::new(&mut value.z).speed(speed)).changed() {
-        changed = true;
-    }
-    changed
+fn edit_vec3_inline(ui: &mut Ui, value: &mut Vec3, speed: f32) -> EditResponse {
+    let mut response = EditResponse::default();
+    let x_response = ui.add(DragValue::new(&mut value.x).speed(speed));
+    response.merge(EditResponse::from_response(&x_response));
+    let y_response = ui.add(DragValue::new(&mut value.y).speed(speed));
+    response.merge(EditResponse::from_response(&y_response));
+    let z_response = ui.add(DragValue::new(&mut value.z).speed(speed));
+    response.merge(EditResponse::from_response(&z_response));
+    response
 }
 
-fn edit_dynamic_value(ui: &mut Ui, value: &mut DynamicValue) -> bool {
+fn edit_dynamic_value(ui: &mut Ui, value: &mut DynamicValue) -> EditResponse {
     match value {
-        DynamicValue::Bool(value) => ui.checkbox(value, "").changed(),
-        DynamicValue::Float(value) => ui.add(DragValue::new(value).speed(0.1)).changed(),
-        DynamicValue::Int(value) => ui.add(DragValue::new(value).speed(1.0)).changed(),
+        DynamicValue::Bool(value) => {
+            let response = ui.checkbox(value, "");
+            EditResponse::from_response(&response)
+        }
+        DynamicValue::Float(value) => {
+            let response = ui.add(DragValue::new(value).speed(0.1));
+            EditResponse::from_response(&response)
+        }
+        DynamicValue::Int(value) => {
+            let response = ui.add(DragValue::new(value).speed(1.0));
+            EditResponse::from_response(&response)
+        }
         DynamicValue::Vec3(value) => {
             let mut vec = Vec3::new(value[0], value[1], value[2]);
-            let changed = edit_vec3_inline(ui, &mut vec, 0.1);
-            if changed {
+            let response = edit_vec3_inline(ui, &mut vec, 0.1);
+            if response.changed {
                 *value = [vec.x, vec.y, vec.z];
             }
-            changed
+            response
         }
-        DynamicValue::String(value) => ui.text_edit_singleline(value).changed(),
+        DynamicValue::String(value) => {
+            let response = ui.text_edit_singleline(value);
+            EditResponse::from_response(&response)
+        }
     }
 }
 
@@ -4469,7 +4926,7 @@ fn apply_mesh_renderer(
     });
 }
 
-fn refresh_material_usage(world: &mut World, project: &Option<EditorProject>, path: &Path) {
+pub fn refresh_material_usage(world: &mut World, project: &Option<EditorProject>, path: &Path) {
     let material_key = project_relative_path(project, path);
     let mut targets = Vec::new();
 

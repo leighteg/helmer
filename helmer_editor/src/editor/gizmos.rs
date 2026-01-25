@@ -11,8 +11,10 @@ use helmer_becs::{
     BevyTransform,
 };
 
-use crate::editor::EditorViewportState;
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
+use crate::editor::{
+    EditorUndoState, EditorViewportState, request_begin_undo_group, request_end_undo_group,
+};
 
 #[derive(Resource, Debug, Clone)]
 pub struct EditorGizmoState {
@@ -211,6 +213,7 @@ pub fn gizmo_system(
     viewport_state: Res<EditorViewportState>,
     selection: Res<InspectorSelectedEntityResource>,
     scene_state: Res<EditorSceneState>,
+    mut undo_state: ResMut<EditorUndoState>,
     input: Res<BevyInputManager>,
     asset_server: Res<BevyAssetServer>,
     mesh_query: Query<&BevyMeshRenderer>,
@@ -221,13 +224,20 @@ pub fn gizmo_system(
         clear_gizmo(&mut state, &mut render_gizmo, &settings);
         return;
     }
+    let allow_undo = scene_state.world_state == WorldState::Edit;
 
     let Some(entity) = selection.0 else {
+        if state.drag.is_some() && allow_undo {
+            request_end_undo_group(&mut undo_state);
+        }
         clear_gizmo(&mut state, &mut render_gizmo, &settings);
         return;
     };
 
     let Some((camera_entity, camera)) = camera_query.iter().next() else {
+        if state.drag.is_some() && allow_undo {
+            request_end_undo_group(&mut undo_state);
+        }
         clear_gizmo(&mut state, &mut render_gizmo, &settings);
         return;
     };
@@ -235,12 +245,18 @@ pub fn gizmo_system(
     let camera_transform = match transforms.get_mut(camera_entity) {
         Ok(transform) => transform.0,
         Err(_) => {
+            if state.drag.is_some() && allow_undo {
+                request_end_undo_group(&mut undo_state);
+            }
             clear_gizmo(&mut state, &mut render_gizmo, &settings);
             return;
         }
     };
 
     let Ok(mut target_transform) = transforms.get_mut(entity) else {
+        if state.drag.is_some() && allow_undo {
+            request_end_undo_group(&mut undo_state);
+        }
         clear_gizmo(&mut state, &mut render_gizmo, &settings);
         return;
     };
@@ -276,9 +292,13 @@ pub fn gizmo_system(
     let view_dir = view_dir.normalize_or_zero();
 
     if wants_pointer {
-        if left_released || state.drag.is_some() {
+        let had_drag = state.drag.is_some();
+        if left_released || had_drag {
             state.drag = None;
             state.active_axis = GizmoAxis::None;
+        }
+        if had_drag && allow_undo {
+            request_end_undo_group(&mut undo_state);
         }
         state.hover_axis = GizmoAxis::None;
     } else if let Some((ray_origin, ray_dir)) = ray {
@@ -305,6 +325,9 @@ pub fn gizmo_system(
             ) {
                 state.active_axis = drag_state.axis;
                 state.drag = Some(drag_state);
+                if allow_undo {
+                    request_begin_undo_group(&mut undo_state, undo_label_for_mode(state.mode));
+                }
             }
         }
 
@@ -322,14 +345,23 @@ pub fn gizmo_system(
             } else {
                 state.active_axis = GizmoAxis::None;
                 state.drag = None;
+                if allow_undo {
+                    request_end_undo_group(&mut undo_state);
+                }
             }
         }
     } else if left_released {
+        if state.drag.is_some() && allow_undo {
+            request_end_undo_group(&mut undo_state);
+        }
         state.active_axis = GizmoAxis::None;
         state.drag = None;
     }
 
     if state.mode == GizmoMode::None {
+        if state.drag.is_some() && allow_undo {
+            request_end_undo_group(&mut undo_state);
+        }
         state.drag = None;
         state.hover_axis = GizmoAxis::None;
         state.active_axis = GizmoAxis::None;
@@ -436,6 +468,15 @@ fn clear_gizmo(
         style: settings.to_style(),
         ..GizmoData::default()
     };
+}
+
+fn undo_label_for_mode(mode: GizmoMode) -> &'static str {
+    match mode {
+        GizmoMode::Translate => "Move",
+        GizmoMode::Rotate => "Rotate",
+        GizmoMode::Scale => "Scale",
+        GizmoMode::None => "Edit",
+    }
 }
 
 fn selection_bounds(

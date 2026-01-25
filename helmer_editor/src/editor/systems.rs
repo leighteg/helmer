@@ -32,10 +32,12 @@ use crate::editor::{
     },
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::DynamicComponents,
+    mark_undo_clean,
     project::{
         EditorProject, create_project, default_material_template, default_scene_template,
         default_script_template, load_project, save_recent_projects,
     },
+    push_undo_snapshot, redo_action, reset_undo_history,
     scene::{
         EditorEntity, EditorSceneState, WorldState, next_available_scene_path, read_scene_document,
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
@@ -45,9 +47,10 @@ use crate::editor::{
     set_play_camera,
     ui::{
         EditorUiState, EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
-        draw_assets_window, draw_editor_window, draw_inspector_window, draw_project_window,
-        draw_scene_window, draw_toolbar, draw_viewport_window,
+        draw_assets_window, draw_editor_window, draw_history_window, draw_inspector_window,
+        draw_project_window, draw_scene_window, draw_toolbar, draw_viewport_window,
     },
+    undo_action,
     watch::configure_file_watcher,
 };
 
@@ -124,6 +127,16 @@ pub fn editor_ui_system(world: &mut World) {
 
     egui_res.windows.push((
         Box::new(|ui: &mut Ui, world: &mut World, _| {
+            draw_history_window(ui, world);
+        }),
+        EguiWindowSpec {
+            id: "History".to_string(),
+            title: "History".to_string(),
+        },
+    ));
+
+    egui_res.windows.push((
+        Box::new(|ui: &mut Ui, world: &mut World, _| {
             draw_assets_window(ui, world);
         }),
         EguiWindowSpec {
@@ -192,6 +205,7 @@ pub fn editor_command_system(world: &mut World) {
             }
             EditorCommand::CreateEntity { kind } => {
                 handle_create_entity(world, kind);
+                push_undo_snapshot(world, "Create Entity");
             }
             EditorCommand::ImportAsset {
                 source_path,
@@ -207,7 +221,8 @@ pub fn editor_command_system(world: &mut World) {
                 handle_create_asset(world, &directory, &name, kind);
             }
             EditorCommand::DeleteEntity { entity } => {
-                if world.get_entity(entity).is_ok() {
+                let existed = world.get_entity(entity).is_ok();
+                if existed {
                     world.despawn(entity);
                 }
                 if let Some(mut selection) = world.get_resource_mut::<
@@ -223,12 +238,33 @@ pub fn editor_command_system(world: &mut World) {
                         pinned.0 = None;
                     }
                 }
+                if existed {
+                    push_undo_snapshot(world, "Delete Entity");
+                }
             }
             EditorCommand::SetActiveCamera { entity } => {
-                handle_set_active_camera(world, entity);
+                if handle_set_active_camera(world, entity) {
+                    push_undo_snapshot(world, "Set Active Camera");
+                }
             }
             EditorCommand::TogglePlayMode => {
                 handle_toggle_play(world);
+            }
+            EditorCommand::Undo => {
+                let label = undo_action(world);
+                if let Some(label) = label {
+                    set_status(world, format!("Undo {}", label));
+                } else {
+                    set_status(world, "Nothing to undo".to_string());
+                }
+            }
+            EditorCommand::Redo => {
+                let label = redo_action(world);
+                if let Some(label) = label {
+                    set_status(world, format!("Redo {}", label));
+                } else {
+                    set_status(world, "Nothing to redo".to_string());
+                }
             }
             EditorCommand::CloseProject => {
                 handle_close_project(world);
@@ -286,12 +322,25 @@ pub fn editor_shortcut_system(
         return;
     }
 
-    let control = input_manager.is_key_active(KeyCode::ControlLeft);
+    let control = input_manager.is_key_active(KeyCode::ControlLeft)
+        || input_manager.is_key_active(KeyCode::ControlRight);
+    let shift = input_manager.is_key_active(KeyCode::ShiftLeft)
+        || input_manager.is_key_active(KeyCode::ShiftRight);
     if control && input_manager.just_pressed.contains(&KeyCode::KeyN) {
         queue.push(EditorCommand::NewScene);
     }
     if control && input_manager.just_pressed.contains(&KeyCode::KeyS) {
         queue.push(EditorCommand::SaveScene);
+    }
+    if control && input_manager.just_pressed.contains(&KeyCode::KeyZ) {
+        if shift {
+            queue.push(EditorCommand::Redo);
+        } else {
+            queue.push(EditorCommand::Undo);
+        }
+    }
+    if control && input_manager.just_pressed.contains(&KeyCode::KeyY) {
+        queue.push(EditorCommand::Redo);
     }
     if input_manager.just_pressed.contains(&KeyCode::F5) {
         queue.push(EditorCommand::TogglePlayMode);
@@ -575,6 +624,8 @@ fn handle_new_scene(world: &mut World) {
     if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>() {
         pinned.0 = None;
     }
+
+    reset_undo_history(world);
 }
 
 fn handle_open_scene(world: &mut World, path: &Path) {
@@ -616,6 +667,7 @@ fn handle_open_scene(world: &mut World, path: &Path) {
                 scene_state.play_backup = None;
             }
 
+            reset_undo_history(world);
             set_status(world, format!("Scene loaded from {}", path.display()));
         }
         Err(err) => {
@@ -664,6 +716,7 @@ fn handle_save_scene_as(world: &mut World, path: &Path) {
                 asset_state.refresh_requested = true;
             }
 
+            mark_undo_clean(world);
             set_status(world, format!("Scene saved to {}", path.display()));
         }
         Err(err) => {
@@ -857,10 +910,10 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
     }
 }
 
-fn handle_set_active_camera(world: &mut World, entity: Entity) {
+fn handle_set_active_camera(world: &mut World, entity: Entity) -> bool {
     if world.get::<BevyCamera>(entity).is_none() {
         set_status(world, "Selected entity has no camera".to_string());
-        return;
+        return false;
     }
 
     if world.get::<EditorViewportCamera>(entity).is_some() {
@@ -868,7 +921,7 @@ fn handle_set_active_camera(world: &mut World, entity: Entity) {
             world,
             "Viewport camera is managed by the editor".to_string(),
         );
-        return;
+        return false;
     }
 
     set_play_camera(world, entity);
@@ -882,6 +935,7 @@ fn handle_set_active_camera(world: &mut World, entity: Entity) {
     }
 
     set_status(world, "Game camera updated".to_string());
+    true
 }
 
 fn apply_viewport_graph(world: &mut World) {

@@ -65,6 +65,8 @@ pub enum EditorCommand {
         entity: Entity,
     },
     TogglePlayMode,
+    Undo,
+    Redo,
     CloseProject,
 }
 

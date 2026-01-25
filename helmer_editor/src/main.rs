@@ -9,12 +9,13 @@ use helmer_becs::{egui_integration::EguiResource, helmer_becs_init};
 use helmer_editor::editor::{
     AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand, EditorCommandQueue,
     EditorGizmoSettings, EditorGizmoState, EditorProject, EditorSceneState, EditorSelectionState,
-    EditorUiState, EditorViewportState, EditorWorkspaceState, FileWatchState, HierarchyUiState,
-    InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
-    ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera, asset_scan_system,
-    drag_drop_system, editor_command_system, editor_physics_state_system, editor_shortcut_system,
-    editor_ui_system, file_watch_system, freecam_system, gizmo_system, load_recent_projects,
-    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
+    EditorUiState, EditorUndoState, EditorViewportState, EditorWorkspaceState, FileWatchState,
+    HierarchyUiState, InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache,
+    MiddleDragUiState, ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera,
+    asset_scan_system, drag_drop_system, editor_command_system, editor_physics_state_system,
+    editor_shortcut_system, editor_ui_system, editor_undo_request_system, file_watch_system,
+    freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
+    script_execution_system, script_registry_system, selection_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -45,6 +46,7 @@ fn editor_init(
 ) {
     world.insert_resource(EditorProject::default());
     world.insert_resource(EditorSceneState::default());
+    world.insert_resource(EditorUndoState::default());
     world.insert_resource(EditorAssetCache::default());
     world.insert_resource(AssetBrowserState::default());
     world.insert_resource(AssetDragState::default());
@@ -118,5 +120,10 @@ fn editor_init(
     schedule
         .add_systems(gizmo_system.before(helmer_becs::systems::render_system::render_data_system));
     schedule.add_systems(selection_system.after(gizmo_system));
+    schedule.add_systems(
+        editor_undo_request_system
+            .after(selection_system)
+            .after(editor_ui_system),
+    );
     schedule.add_systems(freecam_system);
 }

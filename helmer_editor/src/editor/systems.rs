@@ -693,9 +693,49 @@ fn layout_rects_for_screen(
     let mut rects = HashMap::new();
     for (id, window) in layout.windows.iter() {
         let rect = window.rect.to_rect(screen_rect);
-        let rect = round_rect_to_pixels(rect, pixels_per_point, screen_rect);
         rects.insert(id.clone(), rect);
     }
+
+    if pixels_per_point <= 0.0 || rects.is_empty() {
+        return rects;
+    }
+
+    let epsilon = 0.51_f32;
+    let mut x_edges = Vec::with_capacity(rects.len() * 2 + 2);
+    let mut y_edges = Vec::with_capacity(rects.len() * 2 + 2);
+    for rect in rects.values() {
+        x_edges.push(rect.min.x * pixels_per_point);
+        x_edges.push(rect.max.x * pixels_per_point);
+        y_edges.push(rect.min.y * pixels_per_point);
+        y_edges.push(rect.max.y * pixels_per_point);
+    }
+    x_edges.push(screen_rect.min.x * pixels_per_point);
+    x_edges.push(screen_rect.max.x * pixels_per_point);
+    y_edges.push(screen_rect.min.y * pixels_per_point);
+    y_edges.push(screen_rect.max.y * pixels_per_point);
+
+    let x_clusters = build_edge_clusters(x_edges, epsilon);
+    let y_clusters = build_edge_clusters(y_edges, epsilon);
+
+    for rect in rects.values_mut() {
+        let min_x = snap_edge(rect.min.x * pixels_per_point, &x_clusters, epsilon);
+        let max_x = snap_edge(rect.max.x * pixels_per_point, &x_clusters, epsilon);
+        let min_y = snap_edge(rect.min.y * pixels_per_point, &y_clusters, epsilon);
+        let max_y = snap_edge(rect.max.y * pixels_per_point, &y_clusters, epsilon);
+
+        let mut min_x = (min_x / pixels_per_point).max(screen_rect.min.x);
+        let mut max_x = (max_x / pixels_per_point).min(screen_rect.max.x);
+        let mut min_y = (min_y / pixels_per_point).max(screen_rect.min.y);
+        let mut max_y = (max_y / pixels_per_point).min(screen_rect.max.y);
+        if max_x < min_x {
+            std::mem::swap(&mut min_x, &mut max_x);
+        }
+        if max_y < min_y {
+            std::mem::swap(&mut min_y, &mut max_y);
+        }
+        *rect = Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y));
+    }
+
     rects
 }
 
@@ -952,6 +992,50 @@ fn clamp_rect_to_screen(rect: &mut Rect, screen_rect: Rect) {
     if rect.max.y < rect.min.y {
         rect.max.y = rect.min.y;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeCluster {
+    min: f32,
+    max: f32,
+    snapped: f32,
+}
+
+fn build_edge_clusters(mut edges: Vec<f32>, epsilon: f32) -> Vec<EdgeCluster> {
+    edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut clusters: Vec<(f32, f32, f32, u32)> = Vec::new();
+    for edge in edges {
+        if let Some((_min, max, sum, count)) = clusters.last_mut() {
+            if edge - *max <= epsilon {
+                *max = edge;
+                *sum += edge;
+                *count += 1;
+                continue;
+            }
+        }
+        clusters.push((edge, edge, edge, 1));
+    }
+
+    clusters
+        .into_iter()
+        .map(|(min, max, sum, count)| {
+            let mean = sum / count as f32;
+            EdgeCluster {
+                min,
+                max,
+                snapped: mean.round(),
+            }
+        })
+        .collect()
+}
+
+fn snap_edge(edge: f32, clusters: &[EdgeCluster], epsilon: f32) -> f32 {
+    for cluster in clusters {
+        if edge >= cluster.min - epsilon && edge <= cluster.max + epsilon {
+            return cluster.snapped;
+        }
+    }
+    edge.round()
 }
 
 pub fn editor_physics_state_system(

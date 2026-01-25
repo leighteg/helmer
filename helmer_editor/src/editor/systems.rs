@@ -304,7 +304,9 @@ pub fn editor_layout_apply_system(world: &mut World) {
                         let collapsed = window.collapsed;
                         egui_res.window_rect_overrides.insert(id.clone(), rect);
                         egui_res.window_positions.insert(id.clone(), rect.min);
-                        egui_res.window_collapsed_overrides.insert(id, collapsed);
+                        if !allow_layout_edit || hard_apply {
+                            egui_res.window_collapsed_overrides.insert(id, collapsed);
+                        }
                     }
                 }
             }
@@ -503,6 +505,23 @@ pub fn editor_layout_update_system(world: &mut World) {
     if state.layout_dragging_window.is_none() && external_drag_active {
         state.last_screen_rect = Some(screen_rect);
         return;
+    }
+
+    if allow_layout_edit {
+        if let Some(layout) = state.layouts.get_mut(&active_name) {
+            let mut updated = false;
+            for (id, window) in layout.windows.iter_mut() {
+                if let Some(collapsed) = window_collapsed.get(id) {
+                    if window.collapsed != *collapsed {
+                        window.collapsed = *collapsed;
+                        updated = true;
+                    }
+                }
+            }
+            if updated {
+                state.last_screen_rect = Some(screen_rect);
+            }
+        }
     }
 
     let preferred_window_id = top_layer_id.and_then(|layer| {

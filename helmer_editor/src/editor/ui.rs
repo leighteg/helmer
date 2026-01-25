@@ -41,7 +41,7 @@ use crate::editor::{
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue, DynamicValueKind},
     end_material_undo_group, end_undo_group, enforce_undo_cap,
     gizmos::{EditorGizmoSettings, EditorGizmoState},
-    project::{EditorProject, ProjectConfig, default_script_template, save_project_config},
+    project::{EditorProject, ProjectConfig, default_script_template_full, save_project_config},
     push_undo_snapshot,
     scene::{EditorEntity, EditorSceneState, WorldState, next_available_scene_path},
     scripting::{ScriptComponent, ScriptEntry},
@@ -5001,7 +5001,7 @@ fn create_script_asset(world: &mut World, project: &EditorProject) -> Option<Pat
 
     let candidate = scripts_root.join("script.lua");
     let path = unique_path(&candidate);
-    if let Err(err) = fs::write(&path, default_script_template()) {
+    if let Err(err) = fs::write(&path, default_script_template_full()) {
         set_status(world, format!("Failed to write script: {}", err));
         return None;
     }

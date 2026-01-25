@@ -150,7 +150,7 @@ pub fn default_scene_template() -> &'static str {
     "(\n    version: 1,\n    entities: [],\n)\n"
 }
 
-pub fn default_script_template() -> &'static str {
+pub fn default_script_template_simple() -> &'static str {
     r#"local mover = nil
 local t = 0.0
 local speed = 10.0
@@ -172,6 +172,87 @@ function on_update(dt)
     local x = math.cos(t) * radius
     local y = math.cos(t / 2) * radius
     local z = math.sin(t) * radius
+    ecs.set_transform(mover, { position = { x = x, y = y, z = z } })
+end
+"#
+}
+
+pub fn default_script_template_full() -> &'static str {
+    r#"-- helmer Lua API (editor)
+-- Entry points: on_start(), on_update(dt)
+-- Globals:
+--   entity_id : u64 id of the entity that owns this script
+--   print(...) : log values to the editor console
+-- ecs table:
+--   ecs.list_entities() -> {id, ...}
+--   ecs.spawn_entity(name?) -> id
+--   ecs.entity_exists(id) -> bool
+--   ecs.find_entity_by_name(name) -> id|nil
+--   ecs.get_entity_name(id) -> string|nil
+--   ecs.set_entity_name(id, name) -> bool (empty name removes Name)
+--   ecs.delete_entity(id) -> bool
+--   ecs.has_component(id, "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"scene"|"script"|"dynamic") -> bool
+--   ecs.add_component(id, "transform"|"camera"|"light"|"dynamic") -> bool
+--   ecs.remove_component(id, "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"scene"|"script"|"dynamic") -> bool
+--   ecs.get_transform(id) -> {position={x,y,z}, rotation={x,y,z,w}, scale={x,y,z}}|nil
+--   ecs.set_transform(id, {position?, rotation?, scale?}) -> bool
+--   ecs.get_light(id) -> {type, color={x,y,z}, intensity, angle?}|nil
+--   ecs.set_light(id, {type?, color?, intensity?, angle?}) -> bool
+--   ecs.get_camera(id) -> {fov_y_rad, aspect_ratio, near_plane, far_plane, active}|nil
+--   ecs.set_camera(id, {fov_y_rad?, aspect_ratio?, near_plane?, far_plane?, active?}) -> bool
+--   ecs.set_active_camera(id) -> bool
+--   ecs.get_mesh_renderer(id) -> {source, material?, casts_shadow, visible}|nil
+--   ecs.set_mesh_renderer(id, {source?, material?, casts_shadow?, visible?}) -> bool
+--   ecs.get_scene_asset(id) -> path|nil
+--   ecs.set_scene_asset(id, path) -> bool
+--   ecs.get_script(id) -> {path, language}|nil
+--   ecs.set_script(id, path, language?) -> bool
+--   ecs.list_dynamic_components(id) -> [{name, fields={...}}, ...]|nil
+--   ecs.get_dynamic_component(id, name) -> fields|nil
+--   ecs.set_dynamic_component(id, name, fields_table) -> bool
+--   ecs.get_dynamic_field(id, comp_name, field_name) -> value|nil
+--   ecs.set_dynamic_field(id, comp_name, field_name, value) -> bool
+--   ecs.remove_dynamic_component(id, name) -> bool
+--   ecs.remove_dynamic_field(id, comp_name, field_name) -> bool
+
+local mover = nil
+local t = 0.0
+local origin = { x = 0.0, y = 0.0, z = 0.0 }
+
+local speed = 5.0
+
+function on_start()
+    local owner_transform = ecs.get_transform(entity_id)
+    if owner_transform ~= nil and owner_transform.position ~= nil then
+        origin.x = owner_transform.position.x or 0.0
+        origin.y = owner_transform.position.y or 0.0
+        origin.z = owner_transform.position.z or 0.0
+    end
+
+    mover = ecs.spawn_entity("Orbiting Cube")
+    ecs.set_mesh_renderer(mover, {
+        source = "Cube",
+        casts_shadow = true,
+        visible = true,
+    })
+    ecs.set_transform(mover, { position = { x = origin.x, y = origin.y, z = origin.z } })
+end
+
+function on_update(dt)
+    if mover == nil then return end
+
+    local owner_transform = ecs.get_transform(entity_id)
+    if owner_transform ~= nil and owner_transform.position ~= nil then
+        origin.x = owner_transform.position.x or 0.0
+        origin.y = owner_transform.position.y or 0.0
+        origin.z = owner_transform.position.z or 0.0
+    end
+
+    t = t + (dt * speed)
+    local radius = 2.0
+    local x = origin.x + math.cos(t) * radius
+    local y = origin.y + math.cos(t / 2) * radius
+    local z = origin.z + math.sin(t) * radius
     ecs.set_transform(mover, { position = { x = x, y = y, z = z } })
 end
 "#

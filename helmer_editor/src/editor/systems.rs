@@ -35,7 +35,7 @@ use crate::editor::{
     mark_undo_clean,
     project::{
         EditorProject, create_project, default_material_template, default_scene_template,
-        default_script_template, load_project, save_recent_projects,
+        default_script_template_full, load_project, save_recent_projects,
     },
     push_undo_snapshot, redo_action, reset_undo_history,
     scene::{
@@ -893,7 +893,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
             fs::write(&target_path, default_material_template()).map_err(|err| err.to_string())
         }
         AssetCreateKind::Script => {
-            fs::write(&target_path, default_script_template()).map_err(|err| err.to_string())
+            fs::write(&target_path, default_script_template_full()).map_err(|err| err.to_string())
         }
     };
 

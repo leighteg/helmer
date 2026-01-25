@@ -1368,6 +1368,8 @@ fn parse_mesh_source(value: Value, project: Option<&EditorProject>) -> Option<Me
             let raw = value.to_string_lossy().to_string();
             if raw.eq_ignore_ascii_case("cube") {
                 Some(MeshSource::Primitive(PrimitiveKind::Cube))
+            } else if raw.eq_ignore_ascii_case("uv sphere") {
+                Some(MeshSource::Primitive(PrimitiveKind::UvSphere(12, 12)))
             } else if raw.eq_ignore_ascii_case("plane") {
                 Some(MeshSource::Primitive(PrimitiveKind::Plane))
             } else {
@@ -1380,6 +1382,9 @@ fn parse_mesh_source(value: Value, project: Option<&EditorProject>) -> Option<Me
             if let Ok(kind) = table.get::<String>("primitive") {
                 if kind.eq_ignore_ascii_case("cube") {
                     return Some(MeshSource::Primitive(PrimitiveKind::Cube));
+                }
+                if kind.eq_ignore_ascii_case("uv sphere") {
+                    return Some(MeshSource::Primitive(PrimitiveKind::UvSphere(12, 12)));
                 }
                 if kind.eq_ignore_ascii_case("plane") {
                     return Some(MeshSource::Primitive(PrimitiveKind::Plane));

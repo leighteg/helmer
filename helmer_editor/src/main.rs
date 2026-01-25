@@ -13,10 +13,11 @@ use helmer_editor::editor::{
     EditorWorkspaceState, FileWatchState, HierarchyUiState, InspectorNameEditState,
     InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState, ScriptRegistry,
     ScriptRunState, ScriptRuntime, activate_viewport_camera, asset_scan_system, drag_drop_system,
-    editor_command_system, editor_physics_state_system, editor_shortcut_system, editor_ui_system,
-    editor_undo_request_system, file_watch_system, freecam_system, gizmo_system,
-    load_recent_projects, scene_dirty_system, script_execution_system, script_registry_system,
-    selection_system,
+    editor_command_system, editor_layout_apply_system, editor_layout_save_system,
+    editor_layout_update_system, editor_physics_state_system, editor_shortcut_system,
+    editor_ui_system, editor_undo_request_system, file_watch_system, freecam_system, gizmo_system,
+    load_layout_state, load_recent_projects, scene_dirty_system, script_execution_system,
+    script_registry_system, selection_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -60,6 +61,7 @@ fn editor_init(
     world.insert_resource(HierarchyUiState::default());
     world.insert_resource(MaterialEditorCache::default());
     world.insert_resource(EditorWorkspaceState::default());
+    world.insert_resource(load_layout_state());
     world.insert_resource(InspectorNameEditState::default());
     world.insert_resource(InspectorPinnedEntityResource::default());
     world.insert_resource(EditorGizmoState::default());
@@ -86,6 +88,8 @@ fn editor_init(
 
     if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
         egui_res.inspector_ui = false;
+        egui_res.snap_enabled = true;
+        egui_res.snap_distance = 12.0;
     }
 
     let graph_template = world
@@ -118,7 +122,11 @@ fn editor_init(
     schedule.add_systems(scene_dirty_system);
     schedule.add_systems(script_registry_system);
     schedule.add_systems(script_execution_system);
+    schedule.add_systems(editor_layout_apply_system.before(editor_ui_system));
     schedule.add_systems(editor_ui_system.before(helmer_becs::egui_integration::egui_system));
+    schedule
+        .add_systems(editor_layout_update_system.after(helmer_becs::egui_integration::egui_system));
+    schedule.add_systems(editor_layout_save_system.after(editor_layout_update_system));
     schedule
         .add_systems(gizmo_system.before(helmer_becs::systems::render_system::render_data_system));
     schedule.add_systems(selection_system.after(gizmo_system));

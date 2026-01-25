@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -6,7 +7,7 @@ use std::{
 
 use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, World};
 use bevy_ecs::{component::Component, name::Name};
-use egui::Ui;
+use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::provided::components::{Light, MeshRenderer, Transform};
@@ -24,20 +25,22 @@ use helmer_becs::{
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
-    EditorPlayCamera, EditorViewportCamera, EditorViewportState, activate_play_camera,
+    EditorLayout, EditorLayoutState, EditorPlayCamera, EditorViewportCamera, EditorViewportState,
+    LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect, activate_play_camera,
     activate_viewport_camera,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
         scan_asset_entries,
     },
+    capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::DynamicComponents,
-    mark_undo_clean,
+    layout_window_ids, mark_undo_clean,
     project::{
         EditorProject, create_project, default_material_template, default_scene_template,
         default_script_template_full, load_project, save_recent_projects,
     },
-    push_undo_snapshot, redo_action, reset_undo_history,
+    push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
         EditorEntity, EditorSceneState, WorldState, next_available_scene_path, read_scene_document,
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
@@ -162,6 +165,773 @@ pub fn editor_ui_system(world: &mut World) {
                 title,
             },
         ));
+    }
+}
+
+pub fn editor_layout_apply_system(world: &mut World) {
+    let project_open = world
+        .get_resource::<crate::editor::EditorProject>()
+        .and_then(|project| project.root.as_ref())
+        .is_some();
+    let (screen_rect, pixels_per_point) = {
+        let Some(egui_res) = world.get_resource::<EguiResource>() else {
+            return;
+        };
+        let Some(result) = screen_rect_from_egui(egui_res) else {
+            return;
+        };
+        result
+    };
+
+    let (
+        layout,
+        clear_active,
+        activate_default,
+        allow_layout_edit,
+        apply_requested,
+        layout_active,
+        last_screen_rect,
+        project_open_changed,
+    ) = match world.get_resource::<EditorLayoutState>() {
+        Some(state) => {
+            let project_open_changed = state
+                .last_project_open
+                .map(|prev| prev != project_open)
+                .unwrap_or(true);
+            if !project_open {
+                (
+                    None,
+                    false,
+                    None,
+                    state.allow_layout_edit,
+                    state.apply_requested,
+                    true,
+                    state.last_screen_rect,
+                    project_open_changed,
+                )
+            } else {
+                let mut clear_active = false;
+                let mut activate_default = None;
+                let layout = match state.active.as_ref() {
+                    Some(name) => {
+                        let layout = state.layouts.get(name).cloned();
+                        if layout.is_none() {
+                            clear_active = true;
+                        }
+                        layout
+                    }
+                    None => {
+                        if project_open_changed {
+                            if let Some(default) = state.layouts.get("Default") {
+                                activate_default = Some(default.name.clone());
+                                Some(default.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                };
+                let layout_active = state.active.is_some() || activate_default.is_some();
+                (
+                    layout,
+                    clear_active,
+                    activate_default,
+                    state.allow_layout_edit,
+                    state.apply_requested,
+                    layout_active,
+                    state.last_screen_rect,
+                    project_open_changed,
+                )
+            }
+        }
+        None => return,
+    };
+
+    let enforce_layout = !project_open || layout.is_some();
+    let hard_apply = if !project_open {
+        true
+    } else if enforce_layout {
+        apply_requested
+            || activate_default.is_some()
+            || last_screen_rect.is_none()
+            || project_open_changed
+    } else {
+        false
+    };
+
+    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+        egui_res.layout_active = layout_active;
+        egui_res.layout_allow_move = allow_layout_edit;
+        egui_res.layout_force_positions = layout_active;
+        egui_res.layout_resizing_window = None;
+
+        if enforce_layout {
+            if !project_open {
+                let project_rect = centered_project_rect(screen_rect);
+                let project_rect =
+                    round_rect_to_pixels(project_rect, pixels_per_point, screen_rect);
+                for id in layout_window_ids() {
+                    let collapsed = *id != "Project";
+                    if *id == "Project" {
+                        egui_res
+                            .window_rect_overrides
+                            .insert((*id).to_string(), project_rect);
+                        egui_res
+                            .window_positions
+                            .insert((*id).to_string(), project_rect.min);
+                    }
+                    egui_res
+                        .window_collapsed_overrides
+                        .insert((*id).to_string(), collapsed);
+                }
+                egui_res
+                    .window_order_overrides
+                    .insert("Project".to_string(), Order::Foreground);
+            } else if let Some(layout) = layout {
+                let rects = layout
+                    .windows
+                    .iter()
+                    .map(|(id, window)| {
+                        let rect = window.rect.to_rect(screen_rect);
+                        let rect = round_rect_to_pixels(rect, pixels_per_point, screen_rect);
+                        (id.clone(), rect)
+                    })
+                    .collect::<Vec<_>>();
+                for (id, rect) in rects {
+                    if let Some(window) = layout.windows.get(&id) {
+                        let collapsed = window.collapsed;
+                        egui_res.window_rect_overrides.insert(id.clone(), rect);
+                        egui_res.window_positions.insert(id.clone(), rect.min);
+                        egui_res.window_collapsed_overrides.insert(id, collapsed);
+                    }
+                }
+            }
+            egui_res.suppress_snap = true;
+        }
+    }
+
+    if let Some(mut state) = world.get_resource_mut::<EditorLayoutState>() {
+        if clear_active {
+            state.active = None;
+        }
+        if let Some(name) = activate_default {
+            state.active = Some(name);
+        }
+        state.apply_requested = false;
+        state.last_screen_rect = Some(screen_rect);
+        state.last_project_open = Some(project_open);
+        state.layout_applied_this_frame = hard_apply;
+        if hard_apply {
+            state.layout_dragging_window = None;
+            state.layout_drag_mode = LayoutDragMode::None;
+        }
+    }
+}
+
+pub fn editor_layout_save_system(world: &mut World) {
+    let (request, active_name) = match world.get_resource_mut::<EditorLayoutState>() {
+        Some(mut state) => (state.save_request.take(), state.active.clone()),
+        None => return,
+    };
+
+    let Some(request) = request else {
+        return;
+    };
+
+    let Some(egui_res) = world.get_resource::<EguiResource>() else {
+        return;
+    };
+    let Some((screen_rect, _)) = screen_rect_from_egui(egui_res) else {
+        if let Some(mut state) = world.get_resource_mut::<EditorLayoutState>() {
+            state.save_request = Some(request);
+        }
+        return;
+    };
+
+    let layout_name = match request {
+        LayoutSaveRequest::SaveActive => active_name,
+        LayoutSaveRequest::SaveAs(name) => Some(name),
+    };
+
+    let Some(layout_name) = layout_name else {
+        if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
+            state.status = Some("No active layout to save".to_string());
+        }
+        return;
+    };
+
+    let layout = capture_layout(
+        layout_name.clone(),
+        &egui_res.window_rects,
+        &egui_res.window_collapsed,
+        screen_rect,
+    );
+    if layout.windows.is_empty() {
+        if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
+            state.status = Some("No visible windows to save".to_string());
+        }
+        return;
+    }
+
+    let save_error = world.resource_scope::<EditorLayoutState, _>(|_world, mut state| {
+        state.layouts.insert(layout_name.clone(), layout);
+        state.active = Some(layout_name.clone());
+        state.last_screen_rect = Some(screen_rect);
+        state.apply_requested = false;
+        save_layouts(&state).err()
+    });
+
+    if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
+        match save_error {
+            Some(err) => {
+                state.status = Some(format!("Failed to save layout: {}", err));
+            }
+            None => {
+                state.status = Some(format!("Layout saved: {}", layout_name));
+            }
+        }
+    }
+}
+
+pub fn editor_layout_update_system(world: &mut World) {
+    let project_open = world
+        .get_resource::<crate::editor::EditorProject>()
+        .and_then(|project| project.root.as_ref())
+        .is_some();
+    if !project_open {
+        return;
+    }
+
+    let (
+        ctx,
+        screen_rect,
+        pixels_per_point,
+        window_rects,
+        window_collapsed,
+        pointer_down,
+        pointer_released,
+        pointer_pos,
+        grab_radius,
+        top_layer_id,
+    ) = {
+        let Some(egui_res) = world.get_resource::<EguiResource>() else {
+            return;
+        };
+        let Some((screen_rect, pixels_per_point)) = screen_rect_from_egui(egui_res) else {
+            return;
+        };
+        let window_rects = egui_res.window_rects.clone();
+        let window_collapsed = egui_res.window_collapsed.clone();
+        let (pointer_down, pointer_released, pointer_pos) = egui_res.ctx.input(|input| {
+            (
+                input.pointer.any_down(),
+                input.pointer.any_released(),
+                input.pointer.interact_pos(),
+            )
+        });
+        let top_layer_id = pointer_pos.and_then(|pos| egui_res.ctx.layer_id_at(pos));
+        let style = egui_res.ctx.style();
+        let grab_radius = style
+            .interaction
+            .resize_grab_radius_side
+            .max(style.interaction.resize_grab_radius_corner);
+        let ctx = egui_res.ctx.clone();
+        (
+            ctx,
+            screen_rect,
+            pixels_per_point,
+            window_rects,
+            window_collapsed,
+            pointer_down,
+            pointer_released,
+            pointer_pos,
+            grab_radius,
+            top_layer_id,
+        )
+    };
+
+    let mut state = world
+        .get_resource_mut::<EditorLayoutState>()
+        .expect("EditorLayoutState missing");
+    let live_reflow = state.live_reflow;
+    let allow_layout_edit = state.allow_layout_edit;
+    let Some(active_name) = state.active.clone() else {
+        state.layout_applied_this_frame = false;
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    };
+
+    if state.layout_applied_this_frame {
+        state.layout_applied_this_frame = false;
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    }
+
+    if screen_rect_changed(state.last_screen_rect, screen_rect, pixels_per_point) {
+        state.last_screen_rect = Some(screen_rect);
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        return;
+    }
+
+    let Some(layout) = state.layouts.get(&active_name).cloned() else {
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    };
+
+    let layout_rects = layout_rects_for_screen(&layout, screen_rect, pixels_per_point);
+    let external_drag_active = ctx.dragged_id().is_some();
+
+    if state.layout_dragging_window.is_none() && external_drag_active {
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    }
+
+    let preferred_window_id = top_layer_id.and_then(|layer| {
+        layout_window_ids().iter().find_map(|id| {
+            if Id::new(*id) == layer.id {
+                Some((*id).to_string())
+            } else {
+                None
+            }
+        })
+    });
+
+    if pointer_down && state.layout_dragging_window.is_none() && allow_layout_edit {
+        if let Some(pos) = pointer_pos {
+            if let Some((id, mode, edges)) = pick_layout_drag_target(
+                &ctx,
+                &window_rects,
+                &window_collapsed,
+                pos,
+                grab_radius,
+                preferred_window_id.as_deref(),
+            ) {
+                state.layout_dragging_window = Some(id.clone());
+                state.layout_drag_mode = mode;
+                state.layout_drag_start_pos = Some(pos);
+                state.layout_drag_start_layout = Some(layout_rects.clone());
+                state.layout_drag_start_rect = layout_rects.get(&id).copied();
+                state.layout_drag_edges = edges;
+            }
+        }
+    }
+
+    let Some(drag_id) = state.layout_dragging_window.clone() else {
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    };
+
+    let drag_mode = state.layout_drag_mode;
+    let drag_edges = state.layout_drag_edges;
+    let start_layout = state
+        .layout_drag_start_layout
+        .clone()
+        .unwrap_or_else(|| layout_rects.clone());
+    let Some(start_rect) = state
+        .layout_drag_start_rect
+        .or_else(|| start_layout.get(&drag_id).copied())
+    else {
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    };
+
+    let start_pos = state.layout_drag_start_pos.unwrap_or(start_rect.min);
+    let pos = pointer_pos.unwrap_or(start_pos);
+    let delta = pos - start_pos;
+    let finalize = pointer_released || !pointer_down;
+
+    let mut updated_rects = start_layout.clone();
+    match drag_mode {
+        LayoutDragMode::Move => {
+            let moved = translate_rect(start_rect, delta, screen_rect);
+            updated_rects.insert(drag_id.clone(), moved);
+        }
+        LayoutDragMode::Resize => {
+            let resized = resize_rect(start_rect, delta, drag_edges, screen_rect);
+            updated_rects.insert(drag_id.clone(), resized);
+            if live_reflow || finalize {
+                let threshold = edge_threshold(pixels_per_point);
+                apply_reflow_edges(
+                    &start_layout,
+                    &mut updated_rects,
+                    &drag_id,
+                    start_rect,
+                    resized,
+                    drag_edges,
+                    threshold,
+                );
+            }
+        }
+        LayoutDragMode::None => {}
+    }
+
+    for rect in updated_rects.values_mut() {
+        clamp_rect_to_screen(rect, screen_rect);
+        *rect = round_rect_to_pixels(*rect, pixels_per_point, screen_rect);
+    }
+
+    if let Some(layout) = state.layouts.get_mut(&active_name) {
+        for (id, window) in layout.windows.iter_mut() {
+            if let Some(rect) = updated_rects.get(id) {
+                window.rect = NormalizedRect::from_rect(*rect, screen_rect);
+            }
+            if let Some(collapsed) = window_collapsed.get(id) {
+                window.collapsed = *collapsed;
+            }
+        }
+    }
+
+    state.last_screen_rect = Some(screen_rect);
+
+    if finalize {
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+    }
+}
+
+fn screen_rect_from_egui(egui_res: &EguiResource) -> Option<(Rect, f32)> {
+    let pixels_per_point = egui_res
+        .render_data
+        .as_ref()
+        .map(|data| data.screen_descriptor.pixels_per_point)
+        .unwrap_or(1.0);
+    let pixels_per_point = if pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    };
+    if let Some(rect) = egui_res.last_screen_rect {
+        return Some((rect, pixels_per_point));
+    }
+    let render_data = egui_res.render_data.as_ref()?;
+    let size = render_data.screen_descriptor.size_in_pixels;
+    let width = size[0] as f32 / pixels_per_point;
+    let height = size[1] as f32 / pixels_per_point;
+    Some((
+        Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(width, height)),
+        pixels_per_point,
+    ))
+}
+
+fn round_rect_to_pixels(rect: Rect, pixels_per_point: f32, screen_rect: Rect) -> Rect {
+    if pixels_per_point <= 0.0 {
+        return rect;
+    }
+    let inv = 1.0 / pixels_per_point;
+    let mut min_x = (rect.min.x * pixels_per_point).round() * inv;
+    let mut min_y = (rect.min.y * pixels_per_point).round() * inv;
+    let mut max_x = (rect.max.x * pixels_per_point).round() * inv;
+    let mut max_y = (rect.max.y * pixels_per_point).round() * inv;
+    if max_x < min_x {
+        std::mem::swap(&mut min_x, &mut max_x);
+    }
+    if max_y < min_y {
+        std::mem::swap(&mut min_y, &mut max_y);
+    }
+    let min_x = min_x.max(screen_rect.min.x);
+    let min_y = min_y.max(screen_rect.min.y);
+    let max_x = max_x.min(screen_rect.max.x);
+    let max_y = max_y.min(screen_rect.max.y);
+    let min_x = min_x.min(max_x);
+    let min_y = min_y.min(max_y);
+    Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
+}
+
+fn layout_rects_for_screen(
+    layout: &EditorLayout,
+    screen_rect: Rect,
+    pixels_per_point: f32,
+) -> HashMap<String, Rect> {
+    let mut rects = HashMap::new();
+    for (id, window) in layout.windows.iter() {
+        let rect = window.rect.to_rect(screen_rect);
+        let rect = round_rect_to_pixels(rect, pixels_per_point, screen_rect);
+        rects.insert(id.clone(), rect);
+    }
+    rects
+}
+
+fn layout_title_bar_height(ctx: &egui::Context, collapsed: bool) -> f32 {
+    let style = ctx.style();
+    let font_id = egui::TextStyle::Heading.resolve(style.as_ref());
+    let title_height = ctx
+        .fonts_mut(|fonts| fonts.row_height(&font_id))
+        .max(style.spacing.interact_size.y);
+    let frame = egui::Frame::window(style.as_ref());
+    let title_bar_inner_height = title_height + frame.inner_margin.sum().y;
+    let title_content_spacing = if collapsed { 0.0 } else { frame.stroke.width };
+    frame.outer_margin.topf() + frame.stroke.width + title_bar_inner_height + title_content_spacing
+}
+
+fn drag_edges_for_pos(rect: Rect, pos: Pos2, grab_radius: f32) -> LayoutDragEdges {
+    let mut edges = LayoutDragEdges::default();
+    if grab_radius <= 0.0 {
+        return edges;
+    }
+    if !rect.expand(grab_radius).contains(pos) {
+        return edges;
+    }
+    let left = (pos.x - rect.min.x).abs() <= grab_radius;
+    let right = (pos.x - rect.max.x).abs() <= grab_radius;
+    let top = (pos.y - rect.min.y).abs() <= grab_radius;
+    let bottom = (pos.y - rect.max.y).abs() <= grab_radius;
+    let center = rect.center();
+
+    if left && right {
+        edges.left = pos.x <= center.x;
+        edges.right = pos.x > center.x;
+    } else {
+        edges.left = left;
+        edges.right = right;
+    }
+
+    if top && bottom {
+        edges.top = pos.y <= center.y;
+        edges.bottom = pos.y > center.y;
+    } else {
+        edges.top = top;
+        edges.bottom = bottom;
+    }
+
+    edges
+}
+
+fn hit_test_layout_window(
+    ctx: &egui::Context,
+    rect: Rect,
+    collapsed: bool,
+    pos: Pos2,
+    grab_radius: f32,
+) -> Option<(LayoutDragMode, LayoutDragEdges)> {
+    let edges = drag_edges_for_pos(rect, pos, grab_radius);
+    if edges.any() {
+        return Some((LayoutDragMode::Resize, edges));
+    }
+    if rect.contains(pos) {
+        let title_bar_height = layout_title_bar_height(ctx, collapsed);
+        if pos.y <= rect.min.y + title_bar_height {
+            return Some((LayoutDragMode::Move, LayoutDragEdges::default()));
+        }
+    }
+    None
+}
+
+fn pick_layout_drag_target(
+    ctx: &egui::Context,
+    window_rects: &HashMap<String, Rect>,
+    window_collapsed: &HashMap<String, bool>,
+    pos: Pos2,
+    grab_radius: f32,
+    preferred_id: Option<&str>,
+) -> Option<(String, LayoutDragMode, LayoutDragEdges)> {
+    if let Some(id) = preferred_id {
+        if let Some(rect) = window_rects.get(id) {
+            let collapsed = window_collapsed.get(id).copied().unwrap_or(false);
+            if let Some(hit) = hit_test_layout_window(ctx, *rect, collapsed, pos, grab_radius) {
+                return Some((id.to_string(), hit.0, hit.1));
+            }
+        }
+    }
+
+    for id in layout_window_ids() {
+        let Some(rect) = window_rects.get(*id) else {
+            continue;
+        };
+        let collapsed = window_collapsed.get(*id).copied().unwrap_or(false);
+        if let Some(hit) = hit_test_layout_window(ctx, *rect, collapsed, pos, grab_radius) {
+            return Some(((*id).to_string(), hit.0, hit.1));
+        }
+    }
+
+    None
+}
+
+fn translate_rect(rect: Rect, delta: Vec2, screen_rect: Rect) -> Rect {
+    let size = rect.size();
+    let mut min = rect.min + delta;
+    let max_x = (screen_rect.max.x - size.x).max(screen_rect.min.x);
+    let max_y = (screen_rect.max.y - size.y).max(screen_rect.min.y);
+    min.x = min.x.max(screen_rect.min.x).min(max_x);
+    min.y = min.y.max(screen_rect.min.y).min(max_y);
+    Rect::from_min_size(min, size)
+}
+
+fn resize_rect(rect: Rect, delta: Vec2, edges: LayoutDragEdges, screen_rect: Rect) -> Rect {
+    let mut rect = rect;
+    if edges.left {
+        rect.min.x += delta.x;
+    }
+    if edges.right {
+        rect.max.x += delta.x;
+    }
+    if edges.top {
+        rect.min.y += delta.y;
+    }
+    if edges.bottom {
+        rect.max.y += delta.y;
+    }
+
+    let min_size = Vec2::splat(32.0);
+    if rect.width() < min_size.x {
+        if edges.left && !edges.right {
+            rect.min.x = rect.max.x - min_size.x;
+        } else {
+            rect.max.x = rect.min.x + min_size.x;
+        }
+    }
+    if rect.height() < min_size.y {
+        if edges.top && !edges.bottom {
+            rect.min.y = rect.max.y - min_size.y;
+        } else {
+            rect.max.y = rect.min.y + min_size.y;
+        }
+    }
+
+    clamp_rect_to_screen(&mut rect, screen_rect);
+    rect
+}
+
+fn edge_threshold(pixels_per_point: f32) -> f32 {
+    if pixels_per_point > 0.0 {
+        0.75 / pixels_per_point
+    } else {
+        0.75
+    }
+}
+
+fn apply_reflow_edges(
+    base: &HashMap<String, Rect>,
+    updated: &mut HashMap<String, Rect>,
+    changed_id: &str,
+    start_rect: Rect,
+    new_rect: Rect,
+    edges: LayoutDragEdges,
+    threshold: f32,
+) {
+    if edges.left {
+        let old_edge = start_rect.min.x;
+        let new_edge = new_rect.min.x;
+        for (id, rect) in base.iter() {
+            if id == changed_id {
+                continue;
+            }
+            if (rect.max.x - old_edge).abs() <= threshold {
+                if let Some(target) = updated.get_mut(id) {
+                    target.max.x = new_edge;
+                }
+            }
+        }
+    }
+
+    if edges.right {
+        let old_edge = start_rect.max.x;
+        let new_edge = new_rect.max.x;
+        for (id, rect) in base.iter() {
+            if id == changed_id {
+                continue;
+            }
+            if (rect.min.x - old_edge).abs() <= threshold {
+                if let Some(target) = updated.get_mut(id) {
+                    target.min.x = new_edge;
+                }
+            }
+        }
+    }
+
+    if edges.top {
+        let old_edge = start_rect.min.y;
+        let new_edge = new_rect.min.y;
+        for (id, rect) in base.iter() {
+            if id == changed_id {
+                continue;
+            }
+            if (rect.max.y - old_edge).abs() <= threshold {
+                if let Some(target) = updated.get_mut(id) {
+                    target.max.y = new_edge;
+                }
+            }
+        }
+    }
+
+    if edges.bottom {
+        let old_edge = start_rect.max.y;
+        let new_edge = new_rect.max.y;
+        for (id, rect) in base.iter() {
+            if id == changed_id {
+                continue;
+            }
+            if (rect.min.y - old_edge).abs() <= threshold {
+                if let Some(target) = updated.get_mut(id) {
+                    target.min.y = new_edge;
+                }
+            }
+        }
+    }
+}
+
+fn centered_project_rect(screen_rect: Rect) -> Rect {
+    let width = screen_rect.width().max(1.0);
+    let height = screen_rect.height().max(1.0);
+    let mut size = Vec2::new(width * 0.6, height * 0.7);
+    size.x = size.x.max(420.0).min(width);
+    size.y = size.y.max(320.0).min(height);
+    Rect::from_center_size(screen_rect.center(), size)
+}
+
+fn screen_rect_changed(prev: Option<Rect>, current: Rect, pixels_per_point: f32) -> bool {
+    let Some(prev) = prev else {
+        return true;
+    };
+    let epsilon = if pixels_per_point > 0.0 {
+        0.5 / pixels_per_point
+    } else {
+        0.5
+    };
+    (prev.min.x - current.min.x).abs() > epsilon
+        || (prev.min.y - current.min.y).abs() > epsilon
+        || (prev.width() - current.width()).abs() > epsilon
+        || (prev.height() - current.height()).abs() > epsilon
+}
+
+fn clamp_rect_to_screen(rect: &mut Rect, screen_rect: Rect) {
+    rect.min.x = rect.min.x.max(screen_rect.min.x).min(screen_rect.max.x);
+    rect.max.x = rect.max.x.max(screen_rect.min.x).min(screen_rect.max.x);
+    rect.min.y = rect.min.y.max(screen_rect.min.y).min(screen_rect.max.y);
+    rect.max.y = rect.max.y.max(screen_rect.min.y).min(screen_rect.max.y);
+    if rect.max.x < rect.min.x {
+        rect.max.x = rect.min.x;
+    }
+    if rect.max.y < rect.min.y {
+        rect.max.y = rect.min.y;
     }
 }
 

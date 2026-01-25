@@ -30,8 +30,8 @@ use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
 
 use crate::editor::{
-    EditorPlayCamera, EditorUndoState, EditorViewportCamera, EditorViewportState, Freecam,
-    UndoEntry,
+    EditorLayoutState, EditorPlayCamera, EditorUndoState, EditorViewportCamera,
+    EditorViewportState, Freecam, LayoutSaveRequest, UndoEntry,
     assets::{
         AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind,
         SceneAssetPath, is_entry_visible,
@@ -42,7 +42,7 @@ use crate::editor::{
     end_material_undo_group, end_undo_group, enforce_undo_cap,
     gizmos::{EditorGizmoSettings, EditorGizmoState},
     project::{EditorProject, ProjectConfig, default_script_template_full, save_project_config},
-    push_undo_snapshot,
+    push_undo_snapshot, save_layouts,
     scene::{EditorEntity, EditorSceneState, WorldState, next_available_scene_path},
     scripting::{ScriptComponent, ScriptEntry},
 };
@@ -254,6 +254,8 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
             if ui.button(play_label).clicked() {
                 push_command(world, EditorCommand::TogglePlayMode);
             }
+
+            draw_layout_menu(ui, world);
         });
 
         ui.separator();
@@ -268,6 +270,174 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
             ui.label(RichText::new(status).small());
         }
     });
+}
+
+fn draw_layout_menu(ui: &mut Ui, world: &mut World) {
+    let Some(mut layout_state) = world.get_resource_mut::<EditorLayoutState>() else {
+        return;
+    };
+
+    let mut status_message: Option<String> = None;
+
+    ui.menu_button("Layout", |ui| {
+        ui.set_min_width(220.0);
+        let previous_allow_edit = layout_state.allow_layout_edit;
+        let mut names = layout_state.layouts.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+
+        for name in names {
+            let is_active = layout_state.active.as_deref() == Some(name.as_str());
+            let label = if is_active {
+                format!("[x] {}", name)
+            } else {
+                format!("[ ] {}", name)
+            };
+            if ui.selectable_label(is_active, label).clicked() {
+                if name == "Default" {
+                    let default_layout = crate::editor::default_layout();
+                    layout_state
+                        .layouts
+                        .insert(default_layout.name.clone(), default_layout);
+                }
+                if is_active {
+                    layout_state.active = None;
+                    layout_state.apply_requested = false;
+                    layout_state.last_screen_rect = None;
+                } else {
+                    layout_state.active = Some(name.clone());
+                    layout_state.apply_requested = true;
+                }
+                if let Err(err) = save_layouts(&layout_state) {
+                    status_message = Some(format!("Failed to save layouts: {}", err));
+                }
+                ui.close_menu();
+            }
+        }
+
+        ui.separator();
+        if ui
+            .checkbox(
+                &mut layout_state.allow_layout_edit,
+                "Allow moving/resizing while layout active",
+            )
+            .changed()
+            && previous_allow_edit
+            && !layout_state.allow_layout_edit
+        {
+            layout_state.apply_requested = true;
+        }
+        ui.checkbox(&mut layout_state.live_reflow, "Live reflow while resizing");
+        ui.separator();
+        let can_save_active = layout_state.active.is_some();
+        if ui
+            .add_enabled(can_save_active, egui::Button::new("Save Active Layout"))
+            .clicked()
+        {
+            layout_state.save_request = Some(LayoutSaveRequest::SaveActive);
+            ui.close_menu();
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Save As:");
+            ui.text_edit_singleline(&mut layout_state.new_layout_name);
+            if ui.button("Save").clicked() {
+                let name = layout_state.new_layout_name.trim().to_string();
+                if name.is_empty() {
+                    status_message = Some("Layout name cannot be empty".to_string());
+                } else if layout_state.layouts.contains_key(&name) {
+                    status_message = Some("Layout name already exists".to_string());
+                } else {
+                    layout_state.save_request = Some(LayoutSaveRequest::SaveAs(name));
+                    layout_state.new_layout_name.clear();
+                    ui.close_menu();
+                }
+            }
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Rename:");
+            ui.text_edit_singleline(&mut layout_state.rename_layout_name);
+            if ui
+                .add_enabled(
+                    layout_state.active.is_some(),
+                    egui::Button::new("Rename Active"),
+                )
+                .clicked()
+            {
+                let Some(active_name) = layout_state.active.clone() else {
+                    status_message = Some("No active layout to rename".to_string());
+                    ui.close_menu();
+                    return;
+                };
+                if active_name == "Default" {
+                    status_message = Some("Default layout cannot be renamed".to_string());
+                    ui.close_menu();
+                    return;
+                }
+                let new_name = layout_state.rename_layout_name.trim().to_string();
+                if new_name.is_empty() {
+                    status_message = Some("New layout name cannot be empty".to_string());
+                    ui.close_menu();
+                    return;
+                }
+                if new_name == active_name {
+                    status_message = Some("Layout already uses that name".to_string());
+                    ui.close_menu();
+                    return;
+                }
+                if layout_state.layouts.contains_key(&new_name) {
+                    status_message = Some("Layout name already exists".to_string());
+                    ui.close_menu();
+                    return;
+                }
+                if let Some(mut layout) = layout_state.layouts.remove(&active_name) {
+                    layout.name = new_name.clone();
+                    layout_state.layouts.insert(new_name.clone(), layout);
+                    layout_state.active = Some(new_name);
+                    layout_state.rename_layout_name.clear();
+                    if let Err(err) = save_layouts(&layout_state) {
+                        status_message = Some(format!("Failed to save layouts: {}", err));
+                    }
+                } else {
+                    status_message = Some("Active layout not found".to_string());
+                }
+                ui.close_menu();
+            }
+        });
+
+        if ui
+            .add_enabled(
+                layout_state.active.is_some(),
+                egui::Button::new("Delete Active"),
+            )
+            .clicked()
+        {
+            let Some(active_name) = layout_state.active.clone() else {
+                status_message = Some("No active layout to delete".to_string());
+                ui.close_menu();
+                return;
+            };
+            if active_name == "Default" {
+                status_message = Some("Default layout cannot be deleted".to_string());
+                ui.close_menu();
+                return;
+            }
+            layout_state.layouts.remove(&active_name);
+            layout_state.active = None;
+            layout_state.apply_requested = false;
+            layout_state.last_screen_rect = None;
+            if let Err(err) = save_layouts(&layout_state) {
+                status_message = Some(format!("Failed to save layouts: {}", err));
+            }
+            ui.close_menu();
+        }
+    });
+
+    drop(layout_state);
+    if let Some(message) = status_message {
+        set_status(world, message);
+    }
 }
 
 pub fn draw_history_window(ui: &mut Ui, world: &mut World) {

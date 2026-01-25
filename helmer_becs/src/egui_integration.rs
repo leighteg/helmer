@@ -1,5 +1,6 @@
 use bevy_ecs::prelude::*;
-use egui::{Context, Id, Pos2};
+use egui::collapsing_header::CollapsingState;
+use egui::{Context, Frame, Order, Pos2, Rect, Shadow, TextStyle, Vec2};
 use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
 use parking_lot::RwLock;
 use std::{
@@ -35,7 +36,20 @@ pub struct EguiResource {
     pub inspector_ui: bool,
     pub render_graph_passes_state: RenderGraphPassesUiState,
     pub window_positions: HashMap<String, Pos2>,
+    pub window_rects: HashMap<String, Rect>,
+    pub window_rect_overrides: HashMap<String, Rect>,
+    pub window_collapsed: HashMap<String, bool>,
+    pub window_collapsed_overrides: HashMap<String, bool>,
+    pub window_order_overrides: HashMap<String, Order>,
     pub window_dragging: HashSet<String>,
+    pub last_screen_rect: Option<Rect>,
+    pub snap_enabled: bool,
+    pub snap_distance: f32,
+    pub suppress_snap: bool,
+    pub layout_active: bool,
+    pub layout_allow_move: bool,
+    pub layout_force_positions: bool,
+    pub layout_resizing_window: Option<String>,
 }
 
 pub struct RenderGraphPassesUiState {
@@ -52,6 +66,31 @@ impl Default for RenderGraphPassesUiState {
             show_disabled: true,
         }
     }
+}
+
+fn content_size_for_outer_rect(
+    ctx: &Context,
+    frame: &Frame,
+    collapsed: bool,
+    outer_rect: Rect,
+) -> Vec2 {
+    let style = ctx.style();
+    let font_id = TextStyle::Heading.resolve(style.as_ref());
+    let title_height = ctx
+        .fonts_mut(|fonts| fonts.row_height(&font_id))
+        .max(style.spacing.interact_size.y);
+    let title_bar_inner_height = title_height + frame.inner_margin.sum().y;
+    let title_content_spacing = if collapsed { 0.0 } else { frame.stroke.width };
+    let margins =
+        frame.total_margin().sum() + Vec2::new(0.0, title_bar_inner_height + title_content_spacing);
+    let mut size = outer_rect.size() - margins;
+    if size.x < 1.0 {
+        size.x = 1.0;
+    }
+    if size.y < 1.0 {
+        size.y = 1.0;
+    }
+    size
 }
 
 pub fn egui_system(world: &mut World) {
@@ -85,6 +124,14 @@ pub fn egui_system(world: &mut World) {
         )
     };
 
+    if pixels_per_point > 0.0 {
+        let size = Vec2::new(
+            window_size.x as f32 / pixels_per_point,
+            window_size.y as f32 / pixels_per_point,
+        );
+        raw_input.screen_rect = Some(Rect::from_min_size(Pos2::new(0.0, 0.0), size));
+    }
+
     let ctx = {
         let mut egui_res = world
             .get_resource_mut::<EguiResource>()
@@ -109,7 +156,11 @@ pub fn egui_system(world: &mut World) {
 
         egui_res.ctx.clone()
     };
+    if pixels_per_point > 0.0 {
+        ctx.set_pixels_per_point(pixels_per_point);
+    }
 
+    let mut last_screen_rect: Option<Rect> = None;
     let full_output = ctx.run(raw_input, |ctx| {
         let mut egui_res = world
             .get_resource_mut::<EguiResource>()
@@ -117,61 +168,130 @@ pub fn egui_system(world: &mut World) {
 
         let windows = std::mem::take(&mut egui_res.windows);
         let mut close_actions = std::mem::take(&mut egui_res.close_actions);
+        let mut window_positions = std::mem::take(&mut egui_res.window_positions);
+        let window_rects_prev = std::mem::take(&mut egui_res.window_rects);
+        let window_collapsed_prev = std::mem::take(&mut egui_res.window_collapsed);
+        let window_rect_overrides = std::mem::take(&mut egui_res.window_rect_overrides);
+        let window_collapsed_overrides = std::mem::take(&mut egui_res.window_collapsed_overrides);
+        let window_order_overrides = std::mem::take(&mut egui_res.window_order_overrides);
+        let snap_enabled = egui_res.snap_enabled;
+        let snap_distance = egui_res.snap_distance;
+        let suppress_snap = egui_res.suppress_snap;
+        let layout_active = egui_res.layout_active;
+        let layout_force_positions = egui_res.layout_force_positions;
+        egui_res.suppress_snap = false;
 
         drop(egui_res);
 
-        let screen_rect = ctx.available_rect();
+        let screen_rect = ctx.viewport_rect();
+        last_screen_rect = Some(screen_rect);
+        let mut window_rects = HashMap::new();
+        let mut window_collapsed = HashMap::new();
+        let layout_frame = if layout_active {
+            let mut frame = Frame::window(&ctx.style());
+            frame.shadow = Shadow::NONE;
+            Some(frame)
+        } else {
+            None
+        };
 
         for (mut elements, spec) in windows {
             let window_id = egui::Id::new(spec.id.clone());
-            if let Some(on_close) = close_actions.get_mut(&spec.id) {
-                let mut open = true;
-                let mut window = egui::Window::new(spec.title.clone())
-                    .id(window_id)
-                    .constrain_to(screen_rect)
-                    .open(&mut open);
-                if let Some(pos) = world
-                    .get_resource::<EguiResource>()
-                    .and_then(|res| res.window_positions.get(&spec.id).copied())
-                {
-                    window = window.current_pos(pos);
+            let mut open = true;
+            let has_close = close_actions.get_mut(&spec.id).is_some();
+            let is_layout_window = layout_active && window_rect_overrides.contains_key(&spec.id);
+
+            let collapsed = window_collapsed_overrides
+                .get(&spec.id)
+                .copied()
+                .or_else(|| window_collapsed_prev.get(&spec.id).copied())
+                .unwrap_or(false);
+            if window_collapsed_overrides.contains_key(&spec.id) {
+                let mut collapsing = CollapsingState::load_with_default_open(
+                    ctx,
+                    window_id.with("collapsing"),
+                    !collapsed,
+                );
+                collapsing.set_open(!collapsed);
+                collapsing.store(ctx);
+            }
+
+            let mut window = egui::Window::new(spec.title.clone())
+                .id(window_id)
+                .constrain_to(screen_rect);
+
+            if let Some(order) = window_order_overrides.get(&spec.id) {
+                window = window.order(*order);
+            }
+
+            if is_layout_window {
+                window = window.movable(false).resizable(false);
+            }
+
+            if let Some(frame) = layout_frame {
+                window = window.frame(frame);
+            }
+
+            if let Some(rect) = window_rect_overrides.get(&spec.id) {
+                let frame = layout_frame.unwrap_or_else(|| Frame::window(&ctx.style()));
+                let content_size = content_size_for_outer_rect(&ctx, &frame, collapsed, *rect);
+                window = window.current_pos(rect.min).fixed_size(content_size);
+                if layout_force_positions {
+                    window_positions.insert(spec.id.clone(), rect.min);
                 }
-                if let Some(inner) = window.show(ctx, |ui| {
-                    elements(ui, world, &input_arc);
-                }) {
-                    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
-                        if !egui_res.window_dragging.contains(&spec.id) {
-                            egui_res
-                                .window_positions
-                                .insert(spec.id.clone(), inner.response.rect.min);
-                        }
-                    }
-                }
-                if !open {
-                    on_close(world);
-                }
-            } else {
-                let mut window = egui::Window::new(spec.title.clone())
-                    .id(window_id)
-                    .constrain_to(screen_rect);
-                if let Some(pos) = world
-                    .get_resource::<EguiResource>()
-                    .and_then(|res| res.window_positions.get(&spec.id).copied())
-                {
-                    window = window.current_pos(pos);
-                }
-                if let Some(inner) = window.show(ctx, |ui| {
-                    elements(ui, world, &input_arc);
-                }) {
-                    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
-                        if !egui_res.window_dragging.contains(&spec.id) {
-                            egui_res
-                                .window_positions
-                                .insert(spec.id.clone(), inner.response.rect.min);
-                        }
+            } else if let Some(pos) = window_positions.get(&spec.id).copied() {
+                window = window.current_pos(pos);
+            }
+
+            if has_close {
+                window = window.open(&mut open);
+            }
+
+            if let Some(inner) = window.show(ctx, |ui| {
+                elements(ui, world, &input_arc);
+            }) {
+                window_collapsed.insert(spec.id.clone(), inner.inner.is_none());
+                window_rects.insert(spec.id.clone(), inner.response.rect);
+                if let Some(egui_res) = world.get_resource::<EguiResource>() {
+                    if !egui_res.window_dragging.contains(&spec.id) {
+                        window_positions.insert(spec.id.clone(), inner.response.rect.min);
                     }
                 }
             }
+
+            if has_close && !open {
+                if let Some(on_close) = close_actions.get_mut(&spec.id) {
+                    on_close(world);
+                }
+            }
+        }
+
+        if snap_enabled && !suppress_snap && snap_distance > 0.0 {
+            let should_snap = ctx.input(|input| input.pointer.any_released());
+            if should_snap {
+                if let Some((window_id, rect)) =
+                    find_moved_window(&window_rects_prev, &window_rects)
+                {
+                    let snapped = snap_window_rect(
+                        &window_id,
+                        rect,
+                        &window_rects,
+                        screen_rect,
+                        snap_distance,
+                    );
+                    if snapped.min != rect.min {
+                        window_positions.insert(window_id.clone(), snapped.min);
+                        window_rects.insert(window_id, snapped);
+                    }
+                }
+            }
+        }
+
+        if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+            egui_res.window_positions = window_positions;
+            egui_res.window_rects = window_rects;
+            egui_res.window_collapsed = window_collapsed;
+            egui_res.last_screen_rect = last_screen_rect;
         }
     });
 
@@ -201,4 +321,99 @@ pub fn egui_system(world: &mut World) {
             pixels_per_point,
         },
     });
+}
+
+fn find_moved_window(
+    previous: &HashMap<String, Rect>,
+    current: &HashMap<String, Rect>,
+) -> Option<(String, Rect)> {
+    let mut best: Option<(String, Rect, f32)> = None;
+    for (id, rect) in current {
+        let Some(prev) = previous.get(id) else {
+            continue;
+        };
+        let delta = (rect.min - prev.min).length();
+        if delta <= 0.5 {
+            continue;
+        }
+        let replace = match best {
+            Some((_, _, best_delta)) => delta > best_delta,
+            None => true,
+        };
+        if replace {
+            best = Some((id.clone(), *rect, delta));
+        }
+    }
+    best.map(|(id, rect, _)| (id, rect))
+}
+
+fn snap_window_rect(
+    moving_id: &str,
+    rect: Rect,
+    windows: &HashMap<String, Rect>,
+    screen_rect: Rect,
+    distance: f32,
+) -> Rect {
+    if distance <= 0.0 {
+        return rect;
+    }
+
+    let mut best_x = rect.min.x;
+    let mut best_y = rect.min.y;
+    let mut best_dx = distance + 1.0;
+    let mut best_dy = distance + 1.0;
+
+    let width = rect.width();
+    let height = rect.height();
+
+    let mut consider_x = |candidate: f32, delta: f32| {
+        if delta <= distance && delta < best_dx {
+            best_dx = delta;
+            best_x = candidate;
+        }
+    };
+
+    let mut consider_y = |candidate: f32, delta: f32| {
+        if delta <= distance && delta < best_dy {
+            best_dy = delta;
+            best_y = candidate;
+        }
+    };
+
+    consider_x(screen_rect.min.x, (rect.min.x - screen_rect.min.x).abs());
+    consider_x(
+        screen_rect.max.x - width,
+        (rect.max.x - screen_rect.max.x).abs(),
+    );
+    consider_y(screen_rect.min.y, (rect.min.y - screen_rect.min.y).abs());
+    consider_y(
+        screen_rect.max.y - height,
+        (rect.max.y - screen_rect.max.y).abs(),
+    );
+
+    for (id, other) in windows {
+        if id == moving_id {
+            continue;
+        }
+
+        if ranges_overlap(rect.min.y, rect.max.y, other.min.y, other.max.y) {
+            consider_x(other.min.x, (rect.min.x - other.min.x).abs());
+            consider_x(other.max.x - width, (rect.max.x - other.max.x).abs());
+            consider_x(other.min.x - width, (rect.max.x - other.min.x).abs());
+            consider_x(other.max.x, (rect.min.x - other.max.x).abs());
+        }
+
+        if ranges_overlap(rect.min.x, rect.max.x, other.min.x, other.max.x) {
+            consider_y(other.min.y, (rect.min.y - other.min.y).abs());
+            consider_y(other.max.y - height, (rect.max.y - other.max.y).abs());
+            consider_y(other.min.y - height, (rect.max.y - other.min.y).abs());
+            consider_y(other.max.y, (rect.min.y - other.max.y).abs());
+        }
+    }
+
+    Rect::from_min_size(Pos2::new(best_x, best_y), Vec2::new(width, height))
+}
+
+fn ranges_overlap(min_a: f32, max_a: f32, min_b: f32, max_b: f32) -> bool {
+    min_a < max_b && max_a > min_b
 }

@@ -903,8 +903,11 @@ fn apply_reflow_edges(
             if id == changed_id {
                 continue;
             }
-            if (rect.max.x - old_edge).abs() <= threshold {
-                if let Some(target) = updated.get_mut(id) {
+            if let Some(target) = updated.get_mut(id) {
+                if (rect.min.x - old_edge).abs() <= threshold {
+                    target.min.x = new_edge;
+                }
+                if (rect.max.x - old_edge).abs() <= threshold {
                     target.max.x = new_edge;
                 }
             }
@@ -918,9 +921,12 @@ fn apply_reflow_edges(
             if id == changed_id {
                 continue;
             }
-            if (rect.min.x - old_edge).abs() <= threshold {
-                if let Some(target) = updated.get_mut(id) {
+            if let Some(target) = updated.get_mut(id) {
+                if (rect.min.x - old_edge).abs() <= threshold {
                     target.min.x = new_edge;
+                }
+                if (rect.max.x - old_edge).abs() <= threshold {
+                    target.max.x = new_edge;
                 }
             }
         }
@@ -933,8 +939,11 @@ fn apply_reflow_edges(
             if id == changed_id {
                 continue;
             }
-            if (rect.max.y - old_edge).abs() <= threshold {
-                if let Some(target) = updated.get_mut(id) {
+            if let Some(target) = updated.get_mut(id) {
+                if (rect.min.y - old_edge).abs() <= threshold {
+                    target.min.y = new_edge;
+                }
+                if (rect.max.y - old_edge).abs() <= threshold {
                     target.max.y = new_edge;
                 }
             }
@@ -948,9 +957,12 @@ fn apply_reflow_edges(
             if id == changed_id {
                 continue;
             }
-            if (rect.min.y - old_edge).abs() <= threshold {
-                if let Some(target) = updated.get_mut(id) {
+            if let Some(target) = updated.get_mut(id) {
+                if (rect.min.y - old_edge).abs() <= threshold {
                     target.min.y = new_edge;
+                }
+                if (rect.max.y - old_edge).abs() <= threshold {
+                    target.max.y = new_edge;
                 }
             }
         }

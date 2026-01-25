@@ -192,6 +192,9 @@ pub fn editor_layout_apply_system(world: &mut World) {
         layout_active,
         last_screen_rect,
         project_open_changed,
+        active_name,
+        last_active_layout,
+        default_runtime_layout,
     ) = match world.get_resource::<EditorLayoutState>() {
         Some(state) => {
             let project_open_changed = state
@@ -208,6 +211,9 @@ pub fn editor_layout_apply_system(world: &mut World) {
                     true,
                     state.last_screen_rect,
                     project_open_changed,
+                    state.active.clone(),
+                    state.last_active_layout.clone(),
+                    state.default_runtime_layout.clone(),
                 )
             } else {
                 let mut clear_active = false;
@@ -243,18 +249,34 @@ pub fn editor_layout_apply_system(world: &mut World) {
                     layout_active,
                     state.last_screen_rect,
                     project_open_changed,
+                    state.active.clone(),
+                    state.last_active_layout.clone(),
+                    state.default_runtime_layout.clone(),
                 )
             }
         }
         None => return,
     };
 
-    let enforce_layout = !project_open || layout.is_some();
+    let effective_active = activate_default.clone().or_else(|| active_name.clone());
+    let active_is_default = effective_active.as_deref() == Some("Default");
+    let mut layout = layout;
+    if project_open && active_is_default {
+        layout = default_runtime_layout
+            .clone()
+            .or_else(|| Some(crate::editor::default_layout()));
+    }
+
+    let has_layout = layout.is_some();
+    let enforce_layout = !project_open || has_layout;
+    let active_changed =
+        activate_default.is_some() || active_name.as_deref() != last_active_layout.as_deref();
     let hard_apply = if !project_open {
         true
     } else if enforce_layout {
         apply_requested
             || activate_default.is_some()
+            || active_changed
             || last_screen_rect.is_none()
             || project_open_changed
     } else {
@@ -324,7 +346,21 @@ pub fn editor_layout_apply_system(world: &mut World) {
         state.apply_requested = false;
         state.last_screen_rect = Some(screen_rect);
         state.last_project_open = Some(project_open);
+        state.last_active_layout = state.active.clone();
         state.layout_applied_this_frame = hard_apply;
+        let active_name = state.active.clone();
+        let active_is_default = active_name.as_deref() == Some("Default");
+        if active_is_default {
+            if active_changed || state.default_runtime_layout.is_none() {
+                state.default_runtime_layout = Some(crate::editor::default_layout());
+            }
+        } else {
+            state.default_runtime_layout = None;
+        }
+        if hard_apply && has_layout && !state.layout_verify_pending {
+            state.layout_verify_pending = true;
+            state.layout_verify_attempts = 3;
+        }
         if hard_apply {
             state.layout_dragging_window = None;
             state.layout_drag_mode = LayoutDragMode::None;
@@ -459,6 +495,46 @@ pub fn editor_layout_update_system(world: &mut World) {
         .expect("EditorLayoutState missing");
     let live_reflow = state.live_reflow;
     let allow_layout_edit = state.allow_layout_edit;
+
+    if state.layout_verify_pending {
+        let attempts_left = state.layout_verify_attempts;
+        let active_name = state.active.clone();
+        if attempts_left == 0 {
+            state.layout_verify_pending = false;
+        } else if let Some(active_name) = active_name {
+            let layout = if active_name == "Default" {
+                if state.default_runtime_layout.is_none() {
+                    state.default_runtime_layout = Some(crate::editor::default_layout());
+                }
+                state.default_runtime_layout.as_ref()
+            } else {
+                state.layouts.get(&active_name)
+            };
+            if let Some(layout) = layout {
+                if layout_matches_window_rects(
+                    layout,
+                    &window_rects,
+                    &window_collapsed,
+                    screen_rect,
+                    pixels_per_point,
+                ) {
+                    state.layout_verify_pending = false;
+                } else {
+                    state.layout_verify_attempts = attempts_left.saturating_sub(1);
+                    if state.layout_verify_attempts == 0 {
+                        state.layout_verify_pending = false;
+                    } else {
+                        state.apply_requested = true;
+                    }
+                }
+            } else {
+                state.layout_verify_pending = false;
+            }
+        } else {
+            state.layout_verify_pending = false;
+        }
+    }
+
     let Some(active_name) = state.active.clone() else {
         state.layout_applied_this_frame = false;
         state.layout_dragging_window = None;
@@ -471,6 +547,7 @@ pub fn editor_layout_update_system(world: &mut World) {
         return;
     };
 
+    let active_is_default = active_name == "Default";
     if state.layout_applied_this_frame {
         state.layout_applied_this_frame = false;
         state.layout_dragging_window = None;
@@ -494,7 +571,15 @@ pub fn editor_layout_update_system(world: &mut World) {
         return;
     }
 
-    let Some(layout) = state.layouts.get(&active_name).cloned() else {
+    let layout = if active_is_default {
+        if state.default_runtime_layout.is_none() {
+            state.default_runtime_layout = Some(crate::editor::default_layout());
+        }
+        state.default_runtime_layout.clone()
+    } else {
+        state.layouts.get(&active_name).cloned()
+    };
+    let Some(layout) = layout else {
         state.last_screen_rect = Some(screen_rect);
         return;
     };
@@ -508,7 +593,12 @@ pub fn editor_layout_update_system(world: &mut World) {
     }
 
     if allow_layout_edit {
-        if let Some(layout) = state.layouts.get_mut(&active_name) {
+        let target_layout = if active_is_default {
+            state.default_runtime_layout.as_mut()
+        } else {
+            state.layouts.get_mut(&active_name)
+        };
+        if let Some(layout) = target_layout {
             let mut updated = false;
             for (id, window) in layout.windows.iter_mut() {
                 if let Some(collapsed) = window_collapsed.get(id) {
@@ -614,7 +704,12 @@ pub fn editor_layout_update_system(world: &mut World) {
         *rect = round_rect_to_pixels(*rect, pixels_per_point, screen_rect);
     }
 
-    if let Some(layout) = state.layouts.get_mut(&active_name) {
+    let target_layout = if active_is_default {
+        state.default_runtime_layout.as_mut()
+    } else {
+        state.layouts.get_mut(&active_name)
+    };
+    if let Some(layout) = target_layout {
         for (id, window) in layout.windows.iter_mut() {
             if let Some(rect) = updated_rects.get(id) {
                 window.rect = NormalizedRect::from_rect(*rect, screen_rect);
@@ -737,6 +832,50 @@ fn layout_rects_for_screen(
     }
 
     rects
+}
+
+fn layout_matches_window_rects(
+    layout: &EditorLayout,
+    window_rects: &HashMap<String, Rect>,
+    window_collapsed: &HashMap<String, bool>,
+    screen_rect: Rect,
+    pixels_per_point: f32,
+) -> bool {
+    if layout.windows.is_empty() {
+        return false;
+    }
+    let pixels_per_point = if pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    };
+    let threshold = (1.5 / pixels_per_point).max(edge_threshold(pixels_per_point));
+    for (id, window) in layout.windows.iter() {
+        let Some(actual) = window_rects.get(id) else {
+            return false;
+        };
+        let expected = round_rect_to_pixels(
+            window.rect.to_rect(screen_rect),
+            pixels_per_point,
+            screen_rect,
+        );
+        let collapsed = window_collapsed.get(id).copied().unwrap_or(false);
+        if collapsed {
+            if (actual.min.x - expected.min.x).abs() > threshold
+                || (actual.min.y - expected.min.y).abs() > threshold
+                || (actual.max.x - expected.max.x).abs() > threshold
+            {
+                return false;
+            }
+        } else if (actual.min.x - expected.min.x).abs() > threshold
+            || (actual.min.y - expected.min.y).abs() > threshold
+            || (actual.max.x - expected.max.x).abs() > threshold
+            || (actual.max.y - expected.max.y).abs() > threshold
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn layout_title_bar_height(ctx: &egui::Context, collapsed: bool) -> f32 {

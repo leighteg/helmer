@@ -119,6 +119,9 @@ pub struct InspectorNameEditState {
     pub buffer: String,
 }
 
+#[derive(Default, Debug, Clone, Resource)]
+pub struct InspectorPinnedEntityResource(pub Option<Entity>);
+
 #[derive(Default, Debug, Resource)]
 pub struct AssetDragState {
     pub active: bool,
@@ -149,6 +152,7 @@ pub struct MiddleDragUiState {
 pub struct HierarchyUiState {
     pub rename_entity: Option<Entity>,
     pub rename_buffer: String,
+    pub rename_request_focus: bool,
     pub new_dynamic_component_name: String,
     pub new_dynamic_field_name: String,
     pub new_dynamic_field_kind: DynamicValueKind,
@@ -159,6 +163,7 @@ impl Default for HierarchyUiState {
         Self {
             rename_entity: None,
             rename_buffer: String::new(),
+            rename_request_focus: false,
             new_dynamic_component_name: String::new(),
             new_dynamic_field_name: String::new(),
             new_dynamic_field_kind: DynamicValueKind::Float,
@@ -764,148 +769,201 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
 
 pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Hierarchy Inspector");
+    drag_egui_window_on_middle_click(ui, world, "Hierarchy");
 
     with_middle_drag_blocked(ui, world, |ui, world| {
-        ui.horizontal(|ui| {
-            ui.menu_button("Add", |ui| {
-                if ui.button("Empty").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::Empty,
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Camera").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::Camera,
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Directional Light").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::DirectionalLight,
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Point Light").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::PointLight,
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Spot Light").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::SpotLight,
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Cube").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::Primitive(PrimitiveKind::Cube),
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("UV Sphere").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::Primitive(PrimitiveKind::UvSphere(12, 12)),
-                        },
-                    );
-                    ui.close_menu();
-                }
-                if ui.button("Plane").clicked() {
-                    push_command(
-                        world,
-                        EditorCommand::CreateEntity {
-                            kind: SpawnKind::Primitive(PrimitiveKind::Plane),
-                        },
-                    );
-                    ui.close_menu();
-                }
-                ui.separator();
-                ui.menu_button("Physics", |ui| {
-                    if ui.button("Dynamic Body (Box)").clicked() {
+        let entries = collect_hierarchy_entries(world);
+
+        egui::Frame::none().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.menu_button("Add", |ui| {
+                    if ui.button("Empty").clicked() {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::DynamicBodyCuboid,
+                                kind: SpawnKind::Empty,
                             },
                         );
                         ui.close_menu();
                     }
-                    if ui.button("Dynamic Body (Sphere)").clicked() {
+                    if ui.button("Camera").clicked() {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::DynamicBodySphere,
+                                kind: SpawnKind::Camera,
                             },
                         );
                         ui.close_menu();
                     }
-                    if ui.button("Fixed Collider (Box)").clicked() {
+                    if ui.button("Directional Light").clicked() {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::FixedColliderCuboid,
+                                kind: SpawnKind::DirectionalLight,
                             },
                         );
                         ui.close_menu();
                     }
-                    if ui.button("Fixed Collider (Sphere)").clicked() {
+                    if ui.button("Point Light").clicked() {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::FixedColliderSphere,
+                                kind: SpawnKind::PointLight,
                             },
                         );
                         ui.close_menu();
                     }
-                });
-                ui.menu_button("Provided", |ui| {
-                    if ui.button("Freecam Camera").clicked() {
+                    if ui.button("Spot Light").clicked() {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::FreecamCamera,
+                                kind: SpawnKind::SpotLight,
                             },
                         );
                         ui.close_menu();
                     }
+                    if ui.button("Cube").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::Cube),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("UV Sphere").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::UvSphere(12, 12)),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Plane").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::Plane),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.menu_button("Physics", |ui| {
+                        if ui.button("Dynamic Body (Box)").clicked() {
+                            push_command(
+                                world,
+                                EditorCommand::CreateEntity {
+                                    kind: SpawnKind::DynamicBodyCuboid,
+                                },
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("Dynamic Body (Sphere)").clicked() {
+                            push_command(
+                                world,
+                                EditorCommand::CreateEntity {
+                                    kind: SpawnKind::DynamicBodySphere,
+                                },
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("Fixed Collider (Box)").clicked() {
+                            push_command(
+                                world,
+                                EditorCommand::CreateEntity {
+                                    kind: SpawnKind::FixedColliderCuboid,
+                                },
+                            );
+                            ui.close_menu();
+                        }
+                        if ui.button("Fixed Collider (Sphere)").clicked() {
+                            push_command(
+                                world,
+                                EditorCommand::CreateEntity {
+                                    kind: SpawnKind::FixedColliderSphere,
+                                },
+                            );
+                            ui.close_menu();
+                        }
+                    });
+                    ui.menu_button("Provided", |ui| {
+                        if ui.button("Freecam Camera").clicked() {
+                            push_command(
+                                world,
+                                EditorCommand::CreateEntity {
+                                    kind: SpawnKind::FreecamCamera,
+                                },
+                            );
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
+            ui.separator();
+            draw_hierarchy_panel(ui, world, &entries);
         });
+    });
+}
 
-        ui.separator();
+pub fn draw_inspector_window(ui: &mut Ui, world: &mut World) {
+    bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Inspector");
 
-        ui.columns(2, |columns| {
-            columns[0].heading("Entities");
-            draw_hierarchy_panel(&mut columns[0], world);
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(6, 0))
+            .show(ui, |ui| {
+                let selection = world
+                    .get_resource::<InspectorSelectedEntityResource>()
+                    .and_then(|selection| selection.0);
+                let pinned = world
+                    .get_resource::<InspectorPinnedEntityResource>()
+                    .and_then(|pinned| pinned.0);
+                let entity = selection.or(pinned);
 
-            let selection = world
-                .get_resource::<InspectorSelectedEntityResource>()
-                .and_then(|selection| selection.0);
-            columns[1].heading("Inspector");
-            draw_inspector_panel(&mut columns[1], world, selection);
-        });
+                if let Some(entity) = selection {
+                    if let Some(mut pinned) =
+                        world.get_resource_mut::<InspectorPinnedEntityResource>()
+                    {
+                        pinned.0 = Some(entity);
+                    }
+                }
+
+                let Some(entity) = entity else {
+                    ui.label("Select an entity to inspect");
+                    return;
+                };
+                if world.get_entity(entity).is_err() {
+                    if selection.is_some() {
+                        set_selection(world, None);
+                    }
+                    if let Some(mut pinned) =
+                        world.get_resource_mut::<InspectorPinnedEntityResource>()
+                    {
+                        if pinned.0 == Some(entity) {
+                            pinned.0 = None;
+                        }
+                    }
+                    if selection.is_some() {
+                        ui.label("Selected entity is no longer available");
+                    } else {
+                        ui.label("Select an entity to inspect");
+                    }
+                    return;
+                }
+
+                draw_inspector_header(ui, world, entity);
+                ui.separator();
+
+                egui::ScrollArea::both()
+                    .id_salt("inspector_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        draw_inspector_panel(ui, world, entity);
+                    });
+            });
     });
 }
 
@@ -1235,11 +1293,7 @@ pub fn draw_hierarchy_window(ui: &mut Ui, world: &mut World) {
     draw_scene_window(ui, world);
 }
 
-fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World) {
-    let selection = world
-        .get_resource::<InspectorSelectedEntityResource>()
-        .and_then(|selection| selection.0);
-
+fn collect_hierarchy_entries(world: &mut World) -> Vec<(Entity, String)> {
     let mut entries: Vec<(Entity, String)> = Vec::new();
     let mut query = world.query::<(
         Entity,
@@ -1324,73 +1378,78 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World) {
     }
 
     entries.sort_by_key(|(entity, _)| entity.to_bits());
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (entity, label) in entries {
-            let is_selected = selection == Some(entity);
-            let is_renaming = world
-                .get_resource::<HierarchyUiState>()
-                .map(|state| state.rename_entity == Some(entity))
-                .unwrap_or(false);
-
-            if is_renaming {
-                world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
-                    let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
-                    if response.lost_focus()
-                        || ui.input(|input| input.key_pressed(egui::Key::Enter))
-                    {
-                        apply_entity_name(world, entity, ui_state.rename_buffer.trim());
-                        ui_state.rename_entity = None;
-                    }
-                });
-                continue;
-            }
-
-            let response = ui.selectable_label(is_selected, label);
-
-            if response.clicked() {
-                set_selection(world, Some(entity));
-            }
-
-            if response.double_clicked() {
-                focus_entity_in_view(world, entity);
-            }
-
-            response.context_menu(|ui| {
-                if ui.button("Rename").clicked() {
-                    begin_rename(world, entity);
-                    ui.close_menu();
-                }
-                if ui.button("Delete").clicked() {
-                    push_command(world, EditorCommand::DeleteEntity { entity });
-                    ui.close_menu();
-                }
-                if ui.button("Set Game Camera").clicked() {
-                    push_command(world, EditorCommand::SetActiveCamera { entity });
-                    ui.close_menu();
-                }
-            });
-        }
-    });
+    entries
 }
 
-fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity>) {
-    let selected_asset = world
-        .get_resource::<AssetBrowserState>()
-        .and_then(|state| state.selected.clone());
-    let project = world.get_resource::<EditorProject>().cloned();
+fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[(Entity, String)]) {
+    let selection = world
+        .get_resource::<InspectorSelectedEntityResource>()
+        .and_then(|selection| selection.0);
 
-    let Some(entity) = selection else {
-        ui.label("Select an entity to inspect.");
-        return;
-    };
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    egui::ScrollArea::vertical()
+        .id_salt("hierarchy_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                for (entity, label) in entries.iter() {
+                    let is_selected = selection == Some(*entity);
+                    let is_renaming = world
+                        .get_resource::<HierarchyUiState>()
+                        .map(|state| state.rename_entity == Some(*entity))
+                        .unwrap_or(false);
 
-    if world.get_entity(entity).is_err() {
-        set_selection(world, None);
-        ui.label("Selected entity is no longer available.");
-        return;
-    }
+                    if is_renaming {
+                        world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
+                            let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
+                            if ui_state.rename_request_focus {
+                                response.request_focus();
+                                ui_state.rename_request_focus = false;
+                            }
+                            let commit = response.lost_focus()
+                                || (response.has_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                            if commit {
+                                apply_entity_name(world, *entity, ui_state.rename_buffer.trim());
+                                ui_state.rename_entity = None;
+                            }
+                        });
+                        continue;
+                    }
 
+                    let response = ui.add_sized(
+                        Vec2::new(ui.available_width(), 0.0),
+                        egui::Button::new(label).wrap().selected(is_selected),
+                    );
+
+                    if response.clicked() {
+                        set_selection(world, Some(*entity));
+                    }
+
+                    if response.double_clicked() {
+                        focus_entity_in_view(world, *entity);
+                    }
+
+                    response.context_menu(|ui| {
+                        if ui.button("Rename").clicked() {
+                            begin_rename(world, *entity);
+                            ui.close_menu();
+                        }
+                        if ui.button("Delete").clicked() {
+                            push_command(world, EditorCommand::DeleteEntity { entity: *entity });
+                            ui.close_menu();
+                        }
+                        if ui.button("Set Game Camera").clicked() {
+                            push_command(world, EditorCommand::SetActiveCamera { entity: *entity });
+                            ui.close_menu();
+                        }
+                    });
+                }
+            });
+        });
+}
+
+fn draw_inspector_header(ui: &mut Ui, world: &mut World, entity: Entity) {
     let name_snapshot = world
         .get::<Name>(entity)
         .map(|name| name.to_string())
@@ -1406,7 +1465,10 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
         ui.horizontal(|ui| {
             ui.label("Name");
             let response = ui.text_edit_singleline(&mut name_state.buffer);
-            if response.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                response.surrender_focus();
+                commit_name = true;
+            } else if response.lost_focus() {
                 commit_name = true;
             }
         });
@@ -1420,8 +1482,21 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, selection: Option<Entity
         }
     }
 
-    ui.label(format!("ID: {}", entity.to_bits()));
-    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label(format!("ID: {}", entity.to_bits()));
+        if ui.button("Delete").clicked() {
+            push_command(world, EditorCommand::DeleteEntity { entity });
+        }
+    });
+}
+
+fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+    let selected_asset = world
+        .get_resource::<AssetBrowserState>()
+        .and_then(|state| state.selected.clone());
+    let project = world.get_resource::<EditorProject>().cloned();
 
     if world.get::<BevyTransform>(entity).is_some() {
         let mut remove = false;
@@ -3710,6 +3785,7 @@ fn begin_rename(world: &mut World, entity: Entity) {
             .get::<Name>(entity)
             .map(|name| name.to_string())
             .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
+        ui_state.rename_request_focus = true;
     });
     set_selection(world, Some(entity));
 }
@@ -3719,7 +3795,14 @@ fn apply_entity_name(world: &mut World, entity: Entity, name: &str) {
     if trimmed.is_empty() {
         world.entity_mut(entity).remove::<Name>();
     } else {
-        world.entity_mut(entity).insert(Name::new(name.to_string()));
+        world
+            .entity_mut(entity)
+            .insert(Name::new(trimmed.to_string()));
+    }
+    if let Some(mut name_state) = world.get_resource_mut::<InspectorNameEditState>() {
+        if name_state.entity == Some(entity) {
+            name_state.buffer = trimmed.to_string();
+        }
     }
 }
 

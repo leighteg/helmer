@@ -44,9 +44,9 @@ use crate::editor::{
     scripting::{ScriptComponent, ScriptRegistry, load_script_asset},
     set_play_camera,
     ui::{
-        EditorUiState, EditorWorkspaceState, close_editor_window, draw_assets_window,
-        draw_editor_window, draw_project_window, draw_scene_window, draw_toolbar,
-        draw_viewport_window,
+        EditorUiState, EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
+        draw_assets_window, draw_editor_window, draw_inspector_window, draw_project_window,
+        draw_scene_window, draw_toolbar, draw_viewport_window,
     },
     watch::configure_file_watcher,
 };
@@ -107,8 +107,18 @@ pub fn editor_ui_system(world: &mut World) {
             draw_scene_window(ui, world);
         }),
         EguiWindowSpec {
-            id: "Hierarchy Inspector".to_string(),
-            title: "Hierarchy Inspector".to_string(),
+            id: "Hierarchy".to_string(),
+            title: "Hierarchy".to_string(),
+        },
+    ));
+
+    egui_res.windows.push((
+        Box::new(|ui: &mut Ui, world: &mut World, _| {
+            draw_inspector_window(ui, world);
+        }),
+        EguiWindowSpec {
+            id: "Inspector".to_string(),
+            title: "Inspector".to_string(),
         },
     ));
 
@@ -205,6 +215,12 @@ pub fn editor_command_system(world: &mut World) {
                 >() {
                     if selection.0 == Some(entity) {
                         selection.0 = None;
+                    }
+                }
+                if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>()
+                {
+                    if pinned.0 == Some(entity) {
+                        pinned.0 = None;
                     }
                 }
             }
@@ -556,6 +572,9 @@ fn handle_new_scene(world: &mut World) {
     >() {
         selection.0 = None;
     }
+    if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>() {
+        pinned.0 = None;
+    }
 }
 
 fn handle_open_scene(world: &mut World, path: &Path) {
@@ -567,6 +586,9 @@ fn handle_open_scene(world: &mut World, path: &Path) {
                 .expect("EditorProject missing");
 
             reset_editor_scene(world);
+            if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>() {
+                pinned.0 = None;
+            }
 
             let created_entities =
                 world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {

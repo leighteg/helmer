@@ -30,7 +30,10 @@ use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
     common::{
         config::RenderConfig,
-        renderer::{LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms},
+        renderer::{
+            LightData, MAX_GIZMO_ICONS, MAX_GIZMO_LINES, RenderDeviceCaps, ShaderConstants,
+            SkyUniforms,
+        },
     },
     graph::definition::resource_id::ResourceId,
 };
@@ -133,6 +136,50 @@ pub struct DebugCompositeParams {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GizmoIconParams {
+    pub position: [f32; 3],
+    pub kind: u32,
+    pub rotation: [f32; 4],
+    pub color: [f32; 4],
+    pub params: [f32; 4],
+    pub size_params: [f32; 4],
+}
+
+impl Default for GizmoIconParams {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            kind: 0,
+            rotation: [0.0; 4],
+            color: [0.0; 4],
+            params: [0.0; 4],
+            size_params: [0.0; 4],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GizmoLineParams {
+    pub start: [f32; 3],
+    pub _pad0: f32,
+    pub end: [f32; 3],
+    pub _pad1: f32,
+}
+
+impl Default for GizmoLineParams {
+    fn default() -> Self {
+        Self {
+            start: [0.0; 3],
+            _pad0: 0.0,
+            end: [0.0; 3],
+            _pad1: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GizmoParams {
     pub origin: [f32; 3],
     pub mode: u32,
@@ -157,6 +204,13 @@ pub struct GizmoParams {
     pub selection_max: [f32; 3],
     pub selection_thickness: f32,
     pub selection_color: [f32; 4],
+    pub icon_meta: [u32; 4],
+    pub icon_line_params: [f32; 4],
+    pub icons: [GizmoIconParams; MAX_GIZMO_ICONS],
+    pub outline_meta: [u32; 4],
+    pub outline_line_params: [f32; 4],
+    pub outline_color: [f32; 4],
+    pub outline_lines: [GizmoLineParams; MAX_GIZMO_LINES],
 }
 
 #[derive(Clone)]

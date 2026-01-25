@@ -8,14 +8,15 @@ use helmer_becs::{egui_integration::EguiResource, helmer_becs_init};
 
 use helmer_editor::editor::{
     AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand, EditorCommandQueue,
-    EditorGizmoSettings, EditorGizmoState, EditorProject, EditorSceneState, EditorSelectionState,
-    EditorUiState, EditorUndoState, EditorViewportState, EditorWorkspaceState, FileWatchState,
-    HierarchyUiState, InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache,
-    MiddleDragUiState, ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera,
-    asset_scan_system, drag_drop_system, editor_command_system, editor_physics_state_system,
-    editor_shortcut_system, editor_ui_system, editor_undo_request_system, file_watch_system,
-    freecam_system, gizmo_system, load_recent_projects, scene_dirty_system,
-    script_execution_system, script_registry_system, selection_system,
+    EditorGizmoSettings, EditorGizmoState, EditorMeshOutlineCache, EditorProject, EditorSceneState,
+    EditorSelectionState, EditorUiState, EditorUndoState, EditorViewportState,
+    EditorWorkspaceState, FileWatchState, HierarchyUiState, InspectorNameEditState,
+    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState, ScriptRegistry,
+    ScriptRunState, ScriptRuntime, activate_viewport_camera, asset_scan_system, drag_drop_system,
+    editor_command_system, editor_physics_state_system, editor_shortcut_system, editor_ui_system,
+    editor_undo_request_system, file_watch_system, freecam_system, gizmo_system,
+    load_recent_projects, scene_dirty_system, script_execution_system, script_registry_system,
+    selection_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -63,6 +64,7 @@ fn editor_init(
     world.insert_resource(InspectorPinnedEntityResource::default());
     world.insert_resource(EditorGizmoState::default());
     world.insert_resource(EditorGizmoSettings::default());
+    world.insert_resource(EditorMeshOutlineCache::default());
     world.insert_resource(EditorSelectionState::default());
     world.insert_resource(EditorViewportState::default());
     world.insert_resource(RenderGizmoState::default());

@@ -12,6 +12,25 @@ struct CameraUniforms {
     _pad_end: vec4<u32>,
 }
 
+const MAX_GIZMO_ICONS: u32 = 64u;
+const MAX_GIZMO_LINES: u32 = 1024u;
+
+struct GizmoIcon {
+    position: vec3<f32>,
+    kind: u32,
+    rotation: vec4<f32>,
+    color: vec4<f32>,
+    params: vec4<f32>,
+    size_params: vec4<f32>,
+}
+
+struct GizmoLine {
+    start: vec3<f32>,
+    _pad0: f32,
+    end: vec3<f32>,
+    _pad1: f32,
+}
+
 struct GizmoParams {
     origin: vec3<f32>,
     mode: u32,
@@ -36,6 +55,13 @@ struct GizmoParams {
     selection_max: vec3<f32>,
     selection_thickness: f32,
     selection_color: vec4<f32>,
+    icon_meta: vec4<u32>,
+    icon_line_params: vec4<f32>,
+    icons: array<GizmoIcon, MAX_GIZMO_ICONS>,
+    outline_meta: vec4<u32>,
+    outline_line_params: vec4<f32>,
+    outline_color: vec4<f32>,
+    outline_lines: array<GizmoLine, MAX_GIZMO_LINES>,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -57,8 +83,16 @@ const SCALE_VERTS_PER_AXIS: u32 = 12u;
 const ORIGIN_VERTS: u32 = 6u;
 const SELECTION_EDGE_COUNT: u32 = 12u;
 const SELECTION_VERTS_PER_EDGE: u32 = 6u;
+const ICON_EDGE_COUNT: u32 = 16u;
+const ICON_VERTS_PER_EDGE: u32 = 6u;
+const ICON_VERTS_PER_GIZMO: u32 = ICON_EDGE_COUNT * ICON_VERTS_PER_EDGE;
+const OUTLINE_VERTS_PER_LINE: u32 = 6u;
 const TWO_PI: f32 = 6.2831853;
 const CENTER_AXIS_ID: u32 = 4u;
+const ICON_KIND_CAMERA: u32 = 0u;
+const ICON_KIND_LIGHT_DIRECTIONAL: u32 = 1u;
+const ICON_KIND_LIGHT_POINT: u32 = 2u;
+const ICON_KIND_LIGHT_SPOT: u32 = 3u;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
@@ -177,6 +211,191 @@ fn quad_corner_signed(index: u32) -> vec2<f32> {
     return vec2<f32>(-1.0, 1.0);
 }
 
+struct IconEdge {
+    start: vec3<f32>,
+    end: vec3<f32>,
+    valid: bool,
+}
+
+fn line_vertex(
+    index: u32,
+    start: vec3<f32>,
+    end: vec3<f32>,
+    view_dir: vec3<f32>,
+    thickness: f32
+) -> vec3<f32> {
+    let edge_dir = safe_normalize(end - start);
+    let side = axis_side(edge_dir, view_dir);
+    let quad = quad_corner_along(index);
+    return mix(start, end, quad.x) + side * (quad.y * thickness);
+}
+
+fn icon_edge(kind: u32, edge_index: u32, size: f32, params: vec4<f32>) -> IconEdge {
+    var edge: IconEdge;
+    edge.start = vec3<f32>(0.0, 0.0, 0.0);
+    edge.end = vec3<f32>(0.0, 0.0, 0.0);
+    edge.valid = true;
+
+    if (kind == ICON_KIND_CAMERA) {
+        let fov = clamp(params.x, 0.01, 3.12);
+        let aspect = max(params.y, 0.01);
+        let near_ratio = clamp(params.z, 0.02, 0.9);
+        let far_dist = max(size, 0.001);
+        let near_dist = far_dist * near_ratio;
+        let tan_half = tan(fov * 0.5);
+        let half_h_far = tan_half * far_dist;
+        let half_w_far = half_h_far * aspect;
+        let half_h_near = tan_half * near_dist;
+        let half_w_near = half_h_near * aspect;
+        let n0 = vec3<f32>(-half_w_near, -half_h_near, near_dist);
+        let n1 = vec3<f32>(half_w_near, -half_h_near, near_dist);
+        let n2 = vec3<f32>(half_w_near, half_h_near, near_dist);
+        let n3 = vec3<f32>(-half_w_near, half_h_near, near_dist);
+        let f0 = vec3<f32>(-half_w_far, -half_h_far, far_dist);
+        let f1 = vec3<f32>(half_w_far, -half_h_far, far_dist);
+        let f2 = vec3<f32>(half_w_far, half_h_far, far_dist);
+        let f3 = vec3<f32>(-half_w_far, half_h_far, far_dist);
+
+        if (edge_index == 0u) {
+            edge.start = n0;
+            edge.end = n1;
+        } else if (edge_index == 1u) {
+            edge.start = n1;
+            edge.end = n2;
+        } else if (edge_index == 2u) {
+            edge.start = n2;
+            edge.end = n3;
+        } else if (edge_index == 3u) {
+            edge.start = n3;
+            edge.end = n0;
+        } else if (edge_index == 4u) {
+            edge.start = f0;
+            edge.end = f1;
+        } else if (edge_index == 5u) {
+            edge.start = f1;
+            edge.end = f2;
+        } else if (edge_index == 6u) {
+            edge.start = f2;
+            edge.end = f3;
+        } else if (edge_index == 7u) {
+            edge.start = f3;
+            edge.end = f0;
+        } else if (edge_index == 8u) {
+            edge.start = n0;
+            edge.end = f0;
+        } else if (edge_index == 9u) {
+            edge.start = n1;
+            edge.end = f1;
+        } else if (edge_index == 10u) {
+            edge.start = n2;
+            edge.end = f2;
+        } else if (edge_index == 11u) {
+            edge.start = n3;
+            edge.end = f3;
+        } else if (edge_index == 12u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = vec3<f32>(0.0, 0.0, far_dist * 0.6);
+        } else {
+            edge.valid = false;
+        }
+    } else if (kind == ICON_KIND_LIGHT_SPOT) {
+        let angle = clamp(params.x, 0.01, 3.12);
+        let length = max(size, 0.001);
+        let radius = tan(angle * 0.5) * length;
+        let f0 = vec3<f32>(-radius, -radius, length);
+        let f1 = vec3<f32>(radius, -radius, length);
+        let f2 = vec3<f32>(radius, radius, length);
+        let f3 = vec3<f32>(-radius, radius, length);
+
+        if (edge_index == 0u) {
+            edge.start = f0;
+            edge.end = f1;
+        } else if (edge_index == 1u) {
+            edge.start = f1;
+            edge.end = f2;
+        } else if (edge_index == 2u) {
+            edge.start = f2;
+            edge.end = f3;
+        } else if (edge_index == 3u) {
+            edge.start = f3;
+            edge.end = f0;
+        } else if (edge_index == 4u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = f0;
+        } else if (edge_index == 5u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = f1;
+        } else if (edge_index == 6u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = f2;
+        } else if (edge_index == 7u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = f3;
+        } else if (edge_index == 8u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = vec3<f32>(0.0, 0.0, length);
+        } else {
+            edge.valid = false;
+        }
+    } else if (kind == ICON_KIND_LIGHT_POINT) {
+        let radius = max(size, 0.001) * 0.4;
+        if (edge_index == 0u) {
+            edge.start = vec3<f32>(-radius, 0.0, 0.0);
+            edge.end = vec3<f32>(radius, 0.0, 0.0);
+        } else if (edge_index == 1u) {
+            edge.start = vec3<f32>(0.0, -radius, 0.0);
+            edge.end = vec3<f32>(0.0, radius, 0.0);
+        } else if (edge_index == 2u) {
+            edge.start = vec3<f32>(0.0, 0.0, -radius);
+            edge.end = vec3<f32>(0.0, 0.0, radius);
+        } else {
+            edge.valid = false;
+        }
+    } else if (kind == ICON_KIND_LIGHT_DIRECTIONAL) {
+        let length = max(size, 0.001) * 0.9;
+        let head_len = max(size * 0.25, 0.001);
+        let head_width = size * 0.2;
+        let tip = vec3<f32>(0.0, 0.0, length);
+        let base = vec3<f32>(0.0, 0.0, length - head_len);
+        let left = base + vec3<f32>(head_width, 0.0, 0.0);
+        let right = base - vec3<f32>(head_width, 0.0, 0.0);
+        let disc = size * 0.2;
+        let d0 = vec3<f32>(-disc, -disc, 0.0);
+        let d1 = vec3<f32>(disc, -disc, 0.0);
+        let d2 = vec3<f32>(disc, disc, 0.0);
+        let d3 = vec3<f32>(-disc, disc, 0.0);
+
+        if (edge_index == 0u) {
+            edge.start = vec3<f32>(0.0, 0.0, 0.0);
+            edge.end = tip;
+        } else if (edge_index == 1u) {
+            edge.start = tip;
+            edge.end = left;
+        } else if (edge_index == 2u) {
+            edge.start = tip;
+            edge.end = right;
+        } else if (edge_index == 3u) {
+            edge.start = d0;
+            edge.end = d1;
+        } else if (edge_index == 4u) {
+            edge.start = d1;
+            edge.end = d2;
+        } else if (edge_index == 5u) {
+            edge.start = d2;
+            edge.end = d3;
+        } else if (edge_index == 6u) {
+            edge.start = d3;
+            edge.end = d0;
+        } else {
+            edge.valid = false;
+        }
+    } else {
+        edge.valid = false;
+    }
+
+    return edge;
+}
+
 fn highlight_color(base: vec3<f32>, axis_id: u32) -> vec3<f32> {
     if (gizmo.active_axis == axis_id) {
         return mix(base, vec3<f32>(1.0, 1.0, 1.0), gizmo.highlight_params.y);
@@ -201,6 +420,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     let scale_total = SCALE_VERTS_PER_AXIS * AXIS_COUNT;
     let rotate_total = ring_verts_per_axis * AXIS_COUNT;
     let selection_total = select(0u, SELECTION_EDGE_COUNT * SELECTION_VERTS_PER_EDGE, gizmo.selection_enabled != 0u);
+    let outline_total = gizmo.outline_meta.x * OUTLINE_VERTS_PER_LINE;
+    let icon_total = gizmo.icon_meta.x * ICON_VERTS_PER_GIZMO;
     var gizmo_total = 0u;
     if (gizmo.mode == 1u) {
         gizmo_total = translate_total + ORIGIN_VERTS;
@@ -366,6 +587,45 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
         pos = mix(start_world, end_world, quad.x) + side * (quad.y * gizmo.selection_thickness);
         color = gizmo.selection_color.xyz;
         alpha = gizmo.selection_color.w;
+    } else if (vertex_index < gizmo_total + selection_total + outline_total) {
+        let local_index = vertex_index - gizmo_total - selection_total;
+        let line_index = local_index / OUTLINE_VERTS_PER_LINE;
+        let corner_index = local_index % OUTLINE_VERTS_PER_LINE;
+
+        if (line_index < gizmo.outline_meta.x) {
+            let line = gizmo.outline_lines[line_index];
+            let start_world = gizmo.origin + quat_rotate(gizmo.rotation, line.start * gizmo.scale);
+            let end_world = gizmo.origin + quat_rotate(gizmo.rotation, line.end * gizmo.scale);
+            let thickness = max(gizmo.size * gizmo.outline_line_params.x, gizmo.outline_line_params.y);
+            pos = line_vertex(corner_index, start_world, end_world, view_dir, thickness);
+            color = gizmo.outline_color.xyz;
+            alpha = gizmo.outline_color.w;
+        } else {
+            alpha = 0.0;
+        }
+    } else if (vertex_index < gizmo_total + selection_total + outline_total + icon_total) {
+        let local_index = vertex_index - gizmo_total - selection_total - outline_total;
+        let icon_index = local_index / ICON_VERTS_PER_GIZMO;
+        let icon_local = local_index % ICON_VERTS_PER_GIZMO;
+        let edge_index = icon_local / ICON_VERTS_PER_EDGE;
+        let corner_index = icon_local % ICON_VERTS_PER_EDGE;
+
+        if (icon_index < gizmo.icon_meta.x) {
+            let icon = gizmo.icons[icon_index];
+            let thickness = max(icon.size_params.x * gizmo.icon_line_params.x, gizmo.icon_line_params.y);
+            let edge = icon_edge(icon.kind, edge_index, icon.size_params.x, icon.params);
+            if (edge.valid) {
+                let start_world = icon.position + quat_rotate(icon.rotation, edge.start);
+                let end_world = icon.position + quat_rotate(icon.rotation, edge.end);
+                pos = line_vertex(corner_index, start_world, end_world, view_dir, thickness);
+                color = icon.color.xyz;
+                alpha = icon.color.w;
+            } else {
+                alpha = 0.0;
+            }
+        } else {
+            alpha = 0.0;
+        }
     } else {
         alpha = 0.0;
     }

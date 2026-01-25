@@ -395,6 +395,22 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.gizmos_in_play)
             .unwrap_or(false);
+        let mut show_camera_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_camera_gizmos)
+            .unwrap_or(true);
+        let mut show_directional_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_directional_light_gizmos)
+            .unwrap_or(true);
+        let mut show_point_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_point_light_gizmos)
+            .unwrap_or(true);
+        let mut show_spot_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spot_light_gizmos)
+            .unwrap_or(true);
 
         let selected_label = templates
             .iter()
@@ -419,6 +435,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             viewport_state.graph_template = graph_template.clone();
             viewport_state.gizmos_in_play = gizmos_in_play;
+            viewport_state.show_camera_gizmos = show_camera_gizmos;
+            viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
+            viewport_state.show_point_light_gizmos = show_point_light_gizmos;
+            viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
         }
 
         if previous_template != graph_template {
@@ -435,8 +455,19 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
 
         ui.heading("Gizmos");
         ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
+        ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
+        ui.checkbox(
+            &mut show_directional_light_gizmos,
+            "Show Directional Light Gizmos",
+        );
+        ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
+        ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             viewport_state.gizmos_in_play = gizmos_in_play;
+            viewport_state.show_camera_gizmos = show_camera_gizmos;
+            viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
+            viewport_state.show_point_light_gizmos = show_point_light_gizmos;
+            viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
         }
 
         let mut gizmo_mode = world
@@ -468,234 +499,311 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                     gizmo_settings.size_max = size_min;
                 }
 
-                ui.label("Sizing");
-                edit_float_range(
-                    ui,
-                    "Size Scale",
-                    &mut gizmo_settings.size_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                let size_max_limit = gizmo_settings.size_max;
-                edit_float_range(
-                    ui,
-                    "Size Min",
-                    &mut gizmo_settings.size_min,
-                    0.01,
-                    0.0..=size_max_limit,
-                );
-                let size_min_limit = gizmo_settings.size_min;
-                edit_float_range(
-                    ui,
-                    "Size Max",
-                    &mut gizmo_settings.size_max,
-                    1.0,
-                    size_min_limit..=f32::MAX,
-                );
+                ui.collapsing("General", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Size Scale",
+                        &mut gizmo_settings.size_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    let size_max_limit = gizmo_settings.size_max;
+                    edit_float_range(
+                        ui,
+                        "Size Min",
+                        &mut gizmo_settings.size_min,
+                        0.01,
+                        0.0..=size_max_limit,
+                    );
+                    let size_min_limit = gizmo_settings.size_min;
+                    edit_float_range(
+                        ui,
+                        "Size Max",
+                        &mut gizmo_settings.size_max,
+                        1.0,
+                        size_min_limit..=f32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Picking");
-                edit_float_range(
-                    ui,
-                    "Axis Pick Scale",
-                    &mut gizmo_settings.axis_pick_radius_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Axis Pick Min",
-                    &mut gizmo_settings.axis_pick_radius_min,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Center Pick Scale",
-                    &mut gizmo_settings.center_pick_radius_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Center Pick Min",
-                    &mut gizmo_settings.center_pick_radius_min,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Rotate Pick Scale",
-                    &mut gizmo_settings.rotate_pick_radius_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Rotate Pick Min",
-                    &mut gizmo_settings.rotate_pick_radius_min,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Scale Min",
-                    &mut gizmo_settings.scale_min,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
+                ui.collapsing("Picking", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Axis Pick Scale",
+                        &mut gizmo_settings.axis_pick_radius_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Axis Pick Min",
+                        &mut gizmo_settings.axis_pick_radius_min,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Center Pick Scale",
+                        &mut gizmo_settings.center_pick_radius_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Center Pick Min",
+                        &mut gizmo_settings.center_pick_radius_min,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Rotate Pick Scale",
+                        &mut gizmo_settings.rotate_pick_radius_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Rotate Pick Min",
+                        &mut gizmo_settings.rotate_pick_radius_min,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Icon Pick Scale",
+                        &mut gizmo_settings.icon_pick_radius_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Icon Pick Min",
+                        &mut gizmo_settings.icon_pick_radius_min,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Translate");
-                edit_float_range(
-                    ui,
-                    "Thickness Scale",
-                    &mut gizmo_settings.translate_thickness_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Thickness Min",
-                    &mut gizmo_settings.translate_thickness_min,
-                    0.005,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Head Length Scale",
-                    &mut gizmo_settings.translate_head_length_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Head Width Scale",
-                    &mut gizmo_settings.translate_head_width_scale,
-                    0.05,
-                    0.0..=f32::MAX,
-                );
+                ui.collapsing("Translate", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Thickness Scale",
+                        &mut gizmo_settings.translate_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Thickness Min",
+                        &mut gizmo_settings.translate_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Head Length Scale",
+                        &mut gizmo_settings.translate_head_length_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Head Width Scale",
+                        &mut gizmo_settings.translate_head_width_scale,
+                        0.05,
+                        0.0..=f32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Rotate");
-                edit_float_range(
-                    ui,
-                    "Ring Radius Scale",
-                    &mut gizmo_settings.rotate_radius_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Ring Thickness Scale",
-                    &mut gizmo_settings.rotate_thickness_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Ring Thickness Min",
-                    &mut gizmo_settings.rotate_thickness_min,
-                    0.005,
-                    0.0..=f32::MAX,
-                );
-                edit_u32_range(
-                    ui,
-                    "Ring Segments",
-                    &mut gizmo_settings.ring_segments,
-                    1.0,
-                    3..=u32::MAX,
-                );
+                ui.collapsing("Rotate", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Ring Radius Scale",
+                        &mut gizmo_settings.rotate_radius_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Ring Thickness Scale",
+                        &mut gizmo_settings.rotate_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Ring Thickness Min",
+                        &mut gizmo_settings.rotate_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_u32_range(
+                        ui,
+                        "Ring Segments",
+                        &mut gizmo_settings.ring_segments,
+                        1.0,
+                        3..=u32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Scale");
-                edit_float_range(
-                    ui,
-                    "Thickness Scale",
-                    &mut gizmo_settings.scale_thickness_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Thickness Min",
-                    &mut gizmo_settings.scale_thickness_min,
-                    0.005,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Head Length Scale",
-                    &mut gizmo_settings.scale_head_length_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Box Scale",
-                    &mut gizmo_settings.scale_box_scale,
-                    0.05,
-                    0.0..=f32::MAX,
-                );
+                ui.collapsing("Scale", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Thickness Scale",
+                        &mut gizmo_settings.scale_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Thickness Min",
+                        &mut gizmo_settings.scale_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Head Length Scale",
+                        &mut gizmo_settings.scale_head_length_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Box Scale",
+                        &mut gizmo_settings.scale_box_scale,
+                        0.05,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Scale Min",
+                        &mut gizmo_settings.scale_min,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Origin");
-                edit_float_range(
-                    ui,
-                    "Size Scale",
-                    &mut gizmo_settings.origin_size_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Size Min",
-                    &mut gizmo_settings.origin_size_min,
-                    0.005,
-                    0.0..=f32::MAX,
-                );
+                ui.collapsing("Origin", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Size Scale",
+                        &mut gizmo_settings.origin_size_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Size Min",
+                        &mut gizmo_settings.origin_size_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                });
 
-                ui.separator();
-                ui.label("Colors");
-                edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
-                edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
-                edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
-                edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
+                ui.collapsing("Colors", |ui| {
+                    edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
+                    edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
+                    edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
+                    edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
+                });
 
-                ui.separator();
-                ui.label("Selection Outline");
-                edit_float_range(
-                    ui,
-                    "Thickness Scale",
-                    &mut gizmo_settings.selection_thickness_scale,
-                    0.01,
-                    0.0..=f32::MAX,
-                );
-                edit_float_range(
-                    ui,
-                    "Thickness Min",
-                    &mut gizmo_settings.selection_thickness_min,
-                    0.005,
-                    0.0..=f32::MAX,
-                );
-                edit_color(ui, "Color", &mut gizmo_settings.selection_color);
+                ui.collapsing("Bounds Outline", |ui| {
+                    ui.checkbox(
+                        &mut gizmo_settings.show_bounds_outline,
+                        "Show Bounds Outline",
+                    );
+                    edit_float_range(
+                        ui,
+                        "Thickness Scale",
+                        &mut gizmo_settings.selection_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Thickness Min",
+                        &mut gizmo_settings.selection_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_color(ui, "Color", &mut gizmo_settings.selection_color);
+                });
 
-                ui.separator();
-                ui.label("Highlight");
-                edit_float_range(
-                    ui,
-                    "Hover Mix",
-                    &mut gizmo_settings.hover_mix,
-                    0.01,
-                    0.0..=1.0,
-                );
-                edit_float_range(
-                    ui,
-                    "Active Mix",
-                    &mut gizmo_settings.active_mix,
-                    0.01,
-                    0.0..=1.0,
-                );
+                ui.collapsing("Mesh Outline", |ui| {
+                    ui.checkbox(&mut gizmo_settings.show_mesh_outline, "Show Mesh Outline");
+                    edit_float_range(
+                        ui,
+                        "Thickness Scale",
+                        &mut gizmo_settings.outline_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Thickness Min",
+                        &mut gizmo_settings.outline_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_u32_range(
+                        ui,
+                        "Max Lines",
+                        &mut gizmo_settings.outline_max_lines,
+                        1.0,
+                        0..=u32::MAX,
+                    );
+                    edit_color(ui, "Color", &mut gizmo_settings.outline_color);
+                });
+
+                ui.collapsing("Icons", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Icon Size Scale",
+                        &mut gizmo_settings.icon_size_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Line Thickness Scale",
+                        &mut gizmo_settings.icon_thickness_scale,
+                        0.01,
+                        0.0..=f32::MAX,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Line Thickness Min",
+                        &mut gizmo_settings.icon_thickness_min,
+                        0.005,
+                        0.0..=f32::MAX,
+                    );
+                    edit_color(ui, "Camera Color", &mut gizmo_settings.camera_icon_color);
+                    edit_color(
+                        ui,
+                        "Active Camera Color",
+                        &mut gizmo_settings.active_camera_icon_color,
+                    );
+                });
+
+                ui.collapsing("Highlight", |ui| {
+                    edit_float_range(
+                        ui,
+                        "Hover Mix",
+                        &mut gizmo_settings.hover_mix,
+                        0.01,
+                        0.0..=1.0,
+                    );
+                    edit_float_range(
+                        ui,
+                        "Active Mix",
+                        &mut gizmo_settings.active_mix,
+                        0.01,
+                        0.0..=1.0,
+                    );
+                });
+
+                gizmo_settings.sanitize();
             });
         }
 

@@ -486,6 +486,62 @@ impl Default for GizmoAxis {
     }
 }
 
+pub const MAX_GIZMO_ICONS: usize = 64;
+pub const MAX_GIZMO_LINES: usize = 1024;
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoIconKind {
+    Camera = 0,
+    LightDirectional = 1,
+    LightPoint = 2,
+    LightSpot = 3,
+}
+
+impl Default for GizmoIconKind {
+    fn default() -> Self {
+        GizmoIconKind::Camera
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GizmoIcon {
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub size: f32,
+    pub color: Vec3,
+    pub kind: GizmoIconKind,
+    pub params: [f32; 4],
+}
+
+impl Default for GizmoIcon {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            size: 0.0,
+            color: Vec3::ZERO,
+            kind: GizmoIconKind::Camera,
+            params: [0.0; 4],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GizmoLine {
+    pub start: Vec3,
+    pub end: Vec3,
+}
+
+impl Default for GizmoLine {
+    fn default() -> Self {
+        Self {
+            start: Vec3::ZERO,
+            end: Vec3::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GizmoStyle {
     pub ring_segments: u32,
@@ -509,6 +565,11 @@ pub struct GizmoStyle {
     pub selection_thickness_scale: f32,
     pub selection_thickness_min: f32,
     pub selection_color: [f32; 3],
+    pub outline_thickness_scale: f32,
+    pub outline_thickness_min: f32,
+    pub outline_color: [f32; 3],
+    pub icon_thickness_scale: f32,
+    pub icon_thickness_min: f32,
     pub hover_mix: f32,
     pub active_mix: f32,
 }
@@ -537,6 +598,11 @@ impl Default for GizmoStyle {
             selection_thickness_scale: 0.03,
             selection_thickness_min: 0.01,
             selection_color: [1.0, 0.85, 0.2],
+            outline_thickness_scale: 0.02,
+            outline_thickness_min: 0.006,
+            outline_color: [0.35, 0.85, 1.0],
+            icon_thickness_scale: 0.025,
+            icon_thickness_min: 0.008,
             hover_mix: 0.3,
             active_mix: 0.5,
         }
@@ -555,6 +621,10 @@ pub struct GizmoData {
     pub selection_enabled: bool,
     pub selection_min: Vec3,
     pub selection_max: Vec3,
+    pub outline_lines: [GizmoLine; MAX_GIZMO_LINES],
+    pub outline_line_count: u32,
+    pub icons: [GizmoIcon; MAX_GIZMO_ICONS],
+    pub icon_count: u32,
     pub style: GizmoStyle,
 }
 
@@ -571,6 +641,10 @@ impl Default for GizmoData {
             selection_enabled: false,
             selection_min: Vec3::ZERO,
             selection_max: Vec3::ZERO,
+            outline_lines: [GizmoLine::default(); MAX_GIZMO_LINES],
+            outline_line_count: 0,
+            icons: [GizmoIcon::default(); MAX_GIZMO_ICONS],
+            icon_count: 0,
             style: GizmoStyle::default(),
         }
     }

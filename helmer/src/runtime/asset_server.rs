@@ -1569,6 +1569,10 @@ impl AssetServer {
         Handle::new(id)
     }
 
+    pub fn get_mesh(&self, id: usize) -> Option<Arc<Mesh>> {
+        self.mesh_cache.read().get(&id).cloned()
+    }
+
     pub fn set_limits(
         &mut self,
         asset_creation_limit_per_frame: usize,

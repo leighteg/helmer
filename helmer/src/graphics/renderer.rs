@@ -36,13 +36,13 @@ use crate::graphics::{
         renderer::{
             Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
             DdgiGridConstants, EguiTextureCache, GizmoMode, InstanceRaw, LightData,
-            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
-            OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
-            OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
-            RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
-            RenderObject, RenderObjectDelta, RenderPassTiming, RendererStats, ShaderConstants,
-            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
-            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            MAX_GIZMO_ICONS, MAX_GIZMO_LINES, MaterialShaderData, MeshLodPayload, MeshletDesc,
+            MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
+            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
+            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
+            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
+            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
+            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -60,9 +60,9 @@ use crate::graphics::{
         },
     },
     passes::{
-        BundleMode, FrameGlobals, GBufferBundleKey, GizmoParams, IndirectDrawBatch,
-        MaterialTextureSet, RayTracingFrameInput, RayTracingTextureArrays, ShadowBundleKey,
-        SwapchainFrameInput,
+        BundleMode, FrameGlobals, GBufferBundleKey, GizmoIconParams, GizmoLineParams, GizmoParams,
+        IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput, RayTracingTextureArrays,
+        ShadowBundleKey, SwapchainFrameInput,
     },
     render_graphs::default_graph_spec,
 };
@@ -6771,7 +6771,11 @@ impl GraphRenderer {
 
         let (gizmo_params_buffer, gizmo_vertex_count) = {
             let gizmo = render_data.gizmo;
-            if gizmo.mode == GizmoMode::None && !gizmo.selection_enabled {
+            if gizmo.mode == GizmoMode::None
+                && !gizmo.selection_enabled
+                && gizmo.icon_count == 0
+                && gizmo.outline_line_count == 0
+            {
                 (None, 0)
             } else {
                 let style = gizmo.style;
@@ -6787,9 +6791,43 @@ impl GraphRenderer {
                     GizmoMode::None => 0,
                 };
                 let selection_verts = if gizmo.selection_enabled { 12 * 6 } else { 0 };
-                let vertex_count = gizmo_verts + selection_verts;
+                let icon_edge_count = 16;
+                let icon_verts_per_gizmo = icon_edge_count * 6;
+                let icon_count = gizmo.icon_count.min(MAX_GIZMO_ICONS as u32);
+                let icon_verts = icon_count * icon_verts_per_gizmo;
+                let outline_line_count = gizmo.outline_line_count.min(MAX_GIZMO_LINES as u32);
+                let outline_verts = outline_line_count * 6;
+                let vertex_count = gizmo_verts + selection_verts + icon_verts + outline_verts;
                 let selection_thickness = (gizmo.size * style.selection_thickness_scale)
                     .max(style.selection_thickness_min);
+
+                let mut icon_params = [GizmoIconParams::default(); MAX_GIZMO_ICONS];
+                for (index, icon) in gizmo.icons.iter().take(icon_count as usize).enumerate() {
+                    icon_params[index] = GizmoIconParams {
+                        position: icon.position.to_array(),
+                        kind: icon.kind as u32,
+                        rotation: icon.rotation.to_array(),
+                        color: [icon.color.x, icon.color.y, icon.color.z, 0.9],
+                        params: icon.params,
+                        size_params: [icon.size, 0.0, 0.0, 0.0],
+                    };
+                }
+
+                let mut outline_lines = [GizmoLineParams::default(); MAX_GIZMO_LINES];
+                for (index, line) in gizmo
+                    .outline_lines
+                    .iter()
+                    .take(outline_line_count as usize)
+                    .enumerate()
+                {
+                    outline_lines[index] = GizmoLineParams {
+                        start: line.start.to_array(),
+                        _pad0: 0.0,
+                        end: line.end.to_array(),
+                        _pad1: 0.0,
+                    };
+                }
+
                 let params = GizmoParams {
                     origin: gizmo.position.to_array(),
                     mode: gizmo.mode as u32,
@@ -6854,6 +6892,28 @@ impl GraphRenderer {
                         style.selection_color[2],
                         1.0,
                     ],
+                    icon_meta: [icon_count, 0, 0, 0],
+                    icon_line_params: [
+                        style.icon_thickness_scale,
+                        style.icon_thickness_min,
+                        0.0,
+                        0.0,
+                    ],
+                    icons: icon_params,
+                    outline_meta: [outline_line_count, 0, 0, 0],
+                    outline_line_params: [
+                        style.outline_thickness_scale,
+                        style.outline_thickness_min,
+                        0.0,
+                        0.0,
+                    ],
+                    outline_color: [
+                        style.outline_color[0],
+                        style.outline_color[1],
+                        style.outline_color[2],
+                        1.0,
+                    ],
+                    outline_lines,
                 };
                 let buf = self.buffer_cache.gizmo_params.ensure(
                     &self.device,

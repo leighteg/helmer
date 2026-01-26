@@ -1,0 +1,10 @@
+(
+    name: "Flappy Bird",
+    version: 1,
+    assets_dir: "assets",
+    models_dir: "assets/models",
+    textures_dir: "assets/textures",
+    materials_dir: "assets/materials",
+    scenes_dir: "assets/scenes",
+    scripts_dir: "assets/scripts",
+)

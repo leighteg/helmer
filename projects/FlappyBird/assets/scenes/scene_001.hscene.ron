@@ -1,0 +1,74 @@
+(
+    version: 1,
+    entities: [
+        /*[0]*/ (
+            name: Some("Scene Camera"),
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            components: (
+                mesh: None,
+                light: None,
+                camera: Some((
+                    fov_y_rad: 0.7853982,
+                    aspect_ratio: 1.7,
+                    near_plane: 0.1,
+                    far_plane: 100.0,
+                    active: true,
+                )),
+                scene: None,
+                scripts: [],
+                dynamic: [],
+                freecam: false,
+                physics: None,
+            ),
+        ),
+        /*[1]*/ (
+            name: Some("Directional Light"),
+            transform: (
+                position: (0.0, 4.0, 0.0),
+                rotation: (-0.38254622, 0.22725973, 0.22725973, 0.86623573),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            components: (
+                mesh: None,
+                light: Some((
+                    kind: Directional,
+                    color: (1.0, 1.0, 1.0),
+                    intensity: 50.0,
+                )),
+                camera: None,
+                scene: None,
+                scripts: [],
+                dynamic: [],
+                freecam: false,
+                physics: None,
+            ),
+        ),
+        /*[2]*/ (
+            name: Some("Empty"),
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            components: (
+                mesh: None,
+                light: None,
+                camera: None,
+                scene: None,
+                scripts: [
+                    /*[0]*/ (
+                        path: "assets/scripts/script.lua",
+                        language: "lua",
+                    ),
+                ],
+                dynamic: [],
+                freecam: false,
+                physics: None,
+            ),
+        ),
+    ],
+)

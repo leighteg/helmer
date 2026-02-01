@@ -3104,10 +3104,13 @@ impl GraphRenderer {
                 self.gpu_instance_updates.clear();
                 self.note_bundle_resource_change();
                 let reset_rt = restream_assets
-                    || self
-                        .current_render_data
-                        .as_ref()
-                        .is_some_and(|state| state.data.render_graph.name == "traced-graph");
+                    || self.current_render_data.as_ref().is_some_and(|state| {
+                        let graph = &state.data.render_graph;
+                        let config = &state.data.render_config;
+                        graph.name == "traced-graph"
+                            || (graph.name == "hybrid-graph"
+                                && (config.ddgi_pass || config.rt_reflections))
+                    });
                 if reset_rt {
                     self.reset_ray_tracing_state();
                 } else {
@@ -4653,12 +4656,19 @@ impl GraphRenderer {
                 .create_logical(inds_desc.clone(), Some(inds_hints), self.frame_index, None);
         self.insert_buffer_entry(inds_id, inds_desc, inds_buffer, inds_hints, None);
 
-        let rt_blas_index = self.rt_state.register_blas(build_blas(
-            vertices.as_slice(),
-            indices.as_slice(),
-            self.rt_state.blas_leaf_size.max(1),
-        ));
-        self.rt_state.fallback_blas_index = rt_blas_index;
+        let existing = self.rt_state.fallback_blas_index();
+        let rt_blas_index = if existing != 0 && (existing as usize) < self.rt_state.blas_descs.len()
+        {
+            existing
+        } else {
+            let index = self.rt_state.register_blas(build_blas(
+                vertices.as_slice(),
+                indices.as_slice(),
+                self.rt_state.blas_leaf_size.max(1),
+            ));
+            self.rt_state.fallback_blas_index = index;
+            index
+        };
         let estimated_bytes = (vertices.len() * std::mem::size_of::<Vertex>()
             + indices.len() * std::mem::size_of::<u32>()
             + meshlet_data.descs.len() * std::mem::size_of::<MeshletDesc>()
@@ -4885,7 +4895,8 @@ impl GraphRenderer {
 
         let mut gpu_lods = Vec::with_capacity(lods.len().saturating_add(existing_lods.len()));
         let primary_slot = lods.iter().position(|lod| lod.lod_index == 0).unwrap_or(0);
-        let allow_blas = self.rt_blas_targets.is_empty() || self.rt_blas_targets.contains(&id);
+        let allow_blas = self.rt_requires_blas
+            && (self.rt_blas_targets.is_empty() || self.rt_blas_targets.contains(&id));
         let rt_blas_index = if allow_blas {
             existing_rt_blas.unwrap_or_else(|| {
                 lods.get(primary_slot)

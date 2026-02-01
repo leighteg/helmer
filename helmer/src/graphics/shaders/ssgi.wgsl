@@ -143,7 +143,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let blue_noise_dims = vec2<f32>(textureDimensions(t_blue_noise, 0));
     let blue_noise_uv = in.uv * vec2<f32>(textureDimensions(t_direct_lighting_diffuse, 0)) / blue_noise_dims;
-    let blue_noise = textureSample(t_blue_noise, s_blue_noise, blue_noise_uv).xy;
+    let blue_noise = textureSampleLevel(t_blue_noise, s_blue_noise, blue_noise_uv, 0.0).xy;
 
     for (var i = 0; i < i32(constants.ssgi_num_rays); i += 1) {
         let r = fract(blue_noise + vec2<f32>(f32(i) * 0.137, f32(camera.frame_index) * 0.379));
@@ -160,7 +160,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             if any(sample_uv < vec2(0.0)) || any(sample_uv > vec2(1.0)) { break; }
 
-            let depth_at_sample = textureSample(t_depth, s_gbuffer, sample_uv).r;
+            let depth_at_sample = textureSampleLevel(t_depth, s_gbuffer, sample_uv, 0.0).r;
             let scene_vs_at_sample = view_pos_from_uv_depth(sample_uv, depth_at_sample);
 
             let ray_depth = -sample_pos_vs.z;
@@ -168,10 +168,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
             if ray_depth > scene_depth && ray_depth < scene_depth + constants.ssgi_thickness {
                 // get the color of the surface the ray hit.
-                let albedo_at_hit = textureSample(t_albedo, s_gbuffer, sample_uv).rgb;
+                let albedo_at_hit = textureSampleLevel(t_albedo, s_gbuffer, sample_uv, 0.0).rgb;
 
                 // get the light hitting that surface.
-                let lighting_at_hit = textureSample(t_direct_lighting_diffuse, s_gbuffer, sample_uv).rgb;
+                let lighting_at_hit = textureSampleLevel(t_direct_lighting_diffuse, s_gbuffer, sample_uv, 0.0).rgb;
 
                 // combine them to get the final reflected light color.
                 let reflected_light = albedo_at_hit * lighting_at_hit;
@@ -190,7 +190,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     prev_clip /= prev_clip.w;
     let prev_uv = saturate(prev_clip.xy * vec2(0.5, -0.5) + 0.5);
 
-    let prev_result = textureSample(t_history, s_scene, prev_uv).rgb;
+    let prev_result = textureSampleLevel(t_history, s_scene, prev_uv, 0.0).rgb;
     let blended_light = mix(prev_result, ssgi_result, constants.ssgi_blend_factor);
 
     return vec4<f32>(blended_light, 1.0);

@@ -17,10 +17,11 @@ use wasm_bindgen_futures::spawn_local;
 use web_time::Instant;
 use winit::{
     application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
+    platform::web::WindowExtWebSys,
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -609,10 +610,47 @@ impl<T: 'static> Runtime<T> {
         self.window_settings.clone_attributes()
     }
 
+    fn estimate_web_window_size(window: &Window) -> Option<LogicalSize<f64>> {
+        let canvas = window.canvas()?;
+        let rect = canvas.get_bounding_client_rect();
+        let mut width = rect.width();
+        let mut height = rect.height();
+        if width <= 0.0 || height <= 0.0 {
+            if let Some(web_window) = web_sys::window() {
+                if let Ok(inner_width) = web_window.inner_width() {
+                    if let Some(value) = inner_width.as_f64() {
+                        width = value;
+                    }
+                }
+                if let Ok(inner_height) = web_window.inner_height() {
+                    if let Some(value) = inner_height.as_f64() {
+                        height = value;
+                    }
+                }
+            }
+        }
+
+        if width > 0.0 && height > 0.0 {
+            Some(LogicalSize::new(width, height))
+        } else {
+            None
+        }
+    }
+
     fn attach_window(&mut self, window: Arc<Window>) -> PhysicalSize<u32> {
-        let new_size = window.inner_size();
+        let mut new_size = window.inner_size();
+        if new_size.width == 0 || new_size.height == 0 {
+            if let Some(logical_size) = Self::estimate_web_window_size(&window) {
+                let _ = window.request_inner_size(logical_size);
+                new_size = logical_size.to_physical(window.scale_factor());
+            }
+        }
+
         self.window = Some(Arc::clone(&window));
         self.window_settings.sync_geometry_from_window(&window);
+        if new_size.width > 0 && new_size.height > 0 {
+            self.window_settings.set_inner_size(new_size);
+        }
         self.window_settings.apply_post_create(&window);
 
         let mut input = self.input_manager.write();

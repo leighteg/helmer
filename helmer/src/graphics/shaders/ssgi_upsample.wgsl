@@ -25,11 +25,11 @@ fn gaussian(x: f32, sigma: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let center_depth = textureSample(full_res_depth, s_point, in.uv).x;
+    let center_depth = textureSampleLevel(full_res_depth, s_point, in.uv, 0.0).x;
     if (center_depth >= 1.0) {
         return vec4(0.0);
     }
-    let center_normal = normalize(textureSample(full_res_normal, s_point, in.uv).xyz * 2.0 - 1.0);
+    let center_normal = normalize(textureSampleLevel(full_res_normal, s_point, in.uv, 0.0).xyz * 2.0 - 1.0);
 
     let low_res_texel = 1.0 / vec2<f32>(textureDimensions(low_res_ssgi, 0));
     
@@ -45,8 +45,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let offset = vec2<f32>(f32(x), f32(y)) * low_res_texel;
             let sample_uv = in.uv + offset;
 
-            let sample_depth = textureSample(full_res_depth, s_point, sample_uv).x;
-            let sample_normal = normalize(textureSample(full_res_normal, s_point, sample_uv).xyz * 2.0 - 1.0);
+            let sample_depth = textureSampleLevel(full_res_depth, s_point, sample_uv, 0.0).x;
+            let sample_normal = normalize(textureSampleLevel(full_res_normal, s_point, sample_uv, 0.0).xyz * 2.0 - 1.0);
 
             let depth_diff = abs(sample_depth - center_depth);
             // Use 1.0 - dot product for normal difference
@@ -56,14 +56,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let normal_weight = gaussian(normal_diff, normal_sigma);
             let weight = depth_weight * normal_weight;
             
-            final_color += textureSample(low_res_ssgi, s_linear, sample_uv).rgb * weight;
+            final_color += textureSampleLevel(low_res_ssgi, s_linear, sample_uv, 0.0).rgb * weight;
             total_weight += weight;
         }
     }
     
     if (total_weight < 0.001) {
         // Fallback to simple linear sampling if no valid neighbors are found
-        return textureSample(low_res_ssgi, s_linear, in.uv);
+        return textureSampleLevel(low_res_ssgi, s_linear, in.uv, 0.0);
     }
     
     return vec4(final_color / total_weight, 1.0);

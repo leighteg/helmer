@@ -202,33 +202,24 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
 fn fs_main(in: GBufferInput) -> GBufferOutput {
     var out: GBufferOutput;
     let material = materials_buffer[in.material_id];
+    let mip_bias = render_constants.mip_bias;
 
-    // --- Albedo Calculation ---
-    var albedo_color = material.albedo.rgb;
-    var alpha = material.albedo.a;
-    if material.albedo_idx >= 0i {
-        let albedo_sample = textureSampleBias(albedo_tex, pbr_sampler, in.tex_coord, render_constants.mip_bias);
-        albedo_color *= albedo_sample.rgb; // Multiply factor by texture
-        alpha *= albedo_sample.a;
-    }
+    let has_albedo = material.albedo_idx >= 0i;
+    let albedo_sample = textureSampleBias(albedo_tex, pbr_sampler, in.tex_coord, mip_bias);
+    var albedo_color = material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo);
+    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo);
 
-    // --- MRA Calculation ---
-    var metallic = material.metallic;
-    var roughness = material.roughness;
-    var ao = material.ao;
-    if material.metallic_roughness_idx >= 0i {
-    // Standard GLTF packing: R=Occlusion, G=Roughness, B=Metallic
-        let mra_sample = textureSampleBias(mra_tex, pbr_sampler, in.tex_coord, render_constants.mip_bias);
-        ao *= mra_sample.r;          // Occlusion from Red channel
-        roughness *= mra_sample.g;   // Roughness from Green channel
-        metallic *= mra_sample.b;    // Metallic from Blue channel
-    }
+    let has_mra = material.metallic_roughness_idx >= 0i;
+    let mra_sample = textureSampleBias(mra_tex, pbr_sampler, in.tex_coord, mip_bias);
+    let mra_factor = select(vec3<f32>(1.0), mra_sample.rgb, has_mra);
+    var metallic = material.metallic * mra_factor.b;
+    var roughness = material.roughness * mra_factor.g;
+    var ao = material.ao * mra_factor.r;
 
-    // --- Emission Calculation ---
-    var emission_color = material.emission_color * material.emission_strength;
-    if material.emission_idx >= 0i {
-        emission_color *= textureSampleBias(emission_tex, pbr_sampler, in.tex_coord, render_constants.mip_bias).rgb;
-    }
+    let has_emission = material.emission_idx >= 0i;
+    let emission_sample = textureSampleBias(emission_tex, pbr_sampler, in.tex_coord, mip_bias).rgb;
+    var emission_color =
+        material.emission_color * material.emission_strength * select(vec3<f32>(1.0), emission_sample, has_emission);
 
     // --- Normal Mapping ---
     let smooth_normal = safe_normalize(in.world_normal);
@@ -241,19 +232,17 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
         geom_normal = flat_normal;
     }
 
-    var N: vec3<f32>;
-    if material.normal_idx >= 0i {
-        let tangent_space_normal = textureSampleBias(normal_tex, pbr_sampler, in.tex_coord, render_constants.mip_bias).xyz * 2.0 - 1.0;
-        let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
-        var B = safe_normalize(cross(geom_normal, T));
-        if dot(B, in.world_bitangent) < 0.0 {
-            B = -B;
-        }
-        let tbn = mat3x3<f32>(T, B, geom_normal);
-        N = safe_normalize(tbn * tangent_space_normal);
-    } else {
-        N = geom_normal;
+    let has_normal = material.normal_idx >= 0i;
+    let tangent_space_normal =
+        textureSampleBias(normal_tex, pbr_sampler, in.tex_coord, mip_bias).xyz * 2.0 - 1.0;
+    let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+    var B = safe_normalize(cross(geom_normal, T));
+    if dot(B, in.world_bitangent) < 0.0 {
+        B = -B;
     }
+    let tbn = mat3x3<f32>(T, B, geom_normal);
+    let mapped_normal = safe_normalize(tbn * tangent_space_normal);
+    let N = select(geom_normal, mapped_normal, has_normal);
 
     // --- Pack and Output ---
     // Ensure the normal written to the G-Buffer is also valid

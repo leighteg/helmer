@@ -161,8 +161,8 @@ fn sample_scattering_lut(coords: vec3<f32>) -> vec3<f32> {
     let uv = clamped.xy;
     let layer0_i = i32(layer0);
     let layer1_i = i32(layer1);
-    let c0 = textureSample(scattering_lut, atmosphere_sampler, uv, layer0_i).rgb;
-    let c1 = textureSample(scattering_lut, atmosphere_sampler, uv, layer1_i).rgb;
+    let c0 = textureSampleLevel(scattering_lut, atmosphere_sampler, uv, layer0_i, 0.0).rgb;
+    let c1 = textureSampleLevel(scattering_lut, atmosphere_sampler, uv, layer1_i, 0.0).rgb;
     return mix(c0, c1, t);
 }
 
@@ -213,7 +213,7 @@ fn get_transmittance(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
     let up = world_pos / altitude;
     let mu = dot(view_dir, up);
     let uv = altitude_mu_to_uv(altitude, mu, atmosphere.planet_radius, atmosphere.atmosphere_radius);
-    return textureSample(transmittance_lut, atmosphere_sampler, uv).rgb;
+    return textureSampleLevel(transmittance_lut, atmosphere_sampler, uv, 0.0).rgb;
 }
 
 fn get_scattering_color(world_pos: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {

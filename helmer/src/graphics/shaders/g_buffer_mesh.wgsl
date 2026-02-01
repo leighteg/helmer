@@ -481,31 +481,29 @@ fn ms_main(
 fn fs_main(in: GBufferInput) -> GBufferOutput {
     var out: GBufferOutput;
     let material = materials_buffer[in.material_id];
+    let mip_bias = render_constants.mip_bias;
 
-    // --- ALBEDO ---
-    var albedo = material.albedo.rgb;
-    var alpha = material.albedo.a;
-    if material.albedo_idx >= 0i {
-        let sample = textureSampleBias(
-            textures[material.albedo_idx],
-            pbr_sampler,
-            in.tex_coord,
-            render_constants.mip_bias
-        );
-        albedo *= sample.rgb;
-        alpha *= sample.a;
-    }
+    let has_albedo = material.albedo_idx >= 0i;
+    let albedo_idx = select(0i, material.albedo_idx, has_albedo);
+    let albedo_sample = textureSampleBias(
+        textures[albedo_idx],
+        pbr_sampler,
+        in.tex_coord,
+        mip_bias
+    );
+    var albedo = material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo);
+    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo);
 
-    // --- EMISSION ---
-    var emission = material.emission_color * material.emission_strength;
-    if material.emission_idx >= 0i {
-        emission *= textureSampleBias(
-            textures[material.emission_idx],
-            pbr_sampler,
-            in.tex_coord,
-            render_constants.mip_bias
-        ).rgb;
-    }
+    let has_emission = material.emission_idx >= 0i;
+    let emission_idx = select(0i, material.emission_idx, has_emission);
+    let emission_sample = textureSampleBias(
+        textures[emission_idx],
+        pbr_sampler,
+        in.tex_coord,
+        mip_bias
+    ).rgb;
+    var emission =
+        material.emission_color * material.emission_strength * select(vec3<f32>(1.0), emission_sample, has_emission);
 
     // --- NORMAL MAP ---
     let smooth_normal = safe_normalize(in.world_normal);
@@ -518,39 +516,37 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
         geom_normal = flat_normal;
     }
 
-    var N = geom_normal;
-    if material.normal_idx >= 0i {
-        let normal_sample = textureSampleBias(
-            textures[material.normal_idx],
-            pbr_sampler,
-            in.tex_coord,
-            render_constants.mip_bias
-        ).xyz * 2.0 - 1.0;
+    let has_normal = material.normal_idx >= 0i;
+    let normal_idx = select(0i, material.normal_idx, has_normal);
+    let normal_sample = textureSampleBias(
+        textures[normal_idx],
+        pbr_sampler,
+        in.tex_coord,
+        mip_bias
+    ).xyz * 2.0 - 1.0;
 
-        let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
-        var B = safe_normalize(cross(geom_normal, T));
-        if dot(B, in.world_bitangent) < 0.0 {
-            B = -B;
-        }
-        let tbn = mat3x3<f32>(T, B, geom_normal);
-        N = safe_normalize(tbn * normal_sample);
+    let T = safe_normalize(in.world_tangent - geom_normal * dot(geom_normal, in.world_tangent));
+    var B = safe_normalize(cross(geom_normal, T));
+    if dot(B, in.world_bitangent) < 0.0 {
+        B = -B;
     }
+    let tbn = mat3x3<f32>(T, B, geom_normal);
+    let mapped_normal = safe_normalize(tbn * normal_sample);
+    let N = select(geom_normal, mapped_normal, has_normal);
 
     // --- METALLIC, ROUGHNESS, AO ---
-    var metallic = material.metallic;
-    var roughness = material.roughness;
-    var ao = material.ao;
-    if material.metallic_roughness_idx >= 0i {
-        let mra_sample = textureSampleBias(
-            textures[material.metallic_roughness_idx],
-            pbr_sampler,
-            in.tex_coord,
-            render_constants.mip_bias
-        );
-        metallic *= mra_sample.b;
-        roughness *= mra_sample.g;
-        ao *= mra_sample.r;
-    }
+    let has_mra = material.metallic_roughness_idx >= 0i;
+    let mra_idx = select(0i, material.metallic_roughness_idx, has_mra);
+    let mra_sample = textureSampleBias(
+        textures[mra_idx],
+        pbr_sampler,
+        in.tex_coord,
+        mip_bias
+    );
+    let mra_factor = select(vec3<f32>(1.0), mra_sample.rgb, has_mra);
+    var metallic = material.metallic * mra_factor.b;
+    var roughness = material.roughness * mra_factor.g;
+    var ao = material.ao * mra_factor.r;
 
     out.normal = vec4<f32>(safe_normalize(N) * 0.5 + 0.5, 1.0);
     out.albedo = vec4<f32>(albedo, alpha);

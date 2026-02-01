@@ -258,33 +258,33 @@ fn calculate_shadow_factor(
     // 7. Poisson disk sampling
     if sample_count == 16 {
         // 16-tap sampling
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[1] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[3] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[5] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[7] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[9] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[11] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[13] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[15] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[1] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[3] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[5] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[7] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[9] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[11] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[13] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[15] * texel_size, u32(cascade_index), 0.0).rg;
         total_moments *= (1.0 / 16.0);
     } else {
         // 8-tap sampling - every other sample
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index)).rg;
-        total_moments += textureSample(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index)).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[0] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[2] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[4] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[6] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[8] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[10] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[12] * texel_size, u32(cascade_index), 0.0).rg;
+        total_moments += textureSampleLevel(shadow_map, shadow_sampler, shadow_uv + POISSON_DISK_16[14] * texel_size, u32(cascade_index), 0.0).rg;
         total_moments *= (1.0 / 8.0);
     }
 

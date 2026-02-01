@@ -135,31 +135,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let depth = sample_depth(depth_tex, in.tex_coords);
     if (depth <= 0.0) {
         if ((debug.flags & FLAG_SKY) != 0u) {
-            let sky_color = textureSample(sky_tex, scene_sampler, in.tex_coords).rgb;
+            let sky_color = textureSampleLevel(sky_tex, scene_sampler, in.tex_coords, 0.0).rgb;
             return vec4<f32>(sky_color, 1.0);
         }
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
 
-    let albedo_sample = textureSample(albedo_tex, scene_sampler, in.tex_coords);
+    let albedo_sample = textureSampleLevel(albedo_tex, scene_sampler, in.tex_coords, 0.0);
     let albedo = albedo_sample.rgb;
     let alpha = albedo_sample.a;
-    let emission = textureSample(emission_tex, scene_sampler, in.tex_coords).rgb;
+    let emission = textureSampleLevel(emission_tex, scene_sampler, in.tex_coords, 0.0).rgb;
     let emission_strength = length(emission);
 
-    let direct_light = textureSample(direct_lighting_tex, scene_sampler, in.tex_coords).rgb;
-    let indirect_diffuse_ssgi = textureSample(ssgi_tex, scene_sampler, in.tex_coords).rgb;
-    let ssr_sample = textureSample(ssr_tex, scene_sampler, in.tex_coords);
+    let direct_light = textureSampleLevel(direct_lighting_tex, scene_sampler, in.tex_coords, 0.0).rgb;
+    let indirect_diffuse_ssgi = textureSampleLevel(ssgi_tex, scene_sampler, in.tex_coords, 0.0).rgb;
+    let ssr_sample = textureSampleLevel(ssr_tex, scene_sampler, in.tex_coords, 0.0);
     let indirect_specular_ssr = ssr_sample.rgb;
     let ssr_confidence = ssr_sample.a;
 
-    let mra = textureSample(mra_tex, scene_sampler, in.tex_coords);
+    let mra = textureSampleLevel(mra_tex, scene_sampler, in.tex_coords, 0.0);
     let metallic = mra.r;
     let roughness = mra.g;
     let raw_ao = mra.b;
     let ao = mix(0.25, 1.0, raw_ao);
 
-    let packed_normal = textureSample(normal_tex, scene_sampler, in.tex_coords).xyz;
+    let packed_normal = textureSampleLevel(normal_tex, scene_sampler, in.tex_coords, 0.0).xyz;
     let N = normalize(packed_normal * 2.0 - 1.0);
 
     let ndc = vec4<f32>(in.tex_coords.x * 2.0 - 1.0, (1.0 - in.tex_coords.y) * 2.0 - 1.0, depth, 1.0);
@@ -175,11 +175,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var kD_ibl = vec3(1.0) - kS_ibl;
     kD_ibl *= (1.0 - metallic);
 
-    let irradiance = textureSample(irradiance_map, ibl_sampler, N).rgb;
+    let irradiance = textureSampleLevel(irradiance_map, ibl_sampler, N, 0.0).rgb;
     let diffuse_ibl = irradiance * albedo;
 
     let prefiltered_color = textureSampleLevel(prefiltered_env_map, ibl_sampler, R, roughness * MAX_REFLECTION_LOD).rgb;
-    let brdf = textureSample(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness)).rg;
+    let brdf = textureSampleLevel(brdf_lut, brdf_lut_sampler, vec2<f32>(max(dot(N, V), 0.0), roughness), 0.0).rg;
     let specular_ibl = prefiltered_color * (F_ibl * brdf.x + brdf.y);
 
     let total_incoming_indirect_diffuse = (indirect_diffuse_ssgi * constants.ssgi_intensity) + irradiance;

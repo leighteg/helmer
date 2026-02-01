@@ -80,7 +80,7 @@ fn unproject_to_view_h(uv: vec2<f32>, depth: f32) -> vec4<f32> {
 }
 
 fn get_view_pos(uv: vec2<f32>) -> vec3<f32> {
-    let depth = textureSample(depth_texture, gbuf_sampler, uv).x;
+    let depth = textureSampleLevel(depth_texture, gbuf_sampler, uv, 0.0).x;
     let view_h = unproject_to_view_h(uv, depth);
     return view_h.xyz / (view_h.w + EPSILON);
 }
@@ -112,7 +112,7 @@ fn blue_noise(frag_coord: vec2<f32>) -> f32 {
     let noise_dims = vec2<f32>(textureDimensions(blue_noise_tex, 0));
     let offset = vec2<f32>(f32(camera.frame_index), f32(camera.frame_index));
     let uv = (frag_coord + offset) / noise_dims;
-    return textureSample(blue_noise_tex, gbuf_sampler, uv).x;
+    return textureSampleLevel(blue_noise_tex, gbuf_sampler, uv, 0.0).x;
 }
 
 //=============== SHADERS ===============//
@@ -129,19 +129,19 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let screen_uv = frag_coord.xy / screen_size;
 
     // --- 1. G-Buffer Unpack ---
-    let mra = textureSample(gbuf_mra, gbuf_sampler, screen_uv);
+    let mra = textureSampleLevel(gbuf_mra, gbuf_sampler, screen_uv, 0.0);
     let roughness = mra.g;
     if (roughness > constants.ssr_roughness_fade_end) {
         discard;
     }
 
-    let origin_depth = textureSample(depth_texture, gbuf_sampler, screen_uv).x;
+    let origin_depth = textureSampleLevel(depth_texture, gbuf_sampler, screen_uv, 0.0).x;
     if (origin_depth >= 1.0) { discard; } // Skybox
     let origin_vs_h = unproject_to_view_h(screen_uv, origin_depth);
     if (abs(origin_vs_h.w) < EPSILON) { discard; }
     let origin_vs = origin_vs_h.xyz / origin_vs_h.w;
 
-    let packed_normal = textureSample(gbuf_normal, gbuf_sampler, screen_uv).xyz;
+    let packed_normal = textureSampleLevel(gbuf_normal, gbuf_sampler, screen_uv, 0.0).xyz;
     let N_world = normalize(packed_normal * 2.0 - 1.0);
     let normal_matrix = transpose(mat3_inverse(mat3x3<f32>(
         camera.view_matrix[0].xyz,
@@ -219,7 +219,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     if (final_cs.w <= EPSILON) { discard; }
     let refined_uv = (final_cs.xy / final_cs.w) * vec2(0.5, -0.5) + 0.5;
 
-    let reflection_color = textureSample(lit_scene_texture, scene_sampler, refined_uv);
+    let reflection_color = textureSampleLevel(lit_scene_texture, scene_sampler, refined_uv, 0.0);
     
     let edge_fade = smoothstep(0.0, 0.1, min(min(refined_uv.x, 1.0 - refined_uv.x), min(refined_uv.y, 1.0 - refined_uv.y)));
     let roughness_fade = 1.0 - smoothstep(constants.ssr_roughness_fade_start, constants.ssr_roughness_fade_end, roughness);

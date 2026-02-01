@@ -76,13 +76,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel_size = 1.0 / vec2<f32>(textureDimensions(t_noisy_input, 0));
     let center_uv = in.uv;
     
-    let center_depth = textureSample(t_depth, s_point, center_uv).r;
+    let center_depth = textureSampleLevel(t_depth, s_point, center_uv, 0.0).r;
     if (center_depth >= 1.0) {
         return vec4(0.0);
     }
     
-    let center_normal = normalize(textureSample(t_normal, s_point, center_uv).xyz * 2.0 - 1.0);
-    let center_color = textureSample(t_noisy_input, s_linear, center_uv).rgb;
+    let center_normal = normalize(textureSampleLevel(t_normal, s_point, center_uv, 0.0).xyz * 2.0 - 1.0);
+    let center_color = textureSampleLevel(t_noisy_input, s_linear, center_uv, 0.0).rgb;
 
     // --- 1. Temporal Reprojection with History Rejection ---
     let world_pos = world_from_depth(center_uv, center_depth, camera.inverse_view_projection_matrix);
@@ -93,9 +93,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var alpha = 0.1;
 
     // Check if previous frame's data is valid
-    let prev_depth = textureSample(t_depth, s_point, prev_uv).r;
+    let prev_depth = textureSampleLevel(t_depth, s_point, prev_uv, 0.0).r;
     let prev_world_pos = world_from_depth(prev_uv, prev_depth, camera.inverse_view_projection_matrix);
-    let prev_normal = normalize(textureSample(t_normal, s_point, prev_uv).xyz * 2.0 - 1.0);
+    let prev_normal = normalize(textureSampleLevel(t_normal, s_point, prev_uv, 0.0).xyz * 2.0 - 1.0);
 
     let world_dist = distance(world_pos, prev_world_pos);
     let normal_dot = dot(center_normal, prev_normal);
@@ -105,7 +105,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         alpha = 0.5;
     }
     
-    let history_color = textureSample(t_history, s_linear, prev_uv).rgb;
+    let history_color = textureSampleLevel(t_history, s_linear, prev_uv, 0.0).rgb;
     var accumulated_color = mix(history_color, center_color, alpha);
 
     // --- 2. Variance Estimation ---
@@ -116,7 +116,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         for (var x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) { continue; }
             let neighbor_uv = center_uv + vec2(f32(x), f32(y)) * texel_size;
-            let neighbor_color = textureSample(t_noisy_input, s_linear, neighbor_uv).rgb;
+            let neighbor_color = textureSampleLevel(t_noisy_input, s_linear, neighbor_uv, 0.0).rgb;
             moment1 += neighbor_color;
             moment2 += neighbor_color * neighbor_color;
         }
@@ -144,8 +144,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let offset = vec2(f32(x), f32(y)) * texel_size * step_width;
                 let sample_uv = center_uv + offset;
 
-                let sample_depth = textureSample(t_depth, s_point, sample_uv).r;
-                let sample_normal = normalize(textureSample(t_normal, s_point, sample_uv).xyz * 2.0 - 1.0);
+                let sample_depth = textureSampleLevel(t_depth, s_point, sample_uv, 0.0).r;
+                let sample_normal = normalize(textureSampleLevel(t_normal, s_point, sample_uv, 0.0).xyz * 2.0 - 1.0);
                 
                 let depth_diff = abs(sample_depth - center_depth);
                 let normal_dot_spatial = dot(sample_normal, center_normal);
@@ -153,7 +153,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 var weight = select(0.0, 1.0, depth_diff < depth_tolerance && normal_dot_spatial > normal_tolerance);
                 weight *= filter_strength;
 
-                sum += textureSample(t_noisy_input, s_linear, sample_uv).rgb * weight;
+                sum += textureSampleLevel(t_noisy_input, s_linear, sample_uv, 0.0).rgb * weight;
                 total_weight += weight;
             }
         }

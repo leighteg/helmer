@@ -9,8 +9,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use tracing::{info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber, info, warn};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
 use wasm_bindgen_futures::spawn_local;
 use web_time::Instant;
 use winit::{
@@ -46,6 +48,67 @@ struct RenderInit {
 }
 
 type RenderInitResult = Result<WebRenderState, String>;
+
+#[derive(Default)]
+struct ConsoleVisitor {
+    message: Option<String>,
+    fields: Vec<String>,
+}
+
+impl Visit for ConsoleVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = Some(format!("{value:?}"));
+        } else {
+            self.fields.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message = Some(value.to_string());
+        } else {
+            self.fields.push(format!("{}={}", field.name(), value));
+        }
+    }
+}
+
+struct ConsoleLayer;
+
+impl<S> Layer<S> for ConsoleLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let meta = event.metadata();
+        let mut visitor = ConsoleVisitor::default();
+        event.record(&mut visitor);
+
+        let mut message = visitor.message.unwrap_or_default();
+        if !visitor.fields.is_empty() {
+            if !message.is_empty() {
+                message.push(' ');
+            }
+            message.push_str(&visitor.fields.join(" "));
+        }
+        if message.is_empty() {
+            message = meta.name().to_string();
+        }
+
+        let full = if meta.target().is_empty() {
+            message
+        } else {
+            format!("[{}] {}", meta.target(), message)
+        };
+
+        match *meta.level() {
+            Level::ERROR => web_sys::console::error_1(&full.into()),
+            Level::WARN => web_sys::console::warn_1(&full.into()),
+            Level::INFO => web_sys::console::info_1(&full.into()),
+            _ => web_sys::console::log_1(&full.into()),
+        }
+    }
+}
 
 fn log_warn(message: &str) {
     web_sys::console::warn_1(&message.into());
@@ -423,14 +486,14 @@ impl<T: 'static> Runtime<T> {
         resize_callback: impl Fn(PhysicalSize<u32>, &mut T) + 'static,
         dropped_file_callback: impl Fn(PathBuf, &mut T) + 'static,
     ) -> Self {
-        let fmt_layer = tracing_subscriber::fmt::layer().without_time();
+        let console_layer = ConsoleLayer;
         tracing_subscriber::registry()
-            .with(fmt_layer)
+            .with(console_layer)
             .with(tracing_subscriber::EnvFilter::new("helmer"))
             .try_init()
             .ok();
 
-        tracing::info!("2026 leighton [https://leighteg.dev]");
+        info!("2026 leighton [https://leighteg.dev]");
 
         let tuning = Arc::new(RuntimeTuning::default());
         let profiling = Arc::new(RuntimeProfiling::default());
@@ -444,8 +507,11 @@ impl<T: 'static> Runtime<T> {
         let target_tickrate = tuning.load_target_tickrate();
         let logic_clock = LogicClock::new(target_tickrate, config.fixed_timestep);
 
+        let input_manager = Arc::new(RwLock::new(InputManager::new()));
+        crate::runtime::input_manager::register_web_input_manager(Arc::clone(&input_manager));
+
         Self {
-            input_manager: Arc::new(RwLock::new(InputManager::new())),
+            input_manager,
             asset_server: None,
             asset_base_path: None,
             opfs_enabled: true,

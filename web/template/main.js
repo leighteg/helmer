@@ -1,6 +1,103 @@
 import init from "./{{WASM_MODULE}}.js";
 import { registerHelmerWorkerBridge } from "./worker_bridge.js";
 
+const splashRoot = document.getElementById("helmer-splash");
+const splashBar = document.getElementById("helmer-progress-bar");
+const splashLabel = document.getElementById("helmer-progress-label");
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function setSplashProgress(value, text) {
+  if (splashBar) {
+    if (!Number.isFinite(value)) {
+      splashBar.classList.add("is-indeterminate");
+      splashBar.style.transform = "scaleX(0.2)";
+    } else {
+      const clamped = clamp(value, 0, 1);
+      splashBar.classList.remove("is-indeterminate");
+      splashBar.style.transform = `scaleX(${clamped})`;
+    }
+  }
+  if (splashLabel && text) {
+    splashLabel.textContent = text;
+  }
+}
+
+function hideSplash() {
+  if (!splashRoot) {
+    return;
+  }
+  splashRoot.classList.add("splash--hidden");
+  window.setTimeout(() => {
+    splashRoot.remove();
+  }, 700);
+}
+
+function waitForCanvasReady() {
+  const mount = document.getElementById("{{MOUNT_ID}}");
+  if (!mount) {
+    hideSplash();
+    return;
+  }
+
+  const hasCanvas = () => mount.querySelector("canvas");
+  if (hasCanvas()) {
+    hideSplash();
+    return;
+  }
+
+  const observer = new MutationObserver(() => {
+    if (hasCanvas()) {
+      observer.disconnect();
+      hideSplash();
+    }
+  });
+
+  observer.observe(mount, { childList: true });
+}
+
+async function fetchWasmWithProgress(url, onProgress) {
+  const response = await fetch(url, { credentials: "same-origin" });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch wasm (${response.status} ${response.statusText})`);
+  }
+
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  if (!response.body || total <= 0) {
+    onProgress?.(null, total);
+    const buffer = await response.arrayBuffer();
+    onProgress?.(1, buffer.byteLength);
+    return new Uint8Array(buffer);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  onProgress?.(0, total);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value) {
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress?.(received / total, total);
+    }
+  }
+
+  const buffer = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  onProgress?.(1, total);
+  return buffer;
+}
+
 function normalizePath(path) {
   if (!path) {
     return "";
@@ -115,11 +212,48 @@ function registerDropTarget(wasm) {
   });
 }
 
+function registerUnfocusClear(wasm) {
+  if (!wasm || typeof wasm.helmer_clear_input_state !== "function") {
+    return;
+  }
+
+  const clearInput = () => {
+    try {
+      wasm.helmer_clear_input_state();
+    } catch (err) {
+      console.warn("Failed to clear input state on unfocus.", err);
+    }
+  };
+
+  window.addEventListener("blur", clearInput);
+  window.addEventListener("pagehide", clearInput);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      clearInput();
+    }
+  });
+}
+
 async function boot() {
   try {
-    const wasm = await init();
+    const wasmUrl = new URL("./{{WASM_MODULE}}_bg.wasm", import.meta.url);
+    setSplashProgress(0, "Loading engine... 0%");
+    const wasmBytes = await fetchWasmWithProgress(wasmUrl, (progress) => {
+      if (!Number.isFinite(progress)) {
+        setSplashProgress(null, "Loading engine...");
+        return;
+      }
+      const percent = Math.round(progress * 100);
+      setSplashProgress(progress, `Loading engine... ${percent}%`);
+    });
+    setSplashProgress(1, "Initializing runtime...");
+    const initPromise = init({ module_or_path: wasmBytes });
+    waitForCanvasReady();
+    const wasm = await initPromise;
     registerHelmerWorkerBridge(wasm);
     registerDropTarget(wasm);
+    registerUnfocusClear(wasm);
+    hideSplash();
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     if (message.includes("Using exceptions for control flow")) {

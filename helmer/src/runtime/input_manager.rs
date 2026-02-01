@@ -5,9 +5,13 @@ pub use gilrs::{Axis, Button, GamepadId};
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
+#[cfg(target_arch = "wasm32")]
+use parking_lot::RwLock;
 use tracing::info;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 pub use web_gamepad::{Axis, Button, GamepadId};
 #[cfg(target_arch = "wasm32")]
@@ -105,6 +109,33 @@ pub struct InputManager {
     pub egui_last_pointer_down_middle: Mutex<bool>,
     pub egui_wants_pointer: bool,
     pub egui_wants_key: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static WEB_INPUT_MANAGER: std::cell::RefCell<Option<std::sync::Arc<RwLock<InputManager>>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn register_web_input_manager(manager: std::sync::Arc<RwLock<InputManager>>) {
+    WEB_INPUT_MANAGER.with(|slot| {
+        *slot.borrow_mut() = Some(manager);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn helmer_clear_input_state() {
+    WEB_INPUT_MANAGER.with(|slot| {
+        let binding = slot.borrow();
+        let Some(manager) = binding.as_ref() else {
+            return;
+        };
+        let mut guard = manager.write();
+        guard.clear_egui_state();
+        guard.clear_queues();
+    });
 }
 
 impl InputManager {

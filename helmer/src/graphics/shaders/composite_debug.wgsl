@@ -93,8 +93,8 @@ struct DebugCompositeParams {
 @group(1) @binding(4) var brdf_lut_sampler: sampler;
 
 @group(2) @binding(0) var<uniform> camera: CameraUniforms;
-@group(3) @binding(0) var<uniform> constants: Constants;
-@group(4) @binding(0) var<uniform> debug: DebugCompositeParams;
+@group(2) @binding(1) var<uniform> constants: Constants;
+@group(2) @binding(2) var<uniform> debug: DebugCompositeParams;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,

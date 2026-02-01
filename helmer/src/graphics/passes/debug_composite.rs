@@ -36,8 +36,6 @@ pub struct DebugCompositePass {
     bgl0: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     bgl1: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     bgl2: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
-    bgl3: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
-    bgl4: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     format: Arc<RwLock<wgpu::TextureFormat>>,
 }
 
@@ -70,8 +68,6 @@ impl DebugCompositePass {
             bgl0: Arc::new(RwLock::new(None)),
             bgl1: Arc::new(RwLock::new(None)),
             bgl2: Arc::new(RwLock::new(None)),
-            bgl3: Arc::new(RwLock::new(None)),
-            bgl4: Arc::new(RwLock::new(None)),
             format: Arc::new(RwLock::new(swapchain_format)),
         }
     }
@@ -243,54 +239,48 @@ impl DebugCompositePass {
         });
 
         let bgl2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("DebugComposite/CameraBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: Some("DebugComposite/UniformsBGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
-        });
-
-        let bgl3 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("DebugComposite/ConstantsBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<ShaderConstants>() as u64
-                    ),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<ShaderConstants>() as u64,
+                        ),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
-        });
-
-        let bgl4 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("DebugComposite/DebugBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<DebugCompositeParams>() as u64,
-                    ),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                            DebugCompositeParams,
+                        >() as u64),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+            ],
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DebugComposite/PipelineLayout"),
-            bind_group_layouts: &[&bgl0, &bgl1, &bgl2, &bgl3, &bgl4],
+            bind_group_layouts: &[&bgl0, &bgl1, &bgl2],
             immediate_size: 0,
         });
 
@@ -327,8 +317,6 @@ impl DebugCompositePass {
         *self.bgl0.write() = Some(bgl0);
         *self.bgl1.write() = Some(bgl1);
         *self.bgl2.write() = Some(bgl2);
-        *self.bgl3.write() = Some(bgl3);
-        *self.bgl4.write() = Some(bgl4);
     }
 
     fn ensure_mesh_pipeline(&self, device: &wgpu::Device, format: wgpu::TextureFormat) {
@@ -339,24 +327,16 @@ impl DebugCompositePass {
 
         self.ensure_pipeline(device, format);
 
-        let (bgl0, bgl1, bgl2, bgl3, bgl4) = (
-            self.bgl0.read(),
-            self.bgl1.read(),
-            self.bgl2.read(),
-            self.bgl3.read(),
-            self.bgl4.read(),
-        );
-        let (bgl0, bgl1, bgl2, bgl3, bgl4) = (
+        let (bgl0, bgl1, bgl2) = (self.bgl0.read(), self.bgl1.read(), self.bgl2.read());
+        let (bgl0, bgl1, bgl2) = (
             bgl0.as_ref().unwrap(),
             bgl1.as_ref().unwrap(),
             bgl2.as_ref().unwrap(),
-            bgl3.as_ref().unwrap(),
-            bgl4.as_ref().unwrap(),
         );
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DebugComposite/MeshPipelineLayout"),
-            bind_group_layouts: &[bgl0, bgl1, bgl2, bgl3, bgl4],
+            bind_group_layouts: &[bgl0, bgl1, bgl2],
             immediate_size: 0,
         });
 
@@ -564,30 +544,22 @@ impl RenderPass for DebugCompositePass {
         });
 
         let bg2 = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DebugComposite/CameraBG"),
+            label: Some("DebugComposite/UniformsBG"),
             layout: self.bgl2.read().as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.camera_buffer.as_entire_binding(),
-            }],
-        });
-
-        let bg3 = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DebugComposite/ConstantsBG"),
-            layout: self.bgl3.read().as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.render_constants_buffer.as_entire_binding(),
-            }],
-        });
-
-        let bg4 = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DebugComposite/DebugBG"),
-            layout: self.bgl4.read().as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.debug_params_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: frame.render_constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: frame.debug_params_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -615,8 +587,6 @@ impl RenderPass for DebugCompositePass {
         pass.set_bind_group(0, &bg0, &[]);
         pass.set_bind_group(1, &bg1, &[]);
         pass.set_bind_group(2, &bg2, &[]);
-        pass.set_bind_group(3, &bg3, &[]);
-        pass.set_bind_group(4, &bg4, &[]);
         if use_mesh {
             pass.draw_mesh_tasks(1, 1, 1);
         } else {

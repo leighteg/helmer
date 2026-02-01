@@ -347,6 +347,9 @@ impl InputManager {
         self.mouse_wheel = self.mouse_wheel_accumulator;
         self.mouse_wheel_accumulator = Vec2::ZERO;
     }
+    pub fn clear_just_pressed(&mut self) {
+        self.just_pressed.clear();
+    }
 
     // --- EGUI ---
 

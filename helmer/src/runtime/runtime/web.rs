@@ -840,6 +840,7 @@ impl<T: 'static> Runtime<T> {
                         .logic_tick_us
                         .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
+                self.input_manager.write().clear_just_pressed();
 
                 if let Some(delta) = render_delta {
                     if let Some(pending) = self.logic_state.pending_render_delta.as_mut() {

@@ -461,6 +461,7 @@ impl<T: Send + 'static> Runtime<T> {
                                 .logic_tick_us
                                 .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
                         }
+                        input_manager.write().clear_just_pressed();
 
                         if let Some(delta) = render_delta {
                             if let Some(pending) = pending_render_delta.as_mut() {

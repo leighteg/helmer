@@ -188,6 +188,9 @@ impl Default for RenderConfig {
             lod: true,
             gpu_driven: true,
             gpu_multi_draw_indirect: true,
+            #[cfg(target_arch = "wasm32")]
+            render_bundles: false,
+            #[cfg(not(target_arch = "wasm32"))]
             render_bundles: true,
             bundle_invalidate_on_resource_changes: true,
             bundle_cache_stable_frames: 3,

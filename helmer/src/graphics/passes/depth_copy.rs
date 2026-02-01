@@ -18,16 +18,31 @@ pub struct DepthCopyPass {
     depth: ResourceId,
     depth_copy: ResourceId,
     extent: (u32, u32),
+    format: wgpu::TextureFormat,
     pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
 }
 
+fn depth_copy_output_is_single_channel(format: wgpu::TextureFormat) -> bool {
+    matches!(
+        format,
+        wgpu::TextureFormat::R32Float | wgpu::TextureFormat::R16Float
+    )
+}
+
 impl DepthCopyPass {
-    pub fn new(depth: ResourceId, depth_copy: ResourceId, width: u32, height: u32) -> Self {
+    pub fn new(
+        depth: ResourceId,
+        depth_copy: ResourceId,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         Self {
             depth,
             depth_copy,
             extent: (width, height),
+            format,
             pipeline: Arc::new(RwLock::new(None)),
             bgl: Arc::new(RwLock::new(None)),
         }
@@ -53,7 +68,7 @@ impl DepthCopyPass {
             height: self.extent.1,
             mip_levels: 1,
             layers: 1,
-            format: wgpu::TextureFormat::R32Float,
+            format: self.format,
             usage,
         };
         let texture_desc = wgpu::TextureDescriptor {
@@ -66,7 +81,7 @@ impl DepthCopyPass {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
+            format: self.format,
             usage,
             view_formats: &[],
         };
@@ -134,6 +149,18 @@ impl DepthCopyPass {
             return;
         }
 
+        let output_is_single = depth_copy_output_is_single_channel(self.format);
+        let entry_point = if output_is_single {
+            "fs_main"
+        } else {
+            "fs_main_rgba"
+        };
+        let write_mask = if output_is_single {
+            wgpu::ColorWrites::RED
+        } else {
+            wgpu::ColorWrites::ALL
+        };
+
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DepthCopy/BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -167,8 +194,12 @@ impl DepthCopyPass {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::TextureFormat::R32Float.into())],
+                entry_point: Some(entry_point),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.format,
+                    blend: None,
+                    write_mask,
+                })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),

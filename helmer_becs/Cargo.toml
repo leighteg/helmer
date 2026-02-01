@@ -13,6 +13,12 @@ winit = "0.30.12"
 egui = "0.33.3"
 egui-wgpu = "0.33.3"
 parking_lot = "0.12.5"
-rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
 bevy_reflect = { version = "0.17.2", features = ["debug"] }
 crossbeam-channel = "0.5"
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rapier3d = { version = "0.26.1", default-features = false, features = ["dim3", "f32", "simd-stable"] }

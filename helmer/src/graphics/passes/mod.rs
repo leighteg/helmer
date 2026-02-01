@@ -74,6 +74,8 @@ pub struct FrameGlobals {
     pub shadow_matrices_buffer: Option<wgpu::Buffer>,
     pub sky_buffer: wgpu::Buffer,
     pub material_buffer: Option<wgpu::Buffer>,
+    pub material_uniform_buffer: Option<wgpu::Buffer>,
+    pub material_uniform_stride: u64,
     pub material_textures: Option<Arc<Vec<MaterialTextureSet>>>,
     pub material_bindings_version: u64,
     pub texture_views: Vec<wgpu::TextureView>,

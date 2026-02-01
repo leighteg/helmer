@@ -250,10 +250,15 @@ impl StatsUI {
                     })
                     .unwrap_or((0.0, 0.0, 0.0));
 
-                let (mesh_bytes, tex_bytes, mat_bytes) = world
-                    .get_resource::<BevyAssetServer>()
-                    .map(|srv| srv.0.lock().cache_usage_bytes())
-                    .unwrap_or((0, 0, 0));
+                let (mesh_bytes, tex_bytes, mat_bytes) = {
+                    #[cfg(target_arch = "wasm32")]
+                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let asset_server = world.get_resource::<BevyAssetServer>();
+                    asset_server
+                        .map(|srv| srv.0.lock().cache_usage_bytes())
+                        .unwrap_or((0, 0, 0))
+                };
 
                 let history_samples = world
                     .get_resource::<BevyRuntimeProfiling>()
@@ -1044,6 +1049,42 @@ impl StatsUI {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            ui.collapsing("timing", |ui| {
+                                let mut target_tickrate = tuning.load_target_tickrate();
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut target_tickrate)
+                                            .speed(1.0)
+                                            .prefix("target tickrate: "),
+                                    )
+                                    .changed()
+                                {
+                                    tuning.store_target_tickrate(target_tickrate);
+                                }
+
+                                let mut target_fps = tuning.load_target_fps().unwrap_or(60.0);
+                                let mut fps_enabled = tuning.load_target_fps().is_some();
+                                if ui.checkbox(&mut fps_enabled, "cap render fps").changed() {
+                                    if fps_enabled {
+                                        tuning.store_target_fps(Some(target_fps));
+                                    } else {
+                                        tuning.store_target_fps(None);
+                                    }
+                                }
+                                if ui
+                                    .add_enabled(
+                                        fps_enabled,
+                                        egui::DragValue::new(&mut target_fps)
+                                            .speed(1.0)
+                                            .prefix("target fps: "),
+                                    )
+                                    .changed()
+                                {
+                                    tuning.store_target_fps(Some(target_fps));
+                                }
+                            });
+
+                            ui.separator();
                             ui.collapsing("thread budgets", |ui| {
                                 let mut render_message_capacity =
                                     tuning.render_message_capacity.load(Ordering::Relaxed) as u32;
@@ -2410,7 +2451,13 @@ impl StatsUI {
                 let sender = world
                     .get_resource::<BevyRenderSender>()
                     .map(|s| s.0.clone());
-                let asset_server = world.get_resource::<BevyAssetServer>().map(|s| s.0.clone());
+                let asset_server = {
+                    #[cfg(target_arch = "wasm32")]
+                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let asset_server = world.get_resource::<BevyAssetServer>();
+                    asset_server.map(|s| s.0.clone())
+                };
                 let stats = world.get_resource::<BevyRendererStats>();
                 let mb_bytes: usize = 1024 * 1024;
                 let mb_f = mb_bytes as f32;

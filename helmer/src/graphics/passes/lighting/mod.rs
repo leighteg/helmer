@@ -1,6 +1,6 @@
 use crate::graphics::{
     common::renderer::{
-        CameraUniforms, ShaderConstants, ShadowUniforms, SkyUniforms, color_load_op,
+        CameraUniforms, LightData, ShaderConstants, ShadowUniforms, SkyUniforms, color_load_op,
         transient_usage,
     },
     graph::{
@@ -30,6 +30,10 @@ pub struct LightingPass {
     shadow: crate::graphics::passes::shadow::ShadowOutputs,
     outputs: LightingOutputs,
     extent: (u32, u32),
+    format: wgpu::TextureFormat,
+    use_uniform_lights: bool,
+    max_uniform_lights: usize,
+    use_array_scattering: bool,
     pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     mesh_pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     gbuf_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
@@ -46,9 +50,14 @@ impl LightingPass {
         shadow: crate::graphics::passes::shadow::ShadowOutputs,
         width: u32,
         height: u32,
+        format: wgpu::TextureFormat,
         use_transient_textures: bool,
         use_transient_aliasing: bool,
+        supports_fragment_storage_buffers: bool,
+        use_array_scattering: bool,
     ) -> Self {
+        let use_uniform_lights = !supports_fragment_storage_buffers;
+        let max_uniform_lights = crate::graphics::common::constants::WEBGL_MAX_LIGHTS;
         let usage = transient_usage(
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             use_transient_textures,
@@ -58,7 +67,7 @@ impl LightingPass {
             height,
             mip_levels: 1,
             layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format,
             usage,
         }
         .with_hints();
@@ -75,6 +84,10 @@ impl LightingPass {
                 lighting_diffuse: pool.create_logical(desc, Some(hints), 0, None),
             },
             extent: (width, height),
+            format,
+            use_uniform_lights,
+            max_uniform_lights,
+            use_array_scattering,
             pipeline: Arc::new(RwLock::new(None)),
             mesh_pipeline: Arc::new(RwLock::new(None)),
             gbuf_bgl: Arc::new(RwLock::new(None)),
@@ -104,7 +117,7 @@ impl LightingPass {
             height: extent.1,
             mip_levels: 1,
             layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: self.format,
             usage,
         };
         let needs_create = match ctx.rpctx.pool.entry(id) {
@@ -128,7 +141,7 @@ impl LightingPass {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
+                format: self.format,
                 usage,
                 view_formats: &[],
             });
@@ -250,73 +263,96 @@ impl LightingPass {
             ],
         });
 
+        let lights_binding = if self.use_uniform_lights {
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        (std::mem::size_of::<LightData>() * self.max_uniform_lights) as u64,
+                    ),
+                },
+                count: None,
+            }
+        } else {
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        };
+        let scene_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<CameraUniforms>() as u64
+                    ),
+                },
+                count: None,
+            },
+            lights_binding,
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<ShadowUniforms>() as u64
+                    ),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<SkyUniforms>() as u64
+                    ),
+                },
+                count: None,
+            },
+        ];
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Lighting/SceneBGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<CameraUniforms>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<ShadowUniforms>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<SkyUniforms>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-            ],
+            entries: &scene_entries,
         });
+
+        let scattering_view_dimension = if self.use_array_scattering {
+            wgpu::TextureViewDimension::D2Array
+        } else {
+            wgpu::TextureViewDimension::D3
+        };
 
         let atmosphere_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Lighting/AtmosphereBGL"),
@@ -336,7 +372,7 @@ impl LightingPass {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
+                        view_dimension: scattering_view_dimension,
                         multisampled: false,
                     },
                     count: None,
@@ -406,7 +442,17 @@ impl LightingPass {
             immediate_size: 0,
         });
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("lighting.wgsl"));
+        let shader = if self.use_uniform_lights {
+            if self.use_array_scattering {
+                device.create_shader_module(wgpu::include_wgsl!("lighting_webgl_array.wgsl"))
+            } else {
+                device.create_shader_module(wgpu::include_wgsl!("lighting_webgl.wgsl"))
+            }
+        } else if self.use_array_scattering {
+            device.create_shader_module(wgpu::include_wgsl!("lighting_array.wgsl"))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("lighting.wgsl"))
+        };
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Lighting/Pipeline"),
@@ -420,10 +466,7 @@ impl LightingPass {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[
-                    Some(wgpu::TextureFormat::Rgba16Float.into()),
-                    Some(wgpu::TextureFormat::Rgba16Float.into()),
-                ],
+                targets: &[Some(self.format.into()), Some(self.format.into())],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -448,7 +491,17 @@ impl LightingPass {
             immediate_size: 0,
         });
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("lighting_mesh.wgsl"));
+        let shader = if self.use_uniform_lights {
+            if self.use_array_scattering {
+                device.create_shader_module(wgpu::include_wgsl!("lighting_mesh_webgl_array.wgsl"))
+            } else {
+                device.create_shader_module(wgpu::include_wgsl!("lighting_mesh_webgl.wgsl"))
+            }
+        } else if self.use_array_scattering {
+            device.create_shader_module(wgpu::include_wgsl!("lighting_mesh_array.wgsl"))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("lighting_mesh.wgsl"))
+        };
 
         let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Lighting/MeshPipeline"),
@@ -462,10 +515,7 @@ impl LightingPass {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[
-                    Some(wgpu::TextureFormat::Rgba16Float.into()),
-                    Some(wgpu::TextureFormat::Rgba16Float.into()),
-                ],
+                targets: &[Some(self.format.into()), Some(self.format.into())],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -560,10 +610,21 @@ impl RenderPass for LightingPass {
         };
 
         let lights_buffer = frame.lights_buffer.clone().unwrap_or_else(|| {
+            let size = if self.use_uniform_lights {
+                (std::mem::size_of::<crate::graphics::common::renderer::LightData>()
+                    * self.max_uniform_lights) as u64
+            } else {
+                std::mem::size_of::<crate::graphics::common::renderer::LightData>() as u64
+            };
+            let usage = if self.use_uniform_lights {
+                wgpu::BufferUsages::UNIFORM
+            } else {
+                wgpu::BufferUsages::STORAGE
+            };
             ctx.device().create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Lighting/EmptyLights"),
-                size: std::mem::size_of::<crate::graphics::common::renderer::LightData>() as u64,
-                usage: wgpu::BufferUsages::STORAGE,
+                size,
+                usage,
                 mapped_at_creation: false,
             })
         });

@@ -1,6 +1,7 @@
 use crossbeam_channel::Sender;
 use hashbrown::HashMap;
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Instant};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+use web_time::Instant;
 
 use bevy_ecs::prelude::{ReflectComponent, ReflectResource};
 use bevy_ecs::{
@@ -55,8 +56,12 @@ pub type BevyMeshRenderer = BevyWrapper<MeshRenderer>;
 pub type BevyLight = BevyWrapper<Light>;
 
 // Resource Wrappers
-#[derive(Resource)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(Resource))]
 pub struct BevyAssetServer(pub Arc<Mutex<AssetServer>>);
+#[cfg(target_arch = "wasm32")]
+pub type BevyAssetServerParam<'w> = bevy_ecs::system::NonSend<'w, BevyAssetServer>;
+#[cfg(not(target_arch = "wasm32"))]
+pub type BevyAssetServerParam<'w> = bevy_ecs::prelude::Res<'w, BevyAssetServer>;
 #[derive(Resource)]
 pub struct BevyInputManager(pub Arc<RwLock<InputManager>>);
 #[derive(Resource)]
@@ -160,9 +165,17 @@ pub mod physics;
 pub mod provided;
 pub mod systems;
 
-pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
+fn helmer_becs_init_impl<F>(
+    init_callback: fn(&mut World, &mut Schedule, &AssetServer),
+    configure_runtime: F,
+) where
+    F: FnOnce(&mut Runtime<(World, Schedule)>),
+{
     let world = World::new();
     let mut schedule = Schedule::default();
+    #[cfg(target_arch = "wasm32")]
+    schedule.set_executor_kind(bevy_ecs::schedule::ExecutorKind::SingleThreaded);
+    #[cfg(not(target_arch = "wasm32"))]
     schedule.set_executor_kind(bevy_ecs::schedule::ExecutorKind::MultiThreaded);
 
     let mut type_registry = TypeRegistry::default();
@@ -199,6 +212,11 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             world.insert_resource::<BevyRuntimeProfiling>(BevyRuntimeProfiling(
                 runtime.profiling.clone(),
             ));
+            #[cfg(target_arch = "wasm32")]
+            world.insert_non_send_resource::<BevyAssetServer>(BevyAssetServer(
+                runtime.asset_server.as_ref().unwrap().clone(),
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
             world.insert_resource::<BevyAssetServer>(BevyAssetServer(
                 runtime.asset_server.as_ref().unwrap().clone(),
             ));
@@ -327,5 +345,19 @@ pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServe
             }
         },
     );
+    configure_runtime(&mut runtime);
     runtime.init();
+}
+
+pub fn helmer_becs_init(init_callback: fn(&mut World, &mut Schedule, &AssetServer)) {
+    helmer_becs_init_impl(init_callback, |_runtime| {});
+}
+
+pub fn helmer_becs_init_with_runtime<F>(
+    init_callback: fn(&mut World, &mut Schedule, &AssetServer),
+    configure_runtime: F,
+) where
+    F: FnOnce(&mut Runtime<(World, Schedule)>),
+{
+    helmer_becs_init_impl(init_callback, configure_runtime);
 }

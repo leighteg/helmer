@@ -69,7 +69,7 @@ struct Constants {
     pcf_max_scale: f32,
     pcf_max_distance: f32,
     ssgi_intensity: f32,
-    _final_padding: vec2<f32>,
+    _final_padding: vec4<f32>,
 };
 
 //=============== BINDINGS ===============//
@@ -101,6 +101,10 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     return out;
 }
 
+fn evsm_moments(depth: f32) -> vec2<f32> {
+    let warped_depth = exp(render_constants.evsm_c * (depth - 1.0));
+    return vec2<f32>(warped_depth, warped_depth * warped_depth);
+}
 
 //=============== FRAGMENT SHADER ===============//
 @fragment
@@ -108,10 +112,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec2<f32> {
     // Variance Shadow Mapping (VSM)
     // We store the warped depth (moment 1) and warped depth squared (moment 2)
     let depth = clamp(in.depth, 0.0, 1.0);
-    let warped_depth = exp(render_constants.evsm_c * (depth - 1.0));
+    return evsm_moments(depth);
+}
 
-    // r = moment 1 (warped_depth)
-    // g = moment 2 (warped_depth * warped_depth)
-    // The output format is Rg32Float
-    return vec2<f32>(warped_depth, warped_depth * warped_depth);
+@fragment
+fn fs_main_rgba(in: VertexOutput) -> @location(0) vec4<f32> {
+    let depth = clamp(in.depth, 0.0, 1.0);
+    let moments = evsm_moments(depth);
+    return vec4<f32>(moments, 0.0, 1.0);
 }

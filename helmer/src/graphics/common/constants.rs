@@ -6,6 +6,7 @@ pub const DEFAULT_SHADOW_CASCADE_SPLITS: [f32; MAX_SHADOW_CASCADES + 1] =
 pub const MESHLET_MAX_VERTS: usize = 64;
 pub const MESHLET_MAX_PRIMS: usize = 124;
 pub const MESHLET_WORKGROUP_SIZE: u32 = 64;
+pub const WEBGL_MAX_LIGHTS: usize = 256;
 
 // Back-compat defaults for legacy renderers.
 pub const FRAMES_IN_FLIGHT: usize = DEFAULT_FRAMES_IN_FLIGHT;

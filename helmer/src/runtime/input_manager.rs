@@ -1,12 +1,59 @@
-use gilrs::{Axis, Button, GamepadId, Gilrs};
+#[cfg(not(target_arch = "wasm32"))]
+use gilrs::Gilrs;
+#[cfg(not(target_arch = "wasm32"))]
+pub use gilrs::{Axis, Button, GamepadId};
 use glam::{DVec2, UVec2, Vec2};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::Mutex;
 use tracing::info;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+pub use web_gamepad::{Axis, Button, GamepadId};
+#[cfg(target_arch = "wasm32")]
+use web_sys::Gamepad;
 use winit::{
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     keyboard::{Key, KeyCode, ModifiersState},
 };
+
+#[cfg(target_arch = "wasm32")]
+mod web_gamepad {
+    pub type GamepadId = usize;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Axis {
+        LeftStickX,
+        LeftStickY,
+        RightStickX,
+        RightStickY,
+        LeftZ,
+        RightZ,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum Button {
+        South,
+        East,
+        West,
+        North,
+        LeftShoulder,
+        RightShoulder,
+        LeftTrigger,
+        RightTrigger,
+        LeftTrigger2,
+        RightTrigger2,
+        LeftThumb,
+        RightThumb,
+        Select,
+        Start,
+        Mode,
+        DPadUp,
+        DPadDown,
+        DPadLeft,
+        DPadRight,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -29,6 +76,7 @@ pub struct ControllerState {
 
 pub struct InputManager {
     event_queue: Mutex<Vec<InputEvent>>,
+    #[cfg(not(target_arch = "wasm32"))]
     gilrs: Mutex<Gilrs>,
 
     // Keyboard and Mouse state
@@ -63,6 +111,7 @@ impl InputManager {
     pub fn new() -> Self {
         Self {
             event_queue: Mutex::new(Vec::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             gilrs: Mutex::new(Gilrs::new().unwrap()),
             active_keys: HashSet::new(),
             just_pressed: HashSet::new(),
@@ -97,7 +146,8 @@ impl InputManager {
     pub fn process_events(&mut self) {
         self.just_pressed.clear();
 
-        // --- 1. Poll gilrs for controller events and update state directly ---
+        // --- 1. Poll gamepads for controller state ---
+        #[cfg(not(target_arch = "wasm32"))]
         {
             let mut gilrs = self.gilrs.lock();
             while let Some(gilrs::Event { id, event, .. }) = gilrs.next_event() {
@@ -159,6 +209,10 @@ impl InputManager {
                     _ => {}
                 }
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.poll_gamepads();
         }
 
         // --- 2. Process winit events (keyboard/mouse) from the queue ---
@@ -462,6 +516,142 @@ impl InputManager {
         *self.egui_last_pointer_down_middle.lock() = false;
         *self.egui_last_pointer_pos.lock() = None;
         *self.egui_modifiers.lock() = egui::Modifiers::NONE;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_gamepads(&mut self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let navigator = window.navigator();
+        let gamepads = match navigator.get_gamepads() {
+            Ok(list) => list,
+            Err(_) => return,
+        };
+
+        let previous_ids: HashSet<GamepadId> = self.controller_states.keys().copied().collect();
+        let mut connected_ids: HashSet<GamepadId> = HashSet::new();
+
+        for (index, pad_value) in gamepads.iter().enumerate() {
+            if pad_value.is_null() || pad_value.is_undefined() {
+                continue;
+            }
+            let gamepad: Gamepad = pad_value.unchecked_into();
+            let id = index as GamepadId;
+            connected_ids.insert(id);
+
+            let state = self.controller_states.entry(id).or_default();
+            state.active_buttons.clear();
+            state.axis_values.clear();
+            state.left_trigger_value = 0.0;
+            state.right_trigger_value = 0.0;
+
+            let buttons = gamepad.buttons();
+            let get_button = |idx: u32| -> Option<web_sys::GamepadButton> {
+                let value = buttons.get(idx);
+                if value.is_null() || value.is_undefined() {
+                    None
+                } else {
+                    Some(value.unchecked_into())
+                }
+            };
+
+            const TRIGGER_DEADZONE: f32 = 0.05;
+            const TRIGGER_THRESHOLD: f32 = 0.5;
+
+            if let Some(button) = get_button(6) {
+                let value = button.value() as f32;
+                state.left_trigger_value = if value < TRIGGER_DEADZONE { 0.0 } else { value };
+                if value > TRIGGER_THRESHOLD {
+                    state.active_buttons.insert(Button::LeftTrigger);
+                }
+            }
+            if let Some(button) = get_button(7) {
+                let value = button.value() as f32;
+                state.right_trigger_value = if value < TRIGGER_DEADZONE { 0.0 } else { value };
+                if value > TRIGGER_THRESHOLD {
+                    state.active_buttons.insert(Button::RightTrigger);
+                }
+            }
+
+            const BUTTON_MAP: &[(u32, Button)] = &[
+                (0, Button::South),
+                (1, Button::East),
+                (2, Button::West),
+                (3, Button::North),
+                (4, Button::LeftShoulder),
+                (5, Button::RightShoulder),
+                (8, Button::Select),
+                (9, Button::Start),
+                (10, Button::LeftThumb),
+                (11, Button::RightThumb),
+                (12, Button::DPadUp),
+                (13, Button::DPadDown),
+                (14, Button::DPadLeft),
+                (15, Button::DPadRight),
+                (16, Button::Mode),
+            ];
+
+            for (idx, button) in BUTTON_MAP.iter().copied() {
+                if let Some(pad_button) = get_button(idx) {
+                    if pad_button.pressed() {
+                        state.active_buttons.insert(button);
+                    }
+                }
+            }
+
+            let axes = gamepad.axes();
+            let mut axis_values: Vec<f32> = Vec::new();
+            for idx in 0..axes.length() {
+                let value = axes.get(idx).as_f64().unwrap_or(0.0).clamp(-1.0, 1.0) as f32;
+                axis_values.push(value);
+            }
+
+            const DEADZONE: f32 = 0.15;
+            let apply_deadzone =
+                |value: f32| -> f32 { if value.abs() < DEADZONE { 0.0 } else { value } };
+
+            if axis_values.len() > 0 {
+                state
+                    .axis_values
+                    .insert(Axis::LeftStickX, apply_deadzone(axis_values[0]));
+            }
+            if axis_values.len() > 1 {
+                state
+                    .axis_values
+                    .insert(Axis::LeftStickY, apply_deadzone(axis_values[1]));
+            }
+            if axis_values.len() > 2 {
+                state
+                    .axis_values
+                    .insert(Axis::RightStickX, apply_deadzone(axis_values[2]));
+            }
+            if axis_values.len() > 3 {
+                state
+                    .axis_values
+                    .insert(Axis::RightStickY, apply_deadzone(axis_values[3]));
+            }
+
+            if state.left_trigger_value > 0.0 {
+                state
+                    .axis_values
+                    .insert(Axis::LeftZ, state.left_trigger_value);
+            }
+            if state.right_trigger_value > 0.0 {
+                state
+                    .axis_values
+                    .insert(Axis::RightZ, state.right_trigger_value);
+            }
+        }
+
+        for id in previous_ids.difference(&connected_ids) {
+            info!("Gamepad {} disconnected", id);
+            self.controller_states.remove(id);
+        }
+        for id in connected_ids.difference(&previous_ids) {
+            info!("Gamepad {} connected", id);
+            self.controller_states.entry(*id).or_default();
+        }
     }
 }
 

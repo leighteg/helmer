@@ -27,15 +27,16 @@ use egui::{Color32, ColorImage, Vec2 as EguiVec2};
 use glam::{Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Instant,
 };
 use tracing::info;
+use web_time::Instant;
 use winit::{dpi::PhysicalSize, window::Window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +71,16 @@ impl WgpuBackend {
 
     pub fn to_backends(self) -> wgpu::Backends {
         match self {
-            WgpuBackend::Auto => wgpu::Backends::all(),
+            WgpuBackend::Auto => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    wgpu::Backends::all()
+                }
+            }
             WgpuBackend::Vulkan => wgpu::Backends::VULKAN,
             WgpuBackend::Dx12 => wgpu::Backends::DX12,
             WgpuBackend::Metal => wgpu::Backends::METAL,
@@ -295,7 +305,7 @@ impl Vertex {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct MeshletDesc {
     pub vertex_offset: u32,
     pub vertex_count: u32,
@@ -415,7 +425,7 @@ pub struct RenderLight {
 }
 
 /// Hint describing how urgently an asset should be (re)streamed to the GPU
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetStreamKind {
     Mesh,
     Material,
@@ -1193,15 +1203,20 @@ pub fn render_message_payload_bytes(message: &RenderMessage) -> usize {
         RenderMessage::CreateMesh { lods, .. } => {
             let mut bytes = 0usize;
             for lod in lods {
-                bytes = bytes.saturating_add(std::mem::size_of_val(lod.vertices.as_ref()));
-                bytes = bytes.saturating_add(std::mem::size_of_val(lod.indices.as_ref()));
+                bytes = bytes.saturating_add(
+                    lod.vertices
+                        .len()
+                        .saturating_mul(std::mem::size_of::<Vertex>()),
+                );
+                bytes = bytes
+                    .saturating_add(lod.indices.len().saturating_mul(std::mem::size_of::<u32>()));
                 bytes = bytes.saturating_add(
                     crate::graphics::common::meshlets::meshlet_lod_size_bytes(&lod.meshlets),
                 );
             }
             bytes
         }
-        RenderMessage::CreateTexture { data, .. } => std::mem::size_of_val(data.as_ref()),
+        RenderMessage::CreateTexture { data, .. } => data.len(),
         RenderMessage::CreateMaterial(mat) => std::mem::size_of_val(mat),
         _ => 0,
     }
@@ -1486,8 +1501,25 @@ impl RenderDeviceCaps {
         self.features.contains(wgpu::Features::IMMEDIATES)
     }
 
+    pub fn supports_compute(&self) -> bool {
+        self.downlevel_caps
+            .flags
+            .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+    }
+
     pub fn transient_textures_save_memory(&self) -> bool {
         self.adapter_info.transient_saves_memory
+    }
+}
+
+pub fn mesh_shader_visibility(device: &wgpu::Device) -> wgpu::ShaderStages {
+    if device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_MESH_SHADER)
+    {
+        wgpu::ShaderStages::MESH
+    } else {
+        wgpu::ShaderStages::empty()
     }
 }
 

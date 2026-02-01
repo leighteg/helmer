@@ -1,4 +1,4 @@
-use crate::{BevyAssetServer, BevyRuntimeProfiling, BevyTransform, BevyWrapper};
+use crate::{BevyAssetServerParam, BevyRuntimeProfiling, BevyTransform, BevyWrapper};
 use bevy_ecs::{
     component::Component,
     name::Name,
@@ -8,12 +8,10 @@ use bevy_ecs::{
 };
 use glam::Mat4;
 use hashbrown::{HashMap, HashSet};
-use helmer::{
-    provided::components::{MeshRenderer, Transform},
-    runtime::asset_server::{Handle, Scene},
-};
-use std::time::Instant;
+use helmer::provided::components::{MeshRenderer, Transform};
+use helmer::runtime::asset_server::{Handle, Scene};
 use tracing::info;
+use web_time::Instant;
 
 #[derive(Resource, Default)]
 pub struct SceneSpawnedChildren {
@@ -77,7 +75,7 @@ pub struct SceneChildUpdateCache {
 pub fn scene_spawning_system(
     mut commands: Commands,
     mut scene_children: ResMut<SceneSpawnedChildren>,
-    asset_server: Res<BevyAssetServer>,
+    asset_server: BevyAssetServerParam<'_>,
     scene_root_query: Query<(Entity, &SceneRoot), Without<SpawnedScene>>,
     root_transforms: Query<&BevyTransform, With<SceneRoot>>,
     profiling_res: Option<Res<BevyRuntimeProfiling>>,
@@ -92,7 +90,17 @@ pub fn scene_spawning_system(
     });
 
     for (root_entity, scene_root) in scene_root_query.iter() {
-        if let Some(scene) = asset_server.0.lock().get_scene(&scene_root.0) {
+        let scene = {
+            let asset_server_guard = asset_server.0.lock();
+            let scene = asset_server_guard.get_scene(&scene_root.0);
+            if scene.is_some() {
+                // proactively request scene assets so they're seen immediately
+                asset_server_guard.request_scene_assets(&scene_root.0, Some(0), 1.0);
+            }
+            scene
+        };
+
+        if let Some(scene) = scene {
             info!(
                 "Spawning scene {} for entity {}",
                 scene_root.0.id, root_entity

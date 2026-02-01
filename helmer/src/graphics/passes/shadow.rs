@@ -10,7 +10,10 @@ use std::{
 use crate::graphics::{
     common::{
         constants::MAX_SHADOW_CASCADES,
-        renderer::{MeshDrawParams, MeshTaskTiling, mesh_task_tiling, transient_usage},
+        renderer::{
+            MeshDrawParams, MeshTaskTiling, mesh_shader_visibility, mesh_task_tiling,
+            transient_usage,
+        },
     },
     graph::{
         definition::{
@@ -54,6 +57,13 @@ struct ShadowBundleSlot {
     bundles: Option<Vec<wgpu::RenderBundle>>,
     resources: Vec<ResourceId>,
     draw_signature: u64,
+}
+
+fn shadow_format_is_rg(format: wgpu::TextureFormat) -> bool {
+    matches!(
+        format,
+        wgpu::TextureFormat::Rg32Float | wgpu::TextureFormat::Rg16Float
+    )
 }
 
 impl ShadowPass {
@@ -360,6 +370,18 @@ impl ShadowPass {
             return;
         }
 
+        let output_is_rg = shadow_format_is_rg(self.format);
+        let fragment_entry = if output_is_rg {
+            "fs_main"
+        } else {
+            "fs_main_rgba"
+        };
+        let write_mask = if output_is_rg {
+            wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN
+        } else {
+            wgpu::ColorWrites::ALL
+        };
+        let mesh_stage = mesh_shader_visibility(device);
         let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"));
 
         let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
@@ -373,7 +395,7 @@ impl ShadowPass {
             label: Some("Shadow/VPBGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::MESH,
+                visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,
@@ -419,11 +441,11 @@ impl ShadowPass {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fragment_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.format,
                     blend: None,
-                    write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                    write_mask,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -454,6 +476,10 @@ impl ShadowPass {
 
     fn ensure_mesh_pipeline(&self, device: &wgpu::Device) {
         if self.mesh_pipeline.read().is_some() {
+            return;
+        }
+
+        if mesh_shader_visibility(device).is_empty() {
             return;
         }
 

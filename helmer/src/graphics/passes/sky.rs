@@ -25,12 +25,14 @@ pub struct SkyPass {
     depth: ResourceId,
     outputs: SkyOutputs,
     extent: (u32, u32),
+    format: wgpu::TextureFormat,
     pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     mesh_pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     scene_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     atmosphere_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     constants_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     use_transient_textures: bool,
+    use_array_scattering: bool,
 }
 
 impl SkyPass {
@@ -39,8 +41,10 @@ impl SkyPass {
         depth: ResourceId,
         width: u32,
         height: u32,
+        format: wgpu::TextureFormat,
         use_transient_textures: bool,
         use_transient_aliasing: bool,
+        use_array_scattering: bool,
     ) -> Self {
         let usage = transient_usage(
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -51,7 +55,7 @@ impl SkyPass {
             height,
             mip_levels: 1,
             layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format,
             usage,
         }
         .with_hints();
@@ -64,12 +68,14 @@ impl SkyPass {
             depth,
             outputs: SkyOutputs { sky },
             extent: (width, height),
+            format,
             pipeline: Arc::new(RwLock::new(None)),
             mesh_pipeline: Arc::new(RwLock::new(None)),
             scene_bgl: Arc::new(RwLock::new(None)),
             atmosphere_bgl: Arc::new(RwLock::new(None)),
             constants_bgl: Arc::new(RwLock::new(None)),
             use_transient_textures,
+            use_array_scattering,
         }
     }
 
@@ -87,7 +93,7 @@ impl SkyPass {
             height: self.extent.1,
             mip_levels: 1,
             layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: self.format,
             usage,
         };
         let needs_create = match ctx.rpctx.pool.entry(self.outputs.sky) {
@@ -112,7 +118,7 @@ impl SkyPass {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
+                format: self.format,
                 usage,
                 view_formats: &[],
             });
@@ -203,6 +209,12 @@ impl SkyPass {
             ],
         });
 
+        let scattering_view_dimension = if self.use_array_scattering {
+            wgpu::TextureViewDimension::D2Array
+        } else {
+            wgpu::TextureViewDimension::D3
+        };
+
         let atmosphere_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky/AtmosphereBGL"),
             entries: &[
@@ -221,7 +233,7 @@ impl SkyPass {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
+                        view_dimension: scattering_view_dimension,
                         multisampled: false,
                     },
                     count: None,
@@ -277,8 +289,11 @@ impl SkyPass {
             immediate_size: 0,
         });
 
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled.wgsl"));
+        let shader = if self.use_array_scattering {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled_array.wgsl"))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled.wgsl"))
+        };
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Sky/Pipeline"),
@@ -292,7 +307,7 @@ impl SkyPass {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                targets: &[Some(self.format.into())],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -355,6 +370,12 @@ impl SkyPass {
             ],
         });
 
+        let scattering_view_dimension = if self.use_array_scattering {
+            wgpu::TextureViewDimension::D2Array
+        } else {
+            wgpu::TextureViewDimension::D3
+        };
+
         let atmosphere_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky/AtmosphereBGL"),
             entries: &[
@@ -373,7 +394,7 @@ impl SkyPass {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
+                        view_dimension: scattering_view_dimension,
                         multisampled: false,
                     },
                     count: None,
@@ -429,8 +450,13 @@ impl SkyPass {
             immediate_size: 0,
         });
 
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled_mesh.wgsl"));
+        let shader = if self.use_array_scattering {
+            device.create_shader_module(wgpu::include_wgsl!(
+                "../shaders/sky_sampled_mesh_array.wgsl"
+            ))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/sky_sampled_mesh.wgsl"))
+        };
 
         let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Sky/MeshPipeline"),
@@ -444,7 +470,7 @@ impl SkyPass {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                targets: &[Some(self.format.into())],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),

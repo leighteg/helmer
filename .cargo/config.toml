@@ -1,0 +1,17 @@
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C",
+    "link-arg=-z",
+    "-C",
+    "link-arg=stack-size=33554432",
+    "-C",
+    "link-arg=--initial-memory=268435456",
+    "-C",
+    "link-arg=--max-memory=1073741824",
+]
+
+[env]
+CC_wasm32_unknown_unknown = "clang"
+CXX_wasm32_unknown_unknown = "clang++"
+CFLAGS_wasm32_unknown_unknown = "-isystem /usr/include -isystem /usr/include/x86_64-linux-gnu"
+CXXFLAGS_wasm32_unknown_unknown = "-isystem /usr/include/c++/v1 -isystem /usr/include/x86_64-solus-linux/c++/v1 -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu -D_LIBCPP_HAS_NO_THREADS"

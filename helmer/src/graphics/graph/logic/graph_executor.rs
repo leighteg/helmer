@@ -12,7 +12,7 @@ use crate::graphics::graph::logic::render_graph::{
 };
 
 use crate::graphics::graph::logic::gpu_resource_pool::GpuResourcePool;
-use std::time::Instant;
+use web_time::Instant;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RenderGraphExecutionStats {

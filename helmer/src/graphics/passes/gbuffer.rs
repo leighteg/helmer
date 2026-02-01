@@ -20,8 +20,8 @@ use crate::graphics::graph::{
 
 use crate::graphics::backend::binding_backend::BindingBackendKind;
 use crate::graphics::common::renderer::{
-    CameraUniforms, MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_task_tiling,
-    transient_usage,
+    CameraUniforms, MaterialShaderData, MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex,
+    mesh_shader_visibility, mesh_task_tiling, transient_usage,
 };
 use crate::graphics::passes::{FrameGlobals, GBufferBundleKey};
 
@@ -155,7 +155,7 @@ impl GBufferFormats {
         }
     }
 
-    fn ultra() -> Self {
+    pub fn ultra() -> Self {
         Self {
             normal: wgpu::TextureFormat::Rgba8Unorm,
             albedo: wgpu::TextureFormat::Rgba8Unorm,
@@ -261,6 +261,7 @@ pub struct GBufferPass {
     extent: (u32, u32),
     outputs: GBufferOutputs,
     formats: GBufferFormats,
+    use_uniform_materials: bool,
     pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     mesh_pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     camera_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
@@ -296,6 +297,7 @@ impl GBufferPass {
         formats: GBufferFormats,
         use_transient_textures: bool,
         use_transient_aliasing: bool,
+        use_uniform_materials: bool,
     ) -> Self {
         let mut make_rt = |format: wgpu::TextureFormat, label: &str| {
             let usage = transient_usage(
@@ -335,6 +337,7 @@ impl GBufferPass {
             extent: (width, height),
             outputs,
             formats,
+            use_uniform_materials,
             pipeline: Arc::new(RwLock::new(None)),
             mesh_pipeline: Arc::new(RwLock::new(None)),
             camera_bgl: Arc::new(RwLock::new(None)),
@@ -568,13 +571,12 @@ impl GBufferPass {
             self.texture_array_size.store(1, Ordering::Relaxed);
         }
 
+        let mesh_stage = mesh_shader_visibility(device);
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GBuffer/CameraBGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX
-                    | wgpu::ShaderStages::MESH
-                    | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | mesh_stage,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -587,17 +589,26 @@ impl GBufferPass {
         });
 
         let material_entries = if binding_backend == BindingBackendKind::BindGroups {
-            vec![
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+            let material_buffer_entry = wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: if self.use_uniform_materials {
+                        wgpu::BufferBindingType::Uniform
+                    } else {
+                        wgpu::BufferBindingType::Storage { read_only: true }
                     },
-                    count: None,
+                    has_dynamic_offset: false,
+                    min_binding_size: if self.use_uniform_materials {
+                        wgpu::BufferSize::new(std::mem::size_of::<MaterialShaderData>() as u64)
+                    } else {
+                        None
+                    },
                 },
+                count: None,
+            };
+            vec![
+                material_buffer_entry,
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -703,7 +714,17 @@ impl GBufferPass {
         });
 
         let shader = if binding_backend == BindingBackendKind::BindGroups {
-            if self.formats.output_depth_copy {
+            if self.use_uniform_materials {
+                if self.formats.output_depth_copy {
+                    device.create_shader_module(wgpu::include_wgsl!(
+                        "../shaders/g_buffer_bindgroups_webgl.wgsl"
+                    ))
+                } else {
+                    device.create_shader_module(wgpu::include_wgsl!(
+                        "../shaders/g_buffer_bindgroups_no_depth_webgl.wgsl"
+                    ))
+                }
+            } else if self.formats.output_depth_copy {
                 device.create_shader_module(wgpu::include_wgsl!(
                     "../shaders/g_buffer_bindgroups.wgsl"
                 ))
@@ -762,6 +783,10 @@ impl GBufferPass {
         binding_backend: BindingBackendKind,
         texture_array_size: u32,
     ) {
+        if mesh_shader_visibility(device).is_empty() {
+            return;
+        }
+
         if binding_backend == BindingBackendKind::BindGroups {
             if self.mesh_pipeline.read().is_some() {
                 return;
@@ -1021,7 +1046,6 @@ impl GBufferPass {
         device: &wgpu::Device,
         frame: &FrameGlobals,
     ) -> Option<Arc<Vec<wgpu::BindGroup>>> {
-        let material_buffer = frame.material_buffer.as_ref()?;
         let material_textures = frame.material_textures.as_ref()?;
         let material_layout = self.material_bgl.read();
         let material_layout = material_layout.as_ref()?;
@@ -1033,38 +1057,86 @@ impl GBufferPass {
         }
 
         let mut groups = Vec::with_capacity(material_textures.len());
-        for set in material_textures.iter() {
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GBuffer/MaterialBG"),
-                layout: material_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: material_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&set.albedo),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&set.normal),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&set.metallic_roughness),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&set.emission),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
-                    },
-                ],
-            });
-            groups.push(group);
+        if self.use_uniform_materials {
+            let material_buffer = frame.material_uniform_buffer.as_ref()?;
+            let stride = frame.material_uniform_stride;
+            let element_size = std::mem::size_of::<MaterialShaderData>() as u64;
+            if stride < element_size {
+                return None;
+            }
+            for (index, set) in material_textures.iter().enumerate() {
+                let offset = stride.saturating_mul(index as u64);
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("GBuffer/MaterialBG"),
+                    layout: material_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: material_buffer,
+                                offset,
+                                size: wgpu::BufferSize::new(element_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&set.albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&set.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&set.metallic_roughness),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&set.emission),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        },
+                    ],
+                });
+                groups.push(group);
+            }
+        } else {
+            let material_buffer = frame.material_buffer.as_ref()?;
+            for set in material_textures.iter() {
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("GBuffer/MaterialBG"),
+                    layout: material_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: material_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&set.albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&set.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&set.metallic_roughness),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&set.emission),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        },
+                    ],
+                });
+                groups.push(group);
+            }
         }
         let groups = Arc::new(groups);
         *self.material_bind_groups.write() = Some(MaterialBindGroupCache {

@@ -5,12 +5,17 @@ edition = "2024"
 
 [dependencies]
 bevy_ecs = "0.17.2"
-gilrs = "0.11.0"
 glam = "0.30.8"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 winit = "0.30.12"
 egui = "0.33.3"
-rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
 parking_lot = "0.12.3"
 rand = "0.9.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+gilrs = "0.11.0"
+rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rapier3d = { version = "0.26.1", default-features = false, features = ["dim3", "f32", "simd-stable"] }

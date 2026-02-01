@@ -7,7 +7,8 @@ use std::sync::{
 use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
     common::renderer::{
-        MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_task_tiling, transient_usage,
+        MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_shader_visibility,
+        mesh_task_tiling, transient_usage,
     },
     graph::{
         definition::{
@@ -225,13 +226,12 @@ impl ForwardPass {
             self.texture_array_size.store(1, Ordering::Relaxed);
         }
 
+        let mesh_stage = mesh_shader_visibility(device);
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Forward/CameraBGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX
-                    | wgpu::ShaderStages::MESH
-                    | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | mesh_stage,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -423,6 +423,10 @@ impl ForwardPass {
         binding_backend: BindingBackendKind,
         texture_array_size: u32,
     ) {
+        if mesh_shader_visibility(device).is_empty() {
+            return;
+        }
+
         if binding_backend == BindingBackendKind::BindGroups {
             if self.mesh_pipeline.read().is_some() {
                 return;

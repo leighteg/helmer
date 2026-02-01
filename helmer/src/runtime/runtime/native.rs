@@ -9,12 +9,13 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     sync::Arc,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use web_time::Instant;
 use wgpu::{BackendOptions, Dx12BackendOptions};
 #[cfg(target_os = "linux")]
 use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
@@ -27,6 +28,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
+use super::common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning};
 use crate::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
@@ -45,140 +47,6 @@ use crate::{
 
 const MACOS_RETINA_SCALE_FIX_MIN_X: u32 = 3840;
 const MACOS_RETINA_SCALE_FIX_MIN_Y: u32 = 2160;
-
-#[derive(Default)]
-pub struct PerformanceMetrics {
-    pub fps: AtomicU32,
-    pub tps: AtomicU32,
-}
-
-#[derive(Debug)]
-pub struct RuntimeTuning {
-    pub render_message_capacity: AtomicUsize,
-    pub asset_stream_queue_capacity: AtomicUsize,
-    pub asset_worker_queue_capacity: AtomicUsize,
-    pub max_pending_asset_uploads: AtomicUsize,
-    pub max_pending_asset_bytes: AtomicUsize,
-    pub asset_uploads_per_frame: AtomicUsize,
-    pub wgpu_poll_interval_frames: AtomicU32,
-    /// 0 = off, 1 = Poll, 2 = Wait
-    pub wgpu_poll_mode: AtomicU32,
-    pub pixels_per_line: AtomicU32,
-    pub title_update_ms: AtomicU32,
-    pub resize_debounce_ms: AtomicU32,
-    pub pending_asset_uploads: AtomicUsize,
-    pub pending_asset_bytes: AtomicUsize,
-}
-
-impl Default for RuntimeTuning {
-    fn default() -> Self {
-        let message_capacity = 96;
-        Self {
-            render_message_capacity: AtomicUsize::new(message_capacity),
-            asset_stream_queue_capacity: AtomicUsize::new(message_capacity),
-            asset_worker_queue_capacity: AtomicUsize::new(message_capacity),
-            max_pending_asset_uploads: AtomicUsize::new(48),
-            max_pending_asset_bytes: AtomicUsize::new(512 * 1024 * 1024),
-            asset_uploads_per_frame: AtomicUsize::new(8),
-            wgpu_poll_interval_frames: AtomicU32::new(1),
-            wgpu_poll_mode: AtomicU32::new(1),
-            pixels_per_line: AtomicU32::new(38),
-            title_update_ms: AtomicU32::new(200),
-            resize_debounce_ms: AtomicU32::new(500),
-            pending_asset_uploads: AtomicUsize::new(0),
-            pending_asset_bytes: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl RuntimeTuning {
-    pub fn try_reserve_asset_upload(&self, bytes: usize) -> bool {
-        let max_uploads = self.max_pending_asset_uploads.load(Ordering::Relaxed);
-        let max_bytes = self.max_pending_asset_bytes.load(Ordering::Relaxed);
-
-        let uploads = self.pending_asset_uploads.fetch_add(1, Ordering::Relaxed) + 1;
-        let bytes_total = self.pending_asset_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
-
-        let over_uploads = if max_uploads == 0 {
-            uploads > 0
-        } else {
-            uploads > max_uploads
-        };
-        let over_bytes = if max_bytes == 0 {
-            bytes_total > 0
-        } else {
-            bytes_total > max_bytes
-        };
-
-        if over_uploads || over_bytes {
-            self.pending_asset_uploads.fetch_sub(1, Ordering::Relaxed);
-            self.pending_asset_bytes.fetch_sub(bytes, Ordering::Relaxed);
-            return false;
-        }
-
-        true
-    }
-
-    pub fn release_asset_upload(&self, bytes: usize) {
-        let _ =
-            self.pending_asset_uploads
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(1))
-                });
-        let _ = self
-            .pending_asset_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(bytes))
-            });
-    }
-}
-
-#[derive(Debug)]
-pub struct RuntimeProfiling {
-    pub enabled: AtomicBool,
-    pub history_samples: AtomicU32,
-    pub render_pass_plot_limit: AtomicU32,
-    pub main_event_us: AtomicU64,
-    pub main_update_us: AtomicU64,
-    pub logic_frame_us: AtomicU64,
-    pub logic_asset_us: AtomicU64,
-    pub logic_input_us: AtomicU64,
-    pub logic_tick_us: AtomicU64,
-    pub logic_schedule_us: AtomicU64,
-    pub logic_render_send_us: AtomicU64,
-    pub ecs_render_data_us: AtomicU64,
-    pub ecs_scene_spawn_us: AtomicU64,
-    pub ecs_scene_update_us: AtomicU64,
-    pub render_thread_frame_us: AtomicU64,
-    pub render_thread_messages_us: AtomicU64,
-    pub render_thread_upload_us: AtomicU64,
-    pub render_thread_render_us: AtomicU64,
-}
-
-impl Default for RuntimeProfiling {
-    fn default() -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            history_samples: AtomicU32::new(240),
-            render_pass_plot_limit: AtomicU32::new(6),
-            main_event_us: AtomicU64::new(0),
-            main_update_us: AtomicU64::new(0),
-            logic_frame_us: AtomicU64::new(0),
-            logic_asset_us: AtomicU64::new(0),
-            logic_input_us: AtomicU64::new(0),
-            logic_tick_us: AtomicU64::new(0),
-            logic_schedule_us: AtomicU64::new(0),
-            logic_render_send_us: AtomicU64::new(0),
-            ecs_render_data_us: AtomicU64::new(0),
-            ecs_scene_spawn_us: AtomicU64::new(0),
-            ecs_scene_update_us: AtomicU64::new(0),
-            render_thread_frame_us: AtomicU64::new(0),
-            render_thread_messages_us: AtomicU64::new(0),
-            render_thread_upload_us: AtomicU64::new(0),
-            render_thread_render_us: AtomicU64::new(0),
-        }
-    }
-}
 
 pub struct RuntimeCallbacks<T: Send + 'static> {
     init: Option<Box<dyn FnOnce(&mut Runtime<T>, &mut T) + Send>>,
@@ -223,7 +91,6 @@ impl WindowSettingsCache {
     fn clone_attributes(&self) -> WindowAttributes {
         self.attributes.clone()
     }
-
     fn title(&self) -> &str {
         &self.attributes.title
     }
@@ -365,11 +232,11 @@ impl PendingRecreate {
 pub struct Runtime<T: Send + 'static = ()> {
     pub input_manager: Arc<RwLock<InputManager>>,
     pub asset_server: Option<Arc<Mutex<AssetServer>>>,
+    asset_base_path: Option<String>,
 
     // logic thread
     logic_thread: Option<JoinHandle<()>>,
     logic_thread_state: Arc<AtomicBool>,
-    target_tickrate: f32,
 
     // render thread
     render_thread: Option<JoinHandle<()>>,
@@ -381,7 +248,6 @@ pub struct Runtime<T: Send + 'static = ()> {
     render_init_request_receiver: Receiver<RenderInitRequest>,
     render_init_sender: Sender<RenderInitResult>,
     render_init_receiver: Option<Receiver<RenderInitResult>>,
-    target_fps: Option<f32>,
 
     // --- EGUI ---
     egui_winit_state: Option<egui_winit::State>,
@@ -445,10 +311,10 @@ impl<T: Send + 'static> Runtime<T> {
         Self {
             input_manager: Arc::new(RwLock::new(InputManager::new())),
             asset_server: None,
+            asset_base_path: None,
 
             logic_thread: None,
             logic_thread_state: Arc::new(AtomicBool::new(true)),
-            target_tickrate: 120.0,
 
             render_thread: None,
             render_thread_state: Arc::new(AtomicBool::new(true)),
@@ -459,7 +325,6 @@ impl<T: Send + 'static> Runtime<T> {
             render_init_request_receiver,
             render_init_sender,
             render_init_receiver: Some(render_init_receiver),
-            target_fps: None,
 
             egui_winit_state: None,
 
@@ -511,22 +376,39 @@ impl<T: Send + 'static> Runtime<T> {
         let _ = event_loop.run_app(self);
     }
 
+    pub fn set_asset_base_path(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        self.asset_base_path = Some(path.clone());
+        if let Some(asset_server) = self.asset_server.as_ref() {
+            asset_server.lock().set_asset_base_path(path);
+        }
+    }
+
+    pub fn clear_asset_base_path(&mut self) {
+        self.asset_base_path = None;
+        if let Some(asset_server) = self.asset_server.as_ref() {
+            asset_server.lock().clear_asset_base_path();
+        }
+    }
+
     fn start_logic_thread(&mut self) {
         let input_manager = Arc::clone(&self.input_manager);
         let asset_server = Arc::clone(&self.asset_server.as_ref().unwrap());
         let state = Arc::clone(&self.logic_thread_state);
-        let target_tickrate = self.target_tickrate;
         let metrics = Arc::clone(&self.metrics);
         let profiling = Arc::clone(&self.profiling);
         let tick_callback = Arc::clone(&self.callbacks.tick);
         let user_state = Arc::clone(self.user_state.as_ref().unwrap());
         let has_init = Arc::clone(&self.has_init);
+        let deterministic = self.config.fixed_timestep;
+        let tuning = Arc::clone(&self.tuning);
 
         let sender = self.render_thread_sender.clone();
 
         self.logic_thread = Some(thread::spawn(move || {
-            let mut last_time = Instant::now();
-            let frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
+            let mut target_tickrate = tuning.load_target_tickrate();
+            let mut clock = LogicClock::new(target_tickrate, deterministic);
+            let mut frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
             let mut pending_render_delta: Option<RenderDelta> = None;
             let mut egui_cache = EguiTextureCache::default();
             let mut egui_pending_full_upload = false;
@@ -534,10 +416,18 @@ impl<T: Send + 'static> Runtime<T> {
 
             while state.load(Ordering::Relaxed) {
                 let frame_start = Instant::now();
-                let dt = (frame_start - last_time).as_secs_f32();
-
-                let tps = (1.0 / dt).round() as u32;
-                metrics.tps.store(tps, Ordering::Relaxed);
+                let desired_tickrate = tuning.load_target_tickrate();
+                if (desired_tickrate - target_tickrate).abs() > f32::EPSILON {
+                    target_tickrate = desired_tickrate;
+                    frame_duration = Duration::from_secs_f32(1.0 / target_tickrate);
+                    clock.set_tickrate(target_tickrate, frame_start);
+                }
+                let max_steps = tuning.max_logic_steps_per_frame.load(Ordering::Relaxed);
+                let logic_frame = clock.advance(frame_start, max_steps);
+                if logic_frame.steps > 0 {
+                    let tps = (1.0 / logic_frame.dt).round() as u32;
+                    metrics.tps.store(tps, Ordering::Relaxed);
+                }
 
                 let profiling_enabled = profiling.enabled.load(Ordering::Relaxed);
                 let (asset_us, input_us) = if profiling_enabled {
@@ -554,94 +444,96 @@ impl<T: Send + 'static> Runtime<T> {
                     (0, 0)
                 };
 
-                if has_init.load(Ordering::Relaxed) {
+                if has_init.load(Ordering::Relaxed) && logic_frame.steps > 0 {
                     // MAIN LOGIC LOOP EXECUTION
-                    let tick_start = if profiling_enabled {
-                        Some(Instant::now())
-                    } else {
-                        None
-                    };
-                    let mut user_state_guard = user_state.lock();
-                    let (render_delta, egui_render_data) =
-                        tick_callback(dt, &mut *user_state_guard);
-                    drop(user_state_guard);
-                    if let Some(start) = tick_start {
-                        profiling
-                            .logic_tick_us
-                            .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    }
-
-                    if let Some(delta) = render_delta {
-                        if let Some(pending) = pending_render_delta.as_mut() {
-                            pending.merge_from(delta);
-                        } else {
-                            pending_render_delta = Some(delta);
-                        }
-                    }
-
-                    if let Some(delta) = pending_render_delta.take() {
-                        // Drop render frames if the channel is saturated to keep logic thread moving
-                        let send_start = if profiling_enabled {
+                    for _ in 0..logic_frame.steps {
+                        let tick_start = if profiling_enabled {
                             Some(Instant::now())
                         } else {
                             None
                         };
-                        match sender.try_send(RenderMessage::RenderDelta(delta)) {
-                            Ok(_) => {}
-                            Err(TrySendError::Full(RenderMessage::RenderDelta(delta))) => {
-                                pending_render_delta = Some(delta);
-                            }
-                            Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => {
-                                warn!("render thread disconnected");
-                                break;
-                            }
-                        }
-                        if let Some(start) = send_start {
+                        let mut user_state_guard = user_state.lock();
+                        let (render_delta, egui_render_data) =
+                            tick_callback(logic_frame.dt, &mut *user_state_guard);
+                        drop(user_state_guard);
+                        if let Some(start) = tick_start {
                             profiling
-                                .logic_render_send_us
+                                .logic_tick_us
                                 .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
                         }
-                    }
 
-                    if let Some(mut data) = egui_render_data {
-                        let textures_changed = !data.textures_delta.set.is_empty()
-                            || !data.textures_delta.free.is_empty();
-                        apply_egui_delta(&mut egui_cache, &data.textures_delta);
-                        if !data.textures_delta.free.is_empty() {
-                            egui_pending_free.extend_from_slice(&data.textures_delta.free);
-                        }
-
-                        let mut textures_delta = if egui_pending_full_upload {
-                            build_full_egui_delta(&egui_cache)
-                                .unwrap_or_else(|| data.textures_delta.clone())
-                        } else {
-                            data.textures_delta.clone()
-                        };
-
-                        if !egui_pending_free.is_empty() {
-                            for id in &egui_pending_free {
-                                if !textures_delta.free.contains(id) {
-                                    textures_delta.free.push(*id);
-                                }
+                        if let Some(delta) = render_delta {
+                            if let Some(pending) = pending_render_delta.as_mut() {
+                                pending.merge_from(delta);
+                            } else {
+                                pending_render_delta = Some(delta);
                             }
                         }
 
-                        data.textures_delta = textures_delta;
-
-                        match sender.try_send(RenderMessage::EguiData(data)) {
-                            Ok(_) => {
-                                egui_pending_full_upload = false;
-                                egui_pending_free.clear();
-                            }
-                            Err(TrySendError::Full(_)) => {
-                                if textures_changed || egui_pending_full_upload {
-                                    egui_pending_full_upload = true;
+                        if let Some(delta) = pending_render_delta.take() {
+                            // Drop render frames if the channel is saturated to keep logic thread moving
+                            let send_start = if profiling_enabled {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
+                            match sender.try_send(RenderMessage::RenderDelta(delta)) {
+                                Ok(_) => {}
+                                Err(TrySendError::Full(RenderMessage::RenderDelta(delta))) => {
+                                    pending_render_delta = Some(delta);
+                                }
+                                Err(TrySendError::Full(_)) => {}
+                                Err(TrySendError::Disconnected(_)) => {
+                                    warn!("render thread disconnected");
+                                    break;
                                 }
                             }
-                            Err(TrySendError::Disconnected(_)) => {
-                                warn!("render thread disconnected");
-                                break;
+                            if let Some(start) = send_start {
+                                profiling
+                                    .logic_render_send_us
+                                    .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                            }
+                        }
+
+                        if let Some(mut data) = egui_render_data {
+                            let textures_changed = !data.textures_delta.set.is_empty()
+                                || !data.textures_delta.free.is_empty();
+                            apply_egui_delta(&mut egui_cache, &data.textures_delta);
+                            if !data.textures_delta.free.is_empty() {
+                                egui_pending_free.extend_from_slice(&data.textures_delta.free);
+                            }
+
+                            let mut textures_delta = if egui_pending_full_upload {
+                                build_full_egui_delta(&egui_cache)
+                                    .unwrap_or_else(|| data.textures_delta.clone())
+                            } else {
+                                data.textures_delta.clone()
+                            };
+
+                            if !egui_pending_free.is_empty() {
+                                for id in &egui_pending_free {
+                                    if !textures_delta.free.contains(id) {
+                                        textures_delta.free.push(*id);
+                                    }
+                                }
+                            }
+
+                            data.textures_delta = textures_delta;
+
+                            match sender.try_send(RenderMessage::EguiData(data)) {
+                                Ok(_) => {
+                                    egui_pending_full_upload = false;
+                                    egui_pending_free.clear();
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    if textures_changed || egui_pending_full_upload {
+                                        egui_pending_full_upload = true;
+                                    }
+                                }
+                                Err(TrySendError::Disconnected(_)) => {
+                                    warn!("render thread disconnected");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -670,8 +562,6 @@ impl<T: Send + 'static> Runtime<T> {
                         .logic_frame_us
                         .store(frame_start.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
-
-                last_time = frame_start;
             }
 
             info!("logic thread shutting down");
@@ -690,8 +580,6 @@ impl<T: Send + 'static> Runtime<T> {
         render_init_receiver: Receiver<RenderInitResult>,
         asset_server: Option<Arc<Mutex<AssetServer>>>,
     ) {
-        let target_tickrate = self.target_tickrate;
-        let target_fps = self.target_fps; // Use target_fps for render thread
         let state = Arc::clone(&self.render_thread_state);
         let window = Arc::clone(self.window.as_ref().unwrap());
         let window_size = window.inner_size();
@@ -730,6 +618,7 @@ impl<T: Send + 'static> Runtime<T> {
             let Some(render_init) = wait_for_render_init(&render_init_receiver) else {
                 return;
             };
+            let target_tickrate = tuning.load_target_tickrate();
             let mut renderer = pollster::block_on(async {
                 initialize_renderer(
                     render_init.instance,
@@ -746,7 +635,6 @@ impl<T: Send + 'static> Runtime<T> {
                 .unwrap()
             });
 
-            let frame_duration = Duration::from_secs_f32(1.0 / target_fps.unwrap_or(60.0));
             let mut last_render = Instant::now();
             let mut asset_backlog: VecDeque<RenderMessage> = VecDeque::new();
             let mut asset_backlog_bytes: usize = 0;
@@ -940,6 +828,7 @@ impl<T: Send + 'static> Runtime<T> {
                         let Some(render_init) = wait_for_render_init(&render_init_receiver) else {
                             return;
                         };
+                        let target_tickrate = tuning.load_target_tickrate();
                         let recreated = pollster::block_on(async {
                             initialize_renderer(
                                 render_init.instance,
@@ -1028,8 +917,9 @@ impl<T: Send + 'static> Runtime<T> {
                     break;
                 }
 
-                if target_fps.is_some() {
+                if let Some(target_fps) = tuning.load_target_fps() {
                     // Render at target FPS if we have new data OR if enough time has passed
+                    let frame_duration = Duration::from_secs_f32(1.0 / target_fps);
                     let time_since_last_render = frame_start.duration_since(last_render);
                     if should_render || time_since_last_render >= frame_duration {
                         let render_start = if profiling_enabled {
@@ -1199,7 +1089,7 @@ impl<T: Send + 'static> Runtime<T> {
             .unwrap();
 
         // Load and parse SVG
-        const BRAND_SVG_DATA: &[u8] = include_bytes!("../../../brand/helmer.svg");
+        const BRAND_SVG_DATA: &[u8] = include_bytes!("../../../../brand/helmer.svg");
         let svg_str = std::str::from_utf8(BRAND_SVG_DATA)
             .map_err(|_| "Failed to convert SVG bytes to string")
             .unwrap();
@@ -1432,6 +1322,11 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                 asset_worker_capacity,
                 Arc::clone(&self.tuning),
             ))));
+            if let Some(base_path) = self.asset_base_path.as_ref() {
+                if let Some(asset_server) = self.asset_server.as_ref() {
+                    asset_server.lock().set_asset_base_path(base_path.clone());
+                }
+            }
 
             let render_init_receiver = match self.render_init_receiver.take() {
                 Some(receiver) => receiver,

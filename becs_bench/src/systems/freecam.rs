@@ -8,7 +8,7 @@ use glam::{DVec2, Quat, Vec3};
 
 use helmer::{
     provided::components::{Camera, Transform},
-    runtime::input_manager::InputManager,
+    runtime::input_manager::{Axis, Button},
 };
 use helmer_becs::BevyInputManager;
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -90,10 +90,10 @@ pub fn freecam_system(
     }
 
     if let Some(gamepad_id) = maybe_gamepad_id {
-        yaw_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX)
+        yaw_delta -= input_manager.get_controller_axis(gamepad_id, Axis::RightStickX)
             * CONTROLLER_SENSITIVITY
             * dt;
-        pitch_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY)
+        pitch_delta -= input_manager.get_controller_axis(gamepad_id, Axis::RightStickY)
             * CONTROLLER_SENSITIVITY
             * dt;
     }
@@ -102,10 +102,10 @@ pub fn freecam_system(
     state.speed += input_manager.mouse_wheel.y * 2.0;
 
     if let Some(gamepad_id) = maybe_gamepad_id {
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::RightTrigger) {
+        if input_manager.is_controller_button_active(gamepad_id, Button::RightTrigger) {
             state.speed += 10.0 * dt;
         }
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftTrigger) {
+        if input_manager.is_controller_button_active(gamepad_id, Button::LeftTrigger) {
             state.speed -= 10.0 * dt;
         }
     }
@@ -117,7 +117,7 @@ pub fn freecam_system(
     let mut boost_active = input_manager.is_key_active(KeyCode::ShiftLeft);
 
     if let Some(gamepad_id) = maybe_gamepad_id {
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftThumb) {
+        if input_manager.is_controller_button_active(gamepad_id, Button::LeftThumb) {
             boost_active = true;
             speed *= 2.5;
         }
@@ -166,8 +166,8 @@ pub fn freecam_system(
         }
 
         if let Some(gamepad_id) = maybe_gamepad_id {
-            let lx = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
-            let ly = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
+            let lx = input_manager.get_controller_axis(gamepad_id, Axis::LeftStickX);
+            let ly = input_manager.get_controller_axis(gamepad_id, Axis::LeftStickY);
             velocity += right * lx;
             velocity += forward * ly;
 

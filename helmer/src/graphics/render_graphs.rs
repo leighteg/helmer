@@ -491,6 +491,38 @@ impl PassResourceOutput for GizmoOutputs {
     }
 }
 
+fn depth_copy_output_is_single_channel(format: wgpu::TextureFormat) -> bool {
+    matches!(
+        format,
+        wgpu::TextureFormat::R32Float | wgpu::TextureFormat::R16Float
+    )
+}
+
+fn select_gbuffer_formats(params: &RenderGraphBuildParams) -> GBufferFormats {
+    let mut formats = if params.force_low_color_formats {
+        GBufferFormats::ultra()
+    } else {
+        GBufferFormats::select(
+            params
+                .device_caps
+                .limits
+                .max_color_attachment_bytes_per_sample,
+        )
+    };
+
+    formats.depth = params.depth_format;
+    formats.depth_copy = params.depth_copy_format;
+
+    let required_attachments = if formats.output_depth_copy { 5 } else { 4 };
+    if params.max_color_attachments < required_attachments
+        || !depth_copy_output_is_single_channel(formats.depth_copy)
+    {
+        formats.output_depth_copy = false;
+    }
+
+    formats
+}
+
 /// Default graph used by the renderer: shadow -> gbuffer -> lighting -> post.
 pub fn default_graph_spec() -> RenderGraphSpec {
     RenderGraphSpec::unique("default-graph", |params, pool| {
@@ -546,12 +578,8 @@ fn build_default_graph(
         ssgi_history = Some(history_id);
     }
 
-    let gbuffer_formats = GBufferFormats::select(
-        params
-            .device_caps
-            .limits
-            .max_color_attachment_bytes_per_sample,
-    );
+    let gbuffer_formats = select_gbuffer_formats(params);
+    let use_uniform_materials = !params.supports_fragment_storage_buffers;
     let mut builder = PassGraphBuilder::new(pool);
 
     builder.add::<ShadowPass, ShadowOutputs, _>(|pool, _| {
@@ -575,6 +603,7 @@ fn build_default_graph(
             gbuffer_formats,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            use_uniform_materials,
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -585,8 +614,13 @@ fn build_default_graph(
             let gbuffer = *store
                 .outputs::<GBufferOutputs>()
                 .expect("G-buffer pass missing");
-            let pass =
-                DepthCopyPass::new(gbuffer.depth, gbuffer.depth_copy, size.width, size.height);
+            let pass = DepthCopyPass::new(
+                gbuffer.depth,
+                gbuffer.depth_copy,
+                size.width,
+                size.height,
+                gbuffer_formats.depth_copy,
+            );
             let outputs = pass.outputs();
             (pass, outputs)
         });
@@ -601,8 +635,10 @@ fn build_default_graph(
             gbuffer.depth_copy,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -633,8 +669,11 @@ fn build_default_graph(
             shadow,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            params.supports_fragment_storage_buffers,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -826,12 +865,8 @@ fn build_hybrid_graph(
     let toggles = params.config;
     let mut hiz_id = None;
 
-    let gbuffer_formats = GBufferFormats::select(
-        params
-            .device_caps
-            .limits
-            .max_color_attachment_bytes_per_sample,
-    );
+    let gbuffer_formats = select_gbuffer_formats(params);
+    let use_uniform_materials = !params.supports_fragment_storage_buffers;
     let mut builder = PassGraphBuilder::new(pool);
 
     builder.add::<ShadowPass, ShadowOutputs, _>(|pool, _| {
@@ -855,6 +890,7 @@ fn build_hybrid_graph(
             gbuffer_formats,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            use_uniform_materials,
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -865,8 +901,13 @@ fn build_hybrid_graph(
             let gbuffer = *store
                 .outputs::<GBufferOutputs>()
                 .expect("G-buffer pass missing");
-            let pass =
-                DepthCopyPass::new(gbuffer.depth, gbuffer.depth_copy, size.width, size.height);
+            let pass = DepthCopyPass::new(
+                gbuffer.depth,
+                gbuffer.depth_copy,
+                size.width,
+                size.height,
+                gbuffer_formats.depth_copy,
+            );
             let outputs = pass.outputs();
             (pass, outputs)
         });
@@ -881,8 +922,10 @@ fn build_hybrid_graph(
             gbuffer.depth_copy,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -913,8 +956,11 @@ fn build_hybrid_graph(
             shadow,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            params.supports_fragment_storage_buffers,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -1159,12 +1205,8 @@ fn build_debug_graph(
         ssgi_history = Some(history_id);
     }
 
-    let gbuffer_formats = GBufferFormats::select(
-        params
-            .device_caps
-            .limits
-            .max_color_attachment_bytes_per_sample,
-    );
+    let gbuffer_formats = select_gbuffer_formats(params);
+    let use_uniform_materials = !params.supports_fragment_storage_buffers;
     let mut builder = PassGraphBuilder::new(pool);
 
     builder.add::<ShadowPass, ShadowOutputs, _>(|pool, _| {
@@ -1188,6 +1230,7 @@ fn build_debug_graph(
             gbuffer_formats,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            use_uniform_materials,
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -1198,8 +1241,13 @@ fn build_debug_graph(
             let gbuffer = *store
                 .outputs::<GBufferOutputs>()
                 .expect("G-buffer pass missing");
-            let pass =
-                DepthCopyPass::new(gbuffer.depth, gbuffer.depth_copy, size.width, size.height);
+            let pass = DepthCopyPass::new(
+                gbuffer.depth,
+                gbuffer.depth_copy,
+                size.width,
+                size.height,
+                gbuffer_formats.depth_copy,
+            );
             let outputs = pass.outputs();
             (pass, outputs)
         });
@@ -1214,8 +1262,10 @@ fn build_debug_graph(
             gbuffer.depth_copy,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)
@@ -1246,8 +1296,11 @@ fn build_debug_graph(
             shadow,
             size.width,
             size.height,
+            params.hdr_format,
             params.config.use_transient_textures,
             params.config.use_transient_aliasing,
+            params.supports_fragment_storage_buffers,
+            !params.device_caps.supports_compute(),
         );
         let outputs = pass.outputs();
         (pass, outputs)

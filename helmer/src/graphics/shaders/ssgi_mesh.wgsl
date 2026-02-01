@@ -43,7 +43,7 @@ struct Constants {
     pcf_max_scale: f32,
     pcf_max_distance: f32,
     ssgi_intensity: f32,
-    _final_padding: vec2<f32>,
+    _final_padding: vec4<f32>,
 };
 
 const PI: f32 = 3.14159265359;

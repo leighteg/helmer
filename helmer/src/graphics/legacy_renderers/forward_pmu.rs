@@ -1,12 +1,8 @@
 use egui_wgpu::Renderer as EguiRenderer;
 use glam::{Mat4, Quat, Vec3, Vec4Swizzles};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, collections::HashMap, sync::Arc, time::Duration};
 use tracing::{info, warn};
+use web_time::Instant;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 

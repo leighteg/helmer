@@ -5,7 +5,7 @@ use bevy_ecs::{
     },
     system::{Local, ParamSet, SystemParam},
 };
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::{HashMap, HashSet, hash_map::Entry};
 use helmer::{
@@ -24,11 +24,14 @@ use helmer::{
     runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},
 };
 use parking_lot::RwLock;
-use std::{cmp::Ordering, collections::VecDeque, sync::Arc, thread, time::Instant};
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
+use std::{cmp::Ordering, collections::VecDeque, sync::Arc};
 use tracing::warn;
+use web_time::Instant;
 
 use crate::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
+    BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
     BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevyStreamingTuning,
     BevyTransform,
 };
@@ -300,6 +303,16 @@ fn transform_approx_eq(a: &Transform, b: &Transform, epsilon: f32, rotation_epsi
         && a.rotation.dot(b.rotation).abs() >= 1.0 - rotation_epsilon
 }
 
+#[inline]
+fn aabb_is_valid(aabb: &Aabb) -> bool {
+    let min = aabb.min;
+    let max = aabb.max;
+    if !min.is_finite() || !max.is_finite() {
+        return false;
+    }
+    min.x <= max.x && min.y <= max.y && min.z <= max.z
+}
+
 fn select_lod_hysteresis(
     distance_sq: f32,
     current_lod: usize,
@@ -418,7 +431,7 @@ pub struct RenderWorkerState {
 
 #[derive(SystemParam)]
 pub struct RenderSystemResources<'w> {
-    asset_server: Option<Res<'w, BevyAssetServer>>,
+    asset_server: Option<BevyAssetServerParam<'w>>,
     runtime_config: Option<Res<'w, BevyRuntimeConfig>>,
     render_graph: Option<Res<'w, RenderGraphResource>>,
     gizmo_state: Option<Res<'w, RenderGizmoState>>,
@@ -461,288 +474,179 @@ impl Drop for ProfilingScope {
     }
 }
 
+enum RenderWorkerBackend {
+    Threaded {
+        change_tx: Sender<RenderChange>,
+        result_rx: Receiver<RenderResult>,
+    },
+    Local {
+        core: RenderWorkerCore,
+        pending_results: VecDeque<RenderResult>,
+    },
+}
+
 struct RenderWorker {
-    change_tx: Sender<RenderChange>,
-    result_rx: Receiver<RenderResult>,
+    backend: RenderWorkerBackend,
     in_flight: bool,
 }
 
-enum RenderChange {
-    UpsertObjects {
-        objects: Vec<RenderObjectUpdate>,
-    },
-    RemoveObjects {
-        entities: Vec<Entity>,
-    },
-    UpsertLights {
-        lights: Vec<RenderLightUpdate>,
-    },
-    RemoveLights {
-        entities: Vec<Entity>,
-    },
-    UpdateCamera {
-        camera: Camera,
-        transform: Transform,
-    },
-    UpdateConfig {
-        render_config: RenderConfig,
-        render_graph: RenderGraphSpec,
-        streaming_tuning: StreamingTuning,
-        lod_tuning: LodTuning,
-        worker_tuning: RenderWorkerTuning,
-    },
-    RequestFrame {
-        frame_index: u32,
-    },
+impl RenderWorker {
+    fn is_full(&self) -> bool {
+        match &self.backend {
+            RenderWorkerBackend::Threaded { change_tx, .. } => change_tx.is_full(),
+            RenderWorkerBackend::Local { .. } => false,
+        }
+    }
+
+    fn try_send_change(&mut self, change: RenderChange) -> Result<(), TrySendError<RenderChange>> {
+        match &mut self.backend {
+            RenderWorkerBackend::Threaded { change_tx, .. } => change_tx.try_send(change),
+            RenderWorkerBackend::Local {
+                core,
+                pending_results,
+            } => {
+                core.apply_change(change);
+                if let Some(result) = core.step() {
+                    pending_results.push_back(result);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn try_recv_result(&mut self) -> Result<RenderResult, TryRecvError> {
+        match &mut self.backend {
+            RenderWorkerBackend::Threaded { result_rx, .. } => result_rx.try_recv(),
+            RenderWorkerBackend::Local {
+                pending_results, ..
+            } => pending_results.pop_front().ok_or(TryRecvError::Empty),
+        }
+    }
 }
 
-struct RenderResult {
-    render_delta: RenderDelta,
+struct RenderWorkerCore {
+    objects: HashMap<Entity, RenderObjectEntry>,
+    lights: HashMap<Entity, RenderLightEntry>,
+    cells: HashMap<CellKey, CellData>,
+    camera_component: Camera,
+    logical_camera_transform: Transform,
+    render_camera_transform: Transform,
+    render_config: RenderConfig,
+    render_graph: RenderGraphSpec,
+    streaming_tuning: StreamingTuning,
+    lod_tuning: LodTuning,
+    worker_tuning: RenderWorkerTuning,
+    next_proxy_id: usize,
+    has_camera: bool,
+    last_camera_component: Camera,
+    last_render_camera_transform: Transform,
+    has_previous_camera: bool,
+    last_stream_camera_transform: Transform,
+    has_stream_camera: bool,
+    last_stream_motion_transform: Transform,
+    has_stream_motion: bool,
+    last_cull_camera_transform: Transform,
+    has_cull_camera: bool,
+    config_dirty: bool,
+    culling_dirty: bool,
+    lod_dirty: bool,
+    streaming_dirty: bool,
+    cells_dirty: bool,
+    rebuild_cells: bool,
+    force_full: bool,
+    last_cull_frame: u32,
+    last_lod_frame: u32,
+    last_stream_frame: u32,
+    pending_frame: Option<u32>,
+    pending_removed_objects: Vec<usize>,
+    pending_removed_lights: Vec<usize>,
+    pending_removed_proxies: Vec<usize>,
+    has_sent_any: bool,
+    dirty_objects: Vec<Entity>,
     visible_object_count: usize,
-}
-
-struct RenderObjectEntry {
-    transform: Transform,
-    mesh_id: usize,
-    material_id: usize,
-    casts_shadow: bool,
-    visible: bool,
-    lod_state: LodState,
-    last_cull_transform: Transform,
-    last_bounds_transform: Transform,
-    bounds_center: Vec3,
-    axis_x: Vec3,
-    axis_y: Vec3,
-    axis_z: Vec3,
-    mesh_bounds: Aabb,
-    mesh_bounds_valid: bool,
-    bounds_dirty: bool,
-    cell_key: CellKey,
-    cell_index: usize,
-    last_visible: bool,
-    cull_dirty: bool,
-    last_sent_transform: Transform,
-    last_sent_mesh_id: usize,
-    last_sent_material_id: usize,
-    last_sent_casts_shadow: bool,
-    last_sent_lod_index: usize,
-    last_sent_visible: bool,
-}
-
-impl RenderObjectEntry {
-    fn new(
-        transform: Transform,
-        mesh_renderer: MeshRenderer,
-        cell_key: CellKey,
-        cell_index: usize,
-    ) -> Self {
-        Self {
-            transform,
-            mesh_id: mesh_renderer.mesh_id,
-            material_id: mesh_renderer.material_id,
-            casts_shadow: mesh_renderer.casts_shadow,
-            visible: mesh_renderer.visible,
-            lod_state: LodState {
-                last_seen_frame: u32::MAX,
-                ..Default::default()
-            },
-            last_cull_transform: transform,
-            last_bounds_transform: transform,
-            bounds_center: Vec3::ZERO,
-            axis_x: Vec3::ZERO,
-            axis_y: Vec3::ZERO,
-            axis_z: Vec3::ZERO,
-            mesh_bounds: Aabb {
-                min: Vec3::ZERO,
-                max: Vec3::ZERO,
-            },
-            mesh_bounds_valid: false,
-            bounds_dirty: true,
-            cell_key,
-            cell_index,
-            last_visible: false,
-            cull_dirty: true,
-            last_sent_transform: transform,
-            last_sent_mesh_id: mesh_renderer.mesh_id,
-            last_sent_material_id: mesh_renderer.material_id,
-            last_sent_casts_shadow: mesh_renderer.casts_shadow,
-            last_sent_lod_index: 0,
-            last_sent_visible: false,
-        }
-    }
-
-    fn update(&mut self, transform: Transform, mesh_renderer: MeshRenderer) {
-        self.transform = transform;
-        self.bounds_dirty = true;
-
-        if self.mesh_id != mesh_renderer.mesh_id {
-            self.mesh_id = mesh_renderer.mesh_id;
-            self.lod_state = LodState {
-                last_seen_frame: u32::MAX,
-                ..Default::default()
-            };
-            self.cull_dirty = true;
-            self.mesh_bounds_valid = false;
-        }
-
-        if self.material_id != mesh_renderer.material_id {
-            self.material_id = mesh_renderer.material_id;
-        }
-
-        if self.casts_shadow != mesh_renderer.casts_shadow {
-            self.casts_shadow = mesh_renderer.casts_shadow;
-        }
-
-        if self.visible != mesh_renderer.visible {
-            self.visible = mesh_renderer.visible;
-            self.cull_dirty = true;
-        }
-    }
-}
-
-struct RenderLightEntry {
-    transform: Transform,
-    light: Light,
-    last_sent_transform: Transform,
-    last_sent_light: Light,
-    last_sent_present: bool,
-}
-
-impl RenderLightEntry {
-    fn new(transform: Transform, light: Light) -> Self {
-        Self {
-            transform,
-            light,
-            last_sent_transform: transform,
-            last_sent_light: light,
-            last_sent_present: false,
-        }
-    }
-
-    fn update(&mut self, transform: Transform, light: Light) {
-        self.transform = transform;
-        self.light = light;
-    }
-}
-
-fn spawn_render_worker(
+    streaming_queue: VecDeque<Entity>,
     mesh_aabb_map: Arc<RwLock<MeshAabbMap>>,
-    change_capacity: usize,
-) -> RenderWorker {
-    let capacity = change_capacity.max(1);
-    let (change_tx, change_rx) = bounded(capacity);
-    let (result_tx, result_rx) = bounded(1);
-
-    thread::Builder::new()
-        .name("render-data-worker".to_string())
-        .spawn(move || render_worker_loop(change_rx, result_tx, mesh_aabb_map))
-        .expect("render data worker thread");
-
-    RenderWorker {
-        change_tx,
-        result_rx,
-        in_flight: false,
-    }
 }
 
-fn try_send_change(
-    worker_state: &mut RenderWorkerState,
-    worker: &RenderWorker,
-    change: RenderChange,
-    label: &str,
-) -> bool {
-    match worker.change_tx.try_send(change) {
-        Ok(_) => true,
-        Err(TrySendError::Full(_)) => {
-            warn!("render worker change queue full; deferring (drop {label})");
-            worker_state.camera_sent = false;
-            worker_state.config_sent = false;
-            worker_state.needs_full_sync = true;
-            false
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            warn!("render worker disconnected");
-            worker_state.camera_sent = false;
-            worker_state.config_sent = false;
-            worker_state.needs_full_sync = true;
-            false
+impl RenderWorkerCore {
+    fn new(mesh_aabb_map: Arc<RwLock<MeshAabbMap>>) -> Self {
+        let worker_tuning = RenderWorkerTuning::default();
+        Self {
+            objects: HashMap::new(),
+            lights: HashMap::new(),
+            cells: HashMap::new(),
+            camera_component: Camera::default(),
+            logical_camera_transform: Transform::default(),
+            render_camera_transform: Transform::default(),
+            render_config: RenderConfig::default(),
+            render_graph: default_graph_spec(),
+            streaming_tuning: StreamingTuning::default(),
+            lod_tuning: LodTuning::default(),
+            next_proxy_id: worker_tuning.hlod_proxy_id_base,
+            worker_tuning,
+            has_camera: false,
+            last_camera_component: Camera::default(),
+            last_render_camera_transform: Transform::default(),
+            has_previous_camera: false,
+            last_stream_camera_transform: Transform::default(),
+            has_stream_camera: false,
+            last_stream_motion_transform: Transform::default(),
+            has_stream_motion: false,
+            last_cull_camera_transform: Transform::default(),
+            has_cull_camera: false,
+            config_dirty: true,
+            culling_dirty: true,
+            lod_dirty: true,
+            streaming_dirty: true,
+            cells_dirty: true,
+            rebuild_cells: false,
+            force_full: false,
+            last_cull_frame: 0,
+            last_lod_frame: 0,
+            last_stream_frame: 0,
+            pending_frame: None,
+            pending_removed_objects: Vec::new(),
+            pending_removed_lights: Vec::new(),
+            pending_removed_proxies: Vec::new(),
+            has_sent_any: false,
+            dirty_objects: Vec::new(),
+            visible_object_count: 0,
+            streaming_queue: VecDeque::new(),
+            mesh_aabb_map,
         }
     }
-}
 
-fn render_worker_loop(
-    change_rx: Receiver<RenderChange>,
-    result_tx: Sender<RenderResult>,
-    mesh_aabb_map: Arc<RwLock<MeshAabbMap>>,
-) {
-    let mut objects: HashMap<Entity, RenderObjectEntry> = HashMap::new();
-    let mut lights: HashMap<Entity, RenderLightEntry> = HashMap::new();
-    let mut cells: HashMap<CellKey, CellData> = HashMap::new();
-    let mut camera_component = Camera::default();
-    let mut logical_camera_transform = Transform::default();
-    let mut render_camera_transform = Transform::default();
-    let mut render_config = RenderConfig::default();
-    let mut render_graph = default_graph_spec();
-    let mut streaming_tuning = StreamingTuning::default();
-    let mut lod_tuning = LodTuning::default();
-    let mut worker_tuning = RenderWorkerTuning::default();
-    let mut next_proxy_id = worker_tuning.hlod_proxy_id_base;
-    let mut has_camera = false;
-    let mut last_camera_component = Camera::default();
-    let mut last_render_camera_transform = Transform::default();
-    let mut has_previous_camera = false;
-    let mut last_stream_camera_transform = Transform::default();
-    let mut has_stream_camera = false;
-    let mut last_stream_motion_transform = Transform::default();
-    let mut has_stream_motion = false;
-    let mut last_cull_camera_transform = Transform::default();
-    let mut has_cull_camera = false;
-    let mut config_dirty = true;
-    let mut culling_dirty = true;
-    let mut lod_dirty = true;
-    let mut streaming_dirty = true;
-    let mut cells_dirty = true;
-    let mut rebuild_cells = false;
-    let mut force_full = false;
-    let mut last_cull_frame = 0u32;
-    let mut last_lod_frame = 0u32;
-    let mut last_stream_frame = 0u32;
-    let mut pending_frame: Option<u32> = None;
-    let mut pending_removed_objects: Vec<usize> = Vec::new();
-    let mut pending_removed_lights: Vec<usize> = Vec::new();
-    let mut pending_removed_proxies: Vec<usize> = Vec::new();
-    let mut has_sent_any = false;
-    let mut dirty_objects: Vec<Entity> = Vec::new();
-    let mut visible_object_count: usize = 0;
-    let mut streaming_queue: VecDeque<Entity> = VecDeque::new();
+    fn apply_change(&mut self, change: RenderChange) {
+        let RenderWorkerCore {
+            objects,
+            lights,
+            cells,
+            camera_component,
+            logical_camera_transform,
+            render_camera_transform,
+            render_config,
+            render_graph,
+            streaming_tuning,
+            lod_tuning,
+            worker_tuning,
+            next_proxy_id,
+            has_camera,
+            config_dirty,
+            culling_dirty,
+            lod_dirty,
+            streaming_dirty,
+            cells_dirty,
+            rebuild_cells,
+            force_full,
+            pending_frame,
+            pending_removed_objects,
+            pending_removed_lights,
+            pending_removed_proxies,
+            dirty_objects,
+            visible_object_count,
+            ..
+        } = self;
 
-    let apply_change = |change: RenderChange,
-                        objects: &mut HashMap<Entity, RenderObjectEntry>,
-                        lights: &mut HashMap<Entity, RenderLightEntry>,
-                        cells: &mut HashMap<CellKey, CellData>,
-                        next_proxy_id: &mut usize,
-                        camera_component: &mut Camera,
-                        logical_camera_transform: &mut Transform,
-                        render_camera_transform: &mut Transform,
-                        render_config: &mut RenderConfig,
-                        render_graph: &mut RenderGraphSpec,
-                        streaming_tuning: &mut StreamingTuning,
-                        lod_tuning: &mut LodTuning,
-                        worker_tuning: &mut RenderWorkerTuning,
-                        has_camera: &mut bool,
-                        config_dirty: &mut bool,
-                        culling_dirty: &mut bool,
-                        lod_dirty: &mut bool,
-                        streaming_dirty: &mut bool,
-                        cells_dirty: &mut bool,
-                        rebuild_cells: &mut bool,
-                        force_full: &mut bool,
-                        pending_frame: &mut Option<u32>,
-                        pending_removed_objects: &mut Vec<usize>,
-                        pending_removed_lights: &mut Vec<usize>,
-                        pending_removed_proxies: &mut Vec<usize>,
-                        dirty_objects: &mut Vec<Entity>,
-                        visible_object_count: &mut usize| {
         match change {
             RenderChange::UpsertObjects { objects: updates } => {
                 for update in updates {
@@ -841,13 +745,14 @@ fn render_worker_loop(
                             if cell.objects.is_empty() {
                                 if cell.proxy_sent {
                                     pending_removed_proxies.push(cell.proxy_id);
-                                    *visible_object_count = visible_object_count.saturating_sub(1);
+                                    *visible_object_count =
+                                        (*visible_object_count).saturating_sub(1);
                                 }
                                 cells.remove(&entry.cell_key);
                             }
                         }
                         if entry.last_visible {
-                            *visible_object_count = visible_object_count.saturating_sub(1);
+                            *visible_object_count = (*visible_object_count).saturating_sub(1);
                         }
                         if entry.last_sent_visible {
                             pending_removed_objects.push(entity.index() as usize);
@@ -949,100 +854,77 @@ fn render_worker_loop(
                 *pending_frame = Some(frame_index);
             }
         }
-    };
+    }
 
-    loop {
-        let change = match change_rx.recv() {
-            Ok(change) => change,
-            Err(_) => break,
-        };
-
-        apply_change(
-            change,
-            &mut objects,
-            &mut lights,
-            &mut cells,
-            &mut next_proxy_id,
-            &mut camera_component,
-            &mut logical_camera_transform,
-            &mut render_camera_transform,
-            &mut render_config,
-            &mut render_graph,
-            &mut streaming_tuning,
-            &mut lod_tuning,
-            &mut worker_tuning,
-            &mut has_camera,
-            &mut config_dirty,
-            &mut culling_dirty,
-            &mut lod_dirty,
-            &mut streaming_dirty,
-            &mut cells_dirty,
-            &mut rebuild_cells,
-            &mut force_full,
-            &mut pending_frame,
-            &mut pending_removed_objects,
-            &mut pending_removed_lights,
-            &mut pending_removed_proxies,
-            &mut dirty_objects,
-            &mut visible_object_count,
-        );
-
-        while let Ok(change) = change_rx.try_recv() {
-            apply_change(
-                change,
-                &mut objects,
-                &mut lights,
-                &mut cells,
-                &mut next_proxy_id,
-                &mut camera_component,
-                &mut logical_camera_transform,
-                &mut render_camera_transform,
-                &mut render_config,
-                &mut render_graph,
-                &mut streaming_tuning,
-                &mut lod_tuning,
-                &mut worker_tuning,
-                &mut has_camera,
-                &mut config_dirty,
-                &mut culling_dirty,
-                &mut lod_dirty,
-                &mut streaming_dirty,
-                &mut cells_dirty,
-                &mut rebuild_cells,
-                &mut force_full,
-                &mut pending_frame,
-                &mut pending_removed_objects,
-                &mut pending_removed_lights,
-                &mut pending_removed_proxies,
-                &mut dirty_objects,
-                &mut visible_object_count,
-            );
-        }
+    fn step(&mut self) -> Option<RenderResult> {
+        let RenderWorkerCore {
+            objects,
+            lights,
+            cells,
+            camera_component,
+            logical_camera_transform,
+            render_camera_transform,
+            render_config,
+            render_graph,
+            streaming_tuning,
+            lod_tuning,
+            worker_tuning,
+            next_proxy_id,
+            has_camera,
+            last_camera_component,
+            last_render_camera_transform,
+            has_previous_camera,
+            last_stream_camera_transform,
+            has_stream_camera,
+            last_stream_motion_transform,
+            has_stream_motion,
+            last_cull_camera_transform,
+            has_cull_camera,
+            config_dirty,
+            culling_dirty,
+            lod_dirty,
+            streaming_dirty,
+            cells_dirty,
+            rebuild_cells,
+            force_full,
+            last_cull_frame,
+            last_lod_frame,
+            last_stream_frame,
+            pending_frame,
+            pending_removed_objects,
+            pending_removed_lights,
+            pending_removed_proxies,
+            has_sent_any,
+            dirty_objects,
+            visible_object_count,
+            streaming_queue,
+            mesh_aabb_map,
+        } = self;
 
         let Some(frame_index) = pending_frame.take() else {
-            continue;
+            return None;
         };
-        if !has_camera {
-            continue;
+        if !*has_camera {
+            return None;
         }
 
-        if rebuild_cells {
+        if *rebuild_cells {
             cells.clear();
-            next_proxy_id = worker_tuning.hlod_proxy_id_base;
+            *next_proxy_id = worker_tuning.hlod_proxy_id_base;
             let cell_size = worker_tuning.cell_size.max(f32::EPSILON);
             for (&entity, entry) in objects.iter_mut() {
                 let cell_key = CellKey::from_position(entry.transform.position, cell_size);
                 let cell = cells.entry(cell_key).or_insert_with(|| {
-                    let id = next_proxy_id;
-                    next_proxy_id = next_proxy_id.wrapping_add(1);
+                    let id = *next_proxy_id;
+                    *next_proxy_id = next_proxy_id.wrapping_add(1);
                     CellData::new(id)
                 });
                 entry.cell_key = cell_key;
                 entry.cell_index = cell.objects.len();
                 cell.objects.push(entity);
             }
-            rebuild_cells = false;
-            cells_dirty = true;
+            *rebuild_cells = false;
+            *cells_dirty = true;
         }
 
         let transform_epsilon = render_config.transform_epsilon.max(0.0);
@@ -1052,40 +934,40 @@ fn render_worker_loop(
         let stream_move_threshold = worker_tuning.streaming_camera_move_threshold.max(0.0);
         let stream_rot_threshold = worker_tuning.streaming_camera_rot_threshold.clamp(0.0, 1.0);
 
-        let stream_camera_changed = !has_stream_camera
+        let stream_camera_changed = !*has_stream_camera
             || !transform_approx_eq(
-                &logical_camera_transform,
-                &last_stream_camera_transform,
+                logical_camera_transform,
+                last_stream_camera_transform,
                 stream_move_threshold,
                 stream_rot_threshold,
             );
         if stream_camera_changed {
-            last_stream_camera_transform = logical_camera_transform;
-            has_stream_camera = true;
-            streaming_dirty = true;
+            *last_stream_camera_transform = *logical_camera_transform;
+            *has_stream_camera = true;
+            *streaming_dirty = true;
         }
 
-        let camera_component_changed = camera_component != last_camera_component;
+        let camera_component_changed = *camera_component != *last_camera_component;
         let camera_transform_changed = !transform_approx_eq(
-            &render_camera_transform,
-            &last_render_camera_transform,
+            render_camera_transform,
+            last_render_camera_transform,
             transform_epsilon,
             rotation_epsilon,
         );
         let camera_changed =
-            camera_component_changed || !has_previous_camera || camera_transform_changed;
+            camera_component_changed || !*has_previous_camera || camera_transform_changed;
 
-        let cull_camera_changed = !has_cull_camera
+        let cull_camera_changed = !*has_cull_camera
             || !transform_approx_eq(
-                &render_camera_transform,
-                &last_cull_camera_transform,
+                render_camera_transform,
+                last_cull_camera_transform,
                 cull_move_threshold,
                 cull_rot_threshold,
             );
 
         let frustum = if render_config.frustum_culling {
             Some(Frustum::from_camera(
-                &render_camera_transform,
+                render_camera_transform,
                 camera_component.fov_y_rad,
                 camera_component.aspect_ratio,
                 camera_component.near_plane,
@@ -1110,30 +992,30 @@ fn render_worker_loop(
         let stream_camera_pos = logical_camera_transform.position;
         let cull_interval = render_config.cull_interval_frames;
         let cull_interval_ok =
-            cull_interval == 0 || frame_index.saturating_sub(last_cull_frame) >= cull_interval;
-        let do_full_cull = culling_dirty || (cull_camera_changed && cull_interval_ok);
+            cull_interval == 0 || frame_index.saturating_sub(*last_cull_frame) >= cull_interval;
+        let do_full_cull = *culling_dirty || (cull_camera_changed && cull_interval_ok);
         let lod_interval = render_config.lod_interval_frames;
         let lod_interval_ok =
-            lod_interval == 0 || frame_index.saturating_sub(last_lod_frame) >= lod_interval;
-        let do_full_lod = lod_dirty || (cull_camera_changed && lod_interval_ok);
-        let full_scan = do_full_cull || do_full_lod || cells_dirty || force_full;
+            lod_interval == 0 || frame_index.saturating_sub(*last_lod_frame) >= lod_interval;
+        let do_full_lod = *lod_dirty || (cull_camera_changed && lod_interval_ok);
+        let full_scan = do_full_cull || do_full_lod || *cells_dirty || *force_full;
 
         if do_full_cull {
-            last_cull_frame = frame_index;
-            last_cull_camera_transform = render_camera_transform;
-            has_cull_camera = true;
+            *last_cull_frame = frame_index;
+            *last_cull_camera_transform = *render_camera_transform;
+            *has_cull_camera = true;
         }
         if do_full_lod {
-            last_lod_frame = frame_index;
+            *last_lod_frame = frame_index;
         }
 
-        let motion_delta = if has_stream_motion {
+        let motion_delta = if *has_stream_motion {
             (logical_camera_transform.position - last_stream_motion_transform.position).length()
         } else {
             0.0
         };
-        last_stream_motion_transform = logical_camera_transform;
-        has_stream_motion = true;
+        *last_stream_motion_transform = *logical_camera_transform;
+        *has_stream_motion = true;
         let motion_threshold = worker_tuning.streaming_motion_speed_threshold.max(0.0);
         let high_motion = motion_delta > motion_threshold;
         let motion_scale = if high_motion {
@@ -1144,10 +1026,10 @@ fn render_worker_loop(
 
         let streaming_interval = render_config.streaming_interval_frames;
         let streaming_interval_ok = streaming_interval == 0
-            || frame_index.saturating_sub(last_stream_frame) >= streaming_interval;
-        let send_streaming = streaming_dirty
+            || frame_index.saturating_sub(*last_stream_frame) >= streaming_interval;
+        let send_streaming = *streaming_dirty
             || streaming_interval_ok
-            || !has_sent_any
+            || !*has_sent_any
             || !streaming_queue.is_empty();
         let per_object_lod =
             worker_tuning.per_object_lod && lod_enabled && (!gpu_driven || send_streaming);
@@ -1161,9 +1043,13 @@ fn render_worker_loop(
         }
 
         let mesh_aabb_map = mesh_aabb_map.read();
+        let fallback_aabb = Aabb {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        };
 
         let mut objects_upsert = Vec::new();
-        let mut objects_remove = std::mem::take(&mut pending_removed_objects);
+        let mut objects_remove = std::mem::take(pending_removed_objects);
         let proxy_valid = worker_tuning.hlod_enabled
             && worker_tuning.hlod_proxy_mesh_id != 0
             && worker_tuning.hlod_proxy_material_id != 0;
@@ -1236,20 +1122,20 @@ fn render_worker_loop(
 
                 if !entry.mesh_bounds_valid {
                     if let Some(aabb) = mesh_aabb_map.0.get(&entry.mesh_id) {
-                        entry.mesh_bounds = *aabb;
-                        entry.mesh_bounds_valid = true;
-                        entry.bounds_dirty = true;
+                        if aabb_is_valid(aabb) {
+                            entry.mesh_bounds = *aabb;
+                            entry.mesh_bounds_valid = true;
+                            entry.bounds_dirty = true;
+                        } else {
+                            entry.mesh_bounds = fallback_aabb;
+                            entry.mesh_bounds_valid = false;
+                            entry.bounds_dirty = true;
+                            entry.cull_dirty = true;
+                        }
                     } else {
-                        if entry.last_visible {
-                            entry.last_visible = false;
-                            *visible_object_count = (*visible_object_count).saturating_sub(1);
-                        }
-                        if entry.last_sent_visible {
-                            objects_remove.push(entity.index() as usize);
-                            entry.last_sent_visible = false;
-                        }
-                        entry.cull_dirty = false;
-                        return;
+                        entry.mesh_bounds = fallback_aabb;
+                        entry.bounds_dirty = true;
+                        entry.cull_dirty = true;
                     }
                 }
 
@@ -1480,6 +1366,17 @@ fn render_worker_loop(
                 }
             }
 
+            if full_candidates.is_empty() && !cells.is_empty() && worker_tuning.max_full_cells > 0 {
+                for (key, cell) in cells.iter() {
+                    if cell.objects.is_empty() {
+                        continue;
+                    }
+                    let center = key.center(cell_size);
+                    let distance_sq = (center - render_camera_pos).length_squared();
+                    full_candidates.push((distance_sq, *key));
+                }
+            }
+
             let max_full = worker_tuning.max_full_cells;
             if max_full == 0 {
                 full_candidates.clear();
@@ -1519,7 +1416,7 @@ fn render_worker_loop(
                         if let Some(entry) = objects.get_mut(entity) {
                             if entry.last_visible {
                                 entry.last_visible = false;
-                                visible_object_count = visible_object_count.saturating_sub(1);
+                                *visible_object_count = (*visible_object_count).saturating_sub(1);
                             }
                             if entry.last_sent_visible {
                                 objects_remove.push(entity.index() as usize);
@@ -1533,7 +1430,7 @@ fn render_worker_loop(
                 if cell.proxy_active && !new_proxy {
                     if cell.proxy_sent {
                         objects_remove.push(cell.proxy_id);
-                        visible_object_count = visible_object_count.saturating_sub(1);
+                        *visible_object_count = (*visible_object_count).saturating_sub(1);
                     }
                     cell.proxy_active = false;
                     cell.proxy_sent = false;
@@ -1545,7 +1442,7 @@ fn render_worker_loop(
                 if new_full && cell.proxy_active {
                     if cell.proxy_sent {
                         objects_remove.push(cell.proxy_id);
-                        visible_object_count = visible_object_count.saturating_sub(1);
+                        *visible_object_count = (*visible_object_count).saturating_sub(1);
                     }
                     cell.proxy_active = false;
                     cell.proxy_sent = false;
@@ -1561,7 +1458,7 @@ fn render_worker_loop(
                                 entry,
                                 true,
                                 &mut objects_remove,
-                                &mut visible_object_count,
+                                &mut *visible_object_count,
                             );
                         }
                     }
@@ -1602,7 +1499,7 @@ fn render_worker_loop(
                             lod_index: 0,
                         });
                         if !cell.proxy_sent {
-                            visible_object_count = visible_object_count.saturating_add(1);
+                            *visible_object_count = (*visible_object_count).saturating_add(1);
                         }
                         cell.proxy_sent = true;
                         cell.last_proxy_transform = proxy_transform;
@@ -1612,13 +1509,13 @@ fn render_worker_loop(
 
             dirty_objects.clear();
             if do_full_cull {
-                culling_dirty = false;
+                *culling_dirty = false;
             }
             if do_full_lod {
-                lod_dirty = false;
+                *lod_dirty = false;
             }
-            cells_dirty = false;
-            force_full = false;
+            *cells_dirty = false;
+            *force_full = false;
         } else {
             for entity in dirty_objects.drain(..) {
                 if let Some(entry) = objects.get_mut(&entity) {
@@ -1631,7 +1528,7 @@ fn render_worker_loop(
                         entry,
                         cell_full_active,
                         &mut objects_remove,
-                        &mut visible_object_count,
+                        &mut *visible_object_count,
                     );
                 }
             }
@@ -1641,10 +1538,10 @@ fn render_worker_loop(
         if send_streaming {
             if request_budget == 0 {
                 streaming_queue.clear();
-                last_stream_frame = frame_index;
-                streaming_dirty = false;
+                *last_stream_frame = frame_index;
+                *streaming_dirty = false;
             } else {
-                if streaming_queue.is_empty() || streaming_dirty {
+                if streaming_queue.is_empty() || *streaming_dirty {
                     streaming_queue.clear();
                     let cell_size = worker_tuning.cell_size.max(f32::EPSILON);
                     let mut active_cells: Vec<(f32, CellKey)> = Vec::new();
@@ -1667,7 +1564,7 @@ fn render_worker_loop(
                             streaming_queue.extend(cell.objects.iter().copied());
                         }
                     }
-                    streaming_dirty = false;
+                    *streaming_dirty = false;
                 }
 
                 let budget =
@@ -1748,7 +1645,7 @@ fn render_worker_loop(
                 }
 
                 if streaming_queue.is_empty() {
-                    last_stream_frame = frame_index;
+                    *last_stream_frame = frame_index;
                 }
             }
         }
@@ -1760,7 +1657,7 @@ fn render_worker_loop(
         }
 
         let mut lights_upsert = Vec::new();
-        let mut lights_remove = std::mem::take(&mut pending_removed_lights);
+        let mut lights_remove = std::mem::take(pending_removed_lights);
         for (&entity, entry) in lights.iter_mut() {
             let current_transform = entry.transform;
             let needs_update = !entry.last_sent_present
@@ -1785,11 +1682,11 @@ fn render_worker_loop(
             }
         }
 
-        let send_camera = camera_changed || !has_sent_any;
-        let send_config = config_dirty || !has_sent_any;
-        last_render_camera_transform = render_camera_transform;
-        last_camera_component = camera_component;
-        has_previous_camera = true;
+        let send_camera = camera_changed || !*has_sent_any;
+        let send_config = *config_dirty || !*has_sent_any;
+        *last_render_camera_transform = *render_camera_transform;
+        *last_camera_component = *camera_component;
+        *has_previous_camera = true;
 
         objects_remove.sort_unstable();
         objects_remove.dedup();
@@ -1797,7 +1694,7 @@ fn render_worker_loop(
         lights_remove.dedup();
 
         let mut render_delta = RenderDelta {
-            full: !has_sent_any || force_full,
+            full: !*has_sent_any || *force_full,
             objects_upsert,
             objects_remove,
             lights_upsert,
@@ -1811,19 +1708,19 @@ fn render_worker_loop(
 
         if send_camera {
             render_delta.camera = Some(RenderCameraDelta {
-                transform: render_camera_transform,
-                camera: camera_component,
+                transform: *render_camera_transform,
+                camera: *camera_component,
             });
         }
         if send_config {
-            render_delta.render_config = Some(render_config);
+            render_delta.render_config = Some(*render_config);
             render_delta.render_graph = Some(render_graph.clone());
         }
-        config_dirty = false;
+        *config_dirty = false;
 
         if send_streaming {
             if request_budget == 0 {
-                streaming_dirty = false;
+                *streaming_dirty = false;
             } else {
                 let mut streaming_plan = streaming_hints
                     .unwrap_or_default()
@@ -1838,30 +1735,268 @@ fn render_worker_loop(
                     streaming_plan.truncate(request_budget);
                 }
                 if streaming_plan.is_empty() && (!cells.is_empty() || !streaming_queue.is_empty()) {
-                    streaming_dirty = true;
+                    *streaming_dirty = true;
                 } else {
                     render_delta.streaming_requests = Some(streaming_plan);
                 }
                 if streaming_queue.is_empty() {
-                    last_stream_frame = frame_index;
+                    *last_stream_frame = frame_index;
                     if render_delta.streaming_requests.is_some() {
-                        streaming_dirty = false;
+                        *streaming_dirty = false;
                     }
                 }
             }
         }
 
-        if result_tx
-            .send(RenderResult {
-                render_delta,
-                visible_object_count,
-            })
-            .is_err()
-        {
-            break;
+        let result = RenderResult {
+            render_delta,
+            visible_object_count: *visible_object_count,
+        };
+        *has_sent_any = true;
+        *force_full = false;
+        Some(result)
+    }
+}
+
+enum RenderChange {
+    UpsertObjects {
+        objects: Vec<RenderObjectUpdate>,
+    },
+    RemoveObjects {
+        entities: Vec<Entity>,
+    },
+    UpsertLights {
+        lights: Vec<RenderLightUpdate>,
+    },
+    RemoveLights {
+        entities: Vec<Entity>,
+    },
+    UpdateCamera {
+        camera: Camera,
+        transform: Transform,
+    },
+    UpdateConfig {
+        render_config: RenderConfig,
+        render_graph: RenderGraphSpec,
+        streaming_tuning: StreamingTuning,
+        lod_tuning: LodTuning,
+        worker_tuning: RenderWorkerTuning,
+    },
+    RequestFrame {
+        frame_index: u32,
+    },
+}
+
+struct RenderResult {
+    render_delta: RenderDelta,
+    visible_object_count: usize,
+}
+
+struct RenderObjectEntry {
+    transform: Transform,
+    mesh_id: usize,
+    material_id: usize,
+    casts_shadow: bool,
+    visible: bool,
+    lod_state: LodState,
+    last_cull_transform: Transform,
+    last_bounds_transform: Transform,
+    bounds_center: Vec3,
+    axis_x: Vec3,
+    axis_y: Vec3,
+    axis_z: Vec3,
+    mesh_bounds: Aabb,
+    mesh_bounds_valid: bool,
+    bounds_dirty: bool,
+    cell_key: CellKey,
+    cell_index: usize,
+    last_visible: bool,
+    cull_dirty: bool,
+    last_sent_transform: Transform,
+    last_sent_mesh_id: usize,
+    last_sent_material_id: usize,
+    last_sent_casts_shadow: bool,
+    last_sent_lod_index: usize,
+    last_sent_visible: bool,
+}
+
+impl RenderObjectEntry {
+    fn new(
+        transform: Transform,
+        mesh_renderer: MeshRenderer,
+        cell_key: CellKey,
+        cell_index: usize,
+    ) -> Self {
+        Self {
+            transform,
+            mesh_id: mesh_renderer.mesh_id,
+            material_id: mesh_renderer.material_id,
+            casts_shadow: mesh_renderer.casts_shadow,
+            visible: mesh_renderer.visible,
+            lod_state: LodState {
+                last_seen_frame: u32::MAX,
+                ..Default::default()
+            },
+            last_cull_transform: transform,
+            last_bounds_transform: transform,
+            bounds_center: Vec3::ZERO,
+            axis_x: Vec3::ZERO,
+            axis_y: Vec3::ZERO,
+            axis_z: Vec3::ZERO,
+            mesh_bounds: Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            },
+            mesh_bounds_valid: false,
+            bounds_dirty: true,
+            cell_key,
+            cell_index,
+            last_visible: false,
+            cull_dirty: true,
+            last_sent_transform: transform,
+            last_sent_mesh_id: mesh_renderer.mesh_id,
+            last_sent_material_id: mesh_renderer.material_id,
+            last_sent_casts_shadow: mesh_renderer.casts_shadow,
+            last_sent_lod_index: 0,
+            last_sent_visible: false,
         }
-        has_sent_any = true;
-        force_full = false;
+    }
+
+    fn update(&mut self, transform: Transform, mesh_renderer: MeshRenderer) {
+        self.transform = transform;
+        self.bounds_dirty = true;
+
+        if self.mesh_id != mesh_renderer.mesh_id {
+            self.mesh_id = mesh_renderer.mesh_id;
+            self.lod_state = LodState {
+                last_seen_frame: u32::MAX,
+                ..Default::default()
+            };
+            self.cull_dirty = true;
+            self.mesh_bounds_valid = false;
+        }
+
+        if self.material_id != mesh_renderer.material_id {
+            self.material_id = mesh_renderer.material_id;
+        }
+
+        if self.casts_shadow != mesh_renderer.casts_shadow {
+            self.casts_shadow = mesh_renderer.casts_shadow;
+        }
+
+        if self.visible != mesh_renderer.visible {
+            self.visible = mesh_renderer.visible;
+            self.cull_dirty = true;
+        }
+    }
+}
+
+struct RenderLightEntry {
+    transform: Transform,
+    light: Light,
+    last_sent_transform: Transform,
+    last_sent_light: Light,
+    last_sent_present: bool,
+}
+
+impl RenderLightEntry {
+    fn new(transform: Transform, light: Light) -> Self {
+        Self {
+            transform,
+            light,
+            last_sent_transform: transform,
+            last_sent_light: light,
+            last_sent_present: false,
+        }
+    }
+
+    fn update(&mut self, transform: Transform, light: Light) {
+        self.transform = transform;
+        self.light = light;
+    }
+}
+
+fn spawn_render_worker(
+    mesh_aabb_map: Arc<RwLock<MeshAabbMap>>,
+    change_capacity: usize,
+) -> RenderWorker {
+    #[cfg(target_arch = "wasm32")]
+    let backend = RenderWorkerBackend::Local {
+        core: RenderWorkerCore::new(mesh_aabb_map),
+        pending_results: VecDeque::new(),
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let backend = {
+        let capacity = change_capacity.max(1);
+        let (change_tx, change_rx) = bounded(capacity);
+        let (result_tx, result_rx) = bounded(1);
+
+        thread::Builder::new()
+            .name("render-data-worker".to_string())
+            .spawn(move || render_worker_loop(change_rx, result_tx, mesh_aabb_map))
+            .expect("render data worker thread");
+
+        RenderWorkerBackend::Threaded {
+            change_tx,
+            result_rx,
+        }
+    };
+
+    RenderWorker {
+        backend,
+        in_flight: false,
+    }
+}
+
+fn try_send_change(
+    worker_state: &mut RenderWorkerState,
+    worker: &mut RenderWorker,
+    change: RenderChange,
+    label: &str,
+) -> bool {
+    match worker.try_send_change(change) {
+        Ok(_) => true,
+        Err(TrySendError::Full(_)) => {
+            warn!("render worker change queue full; deferring (drop {label})");
+            worker_state.camera_sent = false;
+            worker_state.config_sent = false;
+            worker_state.needs_full_sync = true;
+            false
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            warn!("render worker disconnected");
+            worker_state.camera_sent = false;
+            worker_state.config_sent = false;
+            worker_state.needs_full_sync = true;
+            false
+        }
+    }
+}
+
+fn render_worker_loop(
+    change_rx: Receiver<RenderChange>,
+    result_tx: Sender<RenderResult>,
+    mesh_aabb_map: Arc<RwLock<MeshAabbMap>>,
+) {
+    let mut core = RenderWorkerCore::new(mesh_aabb_map);
+
+    loop {
+        let change = match change_rx.recv() {
+            Ok(change) => change,
+            Err(_) => break,
+        };
+
+        core.apply_change(change);
+        while let Ok(change) = change_rx.try_recv() {
+            core.apply_change(change);
+        }
+
+        if let Some(result) = core.step() {
+            if result_tx.send(result).is_err() {
+                break;
+            }
+        }
     }
 }
 
@@ -2004,7 +2139,7 @@ pub fn render_data_system(
     }
 
     let mut direct_delta = RenderDelta::default();
-    let mut send_failed = worker.change_tx.is_full();
+    let mut send_failed = worker.is_full();
     if send_failed {
         worker_state.needs_full_sync = true;
         worker_state.camera_sent = false;
@@ -2015,7 +2150,7 @@ pub fn render_data_system(
         if !send_failed
             && !try_send_change(
                 &mut *worker_state,
-                &worker,
+                &mut worker,
                 RenderChange::UpdateConfig {
                     render_config,
                     render_graph: render_graph.clone(),
@@ -2065,7 +2200,7 @@ pub fn render_data_system(
             if !send_failed
                 && !try_send_change(
                     &mut *worker_state,
-                    &worker,
+                    &mut worker,
                     RenderChange::UpdateCamera {
                         camera: (*camera).0,
                         transform: (*transform).0,
@@ -2117,7 +2252,7 @@ pub fn render_data_system(
             && !removed_objects.is_empty()
             && !try_send_change(
                 &mut *worker_state,
-                &worker,
+                &mut worker,
                 RenderChange::RemoveObjects {
                     entities: removed_objects,
                 },
@@ -2131,7 +2266,7 @@ pub fn render_data_system(
             && !removed_light_entities.is_empty()
             && !try_send_change(
                 &mut *worker_state,
-                &worker,
+                &mut worker,
                 RenderChange::RemoveLights {
                     entities: removed_light_entities,
                 },
@@ -2141,7 +2276,7 @@ pub fn render_data_system(
             send_failed = true;
         }
 
-        if !send_failed && worker.change_tx.is_full() {
+        if !send_failed && worker.is_full() {
             worker_state.needs_full_sync = true;
             worker_state.camera_sent = false;
             worker_state.config_sent = false;
@@ -2180,7 +2315,7 @@ pub fn render_data_system(
             if !object_updates.is_empty()
                 && !try_send_change(
                     &mut *worker_state,
-                    &worker,
+                    &mut worker,
                     RenderChange::UpsertObjects {
                         objects: object_updates,
                     },
@@ -2191,7 +2326,7 @@ pub fn render_data_system(
             }
         }
 
-        if !send_failed && worker.change_tx.is_full() {
+        if !send_failed && worker.is_full() {
             worker_state.needs_full_sync = true;
             worker_state.camera_sent = false;
             worker_state.config_sent = false;
@@ -2230,7 +2365,7 @@ pub fn render_data_system(
             if !light_updates.is_empty()
                 && !try_send_change(
                     &mut *worker_state,
-                    &worker,
+                    &mut worker,
                     RenderChange::UpsertLights {
                         lights: light_updates,
                     },
@@ -2247,7 +2382,7 @@ pub fn render_data_system(
     }
 
     let mut latest_result = None;
-    while let Ok(result) = worker.result_rx.try_recv() {
+    while let Ok(result) = worker.try_recv_result() {
         latest_result = Some(result);
     }
 
@@ -2281,7 +2416,7 @@ pub fn render_data_system(
 
         if !try_send_change(
             &mut *worker_state,
-            &worker,
+            &mut worker,
             RenderChange::RequestFrame { frame_index },
             "frame request",
         ) {

@@ -5,9 +5,9 @@ use std::{
     env,
     hash::{Hash, Hasher},
     sync::Arc,
-    time::Instant,
 };
 use tracing::{info, warn};
+use web_time::Instant;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
@@ -73,6 +73,130 @@ use glam::{Mat3, Mat4, Quat, Vec3, Vec4Swizzles};
 
 const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
+
+fn format_supports_usage(
+    adapter: &wgpu::Adapter,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+) -> bool {
+    let features = adapter.get_texture_format_features(format);
+    features.allowed_usages.contains(usage)
+}
+
+fn select_depth_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let candidates = [
+        wgpu::TextureFormat::Depth32Float,
+        wgpu::TextureFormat::Depth24Plus,
+        wgpu::TextureFormat::Depth24PlusStencil8,
+        wgpu::TextureFormat::Depth16Unorm,
+    ];
+    for format in candidates {
+        if format_supports_usage(adapter, format, usage) {
+            return format;
+        }
+    }
+    wgpu::TextureFormat::Depth24Plus
+}
+
+fn select_depth_copy_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let candidates = [
+        wgpu::TextureFormat::R32Float,
+        wgpu::TextureFormat::R16Float,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ];
+    for format in candidates {
+        if format_supports_usage(adapter, format, usage) {
+            return format;
+        }
+    }
+    wgpu::TextureFormat::Rgba8Unorm
+}
+
+fn select_hdr_format(adapter: &wgpu::Adapter) -> wgpu::TextureFormat {
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let candidates = [
+        wgpu::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ];
+    for format in candidates {
+        if format_supports_usage(adapter, format, usage) {
+            return format;
+        }
+    }
+    wgpu::TextureFormat::Rgba8Unorm
+}
+
+fn select_atmosphere_lut_format(
+    adapter: &wgpu::Adapter,
+    supports_compute: bool,
+) -> wgpu::TextureFormat {
+    if supports_compute {
+        return wgpu::TextureFormat::Rgba16Float;
+    }
+
+    let required = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let candidates = [
+        wgpu::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ];
+
+    for format in candidates {
+        let features = adapter.get_texture_format_features(format);
+        if features.allowed_usages.contains(required)
+            && features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+        {
+            return format;
+        }
+    }
+
+    for format in candidates {
+        let features = adapter.get_texture_format_features(format);
+        if features.allowed_usages.contains(required) {
+            return format;
+        }
+    }
+
+    wgpu::TextureFormat::Rgba8Unorm
+}
+
+fn select_shadow_format(adapter: &wgpu::Adapter) -> (wgpu::TextureFormat, bool) {
+    let candidates = [
+        wgpu::TextureFormat::Rg32Float,
+        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ];
+    let required_usage =
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let format_features = |format: wgpu::TextureFormat| {
+        let features = adapter.get_texture_format_features(format);
+        let allowed = features.allowed_usages.contains(required_usage);
+        let filterable = features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+        (allowed, filterable)
+    };
+
+    for format in candidates {
+        let (allowed, filterable) = format_features(format);
+        if allowed && filterable {
+            return (format, true);
+        }
+    }
+
+    for format in candidates {
+        let (allowed, filterable) = format_features(format);
+        if allowed {
+            return (format, filterable);
+        }
+    }
+
+    (wgpu::TextureFormat::Rgba8Unorm, true)
+}
 
 #[derive(Clone, Copy)]
 struct MeshLodResource {
@@ -892,6 +1016,7 @@ struct BufferCache {
     shadow_uniforms: ReusableBuffer,
     shadow_matrices: ReusableBuffer,
     materials: ReusableBuffer,
+    materials_uniform: ReusableBuffer,
     debug_params: ReusableBuffer,
     gizmo_params: ReusableBuffer,
     gizmo_icons: ReusableBuffer,
@@ -926,6 +1051,10 @@ impl BufferCache {
             shadow_uniforms: ReusableBuffer::new("GraphRenderer/ShadowUniforms", frames_in_flight),
             shadow_matrices: ReusableBuffer::new("GraphRenderer/ShadowMatrices", frames_in_flight),
             materials: ReusableBuffer::new("GraphRenderer/Materials", frames_in_flight),
+            materials_uniform: ReusableBuffer::new(
+                "GraphRenderer/MaterialsUniform",
+                frames_in_flight,
+            ),
             debug_params: ReusableBuffer::new("GraphRenderer/DebugParams", frames_in_flight),
             gizmo_params: ReusableBuffer::new("GraphRenderer/GizmoParams", frames_in_flight),
             gizmo_icons: ReusableBuffer::new("GraphRenderer/GizmoIcons", frames_in_flight),
@@ -954,6 +1083,7 @@ impl BufferCache {
         self.shadow_uniforms.resize_slots(frames_in_flight);
         self.shadow_matrices.resize_slots(frames_in_flight);
         self.materials.resize_slots(frames_in_flight);
+        self.materials_uniform.resize_slots(frames_in_flight);
         self.debug_params.resize_slots(frames_in_flight);
         self.gizmo_params.resize_slots(frames_in_flight);
         self.gizmo_icons.resize_slots(frames_in_flight);
@@ -1368,6 +1498,17 @@ impl RenderSceneState {
     }
 }
 
+struct ComputePipelines {
+    rt_texture_copy_bgl: wgpu::BindGroupLayout,
+    rt_texture_copy_pipeline: wgpu::ComputePipeline,
+    occlusion_bgl: wgpu::BindGroupLayout,
+    occlusion_pipeline: wgpu::ComputePipeline,
+    gpu_cull_bgl: wgpu::BindGroupLayout,
+    gpu_cull_clear_pipeline: wgpu::ComputePipeline,
+    gpu_cull_pipeline: wgpu::ComputePipeline,
+    gpu_mesh_tasks_pipeline: wgpu::ComputePipeline,
+}
+
 /// The render graph renderer
 pub struct GraphRenderer {
     // WGPU Core
@@ -1392,8 +1533,7 @@ pub struct GraphRenderer {
     mipmap_generator: MipmapGenerator,
     rt_texture_arrays: Option<RtTextureArraySet>,
     rt_texture_arrays_signature: u64,
-    rt_texture_copy_bgl: wgpu::BindGroupLayout,
-    rt_texture_copy_pipeline: wgpu::ComputePipeline,
+    compute_pipelines: Option<ComputePipelines>,
 
     meshes: SlotVec<MeshGpu>,
     fallback_mesh: Option<MeshGpu>,
@@ -1410,6 +1550,10 @@ pub struct GraphRenderer {
     surface_size: PhysicalSize<u32>,
     prev_view_proj: Mat4,
     fallback_view: wgpu::TextureView,
+    fallback_albedo_view: wgpu::TextureView,
+    fallback_normal_view: wgpu::TextureView,
+    fallback_mra_view: wgpu::TextureView,
+    fallback_emission_view: wgpu::TextureView,
     fallback_volume_view: wgpu::TextureView,
     default_sampler: wgpu::Sampler,
     shadow_sampler: wgpu::Sampler,
@@ -1430,14 +1574,13 @@ pub struct GraphRenderer {
     needs_atmosphere_precompute: bool,
     prev_sky_uniforms: SkyUniforms,
     prev_shader_constants: ShaderConstants,
-    occlusion_bgl: wgpu::BindGroupLayout,
-    occlusion_pipeline: wgpu::ComputePipeline,
     occlusion_stable_frames: u32,
-    gpu_cull_bgl: wgpu::BindGroupLayout,
-    gpu_cull_clear_pipeline: wgpu::ComputePipeline,
-    gpu_cull_pipeline: wgpu::ComputePipeline,
-    gpu_mesh_tasks_pipeline: wgpu::ComputePipeline,
     shadow_format: wgpu::TextureFormat,
+    hdr_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    depth_copy_format: wgpu::TextureFormat,
+    max_color_attachments: u32,
+    force_low_color_formats: bool,
     frames_in_flight: usize,
     buffer_cache: BufferCache,
     gizmo_icon_cache: GizmoUploadCache,
@@ -1474,9 +1617,13 @@ pub struct GraphRenderer {
     gpu_instance_updates: Vec<usize>,
     gpu_driven_active: bool,
     supports_indirect_first_instance: bool,
+    supports_compute: bool,
+    use_uniform_lights: bool,
+    use_uniform_materials: bool,
     warned_indirect_first_instance_missing: bool,
     warned_multi_draw_missing: bool,
     warned_mesh_shaders_missing: bool,
+    warned_compute_missing: bool,
     gpu_cull_dirty: bool,
     gpu_cull_last_frame: u32,
     last_gpu_cull_signature: Option<GpuCullSignature>,
@@ -1523,6 +1670,8 @@ pub struct GraphRenderer {
     shadow_matrices_version: u64,
     bundle_invalidate_pending: bool,
     cached_material_buffer: Option<wgpu::Buffer>,
+    cached_material_uniform_buffer: Option<wgpu::Buffer>,
+    cached_material_uniform_stride: u64,
     cached_texture_views: Vec<wgpu::TextureView>,
     cached_texture_array_size: u32,
     cached_material_signature: u64,
@@ -1561,6 +1710,8 @@ pub(crate) struct RendererSnapshot {
 
 struct MaterialBuildResult {
     buffer: Option<wgpu::Buffer>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    uniform_stride: u64,
     views: Vec<wgpu::TextureView>,
     size: u32,
     signature: u64,
@@ -1588,6 +1739,7 @@ impl GraphRenderer {
     ) -> Result<Self, RendererError> {
         let supported_features = adapter.features();
         let adapter_info = adapter.get_info();
+        let adapter_backend = adapter_info.backend;
         let modern_bindless_features = wgpu::Features::TEXTURE_BINDING_ARRAY
             | wgpu::Features::BUFFER_BINDING_ARRAY
             | wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY;
@@ -1699,6 +1851,14 @@ impl GraphRenderer {
             })?;
 
         let device = Arc::new(device);
+        device.on_uncaptured_error(Arc::new(|err| {
+            let message = format!("wgpu uncaptured error: {}", err);
+            #[cfg(target_arch = "wasm32")]
+            {
+                web_sys::console::error_1(&message.as_str().into());
+            }
+            tracing::error!("{}", message);
+        }));
         let device_caps = Arc::new(RenderDeviceCaps {
             adapter_info,
             features: device.features(),
@@ -1723,13 +1883,65 @@ impl GraphRenderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(&device, &surface_config);
+        if let Some(err) = error_scope.pop().await {
+            return Err(RendererError::ResourceCreation(format!(
+                "Failed to configure surface: {}",
+                err
+            )));
+        }
 
         let device_features = device.features();
         let supports_indirect_first_instance =
             device_features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+        let supports_compute = device_caps.supports_compute();
+        let supports_fragment_storage_buffers =
+            device_caps.limits.max_storage_buffers_per_shader_stage > 0;
+        let use_uniform_lights = !supports_fragment_storage_buffers;
+        let use_uniform_materials = !supports_fragment_storage_buffers;
+        if use_uniform_lights {
+            warn!(
+                "Fragment storage buffers unavailable; using uniform light buffer (max {} lights)",
+                crate::graphics::common::constants::WEBGL_MAX_LIGHTS
+            );
+        }
+        if use_uniform_materials {
+            warn!("Fragment storage buffers unavailable; forcing bind group materials.");
+        }
         let bindless_config =
             BindlessConfig::default().clamp_to_device(device_features, &device.limits());
+        let bindless_requires_uniform_indexing = matches!(
+            binding_backend_choice,
+            BindingBackendChoice::BindlessModern | BindingBackendChoice::BindlessFallback
+        ) && !device_features.contains(
+            wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        );
+        let force_bindgroups_backend = use_uniform_materials;
+        let (backend, binding_backend_kind): (Box<dyn BindingBackend>, BindingBackendKind) =
+            match binding_backend_choice {
+                BindingBackendChoice::BindlessModern => (
+                    Box::new(BindlessModernBackend::new(bindless_config.clone())),
+                    BindingBackendKind::BindlessModern,
+                ),
+                BindingBackendChoice::BindlessFallback => (
+                    Box::new(BindlessFallbackBackend::new(bindless_config.clone())),
+                    BindingBackendKind::BindlessFallback,
+                ),
+                BindingBackendChoice::BindGroups | BindingBackendChoice::Auto => (
+                    Box::new(BindGroupBackend::new(bindless_config.clone())),
+                    BindingBackendKind::BindGroups,
+                ),
+            };
+        let (shadow_format, shadow_filterable) = select_shadow_format(&adapter);
+        let hdr_format = select_hdr_format(&adapter);
+        let atmosphere_lut_format = select_atmosphere_lut_format(&adapter, supports_compute);
+        let depth_format = select_depth_format(&adapter);
+        let depth_copy_format = select_depth_copy_format(&adapter);
+        let max_color_attachments = device.limits().max_color_attachments;
+        let force_low_color_formats =
+            adapter_backend == wgpu::Backend::Gl || hdr_format != wgpu::TextureFormat::Rgba16Float;
+        let mipmap_generator = MipmapGenerator::new(&device);
 
         let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Renderer/DefaultSampler"),
@@ -1742,13 +1954,18 @@ impl GraphRenderer {
             ..Default::default()
         });
 
+        let shadow_filter = if shadow_filterable {
+            wgpu::FilterMode::Linear
+        } else {
+            wgpu::FilterMode::Nearest
+        };
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Renderer/ShadowSampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: shadow_filter,
+            min_filter: shadow_filter,
             compare: None,
             ..Default::default()
         });
@@ -1829,7 +2046,12 @@ impl GraphRenderer {
             texture.create_view(&Default::default())
         };
 
+        // Distinct fallback textures so missing material slots stay visible and neutral
         let fallback_view = make_solid_tex([0, 0, 0, 0], &device, &queue);
+        let fallback_albedo_view = make_solid_tex([255, 255, 255, 255], &device, &queue);
+        let fallback_normal_view = make_solid_tex([128, 128, 255, 255], &device, &queue);
+        let fallback_mra_view = make_solid_tex([255, 255, 0, 255], &device, &queue);
+        let fallback_emission_view = make_solid_tex([0, 0, 0, 255], &device, &queue);
         let fallback_volume_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Renderer/Fallback3D"),
             size: wgpu::Extent3d {
@@ -1979,364 +2201,307 @@ impl GraphRenderer {
                 ..Default::default()
             });
 
-        let atmosphere_precomputer = AtmospherePrecomputer::new(&device);
-
-        let occlusion_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Occlusion/BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let occlusion_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Occlusion/PipelineLayout"),
-            bind_group_layouts: &[&occlusion_bgl],
-            immediate_size: 0,
-        });
-
-        let occlusion_shader =
-            device.create_shader_module(wgpu::include_wgsl!("shaders/hiz_cull.wgsl"));
-        let occlusion_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Occlusion/Pipeline"),
-            layout: Some(&occlusion_layout),
-            module: &occlusion_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let gpu_cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("GpuCull/BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<CameraUniforms>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<GpuCullParams>() as u64,
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 10,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let gpu_cull_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("GpuCull/PipelineLayout"),
-            bind_group_layouts: &[&gpu_cull_bgl],
-            immediate_size: 0,
-        });
-        let gpu_cull_shader =
-            device.create_shader_module(wgpu::include_wgsl!("shaders/gpu_cull.wgsl"));
-        let gpu_cull_clear_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("GpuCull/ClearPipeline"),
-                layout: Some(&gpu_cull_layout),
-                module: &gpu_cull_shader,
-                entry_point: Some("clear_draws"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-        let gpu_cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("GpuCull/Pipeline"),
-            layout: Some(&gpu_cull_layout),
-            module: &gpu_cull_shader,
-            entry_point: Some("cull_instances"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let gpu_mesh_tasks_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("GpuCull/MeshTasksPipeline"),
-                layout: Some(&gpu_cull_layout),
-                module: &gpu_cull_shader,
-                entry_point: Some("build_mesh_tasks"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-
-        let supports_float32_filterable = device
-            .features()
-            .contains(wgpu::Features::FLOAT32_FILTERABLE);
-        let shadow_format = if supports_float32_filterable {
-            wgpu::TextureFormat::Rg32Float
-        } else {
-            wgpu::TextureFormat::Rg16Float
-        };
-
-        let binding_backend_choice = match binding_backend_choice {
-            BindingBackendChoice::BindlessModern
-                if !device_features.contains(modern_bindless_features) =>
-            {
-                warn!(
-                    "Bindless modern backend requested but not supported; falling back to bindless fallback"
-                );
-                BindingBackendChoice::BindlessFallback
-            }
-            BindingBackendChoice::BindlessFallback
-                if !device_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY) =>
-            {
-                warn!(
-                    "Bindless fallback backend requested but texture arrays unsupported; falling back to bind groups"
-                );
-                BindingBackendChoice::BindGroups
-            }
-            other => other,
-        };
-
-        let (backend, binding_backend_kind, backend_name): (
-            Box<dyn BindingBackend>,
-            BindingBackendKind,
-            &str,
-        ) = match binding_backend_choice {
-            BindingBackendChoice::BindGroups => (
-                Box::new(BindGroupBackend::new(bindless_config.clone())),
-                BindingBackendKind::BindGroups,
-                "bind-groups",
-            ),
-            BindingBackendChoice::BindlessFallback => (
-                Box::new(BindlessFallbackBackend::new(bindless_config.clone())),
-                BindingBackendKind::BindlessFallback,
-                "bindless-fallback",
-            ),
-            BindingBackendChoice::BindlessModern => (
-                Box::new(BindlessModernBackend::new(bindless_config.clone())),
-                BindingBackendKind::BindlessModern,
-                "bindless-modern",
-            ),
-            BindingBackendChoice::Auto => {
-                if device_features.contains(modern_bindless_features) {
-                    (
-                        Box::new(BindlessModernBackend::new(bindless_config.clone())),
-                        BindingBackendKind::BindlessModern,
-                        "bindless-modern",
-                    )
-                } else if device_features.contains(wgpu::Features::TEXTURE_BINDING_ARRAY) {
-                    (
-                        Box::new(BindlessFallbackBackend::new(bindless_config.clone())),
-                        BindingBackendKind::BindlessFallback,
-                        "bindless-fallback",
-                    )
-                } else {
-                    (
-                        Box::new(BindGroupBackend::new(bindless_config.clone())),
-                        BindingBackendKind::BindGroups,
-                        "bind-groups",
-                    )
-                }
-            }
-        };
-        let bindless_requires_uniform_indexing = matches!(
-            binding_backend_kind,
-            BindingBackendKind::BindlessModern | BindingBackendKind::BindlessFallback
-        ) && !device_features.contains(
-            wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+        let atmosphere_precomputer = AtmospherePrecomputer::new_with_options(
+            &device,
+            supports_compute,
+            atmosphere_lut_format,
         );
-        info!("Selected binding backend: {}", backend_name);
 
-        let mipmap_generator = MipmapGenerator::new(&device);
-        let rt_texture_copy_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("RayTracing/TextureCopyBGL"),
+        let compute_pipelines = if supports_compute {
+            let occlusion_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Occlusion/BGL"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
                 ],
             });
-        let rt_texture_copy_shader =
-            device.create_shader_module(wgpu::include_wgsl!("shaders/rt_texture_copy.wgsl"));
-        let rt_texture_copy_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("RayTracing/TextureCopyPipeline"),
-                layout: Some(
-                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: Some("RayTracing/TextureCopyLayout"),
-                        bind_group_layouts: &[&rt_texture_copy_bgl],
-                        immediate_size: 0,
-                    }),
-                ),
-                module: &rt_texture_copy_shader,
-                entry_point: Some("copy"),
-                compilation_options: Default::default(),
-                cache: None,
+
+            let occlusion_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Occlusion/PipelineLayout"),
+                bind_group_layouts: &[&occlusion_bgl],
+                immediate_size: 0,
             });
+
+            let occlusion_shader =
+                device.create_shader_module(wgpu::include_wgsl!("shaders/hiz_cull.wgsl"));
+            let occlusion_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Occlusion/Pipeline"),
+                    layout: Some(&occlusion_layout),
+                    module: &occlusion_shader,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+            let gpu_cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("GpuCull/BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                CameraUniforms,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<GpuCullParams>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let gpu_cull_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("GpuCull/PipelineLayout"),
+                bind_group_layouts: &[&gpu_cull_bgl],
+                immediate_size: 0,
+            });
+            let gpu_cull_shader =
+                device.create_shader_module(wgpu::include_wgsl!("shaders/gpu_cull.wgsl"));
+            let gpu_cull_clear_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("GpuCull/ClearPipeline"),
+                    layout: Some(&gpu_cull_layout),
+                    module: &gpu_cull_shader,
+                    entry_point: Some("clear_draws"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+            let gpu_cull_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("GpuCull/Pipeline"),
+                    layout: Some(&gpu_cull_layout),
+                    module: &gpu_cull_shader,
+                    entry_point: Some("cull_instances"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+            let gpu_mesh_tasks_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("GpuCull/MeshTasksPipeline"),
+                    layout: Some(&gpu_cull_layout),
+                    module: &gpu_cull_shader,
+                    entry_point: Some("build_mesh_tasks"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+            let rt_texture_copy_bgl =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("RayTracing/TextureCopyBGL"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::StorageTexture {
+                                access: wgpu::StorageTextureAccess::WriteOnly,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+            let rt_texture_copy_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("RayTracing/TextureCopyLayout"),
+                    bind_group_layouts: &[&rt_texture_copy_bgl],
+                    immediate_size: 0,
+                });
+            let rt_texture_copy_shader =
+                device.create_shader_module(wgpu::include_wgsl!("shaders/rt_texture_copy.wgsl"));
+            let rt_texture_copy_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("RayTracing/TextureCopyPipeline"),
+                    layout: Some(&rt_texture_copy_layout),
+                    module: &rt_texture_copy_shader,
+                    entry_point: Some("copy"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+            Some(ComputePipelines {
+                rt_texture_copy_bgl,
+                rt_texture_copy_pipeline,
+                occlusion_bgl,
+                occlusion_pipeline,
+                gpu_cull_bgl,
+                gpu_cull_clear_pipeline,
+                gpu_cull_pipeline,
+                gpu_mesh_tasks_pipeline,
+            })
+        } else {
+            None
+        };
 
         // Budget defaults: tuned for low-memory GPUs
         let mb = 1024 * 1024;
@@ -2367,7 +2532,7 @@ impl GraphRenderer {
             backend,
             binding_backend_kind,
             bindless_requires_uniform_indexing,
-            force_bindgroups_backend: false,
+            force_bindgroups_backend,
             pool,
             active_graph: None,
             shared_stats,
@@ -2378,8 +2543,7 @@ impl GraphRenderer {
             mipmap_generator,
             rt_texture_arrays: None,
             rt_texture_arrays_signature: 0,
-            rt_texture_copy_bgl,
-            rt_texture_copy_pipeline,
+            compute_pipelines,
 
             meshes: SlotVec::new(),
             fallback_mesh: None,
@@ -2395,6 +2559,10 @@ impl GraphRenderer {
             surface_size: size,
             prev_view_proj: Mat4::IDENTITY,
             fallback_view,
+            fallback_albedo_view,
+            fallback_normal_view,
+            fallback_mra_view,
+            fallback_emission_view,
             fallback_volume_view,
             default_sampler,
             shadow_sampler,
@@ -2415,14 +2583,13 @@ impl GraphRenderer {
             needs_atmosphere_precompute: true,
             prev_sky_uniforms: SkyUniforms::default(),
             prev_shader_constants: ShaderConstants::default(),
-            occlusion_bgl,
-            occlusion_pipeline,
             occlusion_stable_frames: 0,
-            gpu_cull_bgl,
-            gpu_cull_clear_pipeline,
-            gpu_cull_pipeline,
-            gpu_mesh_tasks_pipeline,
             shadow_format,
+            hdr_format,
+            depth_format,
+            depth_copy_format,
+            max_color_attachments,
+            force_low_color_formats,
             frames_in_flight,
             buffer_cache: BufferCache::new(frames_in_flight),
             gizmo_icon_cache: GizmoUploadCache::new(),
@@ -2459,9 +2626,13 @@ impl GraphRenderer {
             gpu_instance_updates: Vec::new(),
             gpu_driven_active: false,
             supports_indirect_first_instance,
+            supports_compute,
+            use_uniform_lights,
+            use_uniform_materials,
             warned_indirect_first_instance_missing: false,
             warned_multi_draw_missing: false,
             warned_mesh_shaders_missing: false,
+            warned_compute_missing: false,
             gpu_cull_dirty: true,
             gpu_cull_last_frame: u32::MAX,
             last_gpu_cull_signature: None,
@@ -2507,6 +2678,8 @@ impl GraphRenderer {
             shadow_matrices_version: 0,
             bundle_invalidate_pending: false,
             cached_material_buffer: None,
+            cached_material_uniform_buffer: None,
+            cached_material_uniform_stride: 0,
             cached_texture_views: Vec::new(),
             cached_texture_array_size: 0,
             cached_material_signature: 0,
@@ -2579,28 +2752,7 @@ impl GraphRenderer {
         };
 
         let graph_spec = scene.data.render_graph.clone();
-        let tracing_active = graph_spec.name == "traced-graph"
-            || (graph_spec.name == "hybrid-graph"
-                && (scene.data.render_config.ddgi_pass || scene.data.render_config.rt_reflections));
-        let graph_sig = RenderGraphConfigSignature::from_render_config(&scene.data.render_config);
 
-        if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig) {
-            self.current_render_data = Some(scene);
-            return Err(err);
-        }
-
-        let swapchain_id = match self.active_graph.as_ref() {
-            Some(active) => active.swapchain_id,
-            None => {
-                warn!("Render graph missing; skipping frame");
-                self.current_render_data = Some(scene);
-                self.clear_and_present(&output_view, output_frame);
-                self.frame_index = self.frame_index.wrapping_add(1);
-                return Ok(());
-            }
-        };
-
-        self.update_swapchain_entry(swapchain_id, output_view.clone());
         let streaming_start = if profiling_enabled {
             Some(Instant::now())
         } else {
@@ -2633,6 +2785,29 @@ impl GraphRenderer {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
+
+        let graph_sig = RenderGraphConfigSignature::from_render_config(&globals.render_config);
+        let tracing_active = graph_spec.name == "traced-graph"
+            || (graph_spec.name == "hybrid-graph"
+                && (globals.render_config.ddgi_pass || globals.render_config.rt_reflections));
+
+        if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig) {
+            self.current_render_data = Some(scene);
+            return Err(err);
+        }
+
+        let swapchain_id = match self.active_graph.as_ref() {
+            Some(active) => active.swapchain_id,
+            None => {
+                warn!("Render graph missing; skipping frame");
+                self.current_render_data = Some(scene);
+                self.clear_and_present(&output_view, output_frame);
+                self.frame_index = self.frame_index.wrapping_add(1);
+                return Ok(());
+            }
+        };
+
+        self.update_swapchain_entry(swapchain_id, output_view.clone());
 
         let occlusion_start = if profiling_enabled {
             Some(Instant::now())
@@ -3542,7 +3717,7 @@ impl GraphRenderer {
         self.streaming_last_frame = 0;
         self.streaming_request_cursor = 0;
         self.streaming_scan_cursor = 0;
-        self.force_bindgroups_backend = false;
+        self.force_bindgroups_backend = self.use_uniform_materials;
         self.rt_blas_targets.clear();
         self.rt_blas_last_rebuild_frame = self.frame_index;
         self.rt_requires_blas = false;
@@ -3561,6 +3736,8 @@ impl GraphRenderer {
         self.gpu_cull_dirty = true;
 
         self.cached_material_buffer = None;
+        self.cached_material_uniform_buffer = None;
+        self.cached_material_uniform_stride = 0;
         self.cached_texture_views.clear();
         self.cached_texture_array_size = 0;
         self.cached_material_signature = 0;
@@ -4099,6 +4276,12 @@ impl GraphRenderer {
                 surface_size: self.surface_size,
                 surface_format: self.surface_config.format,
                 shadow_format: self.shadow_format,
+                hdr_format: self.hdr_format,
+                depth_format: self.depth_format,
+                depth_copy_format: self.depth_copy_format,
+                max_color_attachments: self.max_color_attachments,
+                force_low_color_formats: self.force_low_color_formats,
+                supports_fragment_storage_buffers: !self.use_uniform_lights,
                 device_caps: Arc::clone(&self.device_caps),
                 blue_noise_view: Arc::new(self.blue_noise_view.clone()),
                 blue_noise_sampler: Arc::new(self.blue_noise_sampler.clone()),
@@ -6348,6 +6531,31 @@ impl GraphRenderer {
                 .gpu_fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        if !self.supports_compute {
+            if !self.warned_compute_missing {
+                self.warned_compute_missing = true;
+                tracing::warn!(
+                    "Compute features disabled: adapter does not support compute shaders"
+                );
+            }
+            frame_render_config.gpu_driven = false;
+            frame_render_config.occlusion_culling = false;
+            frame_render_config.ddgi_pass = false;
+            frame_render_config.ssgi_pass = false;
+            frame_render_config.ssgi_denoise_pass = false;
+            frame_render_config.ssr_pass = false;
+            frame_render_config.rt_accumulation = false;
+            frame_render_config.rt_direct_lighting = false;
+            frame_render_config.rt_shadows = false;
+            frame_render_config.rt_use_textures = false;
+            frame_render_config.rt_reflections = false;
+            frame_render_config.rt_reflection_direct_lighting = false;
+            frame_render_config.rt_reflection_shadows = false;
+            frame_render_config.rt_reflection_accumulation = false;
+            self.shared_stats
+                .gpu_fallbacks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // Allow vertex fallback if meshlets are missing; passes decide when mesh shaders are safe.
         let draw_require_meshlets = false;
         let gpu_driven = frame_render_config.gpu_driven;
@@ -6365,8 +6573,15 @@ impl GraphRenderer {
             self.gpu_bundle_version = self.gpu_bundle_version.wrapping_add(1);
         }
 
-        let (camera_uniforms, lights, view_proj, view_matrix) =
+        let (mut camera_uniforms, mut lights, view_proj, view_matrix) =
             self.calculate_uniforms(render_data, alpha);
+        if self.use_uniform_lights {
+            let max_lights = crate::graphics::common::constants::WEBGL_MAX_LIGHTS;
+            if lights.len() > max_lights {
+                lights.truncate(max_lights);
+            }
+            camera_uniforms.light_count = lights.len() as u32;
+        }
         let camera_buffer = {
             let (buf, reallocated) = self.buffer_cache.camera.ensure_with_status(
                 &self.device,
@@ -6382,7 +6597,30 @@ impl GraphRenderer {
             }
             buffer
         };
-        let lights_buffer = if lights.is_empty() {
+        let lights_buffer = if self.use_uniform_lights {
+            let max_lights = crate::graphics::common::constants::WEBGL_MAX_LIGHTS;
+            let empty_light = LightData {
+                position: [0.0; 3],
+                light_type: 0,
+                color: [0.0; 3],
+                intensity: 0.0,
+                direction: [0.0; 3],
+                _padding: 0.0,
+            };
+            let mut padded = vec![empty_light; max_lights];
+            for (dst, src) in padded.iter_mut().zip(lights.iter()) {
+                *dst = *src;
+            }
+            let bytes = bytemuck::cast_slice(&padded);
+            let buf = self.buffer_cache.lights.ensure(
+                &self.device,
+                bytes.len() as u64,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buf, 0, bytes);
+            Some(buf.clone())
+        } else if lights.is_empty() {
             None
         } else {
             let bytes = bytemuck::cast_slice(&lights);
@@ -6547,20 +6785,36 @@ impl GraphRenderer {
         let materials_dirty = self.materials_dirty;
         let material_needs_rebuild = materials_dirty || self.cached_texture_array_size == 0;
         let mut texture_overflow = self.cached_texture_overflow;
-        let (material_buffer, texture_views, texture_array_size) = if material_needs_rebuild {
+        let (
+            material_buffer,
+            material_uniform_buffer,
+            material_uniform_stride,
+            texture_views,
+            texture_array_size,
+        ) = if material_needs_rebuild {
             let build = self.build_material_data(scene, materials_dirty);
             self.materials_dirty = false;
             texture_overflow = build.texture_overflow;
             self.cached_texture_overflow = build.texture_overflow;
             if build.changed {
                 self.cached_material_buffer = build.buffer.clone();
+                self.cached_material_uniform_buffer = build.uniform_buffer.clone();
+                self.cached_material_uniform_stride = build.uniform_stride;
                 self.cached_texture_views = build.views.clone();
                 self.cached_texture_array_size = build.size.max(1);
                 self.cached_material_signature = build.signature;
-                (build.buffer, build.views, self.cached_texture_array_size)
+                (
+                    build.buffer,
+                    build.uniform_buffer,
+                    build.uniform_stride,
+                    build.views,
+                    self.cached_texture_array_size,
+                )
             } else {
                 (
                     self.cached_material_buffer.clone(),
+                    self.cached_material_uniform_buffer.clone(),
+                    self.cached_material_uniform_stride,
                     self.cached_texture_views.clone(),
                     self.cached_texture_array_size.max(1),
                 )
@@ -6568,6 +6822,8 @@ impl GraphRenderer {
         } else {
             (
                 self.cached_material_buffer.clone(),
+                self.cached_material_uniform_buffer.clone(),
+                self.cached_material_uniform_stride,
                 self.cached_texture_views.clone(),
                 self.cached_texture_array_size.max(1),
             )
@@ -7110,6 +7366,8 @@ impl GraphRenderer {
             shadow_matrices_buffer,
             sky_buffer,
             material_buffer,
+            material_uniform_buffer,
+            material_uniform_stride,
             material_textures,
             material_bindings_version: self.material_bindings_version,
             texture_views,
@@ -7331,7 +7589,6 @@ impl GraphRenderer {
 
         let interp = globals.alpha > 0.0 && globals.alpha < 1.0;
         let material_version = self.material_version;
-        let material_index_map = &self.material_index_map;
 
         let mut instances = Vec::new();
         let mut bounds = Vec::new();
@@ -7381,10 +7638,7 @@ impl GraphRenderer {
         }
 
         for object in &render_data.objects {
-            let mat_idx = match material_index_map.get(object.material_id) {
-                Some(entry) if entry.version == material_version => entry.index,
-                _ => continue,
-            };
+            let mat_idx = self.material_index_for(object.material_id, material_version);
 
             let mut desired_lod = object.lod_index.saturating_add(lod_bias);
             if force_lowest {
@@ -7763,6 +8017,17 @@ impl GraphRenderer {
             }
         };
 
+        let Some(compute) = self.compute_pipelines.as_ref() else {
+            stats.occlusion_status.store(
+                OCCLUSION_STATUS_DISABLED,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            stats
+                .occlusion_instance_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        };
+
         let params = OcclusionParams {
             instance_count: instances.count,
             _pad0: [0; 3],
@@ -7783,7 +8048,7 @@ impl GraphRenderer {
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Occlusion/BG"),
-            layout: &self.occlusion_bgl,
+            layout: &compute.occlusion_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -7814,7 +8079,7 @@ impl GraphRenderer {
                 label: Some("Occlusion/Pass"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.occlusion_pipeline);
+            cpass.set_pipeline(&compute.occlusion_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (instances.count + 63) / 64;
             cpass.dispatch_workgroups(workgroups, 1, 1);
@@ -7857,6 +8122,17 @@ impl GraphRenderer {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
             return;
         }
+
+        let Some(compute) = self.compute_pipelines.as_ref() else {
+            stats.occlusion_status.store(
+                OCCLUSION_STATUS_DISABLED,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            stats
+                .occlusion_instance_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return;
+        };
 
         let (
             input,
@@ -7981,7 +8257,7 @@ impl GraphRenderer {
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GpuCull/BG"),
-            layout: &self.gpu_cull_bgl,
+            layout: &compute.gpu_cull_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -8044,7 +8320,7 @@ impl GraphRenderer {
                 label: Some("GpuCull/Clear"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.gpu_cull_clear_pipeline);
+            cpass.set_pipeline(&compute.gpu_cull_clear_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (self.gpu_draw_count + 63) / 64;
             cpass.dispatch_workgroups(workgroups, 1, 1);
@@ -8054,7 +8330,7 @@ impl GraphRenderer {
                 label: Some("GpuCull/Instances"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.gpu_cull_pipeline);
+            cpass.set_pipeline(&compute.gpu_cull_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (instance_count + 63) / 64;
             cpass.dispatch_workgroups(workgroups, 1, 1);
@@ -8064,7 +8340,7 @@ impl GraphRenderer {
                 label: Some("GpuCull/MeshTasks"),
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.gpu_mesh_tasks_pipeline);
+            cpass.set_pipeline(&compute.gpu_mesh_tasks_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (self.gpu_draw_count + 63) / 64;
             cpass.dispatch_workgroups(workgroups, 1, 1);
@@ -8366,6 +8642,8 @@ impl GraphRenderer {
         if !force_rebuild && !signature_changed {
             return MaterialBuildResult {
                 buffer: self.cached_material_buffer.clone(),
+                uniform_buffer: self.cached_material_uniform_buffer.clone(),
+                uniform_stride: self.cached_material_uniform_stride,
                 views: self.cached_texture_views.clone(),
                 size: self.cached_texture_array_size.max(1),
                 signature,
@@ -8379,6 +8657,8 @@ impl GraphRenderer {
             self.material_bindings_version = self.material_bindings_version.wrapping_add(1);
             return MaterialBuildResult {
                 buffer: self.cached_material_buffer.clone(),
+                uniform_buffer: self.cached_material_uniform_buffer.clone(),
+                uniform_stride: self.cached_material_uniform_stride,
                 views: textures,
                 size: texture_array_size,
                 signature,
@@ -8458,8 +8738,41 @@ impl GraphRenderer {
             Some(buf.clone())
         };
 
+        let (uniform_buffer, uniform_stride) = if self.use_uniform_materials {
+            let element_size = std::mem::size_of::<MaterialShaderData>();
+            let alignment = self
+                .device
+                .limits()
+                .min_uniform_buffer_offset_alignment
+                .max(1) as usize;
+            let stride = ((element_size + alignment - 1) / alignment) * alignment;
+            let mut padded = vec![0u8; material_gpu.len().saturating_mul(stride)];
+            for (index, material) in material_gpu.iter().enumerate() {
+                let offset = index * stride;
+                let bytes = bytemuck::bytes_of(material);
+                padded[offset..offset + element_size].copy_from_slice(bytes);
+            }
+            let buf = if padded.is_empty() {
+                None
+            } else {
+                let buf = self.buffer_cache.materials_uniform.ensure(
+                    &self.device,
+                    padded.len() as u64,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    self.frame_index,
+                );
+                self.queue.write_buffer(buf, 0, &padded);
+                Some(buf.clone())
+            };
+            (buf, stride as u64)
+        } else {
+            (None, 0)
+        };
+
         MaterialBuildResult {
             buffer: material_buffer,
+            uniform_buffer,
+            uniform_stride,
             views: textures,
             size: texture_array_size,
             signature,
@@ -8557,36 +8870,37 @@ impl GraphRenderer {
 
         let mut textures = Vec::with_capacity(self.material_index_order.len().saturating_add(1));
         let fallback = MaterialTextureSet {
-            albedo: self.fallback_view.clone(),
-            normal: self.fallback_view.clone(),
-            metallic_roughness: self.fallback_view.clone(),
-            emission: self.fallback_view.clone(),
+            albedo: self.fallback_albedo_view.clone(),
+            normal: self.fallback_normal_view.clone(),
+            metallic_roughness: self.fallback_mra_view.clone(),
+            emission: self.fallback_emission_view.clone(),
         };
         textures.push(fallback);
 
-        let mut resolve_tex = |opt_id: Option<usize>| -> wgpu::TextureView {
+        let mut resolve_tex = |pool: &mut GpuResourcePool,
+                               frame_index: u32,
+                               opt_id: Option<usize>,
+                               fallback: &wgpu::TextureView|
+         -> wgpu::TextureView {
             let Some(id) = opt_id else {
-                return self.fallback_view.clone();
+                return fallback.clone();
             };
-            let rid = self
-                .pool
-                .asset_id_to_resource(ResourceKind::Texture, id as u32);
-            let view = self
-                .pool
+            let rid = pool.asset_id_to_resource(ResourceKind::Texture, id as u32);
+            let view = pool
                 .texture_view(rid)
                 .cloned()
-                .unwrap_or_else(|| self.fallback_view.clone());
-            self.pool.mark_used(rid, self.frame_index);
+                .unwrap_or_else(|| fallback.clone());
+            pool.mark_used(rid, frame_index);
             view
         };
 
         for mat_id in &material_ids {
             let Some(entry) = self.materials.get(*mat_id) else {
                 textures.push(MaterialTextureSet {
-                    albedo: self.fallback_view.clone(),
-                    normal: self.fallback_view.clone(),
-                    metallic_roughness: self.fallback_view.clone(),
-                    emission: self.fallback_view.clone(),
+                    albedo: self.fallback_albedo_view.clone(),
+                    normal: self.fallback_normal_view.clone(),
+                    metallic_roughness: self.fallback_mra_view.clone(),
+                    emission: self.fallback_emission_view.clone(),
                 });
                 continue;
             };
@@ -8600,10 +8914,30 @@ impl GraphRenderer {
                 )
             };
             textures.push(MaterialTextureSet {
-                albedo: resolve_tex(albedo_id),
-                normal: resolve_tex(normal_id),
-                metallic_roughness: resolve_tex(mra_id),
-                emission: resolve_tex(emission_id),
+                albedo: resolve_tex(
+                    &mut self.pool,
+                    self.frame_index,
+                    albedo_id,
+                    &self.fallback_albedo_view,
+                ),
+                normal: resolve_tex(
+                    &mut self.pool,
+                    self.frame_index,
+                    normal_id,
+                    &self.fallback_normal_view,
+                ),
+                metallic_roughness: resolve_tex(
+                    &mut self.pool,
+                    self.frame_index,
+                    mra_id,
+                    &self.fallback_mra_view,
+                ),
+                emission: resolve_tex(
+                    &mut self.pool,
+                    self.frame_index,
+                    emission_id,
+                    &self.fallback_emission_view,
+                ),
             });
         }
 
@@ -8652,6 +8986,10 @@ impl GraphRenderer {
         dispatch_x: u32,
         dispatch_y: u32,
     ) {
+        let Some(compute) = self.compute_pipelines.as_ref() else {
+            return;
+        };
+
         let dst_view = dst.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
             base_array_layer: layer,
@@ -8660,7 +8998,7 @@ impl GraphRenderer {
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("RayTracing/TextureCopyBG"),
-            layout: &self.rt_texture_copy_bgl,
+            layout: &compute.rt_texture_copy_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -8686,6 +9024,12 @@ impl GraphRenderer {
         cfg: &RenderConfig,
     ) -> Option<RayTracingTextureArrays> {
         if material_textures.is_empty() {
+            self.rt_texture_arrays = None;
+            self.rt_texture_arrays_signature = 0;
+            return None;
+        }
+
+        if !self.supports_compute || self.compute_pipelines.is_none() {
             self.rt_texture_arrays = None;
             self.rt_texture_arrays_signature = 0;
             return None;
@@ -8781,6 +9125,10 @@ impl GraphRenderer {
             None => return None,
         };
 
+        let Some(compute) = self.compute_pipelines.as_ref() else {
+            return None;
+        };
+
         let workgroup = 8u32;
         let dispatch_x = (resolution + workgroup - 1) / workgroup;
         let dispatch_y = (resolution + workgroup - 1) / workgroup;
@@ -8794,7 +9142,7 @@ impl GraphRenderer {
                 label: Some("RayTracing/TextureArrayCopyPass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.rt_texture_copy_pipeline);
+            pass.set_pipeline(&compute.rt_texture_copy_pipeline);
             for (layer, set) in material_textures.iter().enumerate().take(layers as usize) {
                 let layer = layer as u32;
                 self.copy_rt_texture_layer(
@@ -8862,17 +9210,13 @@ impl GraphRenderer {
         let force_lowest =
             matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
         let meshes = &self.meshes;
-        let material_index_map = &self.material_index_map;
         let material_version = self.material_version;
 
         self.gbuffer_batcher.reset();
         let interp = alpha > 0.0 && alpha < 1.0;
 
         for object in &render_data.objects {
-            let mat_idx = match material_index_map.get(object.material_id) {
-                Some(entry) if entry.version == material_version => entry.index,
-                _ => continue,
-            };
+            let mat_idx = self.material_index_for(object.material_id, material_version);
 
             let mut desired_lod = object.lod_index.saturating_add(lod_bias);
             if force_lowest {

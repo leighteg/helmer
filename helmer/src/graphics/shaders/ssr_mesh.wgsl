@@ -43,7 +43,7 @@ struct Constants {
     pcf_max_scale: f32,
     pcf_max_distance: f32,
     ssgi_intensity: f32,
-    _final_padding: vec2<f32>,
+    _final_padding: vec4<f32>,
     ssr_jitter_strength: f32,
 };
 

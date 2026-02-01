@@ -2,8 +2,9 @@
 members = [
     "helmer",
     "helmer_editor",
-    "test_game", "helmer_becs", "helmer_ecs", "becs_bench", "helmer_view",
+    "test_game", "helmer_becs", "helmer_ecs", "becs_bench", "helmer_view", "xtask",
 ]
+default-members = ["helmer"]
 resolver = "2" # Use the modern feature resolver
 
 [profile.dev]
@@ -57,6 +58,7 @@ opt-level = 3
 
 [patch.crates-io]
 egui-wgpu = { path = "vendor/egui-wgpu" }
+basis-universal-sys = { path = "vendor/basis-universal-sys" }
 
 # Math helpers
 [profile.dev.package.num-traits]

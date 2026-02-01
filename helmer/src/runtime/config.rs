@@ -12,6 +12,7 @@ pub struct RuntimeConfig {
     pub binding_backend: BindingBackendChoice,
 
     pub render_config: RenderConfig,
+    pub fixed_timestep: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -23,6 +24,10 @@ impl Default for RuntimeConfig {
         let wgpu_backend = WgpuBackend::from_env(env::var("HELMER_BACKEND").ok());
         let binding_backend =
             BindingBackendChoice::from_env(env::var("HELMER_BINDING_BACKEND").ok());
+        let fixed_timestep = env::var("HELMER_FIXED_TIMESTEP")
+            .ok()
+            .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(cfg!(target_arch = "wasm32"));
         RuntimeConfig {
             egui: true,
             wgpu_experimental_features,
@@ -30,6 +35,7 @@ impl Default for RuntimeConfig {
             binding_backend,
 
             render_config: RenderConfig::default(),
+            fixed_timestep,
         }
     }
 }

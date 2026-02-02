@@ -1433,9 +1433,6 @@ pub fn helmer_worker_response(bytes: Vec<u8>) {
         };
         let guard = server.lock();
         guard.web_pending_responses.lock().push_back(bytes);
-        guard
-            .inflight_worker_requests
-            .fetch_sub(1, AtomicOrdering::Relaxed);
     });
 }
 
@@ -3577,6 +3574,11 @@ impl AssetServer {
                             warn!("Failed to decode worker response: {}", err);
                         }
                     }
+                    let _ = self.inflight_worker_requests.fetch_update(
+                        AtomicOrdering::Relaxed,
+                        AtomicOrdering::Relaxed,
+                        |value| Some(value.saturating_sub(1)),
+                    );
                     continue;
                 }
             }

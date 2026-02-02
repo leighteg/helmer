@@ -6,19 +6,19 @@ edition = "2024"
 [dependencies]
 helmer = { path = "../helmer" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
-glam = "0.30.8"
-hashbrown = "0.16.0"
-tracing = "0.1.41"
+glam = "0.30.9"
+hashbrown = "0.16.1"
+tracing = "0.1.44"
 winit = "0.30.12"
 egui = "0.33.3"
 egui-wgpu = "0.33.3"
 parking_lot = "0.12.5"
 bevy_reflect = { version = "0.17.2", features = ["debug"] }
-crossbeam-channel = "0.5"
+crossbeam-channel = "0.5.15"
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rapier3d = { version = "0.26.1", features = ["simd-stable", "parallel"] }
+rapier3d = { version = "0.32.0", features = ["simd-stable", "parallel"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rapier3d = { version = "0.26.1", default-features = false, features = ["dim3", "f32", "simd-stable"] }
+rapier3d = { version = "0.32.0", default-features = false, features = ["dim3", "f32", "simd-stable"] }

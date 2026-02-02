@@ -1,5 +1,3 @@
-use std::num::NonZero;
-
 use bevy_ecs::{
     component::Component,
     prelude::{Entity, Local, With, Without},
@@ -11,10 +9,9 @@ use glam::{Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
 use helmer::provided::components::Transform;
 use rapier3d::{
-    math::Isometry,
-    na::{self as nalgebra, Translation3, UnitQuaternion, Vector3},
+    math::Pose,
     prelude::{
-        BroadPhaseMultiSap, CCDSolver, ColliderBuilder, ColliderSet, ImpulseJointSet,
+        CCDSolver, ColliderBuilder, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
         IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
         RigidBodyBuilder, RigidBodySet,
     },
@@ -42,7 +39,7 @@ pub struct CleanupState {
 
 impl CleanupState {
     #[inline(always)]
-    fn is_position_safe(&self, pos: &Vector3<f32>) -> bool {
+    fn is_position_safe(&self, pos: &Vec3) -> bool {
         pos.x.abs() < self.max_coordinate
             && pos.y.abs() < self.max_coordinate
             && pos.z.abs() < self.max_coordinate
@@ -67,12 +64,8 @@ impl Default for CleanupState {
 //=====================================================================
 
 #[inline]
-fn build_isometry(position: Vec3, rotation: Quat) -> Isometry<f32> {
-    let translation = Translation3::new(position.x, position.y, position.z);
-    let rotation = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-        rotation.w, rotation.x, rotation.y, rotation.z,
-    ));
-    Isometry::from_parts(translation, rotation)
+fn build_isometry(position: Vec3, rotation: Quat) -> Pose {
+    Pose::from_parts(position, rotation)
 }
 
 #[inline]
@@ -136,7 +129,7 @@ pub fn sync_entities_to_physics_system(
         let iso = build_isometry(transform.position, transform.rotation);
 
         let rigid_body = RigidBodyBuilder::dynamic()
-            .position(iso)
+            .pose(iso)
             .additional_mass(dynamic_body.mass)
             .ccd_enabled(true)
             .build();
@@ -160,7 +153,7 @@ pub fn sync_entities_to_physics_system(
         let transform = transform.0;
         let iso = build_isometry(transform.position, transform.rotation);
 
-        let rigid_body = RigidBodyBuilder::fixed().position(iso).build();
+        let rigid_body = RigidBodyBuilder::fixed().pose(iso).build();
         let collider = build_collider(shape, transform.scale, false).build();
 
         let rigid_body_handle = rigid_body_set.insert(rigid_body);
@@ -213,7 +206,7 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
     // Update integration parameters
     phys_data.integration_parameters.dt = dt;
 
-    let gravity_vector = Vector3::new(
+    let gravity_vector = Vec3::new(
         phys_data.gravity.x,
         phys_data.gravity.y,
         phys_data.gravity.z,
@@ -221,7 +214,7 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
 
     // Run physics step
     phys_data.pipeline.step(
-        &gravity_vector,
+        gravity_vector,
         &phys_data.integration_parameters,
         &mut phys_data.island_manager,
         &mut phys_data.broad_phase,
@@ -231,7 +224,6 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
         &mut phys_data.impulse_joint_set,
         &mut phys_data.multibody_joint_set,
         &mut phys_data.ccd_solver,
-        None,
         &(),
         &(),
     );
@@ -261,9 +253,9 @@ pub fn sync_physics_to_entities_system(
                 transform.position.y = rb_pos.y;
                 transform.position.z = rb_pos.z;
 
-                transform.rotation.x = rb_rot.i;
-                transform.rotation.y = rb_rot.j;
-                transform.rotation.z = rb_rot.k;
+                transform.rotation.x = rb_rot.x;
+                transform.rotation.y = rb_rot.y;
+                transform.rotation.z = rb_rot.z;
                 transform.rotation.w = rb_rot.w;
             }
         }
@@ -299,7 +291,7 @@ pub fn cleanup_physics_system(
         if let Some(rigid_body) = phys.rigid_body_set.get(handle.rigid_body) {
             let position = rigid_body.translation();
 
-            if !local_state.is_position_safe(position) {
+            if !local_state.is_position_safe(&position) {
                 warn!(
                     "Entity {:?} is out of bounds at [{:.2}, {:.2}, {:.2}], destroying to prevent Rapier panic",
                     entity, position.x, position.y, position.z
@@ -345,7 +337,7 @@ pub fn cleanup_physics_system(
 
 /// Configure broad-phase for optimal performance
 /// Call this when initializing PhysicsResource
-pub fn configure_broad_phase_optimal(broad_phase: &mut BroadPhaseMultiSap) {
+pub fn configure_broad_phase_optimal(_broad_phase: &mut DefaultBroadPhase) {
     // Tune the broad phase grid for better spatial partitioning
     // Adjust these values based on your world size and entity density
 
@@ -363,8 +355,7 @@ pub fn get_optimal_integration_parameters() -> IntegrationParameters {
     // Balance accuracy and performance
     params.max_ccd_substeps = 4; // Good balance for fast-moving objects
     params.num_internal_stabilization_iterations = 4; // Reasonable stability
-    params.num_solver_iterations = NonZero::new(4).unwrap(); // Default is often good
-    params.num_additional_friction_iterations = 2; // Reduce if not needed
+    params.num_solver_iterations = 4; // Default is often good
 
     // Adjust allowed linear error for slight performance gain
     params.normalized_allowed_linear_error = 0.001; // Default is 0.001

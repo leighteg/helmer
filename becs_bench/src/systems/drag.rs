@@ -12,9 +12,9 @@ use helmer_becs::{
     provided::ui::inspector::InspectorSelectedEntityResource,
 };
 use rapier3d::{
-    na::Vector3,
+    math::Pose,
     parry::query::ShapeCastOptions,
-    prelude::{Isometry, QueryFilter, RigidBodyType, Vector},
+    prelude::{QueryFilter, RigidBodyType, Vector},
 };
 use std::f32::consts::PI;
 use winit::event::MouseButton;
@@ -196,7 +196,7 @@ pub fn drag_system(
                     if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
                         if rb.is_kinematic() {
                             let mut new_isometry = *rb.position();
-                            new_isometry.translation.vector = new_pos.to_array().into();
+                            new_isometry.translation = new_pos;
                             rb.set_next_kinematic_position(new_isometry);
                         }
                     }
@@ -218,27 +218,29 @@ pub fn drag_system(
                 // (This logic is complex and depends heavily on the collider setup)
                 if let Some(collider) = physics.collider_set.get(physics_handle.collider) {
                     let shape = collider.shape();
-                    let shape_isometry = Isometry::new(
-                        transform.0.position.to_array().into(),
-                        Vector3::from_vec(transform.0.rotation.to_array().to_vec()),
-                    );
+                    let shape_isometry =
+                        Pose::from_parts(transform.0.position, transform.0.rotation);
 
-                    let shape_vel = rapier3d::na::Vector3::new(0.0, -1.0, 0.0); // Cast downwards
+                    let shape_vel = Vector::new(0.0, -1.0, 0.0); // Cast downwards
                     let filter = QueryFilter::new().exclude_collider(physics_handle.collider);
                     let max_time_of_impact = 100.0; // Max cast distance
 
-                    if let Some((_hit_handle, hit)) = physics.query_pipeline.cast_shape(
+                    let query_pipeline = physics.broad_phase.as_query_pipeline(
+                        physics.narrow_phase.query_dispatcher(),
                         &physics.rigid_body_set,
                         &physics.collider_set,
+                        filter,
+                    );
+
+                    if let Some((_hit_handle, hit)) = query_pipeline.cast_shape(
                         &shape_isometry,
-                        &shape_vel,
+                        shape_vel,
                         shape,
                         ShapeCastOptions {
                             max_time_of_impact,
                             stop_at_penetration: true,
                             ..Default::default()
                         },
-                        filter,
                     ) {
                         // Snap the position to the hit point
                         let snapped_y = transform.0.position.y - hit.time_of_impact;
@@ -259,7 +261,7 @@ pub fn drag_system(
                 if let Some(rb) = physics.rigid_body_set.get_mut(physics_handle.rigid_body) {
                     if let Some(pos) = final_pos {
                         let mut new_isometry = *rb.position();
-                        new_isometry.translation.vector = pos.to_array().into();
+                        new_isometry.translation = pos;
                         rb.set_position(new_isometry, true);
                     }
                     rb.set_body_type(dragged_body_type, true);

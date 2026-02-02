@@ -6,9 +6,9 @@ edition = "2024"
 [dependencies]
 helmer = { path = "../helmer" }
 helmer_ecs = { path = "../helmer_ecs" }
-glam = "0.30.4"
-rand = "0.9.1"
-rapier3d = "0.26.1"
-winit = "0.30.11"
-gilrs = "0.11.0"
-egui = { git = "https://github.com/emilk/egui.git" }
+glam = "0.30.9"
+rand = "0.9.2"
+rapier3d = "0.32.0"
+winit = "0.30.12"
+gilrs = "0.11.1"
+egui = "0.33.3"

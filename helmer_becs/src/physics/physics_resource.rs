@@ -18,7 +18,6 @@ pub struct PhysicsResource {
     pub impulse_joint_set: ImpulseJointSet,
     pub multibody_joint_set: MultibodyJointSet,
     pub ccd_solver: CCDSolver,
-    pub query_pipeline: QueryPipeline, // Important for ray-casting
     pub rigid_body_set: RigidBodySet,
     pub collider_set: ColliderSet,
     pub physics_entities: HashMap<Entity, PhysicsHandle>,
@@ -38,7 +37,6 @@ impl PhysicsResource {
             impulse_joint_set: ImpulseJointSet::new(),
             multibody_joint_set: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
-            query_pipeline: QueryPipeline::new(),
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             physics_entities: HashMap::new(),

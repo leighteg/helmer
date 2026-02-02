@@ -3612,14 +3612,6 @@ impl StatsUI {
                         egui::DragValue::new(
                             &mut physics_resource
                                 .integration_parameters
-                                .num_additional_friction_iterations,
-                        )
-                        .prefix("num_additional_friction_iterations: "),
-                    );
-                    ui.add(
-                        egui::DragValue::new(
-                            &mut physics_resource
-                                .integration_parameters
                                 .num_internal_pgs_iterations,
                         )
                         .prefix("num_internal_pgs_iterations: "),
@@ -3644,7 +3636,8 @@ impl StatsUI {
                         egui::DragValue::new(
                             &mut physics_resource
                                 .integration_parameters
-                                .contact_damping_ratio,
+                                .contact_softness
+                                .damping_ratio,
                         )
                         .prefix("contact_damping_ratio: "),
                     );
@@ -3652,7 +3645,8 @@ impl StatsUI {
                         egui::DragValue::new(
                             &mut physics_resource
                                 .integration_parameters
-                                .contact_natural_frequency,
+                                .contact_softness
+                                .natural_frequency,
                         )
                         .prefix("contact_natural_frequency: "),
                     );

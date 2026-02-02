@@ -1,9 +1,8 @@
 use glam::{Quat, Vec3};
 use helmer::provided::components::Transform;
 use helmer::runtime::input_manager::InputManager;
-use rapier3d::na::{self as nalgebra, Translation3};
 use rapier3d::{
-    math::Isometry,
+    math::Pose,
     prelude::{ColliderBuilder, RigidBodyBuilder},
 };
 use std::any::TypeId;
@@ -64,23 +63,11 @@ impl System for SyncEntitiesToPhysicsSystem {
             // Pass 2: Create dynamic bodies
             if let Some(physics_resource) = ecs.get_resource_mut::<PhysicsResource>() {
                 for (entity_id, transform, dynamic_body, shape) in entities_to_create {
-                    let translation = Translation3::new(
-                        transform.position.x,
-                        transform.position.y,
-                        transform.position.z,
-                    );
-                    let rotation =
-                        nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-                            transform.rotation.w,
-                            transform.rotation.x,
-                            transform.rotation.y,
-                            transform.rotation.z,
-                        ));
-                    let iso = Isometry::from_parts(translation, rotation);
+                    let iso = Pose::from_parts(transform.position, transform.rotation);
 
                     // Build the rigid body using the specified mass
                     let rigid_body = RigidBodyBuilder::dynamic()
-                        .position(iso)
+                        .pose(iso)
                         .additional_mass(dynamic_body.mass)
                         .ccd_enabled(true)
                         .build();
@@ -141,21 +128,9 @@ impl System for SyncEntitiesToPhysicsSystem {
             // Pass 2: Create fixed bodies
             if let Some(physics_resource) = ecs.get_resource_mut::<PhysicsResource>() {
                 for (entity_id, transform, shape) in entities_to_create {
-                    let translation = Translation3::new(
-                        transform.position.x,
-                        transform.position.y,
-                        transform.position.z,
-                    );
-                    let rotation =
-                        nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(
-                            transform.rotation.w,
-                            transform.rotation.x,
-                            transform.rotation.y,
-                            transform.rotation.z,
-                        ));
-                    let iso = Isometry::from_parts(translation, rotation);
+                    let iso = Pose::from_parts(transform.position, transform.rotation);
 
-                    let rigid_body = RigidBodyBuilder::fixed().position(iso).build();
+                    let rigid_body = RigidBodyBuilder::fixed().pose(iso).build();
 
                     let collider = match shape {
                         ColliderShape::Cuboid => ColliderBuilder::cuboid(
@@ -216,10 +191,10 @@ impl System for PhysicsStepSystem {
         phys.integration_parameters
             .num_internal_stabilization_iterations = 4; // Optional: helps with stability
 
-        let gravity_vector = nalgebra::Vector3::new(phys.gravity.x, phys.gravity.y, phys.gravity.z);
+        let gravity_vector = Vec3::new(phys.gravity.x, phys.gravity.y, phys.gravity.z);
 
         phys.pipeline.step(
-            &gravity_vector,
+            gravity_vector,
             &phys.integration_parameters,
             &mut phys.island_manager,
             &mut phys.broad_phase,
@@ -229,7 +204,6 @@ impl System for PhysicsStepSystem {
             &mut phys.impulse_joint_set,
             &mut phys.multibody_joint_set,
             &mut phys.ccd_solver,
-            None,
             &(),
             &(),
         );
@@ -261,8 +235,8 @@ impl System for SyncPhysicsToEntitiesSystem {
                         let rb_pos = rigid_body.translation();
                         let rb_rot = rigid_body.rotation();
 
-                        let new_pos = Vec3::new(rb_pos.x, rb_pos.y, rb_pos.z);
-                        let new_rot = Quat::from_xyzw(rb_rot.i, rb_rot.j, rb_rot.k, rb_rot.w);
+                        let new_pos = rb_pos;
+                        let new_rot = *rb_rot;
                         updates.push((*entity_id, new_pos, new_rot));
                     }
                 }
@@ -308,7 +282,7 @@ impl CleanupPhysicsSystem {
     }
 
     /// Check if a position is within safe Rapier bounds
-    fn is_position_safe(&self, pos: &nalgebra::Vector3<f32>) -> bool {
+    fn is_position_safe(&self, pos: &Vec3) -> bool {
         pos.x.abs() < self.max_coordinate
             && pos.y.abs() < self.max_coordinate
             && pos.z.abs() < self.max_coordinate
@@ -342,7 +316,7 @@ impl System for CleanupPhysicsSystem {
                     {
                         let position = rigid_body.translation();
 
-                        if !self.is_position_safe(position) {
+                        if !self.is_position_safe(&position) {
                             warn!(
                                 "Entity {} is out of bounds at [{:.2}, {:.2}, {:.2}], destroying to prevent Rapier panic",
                                 entity_id, position.x, position.y, position.z

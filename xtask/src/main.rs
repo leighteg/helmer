@@ -346,23 +346,42 @@ fn inject_worker_bridge_import(source: &str) -> Option<String> {
 }
 
 fn rewrite_env_import(source: &str) -> (String, bool) {
+    let mut needs_env = false;
+    let mut output = String::with_capacity(source.len());
+
     for line in source.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let indent = &line[..indent_len];
+        let mut replaced = false;
+
         if let Some(rest) = trimmed.strip_prefix("import * as ") {
-            if let Some(alias) = rest.strip_suffix(" from 'env';") {
-                let replacement = format!("import {} from \"./env.js\";", alias);
-                let updated = source.replacen(line, &replacement, 1);
-                return (updated, true);
+            if let Some(from_idx) = rest.find(" from ") {
+                let alias = rest[..from_idx].trim();
+                let mut module = rest[from_idx + " from ".len()..].trim();
+                module = module.trim_end_matches(';').trim();
+
+                if module == "\"env\"" || module == "'env'" {
+                    let replacement = format!("{}import {} from \"./env.js\";", indent, alias);
+                    output.push_str(&replacement);
+                    output.push('\n');
+                    needs_env = true;
+                    replaced = true;
+                }
             }
-            if let Some(alias) = rest.strip_suffix(" from \"env\";") {
-                let replacement = format!("import {} from \"./env.js\";", alias);
-                let updated = source.replacen(line, &replacement, 1);
-                return (updated, true);
-            }
+        }
+
+        if !replaced {
+            output.push_str(line);
+            output.push('\n');
         }
     }
 
-    (source.to_string(), false)
+    if !source.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+
+    (output, needs_env)
 }
 
 #[derive(Clone, Debug)]

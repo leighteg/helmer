@@ -6,7 +6,8 @@ use std::{
 
 use bevy_ecs::prelude::{Component, Resource};
 use egui::Pos2;
-use helmer::runtime::asset_server::{Handle, Material, Mesh};
+use helmer::runtime::asset_server::{Handle, Material, Mesh, Scene};
+use helmer_becs::BevyAssetServer;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -48,6 +49,25 @@ pub struct EditorAssetCache {
     pub material_handles: HashMap<String, Handle<Material>>,
     pub mesh_handles: HashMap<String, Handle<Mesh>>,
     pub primitive_meshes: HashMap<PrimitiveKind, Handle<Mesh>>,
+    pub scene_handles: HashMap<String, Handle<Scene>>,
+}
+
+pub fn scene_cache_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+pub fn cached_scene_handle(
+    cache: &mut EditorAssetCache,
+    asset_server: &BevyAssetServer,
+    path: &Path,
+) -> Handle<Scene> {
+    let key = scene_cache_key(path);
+    if let Some(handle) = cache.scene_handles.get(&key) {
+        return handle.clone();
+    }
+    let handle = asset_server.0.lock().load_scene(path);
+    cache.scene_handles.insert(key, handle.clone());
+    handle
 }
 
 #[derive(Debug, Clone)]

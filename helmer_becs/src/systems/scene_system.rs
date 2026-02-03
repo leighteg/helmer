@@ -5,7 +5,7 @@ use crate::{
 use bevy_ecs::{
     component::Component,
     name::Name,
-    prelude::{Changed, Commands, Entity, ParamSet, Query, Res, ResMut, Resource, Without},
+    prelude::{Changed, Commands, Entity, ParamSet, Query, Res, ResMut, Resource, Without, World},
     query::With,
     system::Local,
 };
@@ -310,6 +310,11 @@ pub fn scene_child_skinning_system(
             entity_commands.try_insert(BevyAnimator(build_default_animator(anim_lib)));
         }
     }
+}
+
+/// Flush deferred commands so downstream systems can see spawned scene entities in the same frame.
+pub fn apply_scene_commands_system(world: &mut World) {
+    world.flush();
 }
 
 /// An ECS system that finds entities with a `SceneChild` component

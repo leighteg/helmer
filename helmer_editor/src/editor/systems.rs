@@ -18,14 +18,14 @@ use helmer_becs::egui_integration::{EguiResource, EguiWindowSpec};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
-use helmer_becs::systems::render_system::RenderGraphResource;
+use helmer_becs::systems::render_system::{RenderGraphResource, RenderSyncRequest};
 use helmer_becs::systems::scene_system::{
     SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    BevyAnimator, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer, BevyPoseOverride,
-    BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
-    DraggedFile,
+    BevyAnimator, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
+    BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
+    BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -35,7 +35,7 @@ use crate::editor::{
     activate_play_camera, activate_viewport_camera,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
-        PrimitiveKind, SceneAssetPath, scan_asset_entries,
+        PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
     },
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -48,9 +48,9 @@ use crate::editor::{
     },
     push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
-        AnimationClipData, EditorEntity, EditorSceneState, PendingSceneChildAnimations,
-        PendingSceneChildPoseOverrides, PendingSkinnedMeshAsset, WorldState,
-        apply_animation_data_to_timeline, apply_custom_clips_to_animator,
+        AnimationClipData, EditorEntity, EditorRenderRefresh, EditorSceneState,
+        PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PendingSkinnedMeshAsset,
+        WorldState, apply_animation_data_to_timeline, apply_custom_clips_to_animator,
         next_available_scene_path, normalize_path, pose_from_serialized, read_scene_document,
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
@@ -1393,7 +1393,7 @@ pub fn editor_shortcut_system(
 
 pub fn scene_dirty_system(
     mut scene_state: ResMut<EditorSceneState>,
-    query: Query<
+    query_core: Query<
         (),
         (
             bevy_ecs::prelude::With<EditorEntity>,
@@ -1408,12 +1408,19 @@ pub fn scene_dirty_system(
                 Changed<BevyPoseOverride>,
                 Changed<BevySpline>,
                 Changed<BevySplineFollower>,
+                Changed<BevyLookAt>,
+                Changed<BevyEntityFollower>,
                 Changed<Name>,
                 Changed<SceneRoot>,
                 Changed<SceneAssetPath>,
-                Changed<ScriptComponent>,
-                Changed<DynamicComponents>,
             )>,
+        ),
+    >,
+    query_extra: Query<
+        (),
+        (
+            bevy_ecs::prelude::With<EditorEntity>,
+            Or<(Changed<ScriptComponent>, Changed<DynamicComponents>)>,
         ),
     >,
     pose_child_query: Query<(), (With<SceneChild>, Changed<BevyPoseOverride>)>,
@@ -1422,7 +1429,7 @@ pub fn scene_dirty_system(
         return;
     }
 
-    if !query.is_empty() || !pose_child_query.is_empty() {
+    if !query_core.is_empty() || !query_extra.is_empty() || !pose_child_query.is_empty() {
         scene_state.dirty = true;
     }
 }
@@ -1689,6 +1696,31 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
 
     if applied_any {
         push_undo_snapshot(world, "Skinned Mesh");
+    }
+}
+
+pub fn editor_render_refresh_system(world: &mut World) {
+    let pending = world
+        .get_resource::<EditorRenderRefresh>()
+        .map(|refresh| refresh.pending)
+        .unwrap_or(false);
+    if !pending {
+        return;
+    }
+
+    if let Some(mut refresh) = world.get_resource_mut::<EditorRenderRefresh>() {
+        refresh.pending = false;
+    }
+
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, Or<(With<BevyMeshRenderer>, With<BevySkinnedMeshRenderer>)>>()
+        .iter(world)
+        .collect();
+    for entity in entities {
+        if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+            let current = transform.0;
+            transform.0 = current;
+        }
     }
 }
 
@@ -2350,6 +2382,13 @@ fn handle_toggle_play(world: &mut World) {
                 }
             }
 
+            if let Some(mut render_sync) = world.get_resource_mut::<RenderSyncRequest>() {
+                render_sync.request_with_epoch(3);
+            }
+            if let Some(mut refresh) = world.get_resource_mut::<EditorRenderRefresh>() {
+                refresh.pending = true;
+            }
+
             activate_viewport_camera(world);
             apply_viewport_graph(world);
 
@@ -2411,8 +2450,13 @@ fn spawn_primitive(world: &mut World, kind: PrimitiveKind) {
 fn spawn_scene_asset(world: &mut World, path: &Path) {
     let asset_server = world
         .get_resource::<helmer_becs::BevyAssetServer>()
+        .map(|server| helmer_becs::BevyAssetServer(server.0.clone()))
         .expect("AssetServer missing");
-    let handle = asset_server.0.lock().load_scene(path);
+    let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+        cached_scene_handle(&mut cache, &asset_server, path)
+    } else {
+        asset_server.0.lock().load_scene(path)
+    };
 
     world.spawn((
         EditorEntity,

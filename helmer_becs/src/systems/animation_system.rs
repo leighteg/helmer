@@ -93,6 +93,8 @@ impl SkinningResource {
                     globals: vec![Mat4::IDENTITY; joint_count],
                 },
             );
+            // new skinned mesh entries need a render sync so skin offsets are propagated
+            self.full_sync_requested = true;
         }
 
         let entry = self
@@ -286,7 +288,7 @@ pub fn skinning_system(
     let growth = render_config.skin_palette_growth.max(1.0);
 
     for (entity, skinned, animator, pose_override) in query.iter_mut() {
-        let entity_id = entity.index() as usize;
+        let entity_id = entity.to_bits() as usize;
         seen.insert(entity_id);
 
         let skin = &skinned.0.skin;

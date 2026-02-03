@@ -14,19 +14,24 @@ use mlua::{Function, Lua, RegistryKey, Table, UserData, Value, Variadic};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use helmer::provided::components::{
-    Light, LightType, MeshAsset, MeshRenderer, Spline, SplineFollower, SplineMode,
+    EntityFollower, Light, LightType, LookAt, MeshAsset, MeshRenderer, Spline, SplineFollower,
+    SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
 use helmer_becs::systems::scene_system::SceneRoot;
 use helmer_becs::{
-    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight,
-    BevyMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
+    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyEntityFollower,
+    BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer, BevySpline, BevySplineFollower,
+    BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
     EditorPlayCamera, activate_play_camera,
-    assets::{EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath},
+    assets::{
+        EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        cached_scene_handle,
+    },
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
@@ -665,6 +670,8 @@ fn build_ecs_table(
                 "mesh" | "mesh_renderer" => world.get::<BevyMeshRenderer>(entity).is_some(),
                 "spline" => world.get::<BevySpline>(entity).is_some(),
                 "spline_follower" => world.get::<BevySplineFollower>(entity).is_some(),
+                "look_at" => world.get::<BevyLookAt>(entity).is_some(),
+                "entity_follower" => world.get::<BevyEntityFollower>(entity).is_some(),
                 "animator" => world.get::<BevyAnimator>(entity).is_some(),
                 "scene" => world.get::<SceneRoot>(entity).is_some(),
                 "script" => world
@@ -713,6 +720,18 @@ fn build_ecs_table(
                         .entity_mut(entity)
                         .insert(BevySplineFollower(SplineFollower::default()));
                 }
+                "look_at" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyLookAt(LookAt::default()));
+                }
+                "entity_follower" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyEntityFollower(EntityFollower::default()));
+                }
                 "dynamic" => {
                     world
                         .entity_mut(entity)
@@ -757,6 +776,12 @@ fn build_ecs_table(
                 }
                 "spline_follower" => {
                     world.entity_mut(entity).remove::<BevySplineFollower>();
+                }
+                "look_at" => {
+                    world.entity_mut(entity).remove::<BevyLookAt>();
+                }
+                "entity_follower" => {
+                    world.entity_mut(entity).remove::<BevyEntityFollower>();
                 }
                 "animator" => {
                     world.entity_mut(entity).remove::<BevyAnimator>();
@@ -1423,10 +1448,13 @@ fn build_ecs_table(
             };
             let project = world.get_resource::<EditorProject>().cloned();
             let resolved = resolve_project_path(project.as_ref(), Path::new(&path));
-            let handle = {
-                let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
-                    return Ok(false);
-                };
+            let asset_server = match world.get_resource::<BevyAssetServer>() {
+                Some(server) => BevyAssetServer(server.0.clone()),
+                None => return Ok(false),
+            };
+            let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+                cached_scene_handle(&mut cache, &asset_server, &resolved)
+            } else {
                 asset_server.0.lock().load_scene(&resolved)
             };
             world.entity_mut(entity).insert(SceneRoot(handle));

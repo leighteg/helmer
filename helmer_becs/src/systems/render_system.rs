@@ -48,6 +48,32 @@ pub struct RenderPacket(pub Option<RenderDelta>);
 #[derive(Resource, Default)]
 pub struct RenderObjectCount(pub usize);
 
+#[derive(Resource, Default, Clone, Copy)]
+pub struct RenderResetRequest(pub bool);
+
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct RenderSyncRequest {
+    pub frames_remaining: u32,
+    pub bump_epoch: bool,
+}
+
+impl RenderSyncRequest {
+    pub fn request(&mut self, frames: u32) {
+        self.request_inner(frames, false);
+    }
+
+    pub fn request_with_epoch(&mut self, frames: u32) {
+        self.request_inner(frames, true);
+    }
+
+    fn request_inner(&mut self, frames: u32, bump_epoch: bool) {
+        self.frames_remaining = self.frames_remaining.max(frames);
+        if bump_epoch {
+            self.bump_epoch = true;
+        }
+    }
+}
+
 #[derive(Resource, Clone)]
 pub struct RenderGraphResource(pub RenderGraphSpec);
 
@@ -450,6 +476,8 @@ pub struct RenderWorkerState {
     camera_sent: bool,
     config_sent: bool,
     needs_full_sync: bool,
+    reset_requested: bool,
+    epoch: u64,
     last_render_config: Option<RenderConfig>,
     last_render_graph_version: Option<u64>,
     last_streaming_tuning: Option<StreamingTuning>,
@@ -586,7 +614,7 @@ struct RenderWorkerCore {
     last_cull_frame: u32,
     last_lod_frame: u32,
     last_stream_frame: u32,
-    pending_frame: Option<u32>,
+    pending_frame: Option<(u32, u64)>,
     pending_removed_objects: Vec<usize>,
     pending_removed_lights: Vec<usize>,
     pending_removed_proxies: Vec<usize>,
@@ -677,6 +705,13 @@ impl RenderWorkerCore {
         } = self;
 
         match change {
+            RenderChange::ForceFull => {
+                *force_full = true;
+                *cells_dirty = true;
+                *culling_dirty = true;
+                *lod_dirty = true;
+                *streaming_dirty = true;
+            }
             RenderChange::UpsertObjects { objects: updates } => {
                 for update in updates {
                     let cell_size = worker_tuning.cell_size.max(f32::EPSILON);
@@ -784,7 +819,7 @@ impl RenderWorkerCore {
                             *visible_object_count = (*visible_object_count).saturating_sub(1);
                         }
                         if entry.last_sent_visible {
-                            pending_removed_objects.push(entity.index() as usize);
+                            pending_removed_objects.push(entity.to_bits() as usize);
                         }
                     }
                 }
@@ -803,7 +838,7 @@ impl RenderWorkerCore {
                 for entity in entities {
                     if let Some(entry) = lights.remove(&entity) {
                         if entry.last_sent_present {
-                            pending_removed_lights.push(entity.index() as usize);
+                            pending_removed_lights.push(entity.to_bits() as usize);
                         }
                     }
                 }
@@ -879,8 +914,8 @@ impl RenderWorkerCore {
                     }
                 }
             }
-            RenderChange::RequestFrame { frame_index } => {
-                *pending_frame = Some(frame_index);
+            RenderChange::RequestFrame { frame_index, epoch } => {
+                *pending_frame = Some((frame_index, epoch));
             }
         }
     }
@@ -930,7 +965,7 @@ impl RenderWorkerCore {
             mesh_aabb_map,
         } = self;
 
-        let Some(frame_index) = pending_frame.take() else {
+        let Some((frame_index, epoch)) = pending_frame.take() else {
             return None;
         };
         if !*has_camera {
@@ -1142,7 +1177,7 @@ impl RenderWorkerCore {
                         *visible_object_count = (*visible_object_count).saturating_sub(1);
                     }
                     if entry.last_sent_visible {
-                        objects_remove.push(entity.index() as usize);
+                        objects_remove.push(entity.to_bits() as usize);
                         entry.last_sent_visible = false;
                     }
                     entry.cull_dirty = false;
@@ -1235,7 +1270,7 @@ impl RenderWorkerCore {
                 if !visible {
                     if !gpu_driven {
                         if entry.last_sent_visible {
-                            objects_remove.push(entity.index() as usize);
+                            objects_remove.push(entity.to_bits() as usize);
                             entry.last_sent_visible = false;
                         }
                         return;
@@ -1253,7 +1288,7 @@ impl RenderWorkerCore {
                         || entry.casts_shadow != entry.last_sent_casts_shadow;
                     if needs_update {
                         objects_upsert.push(RenderObjectDelta {
-                            id: entity.index() as usize,
+                            id: entity.to_bits() as usize,
                             transform: current_transform,
                             mesh_id: entry.mesh_id,
                             material_id: entry.material_id,
@@ -1318,7 +1353,7 @@ impl RenderWorkerCore {
 
                 if needs_update {
                     objects_upsert.push(RenderObjectDelta {
-                        id: entity.index() as usize,
+                        id: entity.to_bits() as usize,
                         transform: current_transform,
                         mesh_id: entry.mesh_id,
                         material_id: entry.material_id,
@@ -1452,7 +1487,7 @@ impl RenderWorkerCore {
                                 *visible_object_count = (*visible_object_count).saturating_sub(1);
                             }
                             if entry.last_sent_visible {
-                                objects_remove.push(entity.index() as usize);
+                                objects_remove.push(entity.to_bits() as usize);
                                 entry.last_sent_visible = false;
                             }
                         }
@@ -1705,7 +1740,7 @@ impl RenderWorkerCore {
                 || entry.light != entry.last_sent_light;
             if needs_update {
                 lights_upsert.push(RenderLightDelta {
-                    id: entity.index() as usize,
+                    id: entity.to_bits() as usize,
                     transform: current_transform,
                     color: entry.light.color.into(),
                     intensity: entry.light.intensity,
@@ -1787,6 +1822,7 @@ impl RenderWorkerCore {
         let result = RenderResult {
             render_delta,
             visible_object_count: *visible_object_count,
+            epoch,
         };
         *has_sent_any = true;
         *force_full = false;
@@ -1795,6 +1831,7 @@ impl RenderWorkerCore {
 }
 
 enum RenderChange {
+    ForceFull,
     UpsertObjects {
         objects: Vec<RenderObjectUpdate>,
     },
@@ -1820,12 +1857,14 @@ enum RenderChange {
     },
     RequestFrame {
         frame_index: u32,
+        epoch: u64,
     },
 }
 
 struct RenderResult {
     render_delta: RenderDelta,
     visible_object_count: usize,
+    epoch: u64,
 }
 
 struct RenderObjectEntry {
@@ -1998,6 +2037,7 @@ fn try_send_change(
             worker_state.camera_sent = false;
             worker_state.config_sent = false;
             worker_state.needs_full_sync = true;
+            worker_state.reset_requested = true;
             false
         }
         Err(TrySendError::Disconnected(_)) => {
@@ -2005,6 +2045,7 @@ fn try_send_change(
             worker_state.camera_sent = false;
             worker_state.config_sent = false;
             worker_state.needs_full_sync = true;
+            worker_state.reset_requested = true;
             false
         }
     }
@@ -2062,6 +2103,8 @@ pub fn render_data_system(
     resources: RenderSystemResources,
     mut render_packet: ResMut<RenderPacket>,
     mut render_object_count: ResMut<RenderObjectCount>,
+    mut render_reset: ResMut<RenderResetRequest>,
+    mut render_sync: ResMut<RenderSyncRequest>,
     mut skinning: ResMut<SkinningResource>,
     camera_query: Query<(Ref<BevyCamera>, Ref<BevyTransform>), With<BevyActiveCamera>>,
     mut object_queries: ParamSet<(
@@ -2103,6 +2146,26 @@ pub fn render_data_system(
     )>,
     mut removed_lights: RemovedComponents<BevyLight>,
 ) {
+    let sync_active = render_sync.frames_remaining > 0;
+    if render_sync.bump_epoch {
+        worker_state.epoch = worker_state.epoch.wrapping_add(1);
+        worker_state.needs_full_sync = true;
+        worker_state.camera_sent = false;
+        worker_state.config_sent = false;
+        worker_state.reset_requested = true;
+        render_sync.bump_epoch = false;
+    }
+    if sync_active {
+        worker_state.needs_full_sync = true;
+    }
+    if render_reset.0 {
+        worker_state.reset_requested = true;
+        worker_state.needs_full_sync = true;
+        worker_state.camera_sent = false;
+        worker_state.config_sent = false;
+        render_reset.0 = false;
+    }
+
     let (runtime_config, asset_server) = match (
         resources.runtime_config.as_ref(),
         resources.asset_server.as_ref(),
@@ -2130,13 +2193,15 @@ pub fn render_data_system(
         .map(|t| t.change_queue_capacity != worker_tuning.change_queue_capacity)
         .unwrap_or(false);
 
-    if worker_state.worker.is_none() || capacity_changed {
+    if worker_state.worker.is_none() || capacity_changed || worker_state.reset_requested {
         let mesh_aabb_map = asset_server.0.lock().mesh_aabb_map.clone();
         worker_state.worker = Some(spawn_render_worker(mesh_aabb_map, change_capacity));
         worker_state.camera_sent = false;
         worker_state.config_sent = false;
         worker_state.frame_index = 0;
         worker_state.needs_full_sync = true;
+        worker_state.reset_requested = false;
+        worker_state.epoch = worker_state.epoch.wrapping_add(1);
         worker_state.last_render_config = None;
         worker_state.last_render_graph_version = None;
         worker_state.last_streaming_tuning = None;
@@ -2207,6 +2272,7 @@ pub fn render_data_system(
         worker_state.needs_full_sync = true;
         worker_state.camera_sent = false;
         worker_state.config_sent = false;
+        worker_state.reset_requested = true;
     }
 
     if config_changed {
@@ -2296,6 +2362,17 @@ pub fn render_data_system(
 
     let full_sync = worker_state.needs_full_sync;
 
+    if full_sync && !send_failed {
+        if !try_send_change(
+            &mut *worker_state,
+            &mut worker,
+            RenderChange::ForceFull,
+            "force full",
+        ) {
+            send_failed = true;
+        }
+    }
+
     if !send_failed {
         let removed_mesh_count = removed_mesh_renderers.len();
         let removed_skinned_count = removed_skinned_renderers.len();
@@ -2355,6 +2432,7 @@ pub fn render_data_system(
             worker_state.needs_full_sync = true;
             worker_state.camera_sent = false;
             worker_state.config_sent = false;
+            worker_state.reset_requested = true;
             send_failed = true;
         }
 
@@ -2384,7 +2462,7 @@ pub fn render_data_system(
                         let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
                         if cpu_skinning {
                             if let Some(cpu_mesh) =
-                                skinning.cpu_mesh_id_for(entity.index() as usize)
+                                skinning.cpu_mesh_id_for(entity.to_bits() as usize)
                             {
                                 mesh.mesh_id = cpu_mesh;
                             }
@@ -2421,7 +2499,7 @@ pub fn render_data_system(
                         let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
                         if cpu_skinning {
                             if let Some(cpu_mesh) =
-                                skinning.cpu_mesh_id_for(entity.index() as usize)
+                                skinning.cpu_mesh_id_for(entity.to_bits() as usize)
                             {
                                 mesh.mesh_id = cpu_mesh;
                             }
@@ -2503,10 +2581,18 @@ pub fn render_data_system(
         if full_sync && !send_failed {
             worker_state.needs_full_sync = false;
         }
+
+        if sync_active {
+            render_sync.frames_remaining = render_sync.frames_remaining.saturating_sub(1);
+        }
     }
 
     let mut latest_result = None;
     while let Ok(result) = worker.try_recv_result() {
+        if result.epoch != worker_state.epoch {
+            worker.in_flight = false;
+            continue;
+        }
         latest_result = Some(result);
     }
 
@@ -2540,10 +2626,11 @@ pub fn render_data_system(
         let frame_index = worker_state.frame_index;
         worker_state.frame_index = worker_state.frame_index.wrapping_add(1);
 
+        let epoch = worker_state.epoch;
         if !try_send_change(
             &mut *worker_state,
             &mut worker,
-            RenderChange::RequestFrame { frame_index },
+            RenderChange::RequestFrame { frame_index, epoch },
             "frame request",
         ) {
             send_failed = true;

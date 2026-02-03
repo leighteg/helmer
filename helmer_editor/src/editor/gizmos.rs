@@ -825,7 +825,9 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     } else if let Some((ray_origin, ray_dir)) = ray {
         let control_active = input_manager.is_key_active(KeyCode::ControlLeft)
             || input_manager.is_key_active(KeyCode::ControlRight);
-        let key_drag_mode = if !wants_key && !control_active && !freecam_looking {
+        let shift_active = input_manager.is_key_active(KeyCode::ShiftLeft)
+            || input_manager.is_key_active(KeyCode::ShiftRight);
+        let key_mode = if !wants_key && !control_active && !freecam_looking {
             if input_manager.was_just_pressed(KeyCode::KeyG) {
                 Some(GizmoMode::Translate)
             } else if input_manager.was_just_pressed(KeyCode::KeyR) {
@@ -839,9 +841,10 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             None
         };
 
-        if let Some(mode) = key_drag_mode {
+        if let Some(mode) = key_mode {
             state.mode = mode;
-            if state.drag.is_none()
+            if shift_active
+                && state.drag.is_none()
                 && mode != GizmoMode::None
                 && (!lock_entity_gizmo || point_gizmo_active || bone_gizmo_active)
             {

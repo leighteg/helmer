@@ -460,6 +460,54 @@ impl Default for SplineFollower {
     }
 }
 
+// --- Look-at Component ---
+// Rotates an entity to face a target, with optional smoothing.
+#[derive(Debug, Clone, Copy)]
+pub struct LookAt {
+    pub target_entity: Option<u64>,
+    pub target_offset: Vec3,
+    pub offset_in_target_space: bool,
+    pub up: Vec3,
+    pub rotation_smooth_time: f32,
+}
+
+impl Default for LookAt {
+    fn default() -> Self {
+        Self {
+            target_entity: None,
+            target_offset: Vec3::ZERO,
+            offset_in_target_space: true,
+            up: Vec3::Y,
+            rotation_smooth_time: 0.0,
+        }
+    }
+}
+
+// --- Entity Follow Component ---
+// Moves (and optionally rotates) an entity to follow another entity.
+#[derive(Debug, Clone, Copy)]
+pub struct EntityFollower {
+    pub target_entity: Option<u64>,
+    pub position_offset: Vec3,
+    pub offset_in_target_space: bool,
+    pub follow_rotation: bool,
+    pub position_smooth_time: f32,
+    pub rotation_smooth_time: f32,
+}
+
+impl Default for EntityFollower {
+    fn default() -> Self {
+        Self {
+            target_entity: None,
+            position_offset: Vec3::ZERO,
+            offset_in_target_space: true,
+            follow_rotation: false,
+            position_smooth_time: 0.0,
+            rotation_smooth_time: 0.0,
+        }
+    }
+}
+
 fn catmull_rom(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32, tension: f32) -> Vec3 {
     let alpha = tension.clamp(0.0, 1.0);
     let eps = 1.0e-4;

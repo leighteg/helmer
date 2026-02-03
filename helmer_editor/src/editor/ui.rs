@@ -19,8 +19,8 @@ use helmer::graphics::{
     render_graphs::{graph_templates, template_for_graph},
 };
 use helmer::provided::components::{
-    Light, LightType, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower,
-    SplineMode,
+    EntityFollower, Light, LightType, LookAt, MeshRenderer, PoseOverride, SkinnedMeshRenderer,
+    Spline, SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::EguiResource;
@@ -30,9 +30,9 @@ use helmer_becs::systems::scene_system::{
     SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyLight, BevyMeshRenderer,
-    BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevyTransform, BevyWrapper,
+    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyEntityFollower, BevyLight,
+    BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer,
+    BevySpline, BevySplineFollower, BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
@@ -42,7 +42,7 @@ use crate::editor::{
     EditorViewportCamera, EditorViewportState, Freecam, LayoutSaveRequest, UndoEntry,
     assets::{
         AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
-        PrimitiveKind, SceneAssetPath, is_entry_visible,
+        PrimitiveKind, SceneAssetPath, cached_scene_handle, is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -161,6 +161,24 @@ impl AssetDragState {
 }
 
 #[derive(Default, Debug, Resource)]
+pub struct EntityDragState {
+    pub active: bool,
+    pub entity: Option<Entity>,
+}
+
+impl EntityDragState {
+    pub fn start_drag(&mut self, entity: Entity) {
+        self.active = true;
+        self.entity = Some(entity);
+    }
+
+    pub fn stop_drag(&mut self) {
+        self.active = false;
+        self.entity = None;
+    }
+}
+
+#[derive(Default, Debug, Resource)]
 pub struct MiddleDragUiState {
     pub active: bool,
     pub locked_window_id: Option<Id>,
@@ -254,6 +272,7 @@ impl Default for PoseEditorState {
 pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
     drag_egui_window_on_middle_click(ui, world, "Toolbar");
+    draw_entity_drag_indicator(ui, world);
 
     let (scene_name, scene_dirty, world_state) = {
         let Some(scene) = world.get_resource::<EditorSceneState>() else {
@@ -2077,6 +2096,8 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[HierarchyEntr
                     let entity = entry.entity;
                     let is_selected = selection == Some(entity);
                     let is_editor_entity = world.get::<EditorEntity>(entity).is_some();
+                    let is_scene_child = world.get::<SceneChild>(entity).is_some();
+                    let can_drag_entity = is_editor_entity || is_scene_child;
                     let is_renaming = is_editor_entity
                         && world
                             .get_resource::<HierarchyUiState>()
@@ -2144,8 +2165,40 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[HierarchyEntr
                                     .sense(Sense::click_and_drag()),
                             );
 
-                            if is_editor_entity {
+                            if can_drag_entity {
+                                let drag_started = response.drag_started_by(PointerButton::Primary);
+                                let drag_stopped = response.drag_stopped_by(PointerButton::Primary);
+                                if drag_started || drag_stopped {
+                                    if let Some(mut drag_state) =
+                                        world.get_resource_mut::<EntityDragState>()
+                                    {
+                                        if drag_started {
+                                            drag_state.start_drag(entity);
+                                        }
+                                        if drag_stopped {
+                                            drag_state.stop_drag();
+                                        }
+                                    }
+                                }
                                 response.dnd_set_drag_payload(EntityDragPayload { entity });
+                            }
+
+                            let is_dragging = world
+                                .get_resource::<EntityDragState>()
+                                .map(|state| state.active && state.entity == Some(entity))
+                                .unwrap_or(false);
+                            if is_dragging {
+                                let stroke = Stroke::new(
+                                    ui.visuals().selection.stroke.width.max(1.5),
+                                    ui.visuals().selection.stroke.color,
+                                );
+                                let rounding = ui.visuals().widgets.active.rounding();
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    rounding,
+                                    stroke,
+                                    StrokeKind::Inside,
+                                );
                             }
 
                             if response.clicked() {
@@ -2212,6 +2265,46 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[HierarchyEntr
                                             .selected(child_selected)
                                             .sense(Sense::click_and_drag()),
                                     );
+
+                                    let drag_started =
+                                        response.drag_started_by(PointerButton::Primary);
+                                    let drag_stopped =
+                                        response.drag_stopped_by(PointerButton::Primary);
+                                    if drag_started || drag_stopped {
+                                        if let Some(mut drag_state) =
+                                            world.get_resource_mut::<EntityDragState>()
+                                        {
+                                            if drag_started {
+                                                drag_state.start_drag(child_entity);
+                                            }
+                                            if drag_stopped {
+                                                drag_state.stop_drag();
+                                            }
+                                        }
+                                    }
+                                    response.dnd_set_drag_payload(EntityDragPayload {
+                                        entity: child_entity,
+                                    });
+
+                                    let is_dragging = world
+                                        .get_resource::<EntityDragState>()
+                                        .map(|state| {
+                                            state.active && state.entity == Some(child_entity)
+                                        })
+                                        .unwrap_or(false);
+                                    if is_dragging {
+                                        let stroke = Stroke::new(
+                                            ui.visuals().selection.stroke.width.max(1.5),
+                                            ui.visuals().selection.stroke.color,
+                                        );
+                                        let rounding = ui.visuals().widgets.active.rounding();
+                                        ui.painter().rect_stroke(
+                                            response.rect,
+                                            rounding,
+                                            stroke,
+                                            StrokeKind::Inside,
+                                        );
+                                    }
 
                                     if response.clicked() {
                                         set_selection(world, Some(child_entity));
@@ -3766,6 +3859,287 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
+    if world.get::<BevyLookAt>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Look At");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyLookAt>();
+            push_undo_snapshot(world, "Remove Look At");
+        } else {
+            let pinned_entity = world
+                .get_resource::<InspectorPinnedEntityResource>()
+                .and_then(|res| res.0);
+            let pinned_has_transform = pinned_entity
+                .map(|pinned| world.get::<BevyTransform>(pinned).is_some())
+                .unwrap_or(false);
+            let target_name = world
+                .get::<BevyLookAt>(entity)
+                .and_then(|look_at| look_at.0.target_entity)
+                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+
+            let mut dropped_entity: Option<Entity> = None;
+            let mut drop_hint: Option<bool> = None;
+            let drop_response = ui.add_sized(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Button::new("Drop Target Here").sense(Sense::hover()),
+            );
+            highlight_drop_target(ui, &drop_response);
+            if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
+                drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
+            }
+            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+                dropped_entity = Some(payload.entity);
+            }
+            if let Some(valid) = drop_hint {
+                let color = if valid {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                };
+                ui.painter().rect_filled(drop_response.rect, 4.0, color);
+                ui.painter().text(
+                    drop_response.rect.center(),
+                    Align2::CENTER_CENTER,
+                    if valid {
+                        "Drop Target Here"
+                    } else {
+                        "Entity has no Transform"
+                    },
+                    FontId::proportional(12.0),
+                    ui.visuals().text_color(),
+                );
+            }
+            let dropped_valid = dropped_entity
+                .map(|entity| world.get::<BevyTransform>(entity).is_some())
+                .unwrap_or(false);
+
+            let mut look_changed = false;
+            {
+                let Some(mut look_at) = world.get_mut::<BevyLookAt>(entity) else {
+                    return;
+                };
+
+                let offset_response =
+                    edit_vec3(ui, "Target Offset", &mut look_at.0.target_offset, 0.05);
+                if offset_response.changed {
+                    look_changed = true;
+                }
+
+                if ui
+                    .checkbox(
+                        &mut look_at.0.offset_in_target_space,
+                        "Offset in Target Space",
+                    )
+                    .changed()
+                {
+                    look_changed = true;
+                }
+
+                let up_response = edit_vec3(ui, "Up", &mut look_at.0.up, 0.05);
+                if up_response.changed {
+                    look_changed = true;
+                }
+
+                let smooth_response = edit_float(
+                    ui,
+                    "Rotation Smooth Time",
+                    &mut look_at.0.rotation_smooth_time,
+                    0.01,
+                );
+                if smooth_response.changed {
+                    if look_at.0.rotation_smooth_time < 0.0 {
+                        look_at.0.rotation_smooth_time = 0.0;
+                    }
+                    look_changed = true;
+                }
+
+                ui.label(format!("Target: {}", target_name));
+
+                if ui.button("Clear Target").clicked() {
+                    look_at.0.target_entity = None;
+                    look_changed = true;
+                }
+
+                if let Some(pinned) = pinned_entity {
+                    if ui
+                        .add_enabled(pinned_has_transform, egui::Button::new("Use Pinned Entity"))
+                        .clicked()
+                    {
+                        look_at.0.target_entity = Some(pinned.to_bits());
+                        look_changed = true;
+                    }
+                }
+
+                if dropped_valid {
+                    look_at.0.target_entity = dropped_entity.map(|entity| entity.to_bits());
+                    look_changed = true;
+                }
+            }
+
+            if look_changed {
+                push_undo_snapshot(world, "Look At");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevyEntityFollower>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Entity Follower");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyEntityFollower>();
+            push_undo_snapshot(world, "Remove Entity Follower");
+        } else {
+            let pinned_entity = world
+                .get_resource::<InspectorPinnedEntityResource>()
+                .and_then(|res| res.0);
+            let pinned_has_transform = pinned_entity
+                .map(|pinned| world.get::<BevyTransform>(pinned).is_some())
+                .unwrap_or(false);
+            let target_name = world
+                .get::<BevyEntityFollower>(entity)
+                .and_then(|follower| follower.0.target_entity)
+                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+
+            let mut dropped_entity: Option<Entity> = None;
+            let mut drop_hint: Option<bool> = None;
+            let drop_response = ui.add_sized(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Button::new("Drop Target Here").sense(Sense::hover()),
+            );
+            highlight_drop_target(ui, &drop_response);
+            if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
+                drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
+            }
+            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+                dropped_entity = Some(payload.entity);
+            }
+            if let Some(valid) = drop_hint {
+                let color = if valid {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                };
+                ui.painter().rect_filled(drop_response.rect, 4.0, color);
+                ui.painter().text(
+                    drop_response.rect.center(),
+                    Align2::CENTER_CENTER,
+                    if valid {
+                        "Drop Target Here"
+                    } else {
+                        "Entity has no Transform"
+                    },
+                    FontId::proportional(12.0),
+                    ui.visuals().text_color(),
+                );
+            }
+            let dropped_valid = dropped_entity
+                .map(|entity| world.get::<BevyTransform>(entity).is_some())
+                .unwrap_or(false);
+
+            let mut follower_changed = false;
+            {
+                let Some(mut follower) = world.get_mut::<BevyEntityFollower>(entity) else {
+                    return;
+                };
+
+                let offset_response =
+                    edit_vec3(ui, "Position Offset", &mut follower.0.position_offset, 0.05);
+                if offset_response.changed {
+                    follower_changed = true;
+                }
+
+                if ui
+                    .checkbox(
+                        &mut follower.0.offset_in_target_space,
+                        "Offset in Target Space",
+                    )
+                    .changed()
+                {
+                    follower_changed = true;
+                }
+
+                if ui
+                    .checkbox(&mut follower.0.follow_rotation, "Follow Rotation")
+                    .changed()
+                {
+                    follower_changed = true;
+                }
+
+                let pos_smooth_response = edit_float(
+                    ui,
+                    "Position Smooth Time",
+                    &mut follower.0.position_smooth_time,
+                    0.01,
+                );
+                if pos_smooth_response.changed {
+                    if follower.0.position_smooth_time < 0.0 {
+                        follower.0.position_smooth_time = 0.0;
+                    }
+                    follower_changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Rotation Smooth Time");
+                    let rot_smooth_response = ui.add_enabled(
+                        follower.0.follow_rotation,
+                        egui::DragValue::new(&mut follower.0.rotation_smooth_time).speed(0.01),
+                    );
+                    let rot_smooth_response = EditResponse::from_response(&rot_smooth_response);
+                    if rot_smooth_response.changed {
+                        if follower.0.rotation_smooth_time < 0.0 {
+                            follower.0.rotation_smooth_time = 0.0;
+                        }
+                        follower_changed = true;
+                    }
+                });
+
+                ui.label(format!("Target: {}", target_name));
+
+                if ui.button("Clear Target").clicked() {
+                    follower.0.target_entity = None;
+                    follower_changed = true;
+                }
+
+                if let Some(pinned) = pinned_entity {
+                    if ui
+                        .add_enabled(pinned_has_transform, egui::Button::new("Use Pinned Entity"))
+                        .clicked()
+                    {
+                        follower.0.target_entity = Some(pinned.to_bits());
+                        follower_changed = true;
+                    }
+                }
+
+                if dropped_valid {
+                    follower.0.target_entity = dropped_entity.map(|entity| entity.to_bits());
+                    follower_changed = true;
+                }
+            }
+
+            if follower_changed {
+                push_undo_snapshot(world, "Entity Follower");
+            }
+        }
+        ui.separator();
+    }
+
     if world.get::<DynamicRigidBody>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
@@ -4186,7 +4560,9 @@ struct EntityDragPayload {
 }
 
 fn highlight_drop_target(ui: &Ui, response: &Response) {
-    if response.dnd_hover_payload::<AssetDragPayload>().is_some() {
+    if response.dnd_hover_payload::<AssetDragPayload>().is_some()
+        || response.dnd_hover_payload::<EntityDragPayload>().is_some()
+    {
         let border = Stroke::new(
             ui.visuals().selection.stroke.width.max(1.5),
             ui.visuals().selection.stroke.color,
@@ -4199,6 +4575,48 @@ fn highlight_drop_target(ui: &Ui, response: &Response) {
             StrokeKind::Inside,
         );
     }
+}
+
+fn draw_entity_drag_indicator(ui: &Ui, world: &World) {
+    let Some(state) = world.get_resource::<EntityDragState>() else {
+        return;
+    };
+    if !state.active {
+        return;
+    }
+    let Some(entity) = state.entity else {
+        return;
+    };
+    let Some(pointer_pos) = ui.ctx().input(|input| input.pointer.latest_pos()) else {
+        return;
+    };
+
+    let name = world
+        .get::<Name>(entity)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("Entity {}", entity.index()));
+    let text = format!("Dragging: {}", name);
+    let font = FontId::proportional(12.0);
+    let padding = Vec2::new(8.0, 4.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.clone(), font.clone(), Color32::WHITE);
+    let rect = Rect::from_min_size(
+        pointer_pos + Vec2::new(12.0, 12.0),
+        galley.size() + padding * 2.0,
+    );
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        Order::Foreground,
+        Id::new("entity_drag_indicator"),
+    ));
+    painter.rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        font,
+        ui.visuals().text_color(),
+    );
 }
 
 fn try_apply_scene_asset_path(world: &mut World, entity: Entity, path: &Path) -> bool {
@@ -4223,7 +4641,11 @@ fn bring_window_to_front_if_dragging(ui: &Ui, world: &World) {
     let dragging = world
         .get_resource::<AssetDragState>()
         .map(|state| state.active)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || world
+            .get_resource::<EntityDragState>()
+            .map(|state| state.active)
+            .unwrap_or(false);
     if !dragging {
         return;
     }
@@ -5933,6 +6355,8 @@ fn draw_add_component_menu(
     let has_fixed_collider = world.get::<FixedCollider>(entity).is_some();
     let has_spline = world.get::<BevySpline>(entity).is_some();
     let has_spline_follower = world.get::<BevySplineFollower>(entity).is_some();
+    let has_look_at = world.get::<BevyLookAt>(entity).is_some();
+    let has_entity_follower = world.get::<BevyEntityFollower>(entity).is_some();
     let collider_shape = world.get::<ColliderShape>(entity).copied();
 
     let selected_mesh_source = selected_asset
@@ -6061,6 +6485,22 @@ fn draw_add_component_menu(
                 .entity_mut(entity)
                 .insert(BevySplineFollower(SplineFollower::default()));
             push_undo_snapshot(world, "Add Spline Follower");
+            ui.close_menu();
+        }
+        if !has_look_at && ui.button("Look At").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevyLookAt(LookAt::default()));
+            push_undo_snapshot(world, "Add Look At");
+            ui.close_menu();
+        }
+        if !has_entity_follower && ui.button("Entity Follower").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevyEntityFollower(EntityFollower::default()));
+            push_undo_snapshot(world, "Add Entity Follower");
             ui.close_menu();
         }
         if !has_scene {
@@ -6649,7 +7089,10 @@ fn apply_skinned_mesh_renderer_from_asset(
     project: &Option<EditorProject>,
     path: &Path,
 ) -> bool {
-    let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+    let Some(asset_server) = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))
+    else {
         set_status(world, "Asset server missing".to_string());
         return false;
     };
@@ -6658,9 +7101,12 @@ fn apply_skinned_mesh_renderer_from_asset(
     let relative_path = project_relative_path(project, path);
 
     let (scene_handle, scene) = {
-        let asset_server = asset_server.0.lock();
-        let handle = asset_server.load_scene(&resolved_path);
-        let scene = asset_server.get_scene(&handle);
+        let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+            cached_scene_handle(&mut cache, &asset_server, &resolved_path)
+        } else {
+            asset_server.0.lock().load_scene(&resolved_path)
+        };
+        let scene = asset_server.0.lock().get_scene(&handle);
         (handle, scene)
     };
 
@@ -6842,10 +7288,17 @@ fn save_material_file(path: &Path, data: &MaterialFile) -> Result<(), String> {
 }
 
 fn apply_scene_asset(world: &mut World, entity: Entity, path: &Path) {
-    let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+    let Some(asset_server) = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))
+    else {
         return;
     };
-    let handle = asset_server.0.lock().load_scene(path);
+    let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+        cached_scene_handle(&mut cache, &asset_server, path)
+    } else {
+        asset_server.0.lock().load_scene(path)
+    };
     world.entity_mut(entity).insert(SceneRoot(handle));
     world.entity_mut(entity).insert(SceneAssetPath {
         path: path.to_path_buf(),

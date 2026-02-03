@@ -16,8 +16,8 @@ use helmer::{
     animation::Animator,
     graphics::common::renderer::{RenderMessage, RendererStats, StreamingTuning},
     provided::components::{
-        ActiveCamera, Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline,
-        SplineFollower, Transform,
+        ActiveCamera, Camera, EntityFollower, Light, LookAt, MeshRenderer, PoseOverride,
+        SkinnedMeshRenderer, Spline, SplineFollower, Transform,
     },
     runtime::{
         asset_server::AssetServer,
@@ -30,6 +30,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::provided::ui::inspector::InspectorSelectedEntityResource;
 use crate::systems::animation_system::{SkinningResource, skinning_system};
+use crate::systems::follow_system::{entity_follow_system, look_at_system};
 use crate::systems::render_system::RenderGraphResource;
 use crate::systems::spline_system::spline_follow_system;
 use crate::{
@@ -43,10 +44,10 @@ use crate::{
     },
     systems::{
         render_system::RenderObjectCount,
-        render_system::{RenderPacket, render_data_system},
+        render_system::{RenderPacket, RenderResetRequest, RenderSyncRequest, render_data_system},
         scene_system::{
-            SceneSpawnedChildren, scene_child_skinning_system, scene_spawning_system,
-            update_scene_child_transforms,
+            SceneSpawnedChildren, apply_scene_commands_system, scene_child_skinning_system,
+            scene_spawning_system, update_scene_child_transforms,
         },
     },
 };
@@ -77,6 +78,12 @@ pub struct BevySpline(pub Spline);
 
 #[derive(Component, Clone, Debug)]
 pub struct BevySplineFollower(pub SplineFollower);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevyLookAt(pub LookAt);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevyEntityFollower(pub EntityFollower);
 
 // Resource Wrappers
 #[cfg_attr(not(target_arch = "wasm32"), derive(Resource))]
@@ -265,6 +272,8 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<SkinningResource>(SkinningResource::default());
             world.insert_resource::<RenderPacket>(RenderPacket::default());
             world.insert_resource::<RenderObjectCount>(RenderObjectCount::default());
+            world.insert_resource::<RenderResetRequest>(RenderResetRequest::default());
+            world.insert_resource::<RenderSyncRequest>(RenderSyncRequest::default());
             world.insert_resource(RenderGraphResource::default());
             world.insert_resource(SceneSpawnedChildren::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
@@ -272,18 +281,31 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<DraggedFile>(DraggedFile(None));
             world.insert_resource(InspectorSelectedEntityResource::default());
 
-            // core systems
-            schedule
-                .add_systems((spline_follow_system, skinning_system, render_data_system).chain());
-            schedule.add_systems(egui_system);
+            // scene spawning/child setup should happen before skinning + render extraction
             schedule.add_systems(
                 (
                     scene_spawning_system,
                     scene_child_skinning_system,
+                    apply_scene_commands_system,
                     update_scene_child_transforms,
+                )
+                    .chain()
+                    .before(skinning_system)
+                    .before(render_data_system),
+            );
+
+            // core systems
+            schedule.add_systems(
+                (
+                    spline_follow_system,
+                    entity_follow_system,
+                    look_at_system,
+                    skinning_system,
+                    render_data_system,
                 )
                     .chain(),
             );
+            schedule.add_systems(egui_system);
 
             // physics systems
             schedule.add_systems(

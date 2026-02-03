@@ -10,16 +10,17 @@ use bevy_ecs::query::{With, Without};
 use helmer::{
     animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
     provided::components::{
-        Camera, Light, LightType, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline,
-        SplineFollower, SplineMode, Transform,
+        Camera, EntityFollower, Light, LightType, LookAt, MeshRenderer, PoseOverride,
+        SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, Transform,
     },
     runtime::asset_server::{Handle, Scene},
 };
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::{
-    BevyAnimator, BevyCamera, BevyLight, BevyMeshRenderer, BevyPoseOverride,
-    BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper,
-    systems::scene_system::{SceneChild, SceneRoot, build_default_animator},
+    BevyAnimator, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
+    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform,
+    BevyWrapper,
+    systems::scene_system::{SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator},
 };
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ use crate::editor::{
     EditorPlayCamera, EditorTimelineState, EditorViewportCamera, Freecam,
     assets::{
         EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        cached_scene_handle,
     },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
@@ -76,6 +78,11 @@ impl Default for EditorSceneState {
     }
 }
 
+#[derive(Resource, Debug, Default, Clone)]
+pub struct EditorRenderRefresh {
+    pub pending: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneDocument {
     pub version: u32,
@@ -117,6 +124,10 @@ pub struct SceneComponents {
     pub spline: Option<SplineComponentData>,
     #[serde(default)]
     pub spline_follower: Option<SplineFollowerData>,
+    #[serde(default)]
+    pub look_at: Option<LookAtData>,
+    #[serde(default)]
+    pub entity_follower: Option<EntityFollowerData>,
     #[serde(default)]
     pub animation: Option<AnimationComponentData>,
     #[serde(default)]
@@ -225,6 +236,25 @@ pub struct SplineFollowerData {
     pub up: [f32; 3],
     pub offset: [f32; 3],
     pub length_samples: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LookAtData {
+    pub target_name: Option<String>,
+    pub target_offset: [f32; 3],
+    pub offset_in_target_space: bool,
+    pub up: [f32; 3],
+    pub rotation_smooth_time: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityFollowerData {
+    pub target_name: Option<String>,
+    pub position_offset: [f32; 3],
+    pub offset_in_target_space: bool,
+    pub follow_rotation: bool,
+    pub position_smooth_time: f32,
+    pub rotation_smooth_time: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -842,6 +872,18 @@ pub fn reset_editor_scene(world: &mut World) {
         world.despawn(entity);
     }
 
+    let scene_children: Vec<Entity> = world
+        .query_filtered::<Entity, With<SceneChild>>()
+        .iter(world)
+        .collect();
+    for entity in scene_children {
+        world.despawn(entity);
+    }
+
+    if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+        spawned.spawned_scenes.clear();
+    }
+
     if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
         timeline.groups.clear();
         timeline.selected = None;
@@ -1062,6 +1104,32 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                     offset: follower.0.offset.to_array(),
                     length_samples: follower.0.length_samples,
                 });
+        let look_at = world.get::<BevyLookAt>(entity).map(|look_at| LookAtData {
+            target_name: look_at
+                .0
+                .target_entity
+                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .map(|name| name.to_string()),
+            target_offset: look_at.0.target_offset.to_array(),
+            offset_in_target_space: look_at.0.offset_in_target_space,
+            up: look_at.0.up.to_array(),
+            rotation_smooth_time: look_at.0.rotation_smooth_time,
+        });
+        let entity_follower =
+            world
+                .get::<BevyEntityFollower>(entity)
+                .map(|follower| EntityFollowerData {
+                    target_name: follower
+                        .0
+                        .target_entity
+                        .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                        .map(|name| name.to_string()),
+                    position_offset: follower.0.position_offset.to_array(),
+                    offset_in_target_space: follower.0.offset_in_target_space,
+                    follow_rotation: follower.0.follow_rotation,
+                    position_smooth_time: follower.0.position_smooth_time,
+                    rotation_smooth_time: follower.0.rotation_smooth_time,
+                });
         let animation = timeline_groups
             .as_ref()
             .and_then(|groups| groups.iter().find(|group| group.entity == entity.to_bits()))
@@ -1102,6 +1170,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             dynamic,
             spline,
             spline_follower,
+            look_at,
+            entity_follower,
             animation,
             pose_override,
             freecam,
@@ -1199,6 +1269,8 @@ pub fn spawn_scene_from_document(
 
     let mut any_play_camera = false;
     let mut pending_followers: Vec<(Entity, SplineFollowerData)> = Vec::new();
+    let mut pending_look_ats: Vec<(Entity, LookAtData)> = Vec::new();
+    let mut pending_entity_followers: Vec<(Entity, EntityFollowerData)> = Vec::new();
 
     for entity_data in &document.entities {
         let transform = entity_data.transform.to_transform();
@@ -1253,7 +1325,7 @@ pub fn spawn_scene_from_document(
 
         if let Some(scene) = &entity_data.components.scene {
             let path = resolve_path(&scene.path, root);
-            let handle = asset_server.0.lock().load_scene(path);
+            let handle = cached_scene_handle(asset_cache, asset_server, &path);
             entity.insert(SceneRoot(handle));
             entity.insert(SceneAssetPath {
                 path: resolve_path(&scene.path, root),
@@ -1315,6 +1387,29 @@ pub fn spawn_scene_from_document(
             pending_followers.push((entity.id(), follower.clone()));
         }
 
+        if let Some(look_at) = &entity_data.components.look_at {
+            entity.insert(BevyLookAt(LookAt {
+                target_entity: None,
+                target_offset: glam::Vec3::from_array(look_at.target_offset),
+                offset_in_target_space: look_at.offset_in_target_space,
+                up: glam::Vec3::from_array(look_at.up),
+                rotation_smooth_time: look_at.rotation_smooth_time,
+            }));
+            pending_look_ats.push((entity.id(), look_at.clone()));
+        }
+
+        if let Some(follower) = &entity_data.components.entity_follower {
+            entity.insert(BevyEntityFollower(EntityFollower {
+                target_entity: None,
+                position_offset: glam::Vec3::from_array(follower.position_offset),
+                offset_in_target_space: follower.offset_in_target_space,
+                follow_rotation: follower.follow_rotation,
+                position_smooth_time: follower.position_smooth_time,
+                rotation_smooth_time: follower.rotation_smooth_time,
+            }));
+            pending_entity_followers.push((entity.id(), follower.clone()));
+        }
+
         if let Some(physics) = &entity_data.components.physics {
             entity.insert(physics.collider_shape.to_collider_shape());
             match physics.body_kind.clone() {
@@ -1333,9 +1428,8 @@ pub fn spawn_scene_from_document(
         if let Some(skinned) = skinned_data {
             let path = resolve_path(&skinned.scene_path, root);
             let (scene_handle, scene) = {
-                let asset_server = asset_server.0.lock();
-                let handle = asset_server.load_scene(path);
-                let scene = asset_server.get_scene(&handle);
+                let handle = cached_scene_handle(asset_cache, asset_server, &path);
+                let scene = asset_server.0.lock().get_scene(&handle);
                 (handle, scene)
             };
 
@@ -1461,7 +1555,10 @@ pub fn spawn_scene_from_document(
         created.push(entity_id);
     }
 
-    if !pending_followers.is_empty() {
+    if !pending_followers.is_empty()
+        || !pending_look_ats.is_empty()
+        || !pending_entity_followers.is_empty()
+    {
         let mut name_map: HashMap<String, Entity> = HashMap::new();
         for entity in &created {
             if let Some(name) = world.get::<Name>(*entity) {
@@ -1477,6 +1574,30 @@ pub fn spawn_scene_from_document(
             };
             if let Some(mut component) = world.get_mut::<BevySplineFollower>(entity) {
                 component.0.spline_entity = Some(target_entity.to_bits());
+            }
+        }
+
+        for (entity, look_at) in pending_look_ats {
+            let Some(target_name) = look_at.target_name.as_ref() else {
+                continue;
+            };
+            let Some(target_entity) = name_map.get(target_name) else {
+                continue;
+            };
+            if let Some(mut component) = world.get_mut::<BevyLookAt>(entity) {
+                component.0.target_entity = Some(target_entity.to_bits());
+            }
+        }
+
+        for (entity, follower) in pending_entity_followers {
+            let Some(target_name) = follower.target_name.as_ref() else {
+                continue;
+            };
+            let Some(target_entity) = name_map.get(target_name) else {
+                continue;
+            };
+            if let Some(mut component) = world.get_mut::<BevyEntityFollower>(entity) {
+                component.0.target_entity = Some(target_entity.to_bits());
             }
         }
     }

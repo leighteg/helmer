@@ -461,13 +461,32 @@ impl Default for SplineFollower {
 }
 
 fn catmull_rom(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32, tension: f32) -> Vec3 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let s = (1.0 - tension).clamp(0.0, 1.0);
-    let a = -0.5 * s * p0 + (1.0 + 0.5 * s) * p1 + (0.5 * s - 1.0) * p2 + 0.5 * s * p3;
-    let b = s * p0 + (-2.5 * s - 1.0) * p1 + (2.0 * s + 2.0) * p2 - 0.5 * s * p3;
-    let c = -0.5 * s * p0 + 0.5 * s * p2;
-    a * t3 + b * t2 + c * t + p1
+    let alpha = tension.clamp(0.0, 1.0);
+    let eps = 1.0e-4;
+    let d01 = (p1 - p0).length().max(eps).powf(alpha);
+    let d12 = (p2 - p1).length().max(eps).powf(alpha);
+    let d23 = (p3 - p2).length().max(eps).powf(alpha);
+
+    let t0 = 0.0;
+    let t1 = t0 + d01;
+    let t2 = t1 + d12;
+    let t3 = t2 + d23;
+
+    let t = t1 + (t2 - t1) * t;
+
+    let lerp_param = |a: Vec3, b: Vec3, ta: f32, tb: f32, tt: f32| -> Vec3 {
+        let denom = (tb - ta).abs().max(eps);
+        a * ((tb - tt) / denom) + b * ((tt - ta) / denom)
+    };
+
+    let a1 = lerp_param(p0, p1, t0, t1, t);
+    let a2 = lerp_param(p1, p2, t1, t2, t);
+    let a3 = lerp_param(p2, p3, t2, t3, t);
+
+    let b1 = lerp_param(a1, a2, t0, t2, t);
+    let b2 = lerp_param(a2, a3, t1, t3, t);
+
+    lerp_param(b1, b2, t1, t2, t)
 }
 
 fn cubic_bezier(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {

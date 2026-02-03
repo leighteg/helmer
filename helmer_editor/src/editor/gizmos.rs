@@ -112,6 +112,7 @@ pub struct EditorSplineState {
     pub active_point: Option<usize>,
     pub hover_point: Option<usize>,
     pub dragging: bool,
+    pub key_dragging: bool,
     pub saved_gizmo_mode: Option<GizmoMode>,
     point_drag: Option<SplinePointDrag>,
     drag_plane_origin: Vec3,
@@ -135,6 +136,7 @@ impl Default for EditorSplineState {
             active_point: None,
             hover_point: None,
             dragging: false,
+            key_dragging: false,
             saved_gizmo_mode: None,
             point_drag: None,
             drag_plane_origin: Vec3::ZERO,
@@ -635,39 +637,9 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let left_released = !left_down && state.last_mouse_down;
     state.last_mouse_down = left_down;
 
-    if spline_edit_active
-        && !wants_key
-        && state.drag.is_none()
-        && !spline_state.dragging
-        && spline_state.point_drag.is_none()
-        && input_manager.was_just_pressed(KeyCode::KeyE)
-    {
-        if let (Some(active_index), Some(spline_mut)) = (spline_state.active_point, spline.as_mut())
-        {
-            if allow_undo {
-                request_begin_undo_group(&mut undo_state, "Spline");
-            }
-            if let Some(new_index) = extrude_spline_point(
-                &mut spline_mut.0,
-                active_index,
-                &target_transform,
-                &camera_transform,
-                spline_state.draw_plane,
-                spline_state.handle_size_scale,
-                spline_state.handle_size_min,
-            ) {
-                spline_state.active_point = Some(new_index);
-                spline_state.hover_point = Some(new_index);
-                spline_state.point_drag = None;
-            }
-            if allow_undo {
-                request_end_undo_group(&mut undo_state);
-            }
-        }
-    }
-
     let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform);
-    let allow_ui_raycast = state.drag.is_some() || state.key_drag_active;
+    let allow_ui_raycast =
+        state.drag.is_some() || state.key_drag_active || spline_state.key_dragging;
     let ray = if wants_pointer && !allow_ui_raycast {
         None
     } else {
@@ -678,6 +650,63 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             camera_transform.position,
         )
     };
+
+    if spline_edit_active
+        && !wants_key
+        && state.drag.is_none()
+        && !spline_state.dragging
+        && !spline_state.key_dragging
+        && spline_state.point_drag.is_none()
+    {
+        if input_manager.was_just_pressed(KeyCode::KeyE) {
+            if let (Some(active_index), Some(spline_mut)) =
+                (spline_state.active_point, spline.as_mut())
+            {
+                if allow_undo {
+                    request_begin_undo_group(&mut undo_state, "Spline");
+                }
+                if let Some((new_index, plane_origin, plane_normal)) = extrude_spline_point(
+                    &mut spline_mut.0,
+                    active_index,
+                    &target_transform,
+                    &camera_transform,
+                    spline_state.draw_plane,
+                    ray,
+                ) {
+                    spline_state.active_point = Some(new_index);
+                    spline_state.hover_point = Some(new_index);
+                    spline_state.point_drag = None;
+                    spline_state.drag_plane_origin = plane_origin;
+                    spline_state.drag_plane_normal = plane_normal;
+                    spline_state.key_dragging = true;
+                } else if allow_undo {
+                    request_end_undo_group(&mut undo_state);
+                }
+            }
+        } else if input_manager.was_just_pressed(KeyCode::KeyI) {
+            if let (Some(active_index), Some(spline_mut)) =
+                (spline_state.active_point, spline.as_mut())
+            {
+                if let Some((new_index, plane_origin, plane_normal)) = insert_spline_midpoint(
+                    &mut spline_mut.0,
+                    active_index,
+                    &target_transform,
+                    &camera_transform,
+                    spline_state.draw_plane,
+                ) {
+                    if allow_undo {
+                        request_begin_undo_group(&mut undo_state, "Spline");
+                    }
+                    spline_state.active_point = Some(new_index);
+                    spline_state.hover_point = Some(new_index);
+                    spline_state.point_drag = None;
+                    spline_state.drag_plane_origin = plane_origin;
+                    spline_state.drag_plane_normal = plane_normal;
+                    spline_state.key_dragging = true;
+                }
+            }
+        }
+    }
 
     if !pose_edit_active {
         pose_state.hover_joint = None;
@@ -1016,18 +1045,22 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     if spline_selected {
         let allow_plane_drag = spline_points_active
             && spline_edit_active
-            && (!spline_state.use_gizmo || matches!(state.mode, GizmoMode::None));
+            && (!spline_state.use_gizmo
+                || matches!(state.mode, GizmoMode::None)
+                || spline_state.key_dragging);
         if !spline_points_active {
-            if spline_state.dragging && allow_undo {
+            if (spline_state.dragging || spline_state.key_dragging) && allow_undo {
                 request_end_undo_group(&mut undo_state);
             }
             spline_state.dragging = false;
+            spline_state.key_dragging = false;
             spline_state.hover_point = None;
         } else if wants_pointer && !allow_ui_raycast {
-            if spline_state.dragging && allow_undo {
+            if (spline_state.dragging || spline_state.key_dragging) && allow_undo {
                 request_end_undo_group(&mut undo_state);
             }
             spline_state.dragging = false;
+            spline_state.key_dragging = false;
             spline_state.hover_point = None;
         } else if let Some((ray_origin, ray_dir)) = ray {
             let plane_normal = spline_plane_normal(spline_state.draw_plane, &camera_transform);
@@ -1104,8 +1137,30 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 }
             }
 
-            if spline_state.dragging && allow_plane_drag {
-                if left_down {
+            if (spline_state.dragging || spline_state.key_dragging) && allow_plane_drag {
+                if spline_state.key_dragging {
+                    if let Some(hit) = intersect_ray_plane(
+                        ray_origin,
+                        ray_dir,
+                        spline_state.drag_plane_origin,
+                        spline_state.drag_plane_normal,
+                    ) {
+                        let local_hit = inv_spline_matrix.transform_point3(hit);
+                        if let Some(spline_mut) = spline.as_mut() {
+                            if let Some(index) = spline_state.active_point {
+                                if index < spline_mut.0.points.len() {
+                                    spline_mut.0.points[index] = local_hit;
+                                }
+                            }
+                        }
+                    }
+                    if left_pressed {
+                        spline_state.key_dragging = false;
+                        if allow_undo {
+                            request_end_undo_group(&mut undo_state);
+                        }
+                    }
+                } else if left_down {
                     if let Some(hit) = intersect_ray_plane(
                         ray_origin,
                         ray_dir,
@@ -1129,10 +1184,12 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 }
             } else if !allow_plane_drag {
                 spline_state.dragging = false;
+                spline_state.key_dragging = false;
             }
         }
     } else {
         spline_state.dragging = false;
+        spline_state.key_dragging = false;
         spline_state.hover_point = None;
         spline_state.active_point = None;
     }
@@ -2377,9 +2434,8 @@ fn extrude_spline_point(
     spline_transform: &Transform,
     camera_transform: &Transform,
     draw_plane: SplineDrawPlane,
-    handle_size_scale: f32,
-    handle_size_min: f32,
-) -> Option<usize> {
+    ray: Option<(Vec3, Vec3)>,
+) -> Option<(usize, Vec3, Vec3)> {
     let count = spline.points.len();
     if count == 0 {
         return None;
@@ -2389,87 +2445,48 @@ fn extrude_spline_point(
     let inv_spline_matrix = spline_matrix.inverse();
     let active_world = spline_matrix.transform_point3(spline.points[active_index]);
 
-    let (prev_index, next_index) = if count > 1 {
-        if spline.closed {
-            (
-                Some((active_index + count - 1) % count),
-                Some((active_index + 1) % count),
-            )
-        } else {
-            (
-                if active_index > 0 {
-                    Some(active_index - 1)
-                } else {
-                    None
-                },
-                if active_index + 1 < count {
-                    Some(active_index + 1)
-                } else {
-                    None
-                },
-            )
-        }
-    } else {
-        (None, None)
-    };
-
-    let mut direction = if let (Some(prev), Some(next)) = (prev_index, next_index) {
-        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
-        let next_world = spline_matrix.transform_point3(spline.points[next]);
-        next_world - prev_world
-    } else if let Some(prev) = prev_index {
-        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
-        active_world - prev_world
-    } else if let Some(next) = next_index {
-        let next_world = spline_matrix.transform_point3(spline.points[next]);
-        active_world - next_world
-    } else {
-        camera_transform.forward()
-    };
-
-    if direction.length_squared() < 1.0e-6 {
-        direction = camera_transform.right();
-    }
-
     let plane_normal = spline_plane_normal(draw_plane, camera_transform).normalize_or_zero();
-    let mut dir = direction - plane_normal * direction.dot(plane_normal);
-    if dir.length_squared() < 1.0e-6 {
-        let mut fallback = camera_transform.right();
-        if fallback.dot(plane_normal).abs() > 0.9 {
-            fallback = camera_transform.up();
-        }
-        dir = fallback - plane_normal * fallback.dot(plane_normal);
-    }
-    if dir.length_squared() < 1.0e-6 {
-        return None;
-    }
-    dir = dir.normalize();
-
-    let mut step = 0.0;
-    let mut samples = 0.0;
-    if let Some(prev) = prev_index {
-        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
-        step += active_world.distance(prev_world);
-        samples += 1.0;
-    }
-    if let Some(next) = next_index {
-        let next_world = spline_matrix.transform_point3(spline.points[next]);
-        step += active_world.distance(next_world);
-        samples += 1.0;
-    }
-    if samples > 0.0 {
-        step /= samples;
-    }
-    if step <= 1.0e-4 {
-        let distance = camera_transform.position.distance(active_world).max(0.001);
-        step = (distance * handle_size_scale).max(handle_size_min);
-    }
-
-    let new_world = active_world + dir * step;
+    let new_world = ray
+        .and_then(|(ray_origin, ray_dir)| {
+            intersect_ray_plane(ray_origin, ray_dir, active_world, plane_normal)
+        })
+        .unwrap_or(active_world);
     let new_local = inv_spline_matrix.transform_point3(new_world);
     let insert_index = (active_index + 1).min(spline.points.len());
     spline.points.insert(insert_index, new_local);
-    Some(insert_index)
+    Some((insert_index, new_world, plane_normal))
+}
+
+fn insert_spline_midpoint(
+    spline: &mut Spline,
+    active_index: usize,
+    spline_transform: &Transform,
+    camera_transform: &Transform,
+    draw_plane: SplineDrawPlane,
+) -> Option<(usize, Vec3, Vec3)> {
+    let count = spline.points.len();
+    if count < 2 {
+        return None;
+    }
+    let active_index = active_index.min(count.saturating_sub(1));
+    let next_index = if active_index + 1 < count {
+        active_index + 1
+    } else if spline.closed {
+        0
+    } else {
+        return None;
+    };
+
+    let a = spline.points[active_index];
+    let b = spline.points[next_index];
+    let midpoint = (a + b) * 0.5;
+    let insert_index = (active_index + 1).min(spline.points.len());
+    spline.points.insert(insert_index, midpoint);
+
+    let spline_matrix = spline_transform.to_matrix();
+    let new_world = spline_matrix.transform_point3(midpoint);
+    let plane_normal = spline_plane_normal(draw_plane, camera_transform).normalize_or_zero();
+    Some((insert_index, new_world, plane_normal))
 }
 
 fn build_spline_path_lines(spline: &Spline, transform: &Transform, samples: u32) -> Vec<GizmoLine> {

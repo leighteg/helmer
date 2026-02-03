@@ -3423,7 +3423,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     spline_changed = true;
                 }
 
-                let tension_response = edit_float(ui, "Tension", &mut spline.0.tension, 0.01);
+                let tension_response = edit_float(ui, "Catmull Alpha", &mut spline.0.tension, 0.01);
                 if tension_response.changed {
                     spline_changed = true;
                 }
@@ -3478,6 +3478,32 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.checkbox(&mut spline_state.add_mode, "Add Points on Click");
                     ui.checkbox(&mut spline_state.insert_mode, "Insert After Selection");
                     ui.checkbox(&mut spline_state.use_gizmo, "Use Gizmo Handles");
+                    if ui.button("Insert Midpoint").clicked() {
+                        if let Some(active_index) = spline_state.active_point {
+                            if let Some(mut spline) = world.get_mut::<BevySpline>(entity) {
+                                let count = spline.0.points.len();
+                                if count >= 2 {
+                                    let active_index = active_index.min(count.saturating_sub(1));
+                                    let next_index = if active_index + 1 < count {
+                                        active_index + 1
+                                    } else if spline.0.closed {
+                                        0
+                                    } else {
+                                        active_index
+                                    };
+                                    if next_index != active_index {
+                                        let a = spline.0.points[active_index];
+                                        let b = spline.0.points[next_index];
+                                        let insert_index =
+                                            (active_index + 1).min(spline.0.points.len());
+                                        spline.0.points.insert(insert_index, (a + b) * 0.5);
+                                        spline_state.active_point = Some(insert_index);
+                                        push_undo_snapshot(world, "Spline");
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if spline_state.use_gizmo {
                         if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>()
                         {

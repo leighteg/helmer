@@ -1973,6 +1973,13 @@ fn handle_new_scene(world: &mut World) {
     }
 
     reset_undo_history(world);
+
+    if let Some(mut render_sync) = world.get_resource_mut::<RenderSyncRequest>() {
+        render_sync.request_with_epoch(3);
+    }
+    if let Some(mut refresh) = world.get_resource_mut::<EditorRenderRefresh>() {
+        refresh.pending = true;
+    }
 }
 
 fn handle_open_scene(world: &mut World, path: &Path) {
@@ -2012,6 +2019,13 @@ fn handle_open_scene(world: &mut World, path: &Path) {
                 scene_state.name = scene_display_name(path);
                 scene_state.dirty = false;
                 scene_state.play_backup = None;
+            }
+
+            if let Some(mut render_sync) = world.get_resource_mut::<RenderSyncRequest>() {
+                render_sync.request_with_epoch(3);
+            }
+            if let Some(mut refresh) = world.get_resource_mut::<EditorRenderRefresh>() {
+                refresh.pending = true;
             }
 
             reset_undo_history(world);

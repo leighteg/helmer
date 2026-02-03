@@ -35,9 +35,9 @@ use crate::editor::{
     project::EditorProject,
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
-        CameraKey, CameraTrack, ClipSegment, ClipTrack, LightKey, LightTrack, PoseKey, PoseTrack,
-        SplineKey, SplineTrack, TimelineInterpolation, TimelineTrack, TimelineTrackGroup,
-        TransformKey, TransformTrack,
+        CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
+        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation, TimelineTrack,
+        TimelineTrackGroup, TransformKey, TransformTrack,
     },
 };
 
@@ -275,6 +275,7 @@ pub struct PoseOverrideData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AnimationTrackData {
     Pose(PoseTrackData),
+    Joint(JointTrackData),
     Transform(TransformTrackData),
     Camera(CameraTrackData),
     Light(LightTrackData),
@@ -300,6 +301,27 @@ pub struct PoseKeyData {
     pub id: u64,
     pub time: f32,
     pub pose: Vec<SerializedTransform>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JointTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub joint_index: usize,
+    pub weight: f32,
+    pub additive: bool,
+    pub translation_interpolation: TimelineInterpolation,
+    pub rotation_interpolation: TimelineInterpolation,
+    pub scale_interpolation: TimelineInterpolation,
+    pub keys: Vec<JointKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JointKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub transform: SerializedTransform,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -723,6 +745,26 @@ fn animation_track_to_data(track: &TimelineTrack) -> AnimationTrackData {
                 })
                 .collect(),
         }),
+        TimelineTrack::Joint(track) => AnimationTrackData::Joint(JointTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            joint_index: track.joint_index,
+            weight: track.weight,
+            additive: track.additive,
+            translation_interpolation: track.translation_interpolation,
+            rotation_interpolation: track.rotation_interpolation,
+            scale_interpolation: track.scale_interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| JointKeyData {
+                    id: key.id,
+                    time: key.time,
+                    transform: SerializedTransform::from(&key.transform),
+                })
+                .collect(),
+        }),
         TimelineTrack::Transform(track) => AnimationTrackData::Transform(TransformTrackData {
             id: track.id,
             name: track.name.clone(),
@@ -876,6 +918,29 @@ fn animation_track_from_data(
                 keys,
             })
         }
+        AnimationTrackData::Joint(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| JointKey {
+                    id: key.id,
+                    time: key.time,
+                    transform: key.transform.to_transform(),
+                })
+                .collect();
+            TimelineTrack::Joint(JointTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                joint_index: track.joint_index,
+                weight: track.weight,
+                additive: track.additive,
+                translation_interpolation: track.translation_interpolation,
+                rotation_interpolation: track.rotation_interpolation,
+                scale_interpolation: track.scale_interpolation,
+                keys,
+            })
+        }
         AnimationTrackData::Transform(track) => {
             let keys = track
                 .keys
@@ -999,6 +1064,11 @@ fn update_timeline_next_id(timeline: &mut EditorTimelineState) {
             max_id = max_id.max(track.id());
             match track {
                 TimelineTrack::Pose(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Joint(track) => {
                     for key in &track.keys {
                         max_id = max_id.max(key.id);
                     }

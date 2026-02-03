@@ -57,10 +57,10 @@ use crate::editor::{
     },
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
-        CameraKey, CameraTrack, ClipSegment, ClipTrack, LightKey, LightTrack, PoseKey, PoseTrack,
-        SplineKey, SplineTrack, TimelineInterpolation, TimelineSelection, TimelineTrack,
-        TimelineTrackGroup, TransformKey, TransformTrack, build_clip_from_pose_track,
-        build_pose_track_from_clip,
+        CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
+        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation, TimelineSelection,
+        TimelineTrack, TimelineTrackGroup, TransformKey, TransformTrack,
+        build_clip_from_pose_track, build_pose_track_from_clip,
     },
 };
 
@@ -7755,70 +7755,68 @@ fn toggle_expand(world: &mut World, path: PathBuf) {
 
 pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Timeline");
+    ui.heading("Timeline");
 
-    with_middle_drag_blocked(ui, world, |ui, world| {
-        ui.heading("Timeline");
+    let pinned = world
+        .get_resource::<InspectorPinnedEntityResource>()
+        .and_then(|res| res.0);
+    let selected = world
+        .get_resource::<InspectorSelectedEntityResource>()
+        .and_then(|res| res.0);
+    let active_entity = pinned.or(selected);
 
-        let pinned = world
-            .get_resource::<InspectorPinnedEntityResource>()
-            .and_then(|res| res.0);
-        let selected = world
-            .get_resource::<InspectorSelectedEntityResource>()
-            .and_then(|res| res.0);
-        let active_entity = pinned.or(selected);
+    world.resource_scope::<EditorTimelineState, _>(|world, mut timeline| {
+        timeline.recompute_duration();
+        if timeline.current_time > timeline.duration.max(0.01) {
+            timeline.current_time = timeline.duration.max(0.01);
+        }
+        if timeline.view_offset > timeline.duration.max(0.01) {
+            timeline.view_offset = (timeline.duration - 0.01).max(0.0);
+        }
 
-        world.resource_scope::<EditorTimelineState, _>(|world, mut timeline| {
-            timeline.recompute_duration();
-            if timeline.current_time > timeline.duration.max(0.01) {
-                timeline.current_time = timeline.duration.max(0.01);
+        let EditorTimelineState {
+            playing,
+            loop_playback,
+            playback_rate,
+            current_time,
+            duration,
+            auto_duration,
+            frame_rate,
+            snap_to_frame,
+            smart_key,
+            pixels_per_second,
+            view_offset,
+            new_clip_index,
+            new_clip_looping,
+            new_clip_speed,
+            new_clip_name,
+            groups,
+            selected,
+            apply_requested,
+            next_id,
+            middle_drag_active,
+        } = &mut *timeline;
+
+        let mut alloc_id = || {
+            let id = *next_id;
+            *next_id = next_id.saturating_add(1);
+            id
+        };
+
+        ui.horizontal(|ui| {
+            if ui.button(if *playing { "Pause" } else { "Play" }).clicked() {
+                *playing = !*playing;
             }
-            if timeline.view_offset > timeline.duration.max(0.01) {
-                timeline.view_offset = (timeline.duration - 0.01).max(0.0);
+            if ui.button("Stop").clicked() {
+                *playing = false;
+                *current_time = 0.0;
+                *apply_requested = true;
             }
-
-            let EditorTimelineState {
-                playing,
-                loop_playback,
-                playback_rate,
-                current_time,
-                duration,
-                auto_duration,
-                frame_rate,
-                snap_to_frame,
-                smart_key,
-                pixels_per_second,
-                view_offset,
-                new_clip_index,
-                new_clip_looping,
-                new_clip_speed,
-                new_clip_name,
-                groups,
-                selected,
-                apply_requested,
-                next_id,
-            } = &mut *timeline;
-
-            let mut alloc_id = || {
-                let id = *next_id;
-                *next_id = next_id.saturating_add(1);
-                id
-            };
-
-            ui.horizontal(|ui| {
-                if ui.button(if *playing { "Pause" } else { "Play" }).clicked() {
-                    *playing = !*playing;
-                }
-                if ui.button("Stop").clicked() {
-                    *playing = false;
-                    *current_time = 0.0;
-                    *apply_requested = true;
-                }
-                ui.checkbox(loop_playback, "Loop");
-                ui.checkbox(snap_to_frame, "Snap");
-                ui.checkbox(smart_key, "Smart Key");
-                ui.checkbox(auto_duration, "Auto Duration");
-            });
+            ui.checkbox(loop_playback, "Loop");
+            ui.checkbox(snap_to_frame, "Snap");
+            ui.checkbox(smart_key, "Smart Key");
+            ui.checkbox(auto_duration, "Auto Duration");
+        });
 
             ui.horizontal(|ui| {
                 ui.label("Time");
@@ -7870,6 +7868,29 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                         custom_clips: Vec::new(),
                     });
                     groups.len().saturating_sub(1)
+                };
+
+                let selected_joint = world
+                    .get_resource::<PoseEditorState>()
+                    .and_then(|state| {
+                        if state.active_entity == Some(entity.to_bits()) {
+                            state.selected_joint
+                        } else {
+                            None
+                        }
+                    });
+                let selected_joint_name = if let (Some(joint_index), Some(skinned)) =
+                    (selected_joint, world.get::<BevySkinnedMeshRenderer>(entity))
+                {
+                    skinned
+                        .0
+                        .skin
+                        .skeleton
+                        .joints
+                        .get(joint_index)
+                        .map(|joint| joint.name.clone())
+                } else {
+                    None
                 };
 
                 ui.horizontal(|ui| {
@@ -7933,6 +7954,42 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                             scale_interpolation: TimelineInterpolation::Linear,
                             keys: Vec::new(),
                         }));
+                    }
+                    if has_skinned {
+                        let can_add_joint = selected_joint.is_some();
+                        if ui
+                            .add_enabled(can_add_joint, egui::Button::new("Add Joint Track"))
+                            .clicked()
+                        {
+                            let joint_index = selected_joint.unwrap_or(0);
+                            let joint_label = selected_joint_name
+                                .clone()
+                                .unwrap_or_else(|| format!("Joint {}", joint_index));
+                            let group = &mut groups[group_index];
+                            let count = group
+                                .tracks
+                                .iter()
+                                .filter(|track| {
+                                    matches!(track, TimelineTrack::Joint(track) if track.joint_index == joint_index)
+                                })
+                                .count();
+                            group.tracks.push(TimelineTrack::Joint(JointTrack {
+                                id: alloc_id(),
+                                name: if count == 0 {
+                                    format!("Joint: {}", joint_label)
+                                } else {
+                                    format!("Joint: {} ({})", joint_label, count + 1)
+                                },
+                                enabled: true,
+                                joint_index,
+                                weight: 1.0,
+                                additive: false,
+                                translation_interpolation: TimelineInterpolation::Linear,
+                                rotation_interpolation: TimelineInterpolation::Linear,
+                                scale_interpolation: TimelineInterpolation::Linear,
+                                keys: Vec::new(),
+                            }));
+                        }
                     }
                     if has_spline && ui.button("Add Spline Track").clicked() {
                         let group = &mut groups[group_index];
@@ -8045,6 +8102,30 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                             track,
                                             key_time,
                                             pose,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            any_changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(joint_index) = selected_joint {
+                                if let Some(transform) =
+                                    current_joint_transform(world, entity, joint_index)
+                                {
+                                    let joint_label = selected_joint_name
+                                        .clone()
+                                        .unwrap_or_else(|| format!("Joint {}", joint_index));
+                                    let index =
+                                        ensure_joint_track(group, joint_index, joint_label, &mut alloc_id);
+                                    if let TimelineTrack::Joint(track) =
+                                        &mut group.tracks[index]
+                                    {
+                                        if upsert_joint_key(
+                                            track,
+                                            key_time,
+                                            transform,
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -8356,6 +8437,194 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                         }
+                                    }
+                                });
+                            }
+                            TimelineTrack::Joint(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+                                ui.checkbox(&mut track.additive, "Additive");
+                                ui.add(
+                                    DragValue::new(&mut track.weight)
+                                        .speed(0.05)
+                                        .clamp_range(0.0..=1.0),
+                                );
+
+                                let joint_label = world
+                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .and_then(|skinned| {
+                                        skinned
+                                            .0
+                                            .skin
+                                            .skeleton
+                                            .joints
+                                            .get(track.joint_index)
+                                            .map(|joint| joint.name.as_str())
+                                    })
+                                    .map(|name| format!("Joint: {}", name))
+                                    .unwrap_or_else(|| format!("Joint: {}", track.joint_index));
+                                ui.label(joint_label);
+
+                                let mut interp_changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Pos");
+                                    let mut interp = track.translation_interpolation;
+                                    ComboBox::from_id_source(format!("joint_interp_pos_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.translation_interpolation {
+                                        track.translation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Rot");
+                                    let mut interp = track.rotation_interpolation;
+                                    ComboBox::from_id_source(format!("joint_interp_rot_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.rotation_interpolation {
+                                        track.rotation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Scale");
+                                    let mut interp = track.scale_interpolation;
+                                    ComboBox::from_id_source(format!("joint_interp_scale_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.scale_interpolation {
+                                        track.scale_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                if interp_changed {
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    let key_time =
+                                        snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                    if let Some(transform) =
+                                        current_joint_transform(world, entity, track.joint_index)
+                                    {
+                                        if upsert_joint_key(
+                                            track,
+                                            key_time,
+                                            transform,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_key,
+                                                    format!("Key {}", key.id),
+                                                )
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time = snap_time_to_frame(time)
+                                                    .clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(transform) = current_joint_transform(
+                                                    world,
+                                                    entity,
+                                                    track.joint_index,
+                                                ) {
+                                                    key.transform = transform;
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
                                     }
                                 });
                             }
@@ -8941,6 +9210,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     (*duration).max(0.01),
                     pixels_per_second,
                     view_offset,
+                    middle_drag_active,
                     *snap_to_frame,
                     *frame_rate,
                     selected,
@@ -8949,8 +9219,81 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
             } else {
                 ui.label("Select or pin an entity to edit timeline tracks.");
             }
+
+            if !*middle_drag_active {
+                drag_egui_window_on_middle_click(ui, world, "Timeline");
+            }
         });
+}
+
+fn timeline_handle_key(
+    ui: &mut Ui,
+    painter: &egui::Painter,
+    track_id: u64,
+    key_id: u64,
+    key_time: f32,
+    key_rect: Rect,
+    color: Color32,
+    row_timeline_rect: Rect,
+    selected: &mut Option<TimelineSelection>,
+    current_time: &mut f32,
+    apply_requested: &mut bool,
+    clicked_key: &mut bool,
+    visible_start: f32,
+    pixels_per_second: f32,
+    snap_to_frame: bool,
+    frame_rate: f32,
+    duration: f32,
+    allow_interactions: bool,
+) -> (Option<f32>, bool) {
+    let selected_key = matches!(
+        selected,
+        Some(TimelineSelection::Key { track_id: sel_track, key_id: sel_key })
+            if *sel_track == track_id && *sel_key == key_id
+    );
+    painter.rect_filled(key_rect, 2.0, color);
+    if selected_key {
+        painter.rect_stroke(
+            key_rect,
+            2.0,
+            Stroke::new(1.5, Color32::from_gray(240)),
+            StrokeKind::Inside,
+        );
+    }
+    if !allow_interactions {
+        return (None, false);
+    }
+    let response = ui.interact(
+        key_rect,
+        ui.make_persistent_id((track_id, key_id, "key")),
+        Sense::click_and_drag(),
+    );
+    if response.clicked() || response.secondary_clicked() {
+        *selected = Some(TimelineSelection::Key { track_id, key_id });
+        *clicked_key = true;
+    }
+    let mut delete = false;
+    response.context_menu(|ui| {
+        if ui.button("Set Playhead").clicked() {
+            *current_time = key_time;
+            *apply_requested = true;
+            ui.close_menu();
+        }
+        if ui.button("Delete").clicked() {
+            delete = true;
+            ui.close_menu();
+        }
     });
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let time = visible_start + (pos.x - row_timeline_rect.left()) / pixels_per_second;
+            let snapped = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+            *apply_requested = true;
+            *clicked_key = true;
+            return (Some(snapped), delete);
+        }
+    }
+    (None, delete)
 }
 
 fn draw_timeline_canvas(
@@ -8960,6 +9303,7 @@ fn draw_timeline_canvas(
     duration: f32,
     pixels_per_second: &mut f32,
     view_offset: &mut f32,
+    middle_drag_active: &mut bool,
     snap_to_frame: bool,
     frame_rate: f32,
     selected: &mut Option<TimelineSelection>,
@@ -8981,6 +9325,31 @@ fn draw_timeline_canvas(
         Pos2::new(rect.min.x + label_width, rect.min.y + ruler_height),
         rect.max,
     );
+
+    let (middle_down, middle_pressed, middle_released, pointer_pos, pointer_delta) =
+        ui.ctx().input(|input| {
+            (
+                input.pointer.button_down(PointerButton::Middle),
+                input.pointer.button_pressed(PointerButton::Middle),
+                input.pointer.button_released(PointerButton::Middle),
+                input.pointer.latest_pos(),
+                input.pointer.delta(),
+            )
+        });
+
+    if middle_pressed {
+        *middle_drag_active = pointer_pos
+            .map(|pos| timeline_rect.contains(pos) || ruler_rect.contains(pos))
+            .unwrap_or(false);
+    }
+    if middle_released || !middle_down {
+        *middle_drag_active = false;
+    }
+    if *middle_drag_active && middle_down {
+        if pointer_delta.x.abs() > 0.0 {
+            *view_offset = (*view_offset - pointer_delta.x / *pixels_per_second).max(0.0);
+        }
+    }
 
     if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
         if timeline_rect.contains(pointer_pos) || ruler_rect.contains(pointer_pos) {
@@ -9051,6 +9420,7 @@ fn draw_timeline_canvas(
     );
 
     let mut clicked_key = false;
+    let allow_interactions = !*middle_drag_active;
 
     for (index, track) in group.tracks.iter_mut().enumerate() {
         let row_top = rect.min.y + ruler_height + index as f32 * row_height;
@@ -9075,6 +9445,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_key: Option<u64> = None;
                 for key in track.keys.iter_mut() {
                     let x =
                         row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
@@ -9082,29 +9453,87 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
-                    painter.rect_filled(rect, 2.0, Color32::from_rgb(100, 200, 240));
-                    let response = ui.interact(
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
                         rect,
-                        ui.make_persistent_id((track.id, key.id)),
-                        Sense::click_and_drag(),
+                        Color32::from_rgb(100, 200, 240),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Key {
-                            track_id: track.id,
-                            key_id: key.id,
-                        });
-                        clicked_key = true;
+                    if let Some(time) = new_time {
+                        key.time = time;
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            key.time =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                            *apply_requested = true;
-                            clicked_key = true;
-                        }
+                    if delete {
+                        remove_key = Some(key.id);
                     }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
+            TimelineTrack::Joint(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                let mut remove_key: Option<u64> = None;
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
+                        rect,
+                        Color32::from_rgb(200, 140, 240),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
+                    );
+                    if let Some(time) = new_time {
+                        key.time = time;
+                    }
+                    if delete {
+                        remove_key = Some(key.id);
+                    }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
                 }
                 track
                     .keys
@@ -9118,6 +9547,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_key: Option<u64> = None;
                 for key in track.keys.iter_mut() {
                     let x =
                         row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
@@ -9125,29 +9555,36 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
-                    painter.rect_filled(rect, 2.0, Color32::from_rgb(240, 180, 80));
-                    let response = ui.interact(
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
                         rect,
-                        ui.make_persistent_id((track.id, key.id)),
-                        Sense::click_and_drag(),
+                        Color32::from_rgb(240, 180, 80),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Key {
-                            track_id: track.id,
-                            key_id: key.id,
-                        });
-                        clicked_key = true;
+                    if let Some(time) = new_time {
+                        key.time = time;
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            key.time =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                            *apply_requested = true;
-                            clicked_key = true;
-                        }
+                    if delete {
+                        remove_key = Some(key.id);
                     }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
                 }
                 track
                     .keys
@@ -9161,6 +9598,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_key: Option<u64> = None;
                 for key in track.keys.iter_mut() {
                     let x =
                         row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
@@ -9168,29 +9606,36 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
-                    painter.rect_filled(rect, 2.0, Color32::from_rgb(120, 170, 240));
-                    let response = ui.interact(
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
                         rect,
-                        ui.make_persistent_id((track.id, key.id)),
-                        Sense::click_and_drag(),
+                        Color32::from_rgb(120, 170, 240),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Key {
-                            track_id: track.id,
-                            key_id: key.id,
-                        });
-                        clicked_key = true;
+                    if let Some(time) = new_time {
+                        key.time = time;
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            key.time =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                            *apply_requested = true;
-                            clicked_key = true;
-                        }
+                    if delete {
+                        remove_key = Some(key.id);
                     }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
                 }
                 track
                     .keys
@@ -9204,6 +9649,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_key: Option<u64> = None;
                 for key in track.keys.iter_mut() {
                     let x =
                         row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
@@ -9211,29 +9657,36 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
-                    painter.rect_filled(rect, 2.0, Color32::from_rgb(220, 220, 120));
-                    let response = ui.interact(
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
                         rect,
-                        ui.make_persistent_id((track.id, key.id)),
-                        Sense::click_and_drag(),
+                        Color32::from_rgb(220, 220, 120),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Key {
-                            track_id: track.id,
-                            key_id: key.id,
-                        });
-                        clicked_key = true;
+                    if let Some(time) = new_time {
+                        key.time = time;
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            key.time =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                            *apply_requested = true;
-                            clicked_key = true;
-                        }
+                    if delete {
+                        remove_key = Some(key.id);
                     }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
                 }
                 track
                     .keys
@@ -9247,6 +9700,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_key: Option<u64> = None;
                 for key in track.keys.iter_mut() {
                     let x =
                         row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
@@ -9254,29 +9708,36 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
-                    painter.rect_filled(rect, 2.0, Color32::from_rgb(180, 160, 240));
-                    let response = ui.interact(
+                    let (new_time, delete) = timeline_handle_key(
+                        ui,
+                        &painter,
+                        track.id,
+                        key.id,
+                        key.time,
                         rect,
-                        ui.make_persistent_id((track.id, key.id)),
-                        Sense::click_and_drag(),
+                        Color32::from_rgb(180, 160, 240),
+                        row_timeline_rect,
+                        selected,
+                        current_time,
+                        apply_requested,
+                        &mut clicked_key,
+                        visible_start,
+                        *pixels_per_second,
+                        snap_to_frame,
+                        frame_rate,
+                        duration,
+                        allow_interactions,
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Key {
-                            track_id: track.id,
-                            key_id: key.id,
-                        });
-                        clicked_key = true;
+                    if let Some(time) = new_time {
+                        key.time = time;
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            key.time =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                            *apply_requested = true;
-                            clicked_key = true;
-                        }
+                    if delete {
+                        remove_key = Some(key.id);
                     }
+                }
+                if let Some(key_id) = remove_key {
+                    track.keys.retain(|key| key.id != key_id);
+                    *apply_requested = true;
                 }
                 track
                     .keys
@@ -9290,6 +9751,7 @@ fn draw_timeline_canvas(
                     FontId::proportional(12.0),
                     Color32::from_gray(220),
                 );
+                let mut remove_segment: Option<u64> = None;
                 for segment in track.segments.iter_mut() {
                     let start_x = row_timeline_rect.left()
                         + (segment.start - visible_start) * *pixels_per_second;
@@ -9300,43 +9762,76 @@ fn draw_timeline_canvas(
                         Pos2::new(end_x.max(start_x + 6.0), row_rect.max.y - 4.0),
                     );
                     painter.rect_filled(seg_rect, 2.0, Color32::from_rgb(120, 220, 140));
-                    let response = ui.interact(
-                        seg_rect,
-                        ui.make_persistent_id((track.id, segment.id)),
-                        Sense::click_and_drag(),
+                    let selected_segment = matches!(
+                        selected,
+                        Some(TimelineSelection::Clip { track_id, segment_id })
+                            if *track_id == track.id && *segment_id == segment.id
                     );
-                    if response.clicked() {
-                        *selected = Some(TimelineSelection::Clip {
-                            track_id: track.id,
-                            segment_id: segment.id,
-                        });
-                        clicked_key = true;
+                    if selected_segment {
+                        painter.rect_stroke(
+                            seg_rect,
+                            2.0,
+                            Stroke::new(1.5, Color32::from_gray(240)),
+                            StrokeKind::Inside,
+                        );
                     }
-                    if response.dragged() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let time = visible_start
-                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                            let max_start = (duration - segment.duration).max(0.0);
-                            segment.start =
-                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, max_start);
-                            *apply_requested = true;
+                    if allow_interactions {
+                        let response = ui.interact(
+                            seg_rect,
+                            ui.make_persistent_id((track.id, segment.id, "segment")),
+                            Sense::click_and_drag(),
+                        );
+                        if response.clicked() || response.secondary_clicked() {
+                            *selected = Some(TimelineSelection::Clip {
+                                track_id: track.id,
+                                segment_id: segment.id,
+                            });
                             clicked_key = true;
                         }
+                        response.context_menu(|ui| {
+                            if ui.button("Set Playhead").clicked() {
+                                *current_time = segment.start;
+                                *apply_requested = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Delete").clicked() {
+                                remove_segment = Some(segment.id);
+                                ui.close_menu();
+                            }
+                        });
+                        if response.dragged() {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let time = visible_start
+                                    + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                                let max_start = (duration - segment.duration).max(0.0);
+                                segment.start = snap_time(time, snap_to_frame, frame_rate)
+                                    .clamp(0.0, max_start);
+                                *apply_requested = true;
+                                clicked_key = true;
+                            }
+                        }
                     }
+                }
+                if let Some(segment_id) = remove_segment {
+                    track.segments.retain(|segment| segment.id != segment_id);
+                    *apply_requested = true;
                 }
             }
         }
 
-        let response = ui.interact(
-            row_timeline_rect,
-            ui.make_persistent_id((track.id(), "row")),
-            Sense::click_and_drag(),
-        );
-        if (response.clicked() || response.dragged()) && !clicked_key {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let time = visible_start + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
-                *current_time = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
-                *apply_requested = true;
+        if allow_interactions {
+            let response = ui.interact(
+                row_timeline_rect,
+                ui.make_persistent_id((track.id(), "row")),
+                Sense::click_and_drag(),
+            );
+            if (response.clicked() || response.dragged()) && !clicked_key {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let time =
+                        visible_start + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                    *current_time = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                    *apply_requested = true;
+                }
             }
         }
     }
@@ -9471,6 +9966,35 @@ fn upsert_pose_key(
         id: alloc_id(),
         time,
         pose,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn upsert_joint_key(
+    track: &mut JointTrack,
+    time: f32,
+    transform: helmer::provided::components::Transform,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].transform = transform;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !transform_differs(&prev.transform, &transform) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(JointKey {
+        id: alloc_id(),
+        time,
+        transform,
     });
     track
         .keys
@@ -9698,6 +10222,41 @@ fn ensure_pose_track(group: &mut TimelineTrackGroup, alloc_id: &mut impl FnMut()
     group.tracks.len().saturating_sub(1)
 }
 
+fn ensure_joint_track(
+    group: &mut TimelineTrackGroup,
+    joint_index: usize,
+    joint_label: String,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> usize {
+    if let Some(index) = group.tracks.iter().position(
+        |track| matches!(track, TimelineTrack::Joint(track) if track.joint_index == joint_index),
+    ) {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Joint(track) if track.joint_index == joint_index))
+        .count();
+    group.tracks.push(TimelineTrack::Joint(JointTrack {
+        id: alloc_id(),
+        name: if count == 0 {
+            format!("Joint: {}", joint_label)
+        } else {
+            format!("Joint: {} ({})", joint_label, count + 1)
+        },
+        enabled: true,
+        joint_index,
+        weight: 1.0,
+        additive: false,
+        translation_interpolation: TimelineInterpolation::Linear,
+        rotation_interpolation: TimelineInterpolation::Linear,
+        scale_interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
+}
+
 fn ensure_spline_track(
     group: &mut TimelineTrackGroup,
     alloc_id: &mut impl FnMut() -> u64,
@@ -9722,6 +10281,25 @@ fn ensure_spline_track(
         keys: Vec::new(),
     }));
     group.tracks.len().saturating_sub(1)
+}
+
+fn current_joint_transform(
+    world: &World,
+    entity: Entity,
+    joint_index: usize,
+) -> Option<helmer::provided::components::Transform> {
+    let skinned = world.get::<BevySkinnedMeshRenderer>(entity)?;
+    let skeleton = &skinned.0.skin.skeleton;
+    let pose = world
+        .get::<BevyPoseOverride>(entity)
+        .map(|pose| pose.0.pose.clone())
+        .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
+    pose.locals.get(joint_index).copied().or_else(|| {
+        skeleton
+            .joints
+            .get(joint_index)
+            .map(|joint| joint.bind_transform)
+    })
 }
 
 fn build_joint_children(skeleton: &Skeleton) -> Vec<Vec<usize>> {

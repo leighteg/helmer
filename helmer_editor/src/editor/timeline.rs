@@ -25,6 +25,7 @@ pub struct EditorTimelineState {
     pub groups: Vec<TimelineTrackGroup>,
     pub selected: Option<TimelineSelection>,
     pub apply_requested: bool,
+    pub middle_drag_active: bool,
     pub(crate) next_id: u64,
 }
 
@@ -49,6 +50,7 @@ impl Default for EditorTimelineState {
             groups: Vec::new(),
             selected: None,
             apply_requested: true,
+            middle_drag_active: false,
             next_id: 1,
         }
     }
@@ -122,6 +124,7 @@ impl Default for TimelineInterpolation {
 #[derive(Debug, Clone)]
 pub enum TimelineTrack {
     Pose(PoseTrack),
+    Joint(JointTrack),
     Transform(TransformTrack),
     Camera(CameraTrack),
     Light(LightTrack),
@@ -133,6 +136,7 @@ impl TimelineTrack {
     pub fn id(&self) -> u64 {
         match self {
             TimelineTrack::Pose(track) => track.id,
+            TimelineTrack::Joint(track) => track.id,
             TimelineTrack::Transform(track) => track.id,
             TimelineTrack::Camera(track) => track.id,
             TimelineTrack::Light(track) => track.id,
@@ -144,6 +148,7 @@ impl TimelineTrack {
     pub fn name(&self) -> &str {
         match self {
             TimelineTrack::Pose(track) => track.name.as_str(),
+            TimelineTrack::Joint(track) => track.name.as_str(),
             TimelineTrack::Transform(track) => track.name.as_str(),
             TimelineTrack::Camera(track) => track.name.as_str(),
             TimelineTrack::Light(track) => track.name.as_str(),
@@ -155,6 +160,7 @@ impl TimelineTrack {
     pub fn enabled(&self) -> bool {
         match self {
             TimelineTrack::Pose(track) => track.enabled,
+            TimelineTrack::Joint(track) => track.enabled,
             TimelineTrack::Transform(track) => track.enabled,
             TimelineTrack::Camera(track) => track.enabled,
             TimelineTrack::Light(track) => track.enabled,
@@ -166,6 +172,7 @@ impl TimelineTrack {
     pub fn end_time(&self) -> f32 {
         match self {
             TimelineTrack::Pose(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
+            TimelineTrack::Joint(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
             TimelineTrack::Transform(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
             TimelineTrack::Camera(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
             TimelineTrack::Light(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
@@ -197,6 +204,27 @@ pub struct PoseKey {
     pub id: u64,
     pub time: f32,
     pub pose: Pose,
+}
+
+#[derive(Debug, Clone)]
+pub struct JointTrack {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub joint_index: usize,
+    pub weight: f32,
+    pub additive: bool,
+    pub translation_interpolation: TimelineInterpolation,
+    pub rotation_interpolation: TimelineInterpolation,
+    pub scale_interpolation: TimelineInterpolation,
+    pub keys: Vec<JointKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JointKey {
+    pub id: u64,
+    pub time: f32,
+    pub transform: Transform,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +420,12 @@ pub fn timeline_playback_system(
                             has_pose = true;
                         }
                     }
+                    TimelineTrack::Joint(track) => {
+                        if let Some(sample) = sample_joint_track(track, time_cursor) {
+                            apply_joint_sample(&mut base_pose, skeleton, track, sample);
+                            has_pose = true;
+                        }
+                    }
                     TimelineTrack::Clip(track) => {
                         let animator = animator_query.get(entity).ok();
                         if let Some(pose) =
@@ -453,6 +487,57 @@ fn sample_pose_track(track: &PoseTrack, time: f32) -> Option<Pose> {
             let span = (b.time - a.time).max(0.0001);
             let t = ((time - a.time) / span).clamp(0.0, 1.0);
             return Some(interpolate_pose(track, &a.pose, &b.pose, t));
+        }
+    }
+    None
+}
+
+fn sample_joint_track(track: &JointTrack, time: f32) -> Option<Transform> {
+    if track.keys.is_empty() {
+        return None;
+    }
+    if track.keys.len() == 1 {
+        return Some(track.keys[0].transform);
+    }
+    if time <= track.keys[0].time {
+        return Some(track.keys[0].transform);
+    }
+    if time >= track.keys[track.keys.len() - 1].time {
+        return Some(track.keys[track.keys.len() - 1].transform);
+    }
+    for i in 0..track.keys.len() - 1 {
+        let a = &track.keys[i];
+        let b = &track.keys[i + 1];
+        if time >= a.time && time <= b.time {
+            let span = (b.time - a.time).max(0.0001);
+            let t = ((time - a.time) / span).clamp(0.0, 1.0);
+            let step_translation =
+                matches!(track.translation_interpolation, TimelineInterpolation::Step);
+            let step_rotation = matches!(track.rotation_interpolation, TimelineInterpolation::Step);
+            let step_scale = matches!(track.scale_interpolation, TimelineInterpolation::Step);
+            let position = if step_translation {
+                a.transform.position
+            } else {
+                a.transform.position.lerp(b.transform.position, t)
+            };
+            let rotation = if step_rotation {
+                a.transform.rotation
+            } else {
+                a.transform
+                    .rotation
+                    .slerp(b.transform.rotation, t)
+                    .normalize()
+            };
+            let scale = if step_scale {
+                a.transform.scale
+            } else {
+                a.transform.scale.lerp(b.transform.scale, t)
+            };
+            return Some(Transform {
+                position,
+                rotation,
+                scale,
+            });
         }
     }
     None
@@ -718,6 +803,44 @@ fn blend_pose(target: &mut Pose, source: &Pose, weight: f32) {
             position: a.position.lerp(b.position, weight),
             rotation: a.rotation.slerp(b.rotation, weight).normalize(),
             scale: a.scale.lerp(b.scale, weight),
+        };
+    }
+}
+
+fn apply_joint_sample(
+    base_pose: &mut Pose,
+    skeleton: &Skeleton,
+    track: &JointTrack,
+    sample: Transform,
+) {
+    let joint_index = track.joint_index;
+    if joint_index >= base_pose.locals.len() {
+        return;
+    }
+    let weight = track.weight.clamp(0.0, 1.0);
+    if weight <= 0.0 {
+        return;
+    }
+    let current = base_pose.locals[joint_index];
+    if track.additive {
+        let bind = skeleton
+            .joints
+            .get(joint_index)
+            .map(|joint| joint.bind_transform)
+            .unwrap_or_default();
+        let delta_pos = sample.position - bind.position;
+        let delta_scale = sample.scale - bind.scale;
+        let delta_rot = bind.rotation.inverse() * sample.rotation;
+        base_pose.locals[joint_index] = Transform {
+            position: current.position + delta_pos * weight,
+            rotation: current.rotation * Quat::IDENTITY.slerp(delta_rot, weight),
+            scale: current.scale + delta_scale * weight,
+        };
+    } else {
+        base_pose.locals[joint_index] = Transform {
+            position: current.position.lerp(sample.position, weight),
+            rotation: current.rotation.slerp(sample.rotation, weight).normalize(),
+            scale: current.scale.lerp(sample.scale, weight),
         };
     }
 }

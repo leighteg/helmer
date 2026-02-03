@@ -66,6 +66,7 @@ pub struct FrameGlobals {
     pub device_caps: Arc<RenderDeviceCaps>,
     pub binding_backend: BindingBackendKind,
     pub camera_buffer: wgpu::Buffer,
+    pub skin_palette_buffer: wgpu::Buffer,
     pub lights_buffer: Option<wgpu::Buffer>,
     pub lights_len: u32,
     pub render_constants_buffer: wgpu::Buffer,

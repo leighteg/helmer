@@ -1,4 +1,7 @@
-use crate::{BevyAssetServerParam, BevyRuntimeProfiling, BevyTransform, BevyWrapper};
+use crate::{
+    BevyAnimator, BevyAssetServerParam, BevyMeshRenderer, BevyRuntimeProfiling,
+    BevySkinnedMeshRenderer, BevyTransform, BevyWrapper,
+};
 use bevy_ecs::{
     component::Component,
     name::Name,
@@ -8,8 +11,13 @@ use bevy_ecs::{
 };
 use glam::Mat4;
 use hashbrown::{HashMap, HashSet};
-use helmer::provided::components::{MeshRenderer, Transform};
+use helmer::animation::{
+    AnimationGraph, AnimationLayer, AnimationLibrary, AnimationNode, AnimationParameters,
+    AnimationState, AnimationStateMachine, Animator, BlendMode, BlendNode, ClipNode,
+};
+use helmer::provided::components::{MeshRenderer, SkinnedMeshRenderer, Transform};
 use helmer::runtime::asset_server::{Handle, Scene};
+use std::sync::Arc;
 use tracing::info;
 use web_time::Instant;
 
@@ -29,6 +37,7 @@ pub struct SceneChild {
     pub scene_root: Entity,
     pub local_transform: Mat4,   // Transform in parent's local space
     pub last_written: Transform, // Last world transform written to BevyTransform
+    pub scene_node_index: usize,
 }
 
 #[derive(Component)]
@@ -64,6 +73,50 @@ struct RootMatrices {
 pub struct SceneChildUpdateCache {
     changed_roots: HashSet<Entity>,
     root_matrices: HashMap<Entity, RootMatrices>,
+}
+
+pub fn build_default_animator(library: Arc<AnimationLibrary>) -> Animator {
+    let mut nodes = Vec::new();
+    if !library.clips.is_empty() {
+        nodes.push(AnimationNode::Clip(ClipNode {
+            clip_index: 0,
+            speed: 1.0,
+            looping: true,
+            time_offset: 0.0,
+        }));
+    } else {
+        nodes.push(AnimationNode::Blend(BlendNode {
+            children: Vec::new(),
+            normalize: true,
+            mode: BlendMode::Linear,
+        }));
+    }
+
+    let graph = AnimationGraph { library, nodes };
+    let state = AnimationState {
+        name: "Default".to_string(),
+        node: 0,
+    };
+    let state_machine = AnimationStateMachine::new(vec![state], Vec::new());
+    let layer = AnimationLayer {
+        name: "Base".to_string(),
+        weight: 1.0,
+        additive: false,
+        mask: Vec::new(),
+        graph,
+        state_machine,
+    };
+    Animator {
+        layers: vec![layer],
+        parameters: AnimationParameters::default(),
+        enabled: true,
+        time_scale: 1.0,
+    }
+}
+
+#[derive(Component)]
+pub struct PendingSkinnedMesh {
+    pub skin_index: usize,
 }
 
 //================================================================================
@@ -113,13 +166,42 @@ pub fn scene_spawning_system(
 
             let mut spawned_children = Vec::with_capacity(scene.nodes.len());
 
-            for node in &scene.nodes {
+            for (scene_node_index, node) in scene.nodes.iter().enumerate() {
                 // Compute initial world transform
                 let world_matrix = parent_matrix * node.transform;
                 let world_transform = Transform::from_matrix(world_matrix);
 
-                let child_entity = commands
-                    .spawn((
+                let skin = node
+                    .skin_index
+                    .and_then(|idx| scene.skins.read().get(idx).cloned());
+
+                let mut entity_commands = if let Some(skin) = skin {
+                    let skinned =
+                        SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, true, true);
+                    let mut commands = commands.spawn((
+                        BevyWrapper(world_transform),
+                        BevySkinnedMeshRenderer(skinned),
+                        SceneChild {
+                            scene_root: root_entity,
+                            local_transform: node.transform,
+                            last_written: world_transform,
+                            scene_node_index,
+                        },
+                        Name::new(format!(
+                            "scene {} child {}",
+                            scene_root.0.id,
+                            spawned_children.len() + 1
+                        )),
+                    ));
+                    if let Some(anim_lib) = node
+                        .skin_index
+                        .and_then(|idx| scene.animations.read().get(idx).cloned())
+                    {
+                        commands.insert(BevyAnimator(build_default_animator(anim_lib)));
+                    }
+                    commands
+                } else {
+                    let mut commands = commands.spawn((
                         BevyWrapper(world_transform),
                         BevyWrapper(MeshRenderer::new(
                             node.mesh.id,
@@ -131,14 +213,21 @@ pub fn scene_spawning_system(
                             scene_root: root_entity,
                             local_transform: node.transform,
                             last_written: world_transform,
+                            scene_node_index,
                         },
                         Name::new(format!(
                             "scene {} child {}",
                             scene_root.0.id,
                             spawned_children.len() + 1
                         )),
-                    ))
-                    .id();
+                    ));
+                    if let Some(skin_index) = node.skin_index {
+                        commands.insert(PendingSkinnedMesh { skin_index });
+                    }
+                    commands
+                };
+
+                let child_entity = entity_commands.id();
                 spawned_children.push(child_entity);
             }
 
@@ -146,7 +235,7 @@ pub fn scene_spawning_system(
             scene_children
                 .spawned_scenes
                 .insert(root_entity, spawned_children);
-            commands.entity(root_entity).insert(SpawnedScene);
+            commands.entity(root_entity).try_insert(SpawnedScene);
 
             info!("Spawned {} children for scene", child_count);
         }
@@ -172,6 +261,54 @@ pub fn scene_spawning_system(
             start.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+}
+
+pub fn scene_child_skinning_system(
+    mut commands: Commands,
+    asset_server: BevyAssetServerParam<'_>,
+    scene_root_query: Query<&SceneRoot>,
+    pending_query: Query<(
+        Entity,
+        &SceneChild,
+        &PendingSkinnedMesh,
+        Option<&BevyMeshRenderer>,
+    )>,
+) {
+    let asset_server = asset_server.0.lock();
+
+    for (entity, child, pending, mesh_renderer) in pending_query.iter() {
+        let Ok(scene_root) = scene_root_query.get(child.scene_root) else {
+            continue;
+        };
+        let Some(scene) = asset_server.get_scene(&scene_root.0) else {
+            continue;
+        };
+        let Some(node) = scene.nodes.get(child.scene_node_index) else {
+            continue;
+        };
+        if node.skin_index != Some(pending.skin_index) {
+            continue;
+        }
+        let Some(skin) = scene.skins.read().get(pending.skin_index).cloned() else {
+            continue;
+        };
+
+        let (casts_shadow, visible) = mesh_renderer
+            .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+            .unwrap_or((true, true));
+
+        let skinned =
+            SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
+
+        let mut entity_commands = commands.entity(entity);
+        entity_commands.try_remove::<BevyMeshRenderer>();
+        entity_commands.try_insert(BevySkinnedMeshRenderer(skinned));
+        entity_commands.try_remove::<PendingSkinnedMesh>();
+
+        if let Some(anim_lib) = scene.animations.read().get(pending.skin_index).cloned() {
+            entity_commands.try_insert(BevyAnimator(build_default_animator(anim_lib)));
+        }
     }
 }
 

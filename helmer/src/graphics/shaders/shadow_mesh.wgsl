@@ -55,6 +55,9 @@ struct Constants {
 
 struct ShadowInstance {
     model_matrix: mat4x4<f32>,
+    skin_offset: u32,
+    skin_count: u32,
+    _pad0: vec2<u32>,
 }
 
 struct MeshletDesc {
@@ -99,6 +102,8 @@ struct MeshOutput {
 var<workgroup> mesh_output: MeshOutput;
 var<workgroup> mesh_visible: u32;
 var<workgroup> mesh_model: mat4x4<f32>;
+var<workgroup> mesh_skin_offset: u32;
+var<workgroup> mesh_skin_count: u32;
 var<workgroup> mesh_vert_count: u32;
 var<workgroup> mesh_prim_count: u32;
 var<workgroup> mesh_max_vertex: u32;
@@ -108,6 +113,7 @@ var<workgroup> meshlet_center: vec3<f32>;
 var<workgroup> meshlet_radius: f32;
 
 @group(0) @binding(0) var<uniform> light_vp: LightVP;
+@group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 @group(1) @binding(0) var<uniform> render_constants: Constants;
 @group(2) @binding(0) var<storage, read> instances: array<ShadowInstance>;
 @group(2) @binding(1) var<storage, read> meshlet_descs: array<MeshletDesc>;
@@ -120,8 +126,53 @@ fn load_f32(index: u32) -> f32 {
     return bitcast<f32>(vertex_data[index]);
 }
 
+fn load_u32(index: u32) -> u32 {
+    return vertex_data[index];
+}
+
 fn load_vec3(base: u32) -> vec3<f32> {
     return vec3<f32>(load_f32(base), load_f32(base + 1u), load_f32(base + 2u));
+}
+
+fn load_uvec4(base: u32) -> vec4<u32> {
+    return vec4<u32>(
+        load_u32(base),
+        load_u32(base + 1u),
+        load_u32(base + 2u),
+        load_u32(base + 3u)
+    );
+}
+
+fn apply_skinning_position(
+    position: vec3<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_offset: u32,
+    skin_count: u32
+) -> vec3<f32> {
+    if (skin_count == 0u) {
+        return position;
+    }
+
+    let joint0 = min(joints.x, skin_count - 1u);
+    let joint1 = min(joints.y, skin_count - 1u);
+    let joint2 = min(joints.z, skin_count - 1u);
+    let joint3 = min(joints.w, skin_count - 1u);
+
+    var skinned_pos = vec3<f32>(0.0);
+    if (weights.x > 0.0) {
+        skinned_pos += weights.x * (skin_matrices[skin_offset + joint0] * vec4<f32>(position, 1.0)).xyz;
+    }
+    if (weights.y > 0.0) {
+        skinned_pos += weights.y * (skin_matrices[skin_offset + joint1] * vec4<f32>(position, 1.0)).xyz;
+    }
+    if (weights.z > 0.0) {
+        skinned_pos += weights.z * (skin_matrices[skin_offset + joint2] * vec4<f32>(position, 1.0)).xyz;
+    }
+    if (weights.w > 0.0) {
+        skinned_pos += weights.w * (skin_matrices[skin_offset + joint3] * vec4<f32>(position, 1.0)).xyz;
+    }
+    return skinned_pos;
 }
 
 fn max_scale(model: mat4x4<f32>) -> f32 {
@@ -173,7 +224,7 @@ fn ms_main(
         let meshlet_desc_len = arrayLength(&meshlet_descs);
         let meshlet_vert_len = arrayLength(&meshlet_vertices);
         let meshlet_index_len = arrayLength(&meshlet_indices);
-        mesh_max_vertex = arrayLength(&vertex_data) / 12u;
+        mesh_max_vertex = arrayLength(&vertex_data) / 20u;
 
         if (workgroup_id.y >= draw_params.instance_count) {
             mesh_visible = 0u;
@@ -183,6 +234,8 @@ fn ms_main(
                 mesh_visible = 0u;
             } else {
                 let inst = instances[instance_index];
+                mesh_skin_offset = inst.skin_offset;
+                mesh_skin_count = inst.skin_count;
 
                 if (workgroup_id.x >= draw_params.meshlet_count) {
                     mesh_visible = 0u;
@@ -257,10 +310,24 @@ fn ms_main(
     if (local_id.x < mesh_vert_count) {
         let global_index = meshlet_vertices[meshlet_vertex_offset + local_id.x];
         let safe_index = min(global_index, mesh_max_vertex - 1u);
-        let base = safe_index * 12u;
+        let base = safe_index * 20u;
         let position = load_vec3(base);
+        let joints = load_uvec4(base + 12u);
+        let weights = vec4<f32>(
+            load_f32(base + 16u),
+            load_f32(base + 17u),
+            load_f32(base + 18u),
+            load_f32(base + 19u)
+        );
+        let skinned_pos = apply_skinning_position(
+            position,
+            joints,
+            weights,
+            mesh_skin_offset,
+            mesh_skin_count
+        );
 
-        let world_position = mesh_model * vec4<f32>(position, 1.0);
+        let world_position = mesh_model * vec4<f32>(skinned_pos, 1.0);
         let clip_position = light_vp.view_proj * world_position;
 
         mesh_output.vertices[local_id.x].clip_position = clip_position;

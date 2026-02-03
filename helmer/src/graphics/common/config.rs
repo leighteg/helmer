@@ -1,5 +1,18 @@
 use crate::graphics::common::{constants::MAX_SHADOW_CASCADES, renderer::ShaderConstants};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkinningMode {
+    Auto,
+    Gpu,
+    Cpu,
+}
+
+impl Default for SkinningMode {
+    fn default() -> Self {
+        SkinningMode::Auto
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderConfig {
     pub gbuffer_pass: bool,
@@ -146,6 +159,11 @@ pub struct RenderConfig {
     pub rt_reflection_denoise_depth_sigma: f32,
     pub rt_reflection_denoise_normal_sigma: f32,
     pub rt_reflection_denoise_color_sigma: f32,
+
+    pub skinning_mode: SkinningMode,
+    pub skin_palette_capacity: u32,
+    pub skin_palette_growth: f32,
+    pub cpu_skinning_vertex_budget: u32,
 
     pub debug_flags: u32,
 
@@ -309,6 +327,11 @@ impl Default for RenderConfig {
             rt_reflection_denoise_depth_sigma: 50.0,
             rt_reflection_denoise_normal_sigma: 16.0,
             rt_reflection_denoise_color_sigma: 6.0,
+
+            skinning_mode: SkinningMode::Auto,
+            skin_palette_capacity: 0,
+            skin_palette_growth: 1.5,
+            cpu_skinning_vertex_budget: 0,
 
             debug_flags: DEBUG_FLAG_DIRECT
                 | DEBUG_FLAG_INDIRECT

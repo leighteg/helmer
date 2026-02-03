@@ -13,8 +13,12 @@ use bevy_ecs::{
 };
 use bevy_reflect::{Reflect, TypeRegistry, TypeRegistryArc};
 use helmer::{
+    animation::Animator,
     graphics::common::renderer::{RenderMessage, RendererStats, StreamingTuning},
-    provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
+    provided::components::{
+        ActiveCamera, Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline,
+        SplineFollower, Transform,
+    },
     runtime::{
         asset_server::AssetServer,
         config::RuntimeConfig,
@@ -25,7 +29,9 @@ use helmer::{
 use parking_lot::{Mutex, RwLock};
 
 use crate::provided::ui::inspector::InspectorSelectedEntityResource;
+use crate::systems::animation_system::{SkinningResource, skinning_system};
 use crate::systems::render_system::RenderGraphResource;
+use crate::systems::spline_system::spline_follow_system;
 use crate::{
     egui_integration::{EguiResource, egui_system},
     physics::{
@@ -39,7 +45,8 @@ use crate::{
         render_system::RenderObjectCount,
         render_system::{RenderPacket, render_data_system},
         scene_system::{
-            SceneSpawnedChildren, scene_spawning_system, update_scene_child_transforms,
+            SceneSpawnedChildren, scene_child_skinning_system, scene_spawning_system,
+            update_scene_child_transforms,
         },
     },
 };
@@ -54,6 +61,22 @@ pub type BevyCamera = BevyWrapper<Camera>;
 pub type BevyActiveCamera = BevyWrapper<ActiveCamera>;
 pub type BevyMeshRenderer = BevyWrapper<MeshRenderer>;
 pub type BevyLight = BevyWrapper<Light>;
+
+// Non-Copy components need dedicated wrappers.
+#[derive(Component, Clone, Debug)]
+pub struct BevySkinnedMeshRenderer(pub SkinnedMeshRenderer);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevyAnimator(pub Animator);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevyPoseOverride(pub PoseOverride);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevySpline(pub Spline);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevySplineFollower(pub SplineFollower);
 
 // Resource Wrappers
 #[cfg_attr(not(target_arch = "wasm32"), derive(Resource))]
@@ -239,6 +262,7 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<DebugGraphHistory>(DebugGraphHistory::default());
             world.insert_resource::<ProfilingHistory>(ProfilingHistory::default());
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
+            world.insert_resource::<SkinningResource>(SkinningResource::default());
             world.insert_resource::<RenderPacket>(RenderPacket::default());
             world.insert_resource::<RenderObjectCount>(RenderObjectCount::default());
             world.insert_resource(RenderGraphResource::default());
@@ -249,9 +273,17 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource(InspectorSelectedEntityResource::default());
 
             // core systems
-            schedule.add_systems(render_data_system);
+            schedule
+                .add_systems((spline_follow_system, skinning_system, render_data_system).chain());
             schedule.add_systems(egui_system);
-            schedule.add_systems((scene_spawning_system, update_scene_child_transforms).chain());
+            schedule.add_systems(
+                (
+                    scene_spawning_system,
+                    scene_child_skinning_system,
+                    update_scene_child_transforms,
+                )
+                    .chain(),
+            );
 
             // physics systems
             schedule.add_systems(

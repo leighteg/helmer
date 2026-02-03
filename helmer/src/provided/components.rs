@@ -1,5 +1,7 @@
+use crate::animation::{Pose, Skeleton, Skin};
 use crate::graphics::common::renderer::Vertex;
 use glam::{Mat4, Quat, Vec2, Vec3};
+use std::sync::Arc;
 
 // --- Core Transform Component ---
 // This is fundamental for any spatial entity.
@@ -82,6 +84,65 @@ impl MeshRenderer {
             material_id,
             casts_shadow,
             visible,
+        }
+    }
+}
+
+// --- Skinned Mesh Rendering Component ---
+// Uses a skin/skeleton to deform vertices.
+#[derive(Debug, Clone)]
+pub struct SkinnedMeshRenderer {
+    pub mesh_id: usize,
+    pub material_id: usize,
+    pub casts_shadow: bool,
+    pub visible: bool,
+    pub skin: Arc<Skin>,
+}
+
+impl SkinnedMeshRenderer {
+    pub fn new(
+        mesh_id: usize,
+        material_id: usize,
+        skin: Arc<Skin>,
+        casts_shadow: bool,
+        visible: bool,
+    ) -> Self {
+        Self {
+            mesh_id,
+            material_id,
+            casts_shadow,
+            visible,
+            skin,
+        }
+    }
+}
+
+// --- Pose Override Component ---
+// Editor/runtime override for manual posing or timeline playback.
+#[derive(Debug, Clone)]
+pub struct PoseOverride {
+    pub enabled: bool,
+    pub pose: Pose,
+}
+
+impl PoseOverride {
+    pub fn new(skeleton: &Skeleton) -> Self {
+        Self {
+            enabled: true,
+            pose: Pose::from_skeleton(skeleton),
+        }
+    }
+
+    pub fn reset_to_bind(&mut self, skeleton: &Skeleton) {
+        self.pose.reset_to_bind(skeleton);
+    }
+}
+
+impl Default for PoseOverride {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pose: Pose { locals: Vec::new() },
         }
     }
 }
@@ -218,6 +279,206 @@ pub struct MeshAsset {
     pub mesh_file_path: Option<String>,
 }
 
+// --- Spline Components ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplineMode {
+    Linear,
+    CatmullRom,
+    Bezier,
+}
+
+#[derive(Debug, Clone)]
+pub struct Spline {
+    pub points: Vec<Vec3>,
+    pub closed: bool,
+    pub mode: SplineMode,
+    pub tension: f32,
+}
+
+impl Default for Spline {
+    fn default() -> Self {
+        Self {
+            points: Vec::new(),
+            closed: false,
+            mode: SplineMode::CatmullRom,
+            tension: 0.5,
+        }
+    }
+}
+
+impl Spline {
+    pub fn point_count(&self) -> usize {
+        self.points.len()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.points.len() >= 2
+    }
+
+    pub fn sample(&self, t: f32) -> Vec3 {
+        if self.points.is_empty() {
+            return Vec3::ZERO;
+        }
+        if self.points.len() == 1 {
+            return self.points[0];
+        }
+        let t = t.clamp(0.0, 1.0);
+        match self.mode {
+            SplineMode::Linear => self.sample_linear(t),
+            SplineMode::CatmullRom => self.sample_catmull_rom(t),
+            SplineMode::Bezier => self.sample_bezier(t),
+        }
+    }
+
+    pub fn sample_tangent(&self, t: f32) -> Vec3 {
+        let eps = 1e-3;
+        let t0 = (t - eps).clamp(0.0, 1.0);
+        let t1 = (t + eps).clamp(0.0, 1.0);
+        let p0 = self.sample(t0);
+        let p1 = self.sample(t1);
+        let dir = p1 - p0;
+        if dir.length_squared() > 0.0 {
+            dir.normalize()
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    pub fn approx_length(&self, samples: usize) -> f32 {
+        if self.points.len() < 2 || samples < 2 {
+            return 0.0;
+        }
+        let mut length = 0.0;
+        let mut prev = self.sample(0.0);
+        let step = 1.0 / (samples.saturating_sub(1) as f32);
+        for i in 1..samples {
+            let t = i as f32 * step;
+            let current = self.sample(t);
+            length += current.distance(prev);
+            prev = current;
+        }
+        length
+    }
+
+    fn sample_linear(&self, t: f32) -> Vec3 {
+        let segment_count = if self.closed {
+            self.points.len()
+        } else {
+            self.points.len().saturating_sub(1)
+        };
+        if segment_count == 0 {
+            return self.points[0];
+        }
+        let f = t * segment_count as f32;
+        let seg = f.floor() as usize;
+        let local_t = f - seg as f32;
+        let i0 = seg.min(segment_count - 1);
+        let i1 = if self.closed {
+            (i0 + 1) % self.points.len()
+        } else {
+            (i0 + 1).min(self.points.len() - 1)
+        };
+        self.points[i0].lerp(self.points[i1], local_t)
+    }
+
+    fn sample_catmull_rom(&self, t: f32) -> Vec3 {
+        if self.points.len() < 4 {
+            return self.sample_linear(t);
+        }
+        let segment_count = if self.closed {
+            self.points.len()
+        } else {
+            self.points.len().saturating_sub(1)
+        };
+        if segment_count == 0 {
+            return self.points[0];
+        }
+        let f = t * segment_count as f32;
+        let seg = f.floor() as usize;
+        let local_t = f - seg as f32;
+        let idx = |i: isize| -> usize {
+            if self.closed {
+                let len = self.points.len() as isize;
+                (i.rem_euclid(len)) as usize
+            } else {
+                i.clamp(0, (self.points.len() - 1) as isize) as usize
+            }
+        };
+        let i1 = seg as isize;
+        let p0 = self.points[idx(i1 - 1)];
+        let p1 = self.points[idx(i1)];
+        let p2 = self.points[idx(i1 + 1)];
+        let p3 = self.points[idx(i1 + 2)];
+        catmull_rom(p0, p1, p2, p3, local_t, self.tension)
+    }
+
+    fn sample_bezier(&self, t: f32) -> Vec3 {
+        if self.points.len() < 4 {
+            return self.sample_linear(t);
+        }
+        let segment_count = (self.points.len() - 1) / 3;
+        if segment_count == 0 {
+            return self.points[0];
+        }
+        let f = t * segment_count as f32;
+        let seg = f.floor() as usize;
+        let local_t = f - seg as f32;
+        let base = (seg * 3).min(self.points.len() - 4);
+        let p0 = self.points[base];
+        let p1 = self.points[base + 1];
+        let p2 = self.points[base + 2];
+        let p3 = self.points[base + 3];
+        cubic_bezier(p0, p1, p2, p3, local_t)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SplineFollower {
+    pub spline_entity: Option<u64>,
+    pub t: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub follow_rotation: bool,
+    pub up: Vec3,
+    pub offset: Vec3,
+    pub length_samples: u32,
+}
+
+impl Default for SplineFollower {
+    fn default() -> Self {
+        Self {
+            spline_entity: None,
+            t: 0.0,
+            speed: 1.0,
+            looped: true,
+            follow_rotation: true,
+            up: Vec3::Y,
+            offset: Vec3::ZERO,
+            length_samples: 32,
+        }
+    }
+}
+
+fn catmull_rom(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32, tension: f32) -> Vec3 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let s = (1.0 - tension).clamp(0.0, 1.0);
+    let a = -0.5 * s * p0 + (1.0 + 0.5 * s) * p1 + (0.5 * s - 1.0) * p2 + 0.5 * s * p3;
+    let b = s * p0 + (-2.5 * s - 1.0) * p1 + (2.0 * s + 2.0) * p2 - 0.5 * s * p3;
+    let c = -0.5 * s * p0 + 0.5 * s * p2;
+    a * t3 + b * t2 + c * t + p1
+}
+
+fn cubic_bezier(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
+    let u = 1.0 - t;
+    let tt = t * t;
+    let uu = u * u;
+    let uuu = uu * u;
+    let ttt = tt * t;
+    p0 * uuu + p1 * (3.0 * uu * t) + p2 * (3.0 * u * tt) + p3 * ttt
+}
+
 impl MeshAsset {
     // New constructor for already generated/loaded raw data
     pub fn new_raw(name: String, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
@@ -249,144 +510,192 @@ impl MeshAsset {
                 normal: [0.0, 0.0, 1.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, 0.5],
                 normal: [0.0, 0.0, 1.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, 0.5],
                 normal: [0.0, 0.0, 1.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, 0.5],
                 normal: [0.0, 0.0, 1.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, -0.5, -0.5],
                 normal: [0.0, 0.0, -1.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, -0.5],
                 normal: [0.0, 0.0, -1.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, -0.5],
                 normal: [0.0, 0.0, -1.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, -0.5],
                 normal: [0.0, 0.0, -1.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [-1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, 0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, 0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, -0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, -0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, -0.5, 0.5],
                 normal: [0.0, -1.0, 0.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, 0.5],
                 normal: [0.0, -1.0, 0.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, -0.5],
                 normal: [0.0, -1.0, 0.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, -0.5, -0.5],
                 normal: [0.0, -1.0, 0.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, 0.5],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, -0.5, -0.5],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, -0.5],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.5, 0.5],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [0.0, 0.0, -1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, -0.5, 0.5],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, -0.5, -0.5],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, -0.5],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.5, 0.5],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [0.0, 0.0, 1.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
         ];
 
@@ -408,24 +717,32 @@ impl MeshAsset {
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [0.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.0, 0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [1.0, 1.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [0.5, 0.0, -0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
             Vertex {
                 position: [-0.5, 0.0, -0.5],
                 normal: [0.0, 1.0, 0.0],
                 tex_coord: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
             },
         ];
         let indices = vec![0, 1, 2, 2, 3, 0];
@@ -455,12 +772,12 @@ impl MeshAsset {
 
                 let tangent = Vec3::new(-theta.cos(), 0.0, -theta.sin()).normalize();
 
-                vertices.push(Vertex {
-                    position: position.into(),
-                    normal: normal.into(),
-                    tex_coord: tex_coord.into(),
-                    tangent: tangent.extend(0.0).into(),
-                });
+                vertices.push(Vertex::new(
+                    position.into(),
+                    normal.into(),
+                    tex_coord.into(),
+                    tangent.extend(0.0).into(),
+                ));
             }
         }
 

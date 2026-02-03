@@ -24,7 +24,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use crossbeam_channel::Sender;
 use egui::{Color32, ColorImage, Vec2 as EguiVec2};
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -271,14 +271,18 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub tex_coord: [f32; 2],
     pub tangent: [f32; 4],
+    pub joints: [u32; 4],
+    pub weights: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3, // position
         1 => Float32x3, // normal
         2 => Float32x2, // tex_coord
         3 => Float32x4, // tangent
+        4 => Uint32x4,  // joints
+        5 => Float32x4, // weights
     ];
 
     pub fn new(
@@ -292,6 +296,26 @@ impl Vertex {
             normal,
             tex_coord,
             tangent,
+            joints: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    pub fn with_skinning(
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coord: [f32; 2],
+        tangent: [f32; 4],
+        joints: [u32; 4],
+        weights: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            tex_coord,
+            tangent,
+            joints,
+            weights,
         }
     }
 
@@ -353,6 +377,9 @@ pub struct MeshDrawParams {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
     pub model_matrix: [[f32; 4]; 4],
+    pub skin_offset: u32,
+    pub skin_count: u32,
+    pub _pad0: [u32; 2],
 }
 
 impl InstanceRaw {
@@ -369,23 +396,34 @@ impl InstanceRaw {
                 // A mat4f is four vec4f
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 5, // 0-4 are for Vertex
+                    shader_location: 6, // 0-5 are for Vertex
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
                     shader_location: 7,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
                     shader_location: 8,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress
+                        + mem::size_of::<u32>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }
@@ -412,6 +450,8 @@ pub struct RenderObject {
     pub material_id: usize,
     pub casts_shadow: bool,
     pub lod_index: usize,
+    pub skin_offset: u32,
+    pub skin_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -463,6 +503,7 @@ pub struct RenderData {
     pub render_config: RenderConfig,
     pub render_graph: RenderGraphSpec,
     pub gizmo: GizmoData,
+    pub skin_palette: Vec<Mat4>,
 }
 
 #[repr(u32)]
@@ -708,6 +749,8 @@ pub struct RenderObjectDelta {
     pub material_id: usize,
     pub casts_shadow: bool,
     pub lod_index: usize,
+    pub skin_offset: u32,
+    pub skin_count: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -736,6 +779,7 @@ pub struct RenderDelta {
     pub render_config: Option<RenderConfig>,
     pub render_graph: Option<RenderGraphSpec>,
     pub gizmo: Option<GizmoData>,
+    pub skin_palette: Option<Vec<Mat4>>,
     pub streaming_requests: Option<Vec<AssetStreamingRequest>>,
 }
 
@@ -750,6 +794,7 @@ impl RenderDelta {
             && self.render_config.is_none()
             && self.render_graph.is_none()
             && self.gizmo.is_none()
+            && self.skin_palette.is_none()
             && self.streaming_requests.is_none()
     }
 
@@ -804,6 +849,9 @@ impl RenderDelta {
         if other.gizmo.is_some() {
             self.gizmo = other.gizmo;
         }
+        if other.skin_palette.is_some() {
+            self.skin_palette = other.skin_palette;
+        }
         if other.streaming_requests.is_some() {
             self.streaming_requests = other.streaming_requests;
         }
@@ -843,6 +891,9 @@ impl RenderDelta {
         }
         if delta.gizmo.is_some() {
             self.gizmo = delta.gizmo.clone();
+        }
+        if delta.skin_palette.is_some() {
+            self.skin_palette = delta.skin_palette.clone();
         }
         if delta.streaming_requests.is_some() {
             self.streaming_requests = delta.streaming_requests.clone();

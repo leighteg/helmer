@@ -6,14 +6,18 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
 }
 
 // Per-instance data read from vertex buffer 1
 struct InstanceInput {
-    @location(5) model_matrix_col_0: vec4<f32>,
-    @location(6) model_matrix_col_1: vec4<f32>,
-    @location(7) model_matrix_col_2: vec4<f32>,
-    @location(8) model_matrix_col_3: vec4<f32>,
+    @location(6) model_matrix_col_0: vec4<f32>,
+    @location(7) model_matrix_col_1: vec4<f32>,
+    @location(8) model_matrix_col_2: vec4<f32>,
+    @location(9) model_matrix_col_3: vec4<f32>,
+    @location(10) skin_offset: u32,
+    @location(11) skin_count: u32,
 }
 
 struct VertexOutput {
@@ -75,8 +79,39 @@ struct Constants {
 //=============== BINDINGS ===============//
 
 @group(0) @binding(0) var<uniform> light_vp: LightVP; 
+@group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 @group(1) @binding(0) var<uniform> render_constants: Constants;
 
+fn apply_skinning_position(vertex: VertexInput, skin_offset: u32, skin_count: u32) -> vec3<f32> {
+    if (skin_count == 0u) {
+        return vertex.position;
+    }
+
+    let weights = vertex.weights;
+    let joint0 = min(vertex.joints.x, skin_count - 1u);
+    let joint1 = min(vertex.joints.y, skin_count - 1u);
+    let joint2 = min(vertex.joints.z, skin_count - 1u);
+    let joint3 = min(vertex.joints.w, skin_count - 1u);
+
+    var skinned_pos = vec4<f32>(0.0);
+    if (weights.x > 0.0) {
+        let m = skin_matrices[skin_offset + joint0];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.x;
+    }
+    if (weights.y > 0.0) {
+        let m = skin_matrices[skin_offset + joint1];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.y;
+    }
+    if (weights.z > 0.0) {
+        let m = skin_matrices[skin_offset + joint2];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.z;
+    }
+    if (weights.w > 0.0) {
+        let m = skin_matrices[skin_offset + joint3];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.w;
+    }
+    return skinned_pos.xyz;
+}
 
 //=============== VERTEX SHADER ===============//
 @vertex
@@ -90,7 +125,8 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     );
 
     var out: VertexOutput;
-    let world_pos = model_matrix * vec4<f32>(vertex.position, 1.0);
+    let skinned_pos = apply_skinning_position(vertex, instance.skin_offset, instance.skin_count);
+    let world_pos = model_matrix * vec4<f32>(skinned_pos, 1.0);
     let clip_pos = light_vp.view_proj * world_pos;
 
     // NDC z is already 0..1 for WebGPU.

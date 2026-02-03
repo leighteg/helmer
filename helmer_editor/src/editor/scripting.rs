@@ -13,13 +13,15 @@ use glam::{DVec2, Quat, Vec2, Vec3};
 use mlua::{Function, Lua, RegistryKey, Table, UserData, Value, Variadic};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-use helmer::provided::components::{Light, LightType, MeshAsset, MeshRenderer};
+use helmer::provided::components::{
+    Light, LightType, MeshAsset, MeshRenderer, Spline, SplineFollower, SplineMode,
+};
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
 use helmer_becs::systems::scene_system::SceneRoot;
 use helmer_becs::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
-    BevyTransform, BevyWrapper, DeltaTime,
+    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight,
+    BevyMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
@@ -661,6 +663,9 @@ fn build_ecs_table(
                 "camera" => world.get::<BevyCamera>(entity).is_some(),
                 "light" => world.get::<BevyLight>(entity).is_some(),
                 "mesh" | "mesh_renderer" => world.get::<BevyMeshRenderer>(entity).is_some(),
+                "spline" => world.get::<BevySpline>(entity).is_some(),
+                "spline_follower" => world.get::<BevySplineFollower>(entity).is_some(),
+                "animator" => world.get::<BevyAnimator>(entity).is_some(),
                 "scene" => world.get::<SceneRoot>(entity).is_some(),
                 "script" => world
                     .get::<ScriptComponent>(entity)
@@ -695,6 +700,18 @@ fn build_ecs_table(
                     world
                         .entity_mut(entity)
                         .insert(BevyWrapper(Light::point(Vec3::ONE, 10.0)));
+                }
+                "spline" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevySpline(Spline::default()));
+                }
+                "spline_follower" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevySplineFollower(SplineFollower::default()));
                 }
                 "dynamic" => {
                     world
@@ -734,6 +751,15 @@ fn build_ecs_table(
                 "mesh" | "mesh_renderer" => {
                     world.entity_mut(entity).remove::<BevyMeshRenderer>();
                     world.entity_mut(entity).remove::<EditorMesh>();
+                }
+                "spline" => {
+                    world.entity_mut(entity).remove::<BevySpline>();
+                }
+                "spline_follower" => {
+                    world.entity_mut(entity).remove::<BevySplineFollower>();
+                }
+                "animator" => {
+                    world.entity_mut(entity).remove::<BevyAnimator>();
                 }
                 "scene" => {
                     world.entity_mut(entity).remove::<SceneRoot>();
@@ -803,6 +829,339 @@ fn build_ecs_table(
             world.entity_mut(entity).insert(BevyWrapper(transform));
             Ok(true)
         })?,
+    )?;
+
+    let world_ptr_get_spline = world_ptr;
+    ecs.set(
+        "get_spline",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_spline as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(spline) = world.get::<BevySpline>(entity) else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            let points_table = lua.create_table()?;
+            for (index, point) in spline.0.points.iter().enumerate() {
+                points_table.set(index + 1, vec3_to_table(lua, *point)?)?;
+            }
+            table.set("points", points_table)?;
+            table.set("closed", spline.0.closed)?;
+            table.set("tension", spline.0.tension)?;
+            table.set("mode", spline_mode_to_str(spline.0.mode))?;
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_set_spline = world_ptr;
+    ecs.set(
+        "set_spline",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_spline as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                return Ok(false);
+            };
+
+            if let Ok(points) = data.get::<Table>("points") {
+                let mut parsed = Vec::new();
+                let len = points.len().unwrap_or(0);
+                for i in 1..=len {
+                    if let Ok(point_table) = points.get::<Table>(i) {
+                        if let Some(point) = table_to_vec3(&point_table) {
+                            parsed.push(point);
+                        }
+                    }
+                }
+                spline.0.points = parsed;
+            }
+            if let Ok(closed) = data.get::<bool>("closed") {
+                spline.0.closed = closed;
+            }
+            if let Ok(tension) = data.get::<f32>("tension") {
+                spline.0.tension = tension;
+            }
+            if let Ok(mode) = data.get::<String>("mode") {
+                if let Some(parsed) = spline_mode_from_str(&mode) {
+                    spline.0.mode = parsed;
+                }
+            }
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_add_spline_point = world_ptr;
+    ecs.set(
+        "add_spline_point",
+        lua.create_function(move |_, (entity_id, point): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_add_spline_point as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                return Ok(false);
+            };
+            let Some(vec) = table_to_vec3(&point) else {
+                return Ok(false);
+            };
+            spline.0.points.push(vec);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_spline_point = world_ptr;
+    ecs.set(
+        "set_spline_point",
+        lua.create_function(move |_, (entity_id, index, point): (u64, usize, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_spline_point as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                return Ok(false);
+            };
+            let Some(vec) = table_to_vec3(&point) else {
+                return Ok(false);
+            };
+            let idx = index.saturating_sub(1);
+            if idx >= spline.0.points.len() {
+                return Ok(false);
+            }
+            spline.0.points[idx] = vec;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_remove_spline_point = world_ptr;
+    ecs.set(
+        "remove_spline_point",
+        lua.create_function(move |_, (entity_id, index): (u64, usize)| {
+            let world = unsafe { &mut *(world_ptr_remove_spline_point as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                return Ok(false);
+            };
+            let idx = index.saturating_sub(1);
+            if idx >= spline.0.points.len() {
+                return Ok(false);
+            }
+            spline.0.points.remove(idx);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_sample_spline = world_ptr;
+    ecs.set(
+        "sample_spline",
+        lua.create_function(move |lua, (entity_id, t): (u64, f32)| {
+            let world = unsafe { &mut *(world_ptr_sample_spline as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(spline) = world.get::<BevySpline>(entity) else {
+                return Ok(None);
+            };
+            let pos = spline.0.sample(t);
+            Ok(Some(vec3_to_table(lua, pos)?))
+        })?,
+    )?;
+
+    let world_ptr_spline_length = world_ptr;
+    ecs.set(
+        "spline_length",
+        lua.create_function(move |_, (entity_id, samples): (u64, Option<u32>)| {
+            let world = unsafe { &mut *(world_ptr_spline_length as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(spline) = world.get::<BevySpline>(entity) else {
+                return Ok(None);
+            };
+            let samples = samples.unwrap_or(64).max(2) as usize;
+            Ok(Some(spline.0.approx_length(samples)))
+        })?,
+    )?;
+
+    let world_ptr_follow_spline = world_ptr;
+    ecs.set(
+        "follow_spline",
+        lua.create_function(
+            move |_,
+                  (entity_id, spline_id, speed, looped): (
+                u64,
+                Option<u64>,
+                Option<f32>,
+                Option<bool>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_follow_spline as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let follower = world
+                    .get::<BevySplineFollower>(entity)
+                    .cloned()
+                    .map(|f| f.0)
+                    .unwrap_or_else(SplineFollower::default);
+                let mut follower = follower;
+                follower.spline_entity = spline_id;
+                if let Some(value) = speed {
+                    follower.speed = value;
+                }
+                if let Some(value) = looped {
+                    follower.looped = value;
+                }
+                world
+                    .entity_mut(entity)
+                    .insert(BevySplineFollower(follower));
+                Ok(true)
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_anim_enabled = world_ptr;
+    ecs.set(
+        "set_animator_enabled",
+        lua.create_function(move |_, (entity_id, enabled): (u64, bool)| {
+            let world = unsafe { &mut *(world_ptr_set_anim_enabled as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                return Ok(false);
+            };
+            animator.0.enabled = enabled;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_anim_time = world_ptr;
+    ecs.set(
+        "set_animator_time_scale",
+        lua.create_function(move |_, (entity_id, time_scale): (u64, f32)| {
+            let world = unsafe { &mut *(world_ptr_set_anim_time as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                return Ok(false);
+            };
+            animator.0.time_scale = time_scale.max(0.0);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_anim_float = world_ptr;
+    ecs.set(
+        "set_animator_param_float",
+        lua.create_function(move |_, (entity_id, name, value): (u64, String, f32)| {
+            let world = unsafe { &mut *(world_ptr_set_anim_float as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                return Ok(false);
+            };
+            animator.0.parameters.set_float(name, value);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_anim_bool = world_ptr;
+    ecs.set(
+        "set_animator_param_bool",
+        lua.create_function(move |_, (entity_id, name, value): (u64, String, bool)| {
+            let world = unsafe { &mut *(world_ptr_set_anim_bool as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                return Ok(false);
+            };
+            animator.0.parameters.set_bool(name, value);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_trigger_anim = world_ptr;
+    ecs.set(
+        "trigger_animator",
+        lua.create_function(move |_, (entity_id, name): (u64, String)| {
+            let world = unsafe { &mut *(world_ptr_trigger_anim as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                return Ok(false);
+            };
+            animator.0.parameters.trigger(name);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_anim_clips = world_ptr;
+    ecs.set(
+        "get_animator_clips",
+        lua.create_function(move |lua, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_anim_clips as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(entity) else {
+                return Ok(None);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let Some(layer) = animator.0.layers.get(layer_index) else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            for (index, clip) in layer.graph.library.clips.iter().enumerate() {
+                table.set(index + 1, clip.name.clone())?;
+            }
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_play_clip = world_ptr;
+    ecs.set(
+        "play_anim_clip",
+        lua.create_function(
+            move |_, (entity_id, name, layer_index): (u64, String, Option<usize>)| {
+                let world = unsafe { &mut *(world_ptr_play_clip as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                    return Ok(false);
+                };
+                let layer_index = layer_index.unwrap_or(0);
+                let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    return Ok(false);
+                };
+                let Some(clip_index) = layer.graph.library.clip_index(&name) else {
+                    return Ok(false);
+                };
+                if let Some(state) = layer
+                    .state_machine
+                    .states
+                    .get(layer.state_machine.current_state)
+                {
+                    if let Some(node) = layer.graph.nodes.get_mut(state.node) {
+                        if let helmer::animation::AnimationNode::Clip(clip_node) = node {
+                            clip_node.clip_index = clip_index;
+                            layer.state_machine.state_time = 0.0;
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            },
+        )?,
     )?;
 
     let world_ptr_get_light = world_ptr;
@@ -2683,6 +3042,23 @@ fn light_type_name(kind: LightType) -> &'static str {
         LightType::Directional => "Directional",
         LightType::Point => "Point",
         LightType::Spot { .. } => "Spot",
+    }
+}
+
+fn spline_mode_to_str(mode: SplineMode) -> &'static str {
+    match mode {
+        SplineMode::Linear => "linear",
+        SplineMode::CatmullRom => "catmullrom",
+        SplineMode::Bezier => "bezier",
+    }
+}
+
+fn spline_mode_from_str(mode: &str) -> Option<SplineMode> {
+    match mode.to_ascii_lowercase().as_str() {
+        "linear" => Some(SplineMode::Linear),
+        "catmullrom" | "catmull_rom" | "catmull-rom" => Some(SplineMode::CatmullRom),
+        "bezier" => Some(SplineMode::Bezier),
+        _ => None,
     }
 }
 

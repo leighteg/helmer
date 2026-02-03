@@ -4,6 +4,7 @@ use std::{
 };
 
 use bevy_ecs::prelude::{Resource, World};
+use helmer_becs::BevySkinnedMeshRenderer;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 
 use crate::editor::{
@@ -15,7 +16,7 @@ use crate::editor::{
     },
     ui::{
         InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache,
-        refresh_material_usage,
+        PoseEditorState, refresh_material_usage,
     },
 };
 
@@ -553,6 +554,8 @@ fn apply_material_snapshot(
 }
 
 fn apply_snapshot(world: &mut World, snapshot: &SceneSnapshot) {
+    let pose_state_before = world.get_resource::<PoseEditorState>().cloned();
+
     let project_snapshot = match world.get_resource::<EditorProject>() {
         Some(project) => project.clone(),
         None => return,
@@ -604,6 +607,45 @@ fn apply_snapshot(world: &mut World, snapshot: &SceneSnapshot) {
     if let Some(mut name_state) = world.get_resource_mut::<InspectorNameEditState>() {
         name_state.entity = None;
         name_state.buffer.clear();
+    }
+
+    if let Some(prev_pose_state) = pose_state_before {
+        let selected_entity = world
+            .get_resource::<InspectorSelectedEntityResource>()
+            .and_then(|selection| selection.0);
+        let selected_joint_count = selected_entity
+            .and_then(|entity| world.get::<BevySkinnedMeshRenderer>(entity))
+            .map(|skinned| skinned.0.skin.skeleton.joint_count());
+
+        if let Some(mut pose_state) = world.get_resource_mut::<PoseEditorState>() {
+            let mut next_state = prev_pose_state;
+            next_state.hover_joint = None;
+            next_state.dragging = false;
+
+            if next_state.edit_mode {
+                if let (Some(entity), Some(joint_count)) = (selected_entity, selected_joint_count) {
+                    next_state.active_entity = Some(entity.to_bits());
+                    if next_state
+                        .selected_joint
+                        .map(|index| index < joint_count)
+                        .unwrap_or(false)
+                    {
+                        // keep selection
+                    } else {
+                        next_state.selected_joint = None;
+                    }
+                } else {
+                    next_state.edit_mode = false;
+                    next_state.active_entity = None;
+                    next_state.selected_joint = None;
+                }
+            } else {
+                next_state.active_entity = None;
+                next_state.selected_joint = None;
+            }
+
+            *pose_state = next_state;
+        }
     }
 }
 

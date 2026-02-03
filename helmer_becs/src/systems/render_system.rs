@@ -11,7 +11,7 @@ use hashbrown::{HashMap, HashSet, hash_map::Entry};
 use helmer::{
     graphics::{
         common::{
-            config::RenderConfig,
+            config::{RenderConfig, SkinningMode},
             graph::RenderGraphSpec,
             renderer::{
                 Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
@@ -20,7 +20,7 @@ use helmer::{
         },
         render_graphs::default_graph_spec,
     },
-    provided::components::{Camera, Light, MeshRenderer, Transform},
+    provided::components::{Camera, Light, MeshRenderer, SkinnedMeshRenderer, Transform},
     runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},
 };
 use parking_lot::RwLock;
@@ -30,10 +30,11 @@ use std::{cmp::Ordering, collections::VecDeque, sync::Arc};
 use tracing::warn;
 use web_time::Instant;
 
+use crate::systems::animation_system::SkinningResource;
 use crate::{
     BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
-    BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevyStreamingTuning,
-    BevyTransform,
+    BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
+    BevyStreamingTuning, BevyTransform,
 };
 
 //================================================================================
@@ -401,10 +402,38 @@ fn compute_lod_index(
 //================================================================================
 
 #[derive(Clone, Copy)]
+struct RenderMeshInfo {
+    mesh_id: usize,
+    material_id: usize,
+    casts_shadow: bool,
+    visible: bool,
+}
+
+impl RenderMeshInfo {
+    fn from_mesh_renderer(mesh: &MeshRenderer) -> Self {
+        Self {
+            mesh_id: mesh.mesh_id,
+            material_id: mesh.material_id,
+            casts_shadow: mesh.casts_shadow,
+            visible: mesh.visible,
+        }
+    }
+
+    fn from_skinned_renderer(mesh: &SkinnedMeshRenderer) -> Self {
+        Self {
+            mesh_id: mesh.mesh_id,
+            material_id: mesh.material_id,
+            casts_shadow: mesh.casts_shadow,
+            visible: mesh.visible,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct RenderObjectUpdate {
     entity: Entity,
     transform: Transform,
-    mesh_renderer: MeshRenderer,
+    mesh: RenderMeshInfo,
 }
 
 #[derive(Clone, Copy)]
@@ -689,14 +718,14 @@ impl RenderWorkerCore {
                                 let entry_mut = entry.get_mut();
                                 entry_mut.cell_key = cell_key;
                                 entry_mut.cell_index = new_index;
-                                entry_mut.update(update.transform, update.mesh_renderer);
+                                entry_mut.update(update.transform, update.mesh);
                                 if !entry_mut.cull_dirty {
                                     entry_mut.cull_dirty = true;
                                     dirty_objects.push(update.entity);
                                 }
                             } else {
                                 let entry_mut = entry.get_mut();
-                                entry_mut.update(update.transform, update.mesh_renderer);
+                                entry_mut.update(update.transform, update.mesh);
                                 if !entry_mut.cull_dirty {
                                     entry_mut.cull_dirty = true;
                                     dirty_objects.push(update.entity);
@@ -718,7 +747,7 @@ impl RenderWorkerCore {
                             cell.objects.push(update.entity);
                             entry.insert(RenderObjectEntry::new(
                                 update.transform,
-                                update.mesh_renderer,
+                                update.mesh,
                                 cell_key,
                                 cell_index,
                             ));
@@ -1230,6 +1259,8 @@ impl RenderWorkerCore {
                             material_id: entry.material_id,
                             casts_shadow: entry.casts_shadow,
                             lod_index: entry.last_sent_lod_index,
+                            skin_offset: 0,
+                            skin_count: 0,
                         });
                         entry.last_sent_visible = true;
                         entry.last_sent_transform = current_transform;
@@ -1293,6 +1324,8 @@ impl RenderWorkerCore {
                         material_id: entry.material_id,
                         casts_shadow: entry.casts_shadow,
                         lod_index,
+                        skin_offset: 0,
+                        skin_count: 0,
                     });
                     entry.last_sent_visible = true;
                     entry.last_sent_transform = current_transform;
@@ -1497,6 +1530,8 @@ impl RenderWorkerCore {
                             material_id: proxy_material_id,
                             casts_shadow: false,
                             lod_index: 0,
+                            skin_offset: 0,
+                            skin_count: 0,
                         });
                         if !cell.proxy_sent {
                             *visible_object_count = (*visible_object_count).saturating_add(1);
@@ -1703,6 +1738,7 @@ impl RenderWorkerCore {
             render_config: None,
             render_graph: None,
             gizmo: None,
+            skin_palette: None,
             streaming_requests: None,
         };
 
@@ -1823,16 +1859,16 @@ struct RenderObjectEntry {
 impl RenderObjectEntry {
     fn new(
         transform: Transform,
-        mesh_renderer: MeshRenderer,
+        mesh: RenderMeshInfo,
         cell_key: CellKey,
         cell_index: usize,
     ) -> Self {
         Self {
             transform,
-            mesh_id: mesh_renderer.mesh_id,
-            material_id: mesh_renderer.material_id,
-            casts_shadow: mesh_renderer.casts_shadow,
-            visible: mesh_renderer.visible,
+            mesh_id: mesh.mesh_id,
+            material_id: mesh.material_id,
+            casts_shadow: mesh.casts_shadow,
+            visible: mesh.visible,
             lod_state: LodState {
                 last_seen_frame: u32::MAX,
                 ..Default::default()
@@ -1854,20 +1890,20 @@ impl RenderObjectEntry {
             last_visible: false,
             cull_dirty: true,
             last_sent_transform: transform,
-            last_sent_mesh_id: mesh_renderer.mesh_id,
-            last_sent_material_id: mesh_renderer.material_id,
-            last_sent_casts_shadow: mesh_renderer.casts_shadow,
+            last_sent_mesh_id: mesh.mesh_id,
+            last_sent_material_id: mesh.material_id,
+            last_sent_casts_shadow: mesh.casts_shadow,
             last_sent_lod_index: 0,
             last_sent_visible: false,
         }
     }
 
-    fn update(&mut self, transform: Transform, mesh_renderer: MeshRenderer) {
+    fn update(&mut self, transform: Transform, mesh: RenderMeshInfo) {
         self.transform = transform;
         self.bounds_dirty = true;
 
-        if self.mesh_id != mesh_renderer.mesh_id {
-            self.mesh_id = mesh_renderer.mesh_id;
+        if self.mesh_id != mesh.mesh_id {
+            self.mesh_id = mesh.mesh_id;
             self.lod_state = LodState {
                 last_seen_frame: u32::MAX,
                 ..Default::default()
@@ -1876,16 +1912,16 @@ impl RenderObjectEntry {
             self.mesh_bounds_valid = false;
         }
 
-        if self.material_id != mesh_renderer.material_id {
-            self.material_id = mesh_renderer.material_id;
+        if self.material_id != mesh.material_id {
+            self.material_id = mesh.material_id;
         }
 
-        if self.casts_shadow != mesh_renderer.casts_shadow {
-            self.casts_shadow = mesh_renderer.casts_shadow;
+        if self.casts_shadow != mesh.casts_shadow {
+            self.casts_shadow = mesh.casts_shadow;
         }
 
-        if self.visible != mesh_renderer.visible {
-            self.visible = mesh_renderer.visible;
+        if self.visible != mesh.visible {
+            self.visible = mesh.visible;
             self.cull_dirty = true;
         }
     }
@@ -2000,6 +2036,21 @@ fn render_worker_loop(
     }
 }
 
+fn apply_skinning_delta(delta: &mut RenderDelta, skinning: &SkinningResource) {
+    for obj in delta.objects_upsert.iter_mut() {
+        if let Some((offset, count)) = skinning.skin_params_for(obj.id) {
+            obj.skin_offset = offset;
+            obj.skin_count = count;
+        } else {
+            obj.skin_offset = 0;
+            obj.skin_count = 0;
+        }
+    }
+    if skinning.should_send_palette() {
+        delta.skin_palette = Some(skinning.palette().to_vec());
+    }
+}
+
 //================================================================================
 // The Bevy System
 //================================================================================
@@ -2011,6 +2062,7 @@ pub fn render_data_system(
     resources: RenderSystemResources,
     mut render_packet: ResMut<RenderPacket>,
     mut render_object_count: ResMut<RenderObjectCount>,
+    mut skinning: ResMut<SkinningResource>,
     camera_query: Query<(Ref<BevyCamera>, Ref<BevyTransform>), With<BevyActiveCamera>>,
     mut object_queries: ParamSet<(
         Query<(Entity, &BevyTransform, &BevyMeshRenderer)>,
@@ -2023,8 +2075,19 @@ pub fn render_data_system(
                 Changed<BevyMeshRenderer>,
             )>,
         >,
+        Query<(Entity, &BevyTransform, &BevySkinnedMeshRenderer)>,
+        Query<
+            (Entity, &BevyTransform, &BevySkinnedMeshRenderer),
+            Or<(
+                Added<BevyTransform>,
+                Added<BevySkinnedMeshRenderer>,
+                Changed<BevyTransform>,
+                Changed<BevySkinnedMeshRenderer>,
+            )>,
+        >,
     )>,
     mut removed_mesh_renderers: RemovedComponents<BevyMeshRenderer>,
+    mut removed_skinned_renderers: RemovedComponents<BevySkinnedMeshRenderer>,
     mut removed_transforms: RemovedComponents<BevyTransform>,
     mut light_queries: ParamSet<(
         Query<(Entity, &BevyTransform, &BevyLight)>,
@@ -2225,28 +2288,40 @@ pub fn render_data_system(
         worker_state.camera_sent = false;
     }
 
+    if skinning.take_full_sync() {
+        worker_state.needs_full_sync = true;
+        worker_state.camera_sent = false;
+        worker_state.config_sent = false;
+    }
+
     let full_sync = worker_state.needs_full_sync;
 
     if !send_failed {
         let removed_mesh_count = removed_mesh_renderers.len();
+        let removed_skinned_count = removed_skinned_renderers.len();
         let removed_light_count = removed_lights.len();
         let removed_transform_count = removed_transforms.len();
 
-        let mut removed_objects =
-            Vec::with_capacity(removed_mesh_count.saturating_add(removed_transform_count));
-        let mut removed_light_entities =
-            Vec::with_capacity(removed_light_count.saturating_add(removed_transform_count));
+        let mut removed_object_set =
+            HashSet::with_capacity(removed_mesh_count.saturating_add(removed_skinned_count));
+        let mut removed_light_set =
+            HashSet::with_capacity(removed_light_count.saturating_add(removed_transform_count));
 
         for entity in removed_mesh_renderers.read() {
-            removed_objects.push(entity);
+            removed_object_set.insert(entity);
+        }
+        for entity in removed_skinned_renderers.read() {
+            removed_object_set.insert(entity);
         }
         for entity in removed_lights.read() {
-            removed_light_entities.push(entity);
+            removed_light_set.insert(entity);
         }
         for entity in removed_transforms.read() {
-            removed_objects.push(entity);
-            removed_light_entities.push(entity);
+            removed_object_set.insert(entity);
+            removed_light_set.insert(entity);
         }
+        let removed_objects: Vec<Entity> = removed_object_set.into_iter().collect();
+        let removed_light_entities: Vec<Entity> = removed_light_set.into_iter().collect();
 
         if !full_sync
             && !removed_objects.is_empty()
@@ -2284,30 +2359,79 @@ pub fn render_data_system(
         }
 
         if !send_failed {
+            let cpu_skinning = matches!(render_config.skinning_mode, SkinningMode::Cpu);
             let object_updates = if full_sync {
-                let objects_query = object_queries.p0();
-                let objects_iter = objects_query.iter();
-                let (object_count, _) = objects_iter.size_hint();
-                let mut updates = Vec::with_capacity(object_count);
-                for (entity, transform, mesh_renderer) in objects_iter {
-                    updates.push(RenderObjectUpdate {
-                        entity,
-                        transform: transform.0,
-                        mesh_renderer: mesh_renderer.0,
-                    });
+                let mut updates = Vec::new();
+                {
+                    let objects_query = object_queries.p0();
+                    let objects_iter = objects_query.iter();
+                    let (object_count, _) = objects_iter.size_hint();
+                    updates.reserve(object_count);
+                    for (entity, transform, mesh_renderer) in objects_iter {
+                        updates.push(RenderObjectUpdate {
+                            entity,
+                            transform: transform.0,
+                            mesh: RenderMeshInfo::from_mesh_renderer(&mesh_renderer.0),
+                        });
+                    }
+                }
+                {
+                    let skinned_query = object_queries.p2();
+                    let skinned_iter = skinned_query.iter();
+                    let (skinned_count, _) = skinned_iter.size_hint();
+                    updates.reserve(skinned_count);
+                    for (entity, transform, skinned_renderer) in skinned_iter {
+                        let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
+                        if cpu_skinning {
+                            if let Some(cpu_mesh) =
+                                skinning.cpu_mesh_id_for(entity.index() as usize)
+                            {
+                                mesh.mesh_id = cpu_mesh;
+                            }
+                        }
+                        updates.push(RenderObjectUpdate {
+                            entity,
+                            transform: transform.0,
+                            mesh,
+                        });
+                    }
                 }
                 updates
             } else {
-                let objects_query = object_queries.p1();
-                let objects_iter = objects_query.iter();
-                let (object_count, _) = objects_iter.size_hint();
-                let mut updates = Vec::with_capacity(object_count);
-                for (entity, transform, mesh_renderer) in objects_iter {
-                    updates.push(RenderObjectUpdate {
-                        entity,
-                        transform: transform.0,
-                        mesh_renderer: mesh_renderer.0,
-                    });
+                let mut updates = Vec::new();
+                {
+                    let objects_query = object_queries.p1();
+                    let objects_iter = objects_query.iter();
+                    let (object_count, _) = objects_iter.size_hint();
+                    updates.reserve(object_count);
+                    for (entity, transform, mesh_renderer) in objects_iter {
+                        updates.push(RenderObjectUpdate {
+                            entity,
+                            transform: transform.0,
+                            mesh: RenderMeshInfo::from_mesh_renderer(&mesh_renderer.0),
+                        });
+                    }
+                }
+                {
+                    let skinned_query = object_queries.p3();
+                    let skinned_iter = skinned_query.iter();
+                    let (skinned_count, _) = skinned_iter.size_hint();
+                    updates.reserve(skinned_count);
+                    for (entity, transform, skinned_renderer) in skinned_iter {
+                        let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
+                        if cpu_skinning {
+                            if let Some(cpu_mesh) =
+                                skinning.cpu_mesh_id_for(entity.index() as usize)
+                            {
+                                mesh.mesh_id = cpu_mesh;
+                            }
+                        }
+                        updates.push(RenderObjectUpdate {
+                            entity,
+                            transform: transform.0,
+                            mesh,
+                        });
+                    }
                 }
                 updates
             };
@@ -2404,9 +2528,11 @@ pub fn render_data_system(
         if let Some(direct) = direct_delta {
             render_delta.merge_from(direct);
         }
+        apply_skinning_delta(&mut render_delta, &skinning);
         render_packet.0 = Some(render_delta);
         render_object_count.0 = result.visible_object_count;
-    } else if let Some(direct) = direct_delta {
+    } else if let Some(mut direct) = direct_delta {
+        apply_skinning_delta(&mut direct, &skinning);
         render_packet.0 = Some(direct);
     }
 

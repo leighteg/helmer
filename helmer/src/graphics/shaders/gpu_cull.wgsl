@@ -15,25 +15,31 @@ struct CameraUniforms {
 struct InstanceInput {
     prev_model: mat4x4<f32>,
     curr_model: mat4x4<f32>,
+    bounds_center: vec4<f32>,
+    bounds_extents: vec4<f32>,
     material_id: u32,
     mesh_id: u32,
     casts_shadow: u32,
-    _pad0: u32,
-    bounds_center: vec4<f32>,
-    bounds_extents: vec4<f32>,
+    skin_offset: u32,
+    skin_count: u32,
+    _pad0: array<u32, 3>,
 }
 
 struct GBufferInstance {
     model_matrix: mat4x4<f32>,
     material_id: u32,
     visibility: u32,
-    _pad0: vec2<u32>,
+    skin_offset: u32,
+    skin_count: u32,
     bounds_center: vec4<f32>,
     bounds_extents: vec4<f32>,
 }
 
 struct ShadowInstance {
     model_matrix: mat4x4<f32>,
+    skin_offset: u32,
+    skin_count: u32,
+    _pad0: vec2<u32>,
 }
 
 struct MeshMeta {
@@ -282,6 +288,8 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         gbuffer_out[out_idx].model_matrix = model;
         gbuffer_out[out_idx].material_id = inst.material_id;
         gbuffer_out[out_idx].visibility = 1u;
+        gbuffer_out[out_idx].skin_offset = inst.skin_offset;
+        gbuffer_out[out_idx].skin_count = inst.skin_count;
         gbuffer_out[out_idx].bounds_center = inst.bounds_center;
         gbuffer_out[out_idx].bounds_extents = inst.bounds_extents;
     }
@@ -291,6 +299,8 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (shadow_idx < capacity) {
             let out_idx = base + shadow_idx;
             shadow_out[out_idx].model_matrix = model;
+            shadow_out[out_idx].skin_offset = inst.skin_offset;
+            shadow_out[out_idx].skin_count = inst.skin_count;
         }
     }
 }

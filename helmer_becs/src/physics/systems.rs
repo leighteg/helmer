@@ -170,7 +170,7 @@ pub fn sync_entities_to_physics_system(
 
     // Batch insert all handles at once
     for (entity, handle) in batch_handles {
-        commands.entity(entity).insert(handle);
+        commands.entity(entity).try_insert(handle);
         physics_entities.insert(entity, handle);
     }
 }
@@ -303,7 +303,7 @@ pub fn cleanup_physics_system(
 
     // Despawn out-of-bounds entities
     for &entity in &local_state.out_of_bounds_entities {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
 
     // Combine all entities to cleanup

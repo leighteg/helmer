@@ -253,12 +253,14 @@ struct RtTextureArraySet {
 struct GpuInstanceInput {
     prev_model: [[f32; 4]; 4],
     curr_model: [[f32; 4]; 4],
+    bounds_center: [f32; 4],
+    bounds_extents: [f32; 4],
     material_id: u32,
     mesh_id: u32,
     casts_shadow: u32,
-    _pad0: u32,
-    bounds_center: [f32; 4],
-    bounds_extents: [f32; 4],
+    skin_offset: u32,
+    skin_count: u32,
+    _pad0: [u32; 3],
 }
 
 #[repr(C)]
@@ -1009,6 +1011,7 @@ struct RayTracingSnapshot {
 
 struct BufferCache {
     camera: ReusableBuffer,
+    skin_palette: ReusableBuffer,
     lights: ReusableBuffer,
     render_constants: ReusableBuffer,
     ddgi_grid: ReusableBuffer,
@@ -1041,6 +1044,7 @@ impl BufferCache {
     fn new(frames_in_flight: usize) -> Self {
         Self {
             camera: ReusableBuffer::new("GraphRenderer/Camera", frames_in_flight),
+            skin_palette: ReusableBuffer::new("GraphRenderer/SkinPalette", frames_in_flight),
             lights: ReusableBuffer::new("GraphRenderer/Lights", frames_in_flight),
             render_constants: ReusableBuffer::new(
                 "GraphRenderer/RenderConstants",
@@ -1077,6 +1081,7 @@ impl BufferCache {
 
     fn resize(&mut self, frames_in_flight: usize) {
         self.camera.resize_slots(frames_in_flight);
+        self.skin_palette.resize_slots(frames_in_flight);
         self.lights.resize_slots(frames_in_flight);
         self.render_constants.resize_slots(frames_in_flight);
         self.sky.resize_slots(frames_in_flight);
@@ -1251,6 +1256,7 @@ enum ObjectUpdateResult {
         prev_lod_index: usize,
         prev_casts_shadow: bool,
         transform_changed: bool,
+        skin_changed: bool,
     },
     Unchanged,
 }
@@ -1326,6 +1332,8 @@ impl RenderSceneState {
             let material_changed = prev_material_id != obj.material_id;
             let lod_changed = prev_lod_index != obj.lod_index;
             let casts_shadow_changed = prev_casts_shadow != obj.casts_shadow;
+            let skin_changed =
+                entry.skin_offset != obj.skin_offset || entry.skin_count != obj.skin_count;
 
             entry.previous_transform = entry.current_transform;
             entry.current_transform = obj.transform;
@@ -1333,7 +1341,8 @@ impl RenderSceneState {
                 || mesh_changed
                 || material_changed
                 || lod_changed
-                || casts_shadow_changed)
+                || casts_shadow_changed
+                || skin_changed)
             {
                 return ObjectUpdateResult::Unchanged;
             }
@@ -1341,6 +1350,8 @@ impl RenderSceneState {
             entry.material_id = obj.material_id;
             entry.casts_shadow = obj.casts_shadow;
             entry.lod_index = obj.lod_index;
+            entry.skin_offset = obj.skin_offset;
+            entry.skin_count = obj.skin_count;
             if material_changed {
                 self.drop_material_usage(prev_material_id);
                 self.bump_material_usage(obj.material_id);
@@ -1352,6 +1363,7 @@ impl RenderSceneState {
                 prev_lod_index,
                 prev_casts_shadow,
                 transform_changed,
+                skin_changed,
             }
         } else {
             let idx = self.data.objects.len();
@@ -1363,6 +1375,8 @@ impl RenderSceneState {
                 material_id: obj.material_id,
                 casts_shadow: obj.casts_shadow,
                 lod_index: obj.lod_index,
+                skin_offset: obj.skin_offset,
+                skin_count: obj.skin_count,
             });
             self.object_indices.insert(obj.id, idx);
             self.bump_material_usage(obj.material_id);
@@ -3313,6 +3327,7 @@ impl GraphRenderer {
             render_config,
             render_graph,
             gizmo,
+            skin_palette,
             streaming_requests,
         } = delta;
         let mut objects_changed = full;
@@ -3322,6 +3337,7 @@ impl GraphRenderer {
         let mut materials_needed = false;
         let material_version = self.material_version;
         let gizmo_value = gizmo.clone().unwrap_or_default();
+        let palette_value = skin_palette.clone().unwrap_or_default();
 
         if self.current_render_data.is_none() {
             let config = render_config.unwrap_or_else(RenderConfig::default);
@@ -3340,6 +3356,7 @@ impl GraphRenderer {
                 render_config: config,
                 render_graph: graph,
                 gizmo: gizmo_value,
+                skin_palette: palette_value.clone(),
             };
             self.current_render_data = Some(RenderSceneState::new(data));
         }
@@ -3354,6 +3371,7 @@ impl GraphRenderer {
         if full {
             state.clear_objects();
             state.clear_lights();
+            state.data.skin_palette = palette_value;
             self.gpu_instance_updates.clear();
             self.gpu_instances_dirty = true;
             self.gpu_draws_dirty = true;
@@ -3382,6 +3400,9 @@ impl GraphRenderer {
         }
         if let Some(gizmo) = gizmo {
             state.data.gizmo = gizmo;
+        }
+        if let Some(palette) = skin_palette {
+            state.data.skin_palette = palette;
         }
         let gpu_driven =
             state.data.render_config.gpu_driven && self.supports_indirect_first_instance;
@@ -3429,6 +3450,7 @@ impl GraphRenderer {
                     prev_lod_index,
                     prev_casts_shadow,
                     transform_changed,
+                    skin_changed,
                 } => {
                     let mesh_changed = prev_mesh_id != mesh_id;
                     let material_changed = prev_material_id != material_id;
@@ -3438,7 +3460,8 @@ impl GraphRenderer {
                         || mesh_changed
                         || material_changed
                         || lod_changed
-                        || casts_shadow_changed;
+                        || casts_shadow_changed
+                        || skin_changed;
                     if any_change {
                         objects_changed = true;
                     }
@@ -3466,7 +3489,11 @@ impl GraphRenderer {
                     {
                         materials_needed = true;
                     }
-                    if transform_changed || mesh_changed || material_changed || casts_shadow_changed
+                    if transform_changed
+                        || mesh_changed
+                        || material_changed
+                        || casts_shadow_changed
+                        || skin_changed
                     {
                         self.gpu_instance_updates.push(index);
                     }
@@ -6608,6 +6635,34 @@ impl GraphRenderer {
             }
             buffer
         };
+        let skin_palette_buffer = {
+            let mut palette = Vec::new();
+            if render_data.skin_palette.is_empty() {
+                palette.push(Mat4::IDENTITY);
+            } else {
+                palette.reserve(render_data.skin_palette.len());
+                for mat in &render_data.skin_palette {
+                    palette.push(*mat);
+                }
+            }
+            let mut raw: Vec<[[f32; 4]; 4]> = Vec::with_capacity(palette.len());
+            for mat in palette {
+                raw.push(mat.to_cols_array_2d());
+            }
+            let bytes = bytemuck::cast_slice(&raw);
+            let (buf, reallocated) = self.buffer_cache.skin_palette.ensure_with_status(
+                &self.device,
+                bytes.len().max(64) as u64,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buf, 0, bytes);
+            let buffer = buf.clone();
+            if reallocated {
+                self.note_bundle_resource_change();
+            }
+            buffer
+        };
         let lights_buffer = if self.use_uniform_lights {
             let max_lights = crate::graphics::common::constants::WEBGL_MAX_LIGHTS;
             let empty_light = LightData {
@@ -7369,6 +7424,7 @@ impl GraphRenderer {
             device_caps: Arc::clone(&self.device_caps),
             binding_backend: frame_binding_backend,
             camera_buffer,
+            skin_palette_buffer,
             lights_buffer,
             lights_len: lights.len() as u32,
             render_constants_buffer,
@@ -9288,7 +9344,8 @@ impl GraphRenderer {
                 model_matrix: model_matrix.to_cols_array_2d(),
                 material_id: mat_idx,
                 visibility: 1,
-                _pad0: [0; 2],
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
                 bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
                 bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
             };
@@ -9465,6 +9522,9 @@ impl GraphRenderer {
 
             let instance = InstanceRaw {
                 model_matrix: model_matrix.to_cols_array_2d(),
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
+                _pad0: [0; 2],
             };
 
             let key = MeshLodKey {
@@ -9905,12 +9965,14 @@ impl GraphRenderer {
         GpuInstanceInput {
             prev_model: prev.to_cols_array_2d(),
             curr_model: curr.to_cols_array_2d(),
+            bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
+            bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
             material_id,
             mesh_id,
             casts_shadow: obj.casts_shadow as u32,
-            _pad0: 0,
-            bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
-            bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
+            skin_offset: obj.skin_offset,
+            skin_count: obj.skin_count,
+            _pad0: [0; 3],
         }
     }
 

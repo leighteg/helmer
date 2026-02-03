@@ -18,6 +18,8 @@ pub struct EditorViewportState {
     pub show_directional_light_gizmos: bool,
     pub show_point_light_gizmos: bool,
     pub show_spot_light_gizmos: bool,
+    pub show_spline_paths: bool,
+    pub show_spline_points: bool,
 }
 
 impl Default for EditorViewportState {
@@ -29,6 +31,8 @@ impl Default for EditorViewportState {
             show_directional_light_gizmos: true,
             show_point_light_gizmos: true,
             show_spot_light_gizmos: true,
+            show_spline_paths: true,
+            show_spline_points: true,
         }
     }
 }

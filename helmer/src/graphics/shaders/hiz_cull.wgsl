@@ -16,7 +16,8 @@ struct InstanceData {
     model_matrix: mat4x4<f32>,
     material_id: u32,
     visibility: u32,
-    _pad0: vec2<u32>,
+    skin_offset: u32,
+    skin_count: u32,
     bounds_center: vec4<f32>,
     bounds_extents: vec4<f32>,
 }

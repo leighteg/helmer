@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -7,27 +8,44 @@ use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use bevy_ecs::query::{With, Without};
 use helmer::{
-    provided::components::{Camera, Light, LightType, MeshRenderer, Transform},
-    runtime::asset_server::Handle,
+    animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
+    provided::components::{
+        Camera, Light, LightType, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline,
+        SplineFollower, SplineMode, Transform,
+    },
+    runtime::asset_server::{Handle, Scene},
 };
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::{
-    BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform, BevyWrapper,
-    systems::scene_system::SceneRoot,
+    BevyAnimator, BevyCamera, BevyLight, BevyMeshRenderer, BevyPoseOverride,
+    BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper,
+    systems::scene_system::{SceneChild, SceneRoot, build_default_animator},
 };
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::editor::{
-    EditorPlayCamera, EditorViewportCamera, Freecam,
-    assets::{EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath},
+    EditorPlayCamera, EditorTimelineState, EditorViewportCamera, Freecam,
+    assets::{
+        EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+    },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
     scripting::{ScriptComponent, ScriptEntry},
+    timeline::{
+        ClipSegment, ClipTrack, PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation,
+        TimelineTrack, TimelineTrackGroup,
+    },
 };
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorEntity;
+
+#[derive(Component, Debug, Clone)]
+pub struct PendingSkinnedMeshAsset {
+    pub scene_handle: Handle<Scene>,
+    pub node_index: Option<usize>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldState {
@@ -62,6 +80,20 @@ impl Default for EditorSceneState {
 pub struct SceneDocument {
     pub version: u32,
     pub entities: Vec<SceneEntityData>,
+    #[serde(default)]
+    pub scene_child_animations: Vec<SceneChildAnimationData>,
+    #[serde(default)]
+    pub scene_child_pose_overrides: Vec<SceneChildPoseOverrideData>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct PendingSceneChildAnimations {
+    pub entries: Vec<SceneChildAnimationData>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct PendingSceneChildPoseOverrides {
+    pub entries: Vec<SceneChildPoseOverrideData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,11 +106,21 @@ pub struct SceneEntityData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SceneComponents {
     pub mesh: Option<MeshComponentData>,
+    #[serde(default)]
+    pub skinned: Option<SkinnedMeshComponentData>,
     pub light: Option<LightComponentData>,
     pub camera: Option<CameraComponentData>,
     pub scene: Option<SceneAssetData>,
     pub scripts: Vec<ScriptComponentData>,
     pub dynamic: Vec<DynamicComponent>,
+    #[serde(default)]
+    pub spline: Option<SplineComponentData>,
+    #[serde(default)]
+    pub spline_follower: Option<SplineFollowerData>,
+    #[serde(default)]
+    pub animation: Option<AnimationComponentData>,
+    #[serde(default)]
+    pub pose_override: Option<PoseOverrideData>,
     #[serde(default)]
     pub freecam: bool,
     #[serde(default)]
@@ -127,6 +169,195 @@ pub struct MeshComponentData {
     pub material: Option<String>,
     pub casts_shadow: bool,
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkinnedMeshComponentData {
+    pub scene_path: String,
+    #[serde(default)]
+    pub scene_node_index: Option<usize>,
+    pub casts_shadow: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum SplineModeData {
+    Linear,
+    CatmullRom,
+    Bezier,
+}
+
+impl From<SplineMode> for SplineModeData {
+    fn from(mode: SplineMode) -> Self {
+        match mode {
+            SplineMode::Linear => Self::Linear,
+            SplineMode::CatmullRom => Self::CatmullRom,
+            SplineMode::Bezier => Self::Bezier,
+        }
+    }
+}
+
+impl SplineModeData {
+    pub fn to_mode(self) -> SplineMode {
+        match self {
+            Self::Linear => SplineMode::Linear,
+            Self::CatmullRom => SplineMode::CatmullRom,
+            Self::Bezier => SplineMode::Bezier,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineComponentData {
+    pub points: Vec<[f32; 3]>,
+    pub closed: bool,
+    pub mode: SplineModeData,
+    pub tension: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineFollowerData {
+    pub spline_name: Option<String>,
+    pub t: f32,
+    pub speed: f32,
+    pub looped: bool,
+    pub follow_rotation: bool,
+    pub up: [f32; 3],
+    pub offset: [f32; 3],
+    pub length_samples: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AnimationComponentData {
+    #[serde(default)]
+    pub tracks: Vec<AnimationTrackData>,
+    #[serde(default)]
+    pub clips: Vec<AnimationClipData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoseOverrideData {
+    pub enabled: bool,
+    pub locals: Vec<SerializedTransform>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AnimationTrackData {
+    Pose(PoseTrackData),
+    Spline(SplineTrackData),
+    Clip(ClipTrackData),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoseTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub weight: f32,
+    pub additive: bool,
+    pub translation_interpolation: TimelineInterpolation,
+    pub rotation_interpolation: TimelineInterpolation,
+    pub scale_interpolation: TimelineInterpolation,
+    pub keys: Vec<PoseKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PoseKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub pose: Vec<SerializedTransform>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub interpolation: TimelineInterpolation,
+    pub keys: Vec<SplineKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub spline: SplineComponentData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub weight: f32,
+    pub additive: bool,
+    pub segments: Vec<ClipSegmentData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClipSegmentData {
+    pub id: u64,
+    pub start: f32,
+    pub duration: f32,
+    pub clip_name: String,
+    pub speed: f32,
+    pub looping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimationClipData {
+    pub name: String,
+    pub duration: f32,
+    pub channels: Vec<AnimationChannelData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AnimationChannelData {
+    Translation {
+        target: usize,
+        interpolation: Interpolation,
+        keyframes: Vec<Vec3KeyframeData>,
+    },
+    Rotation {
+        target: usize,
+        interpolation: Interpolation,
+        keyframes: Vec<QuatKeyframeData>,
+    },
+    Scale {
+        target: usize,
+        interpolation: Interpolation,
+        keyframes: Vec<Vec3KeyframeData>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Vec3KeyframeData {
+    pub time: f32,
+    pub value: [f32; 3],
+    pub in_tangent: Option<[f32; 3]>,
+    pub out_tangent: Option<[f32; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuatKeyframeData {
+    pub time: f32,
+    pub value: [f32; 4],
+    pub in_tangent: Option<[f32; 4]>,
+    pub out_tangent: Option<[f32; 4]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneChildAnimationData {
+    pub scene_path: String,
+    pub scene_node_index: usize,
+    pub animation: AnimationComponentData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneChildPoseOverrideData {
+    pub scene_path: String,
+    pub scene_node_index: usize,
+    pub pose: PoseOverrideData,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -190,6 +421,417 @@ impl SerializedTransform {
     }
 }
 
+impl From<&Spline> for SplineComponentData {
+    fn from(spline: &Spline) -> Self {
+        Self {
+            points: spline.points.iter().map(|point| point.to_array()).collect(),
+            closed: spline.closed,
+            mode: spline.mode.into(),
+            tension: spline.tension,
+        }
+    }
+}
+
+impl SplineComponentData {
+    pub fn to_spline(&self) -> Spline {
+        Spline {
+            points: self
+                .points
+                .iter()
+                .map(|point| glam::Vec3::from_array(*point))
+                .collect(),
+            closed: self.closed,
+            mode: self.mode.to_mode(),
+            tension: self.tension,
+        }
+    }
+}
+
+impl AnimationClipData {
+    pub fn from_clip(clip: &AnimationClip) -> Self {
+        let channels = clip
+            .channels
+            .iter()
+            .map(|channel| match channel {
+                AnimationChannel::Translation {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannelData::Translation {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| Vec3KeyframeData {
+                            time: key.time,
+                            value: key.value.to_array(),
+                            in_tangent: key.in_tangent.map(|tangent| tangent.to_array()),
+                            out_tangent: key.out_tangent.map(|tangent| tangent.to_array()),
+                        })
+                        .collect(),
+                },
+                AnimationChannel::Rotation {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannelData::Rotation {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| QuatKeyframeData {
+                            time: key.time,
+                            value: key.value.to_array(),
+                            in_tangent: key.in_tangent.map(|tangent| tangent.to_array()),
+                            out_tangent: key.out_tangent.map(|tangent| tangent.to_array()),
+                        })
+                        .collect(),
+                },
+                AnimationChannel::Scale {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannelData::Scale {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| Vec3KeyframeData {
+                            time: key.time,
+                            value: key.value.to_array(),
+                            in_tangent: key.in_tangent.map(|tangent| tangent.to_array()),
+                            out_tangent: key.out_tangent.map(|tangent| tangent.to_array()),
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+        Self {
+            name: clip.name.clone(),
+            duration: clip.duration,
+            channels,
+        }
+    }
+
+    pub fn to_clip(&self) -> AnimationClip {
+        let channels = self
+            .channels
+            .iter()
+            .map(|channel| match channel {
+                AnimationChannelData::Translation {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannel::Translation {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| {
+                            let mut frame =
+                                Keyframe::new(key.time, glam::Vec3::from_array(key.value));
+                            frame.in_tangent = key
+                                .in_tangent
+                                .map(|tangent| glam::Vec3::from_array(tangent));
+                            frame.out_tangent = key
+                                .out_tangent
+                                .map(|tangent| glam::Vec3::from_array(tangent));
+                            frame
+                        })
+                        .collect(),
+                },
+                AnimationChannelData::Rotation {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannel::Rotation {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| {
+                            let mut frame =
+                                Keyframe::new(key.time, glam::Quat::from_array(key.value));
+                            frame.in_tangent = key
+                                .in_tangent
+                                .map(|tangent| glam::Quat::from_array(tangent));
+                            frame.out_tangent = key
+                                .out_tangent
+                                .map(|tangent| glam::Quat::from_array(tangent));
+                            frame
+                        })
+                        .collect(),
+                },
+                AnimationChannelData::Scale {
+                    target,
+                    interpolation,
+                    keyframes,
+                } => AnimationChannel::Scale {
+                    target: *target,
+                    interpolation: *interpolation,
+                    keyframes: keyframes
+                        .iter()
+                        .map(|key| {
+                            let mut frame =
+                                Keyframe::new(key.time, glam::Vec3::from_array(key.value));
+                            frame.in_tangent = key
+                                .in_tangent
+                                .map(|tangent| glam::Vec3::from_array(tangent));
+                            frame.out_tangent = key
+                                .out_tangent
+                                .map(|tangent| glam::Vec3::from_array(tangent));
+                            frame
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+
+        AnimationClip {
+            name: self.name.clone(),
+            duration: self.duration,
+            channels,
+        }
+    }
+}
+
+fn animation_component_from_group(group: &TimelineTrackGroup) -> Option<AnimationComponentData> {
+    let tracks = group
+        .tracks
+        .iter()
+        .map(animation_track_to_data)
+        .collect::<Vec<_>>();
+    let clips = group
+        .custom_clips
+        .iter()
+        .map(AnimationClipData::from_clip)
+        .collect::<Vec<_>>();
+    if tracks.is_empty() && clips.is_empty() {
+        None
+    } else {
+        Some(AnimationComponentData { tracks, clips })
+    }
+}
+
+fn animation_track_to_data(track: &TimelineTrack) -> AnimationTrackData {
+    match track {
+        TimelineTrack::Pose(track) => AnimationTrackData::Pose(PoseTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            weight: track.weight,
+            additive: track.additive,
+            translation_interpolation: track.translation_interpolation,
+            rotation_interpolation: track.rotation_interpolation,
+            scale_interpolation: track.scale_interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| PoseKeyData {
+                    id: key.id,
+                    time: key.time,
+                    pose: key
+                        .pose
+                        .locals
+                        .iter()
+                        .map(SerializedTransform::from)
+                        .collect(),
+                })
+                .collect(),
+        }),
+        TimelineTrack::Spline(track) => AnimationTrackData::Spline(SplineTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            interpolation: track.interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| SplineKeyData {
+                    id: key.id,
+                    time: key.time,
+                    spline: SplineComponentData::from(&key.spline),
+                })
+                .collect(),
+        }),
+        TimelineTrack::Clip(track) => AnimationTrackData::Clip(ClipTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            weight: track.weight,
+            additive: track.additive,
+            segments: track
+                .segments
+                .iter()
+                .map(|segment| ClipSegmentData {
+                    id: segment.id,
+                    start: segment.start,
+                    duration: segment.duration,
+                    clip_name: segment.clip_name.clone(),
+                    speed: segment.speed,
+                    looping: segment.looping,
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn pose_to_serialized(pose: &Pose) -> Vec<SerializedTransform> {
+    pose.locals.iter().map(SerializedTransform::from).collect()
+}
+
+pub(crate) fn pose_from_serialized(
+    transforms: &[SerializedTransform],
+    skeleton: Option<&Skeleton>,
+) -> Pose {
+    if let Some(skeleton) = skeleton {
+        let mut locals = Vec::with_capacity(skeleton.joint_count());
+        for index in 0..skeleton.joint_count() {
+            let local = transforms
+                .get(index)
+                .map(SerializedTransform::to_transform)
+                .unwrap_or_else(|| skeleton.joints[index].bind_transform);
+            locals.push(local);
+        }
+        Pose { locals }
+    } else {
+        Pose {
+            locals: transforms
+                .iter()
+                .map(SerializedTransform::to_transform)
+                .collect(),
+        }
+    }
+}
+
+fn animation_track_from_data(
+    data: &AnimationTrackData,
+    skeleton: Option<&Skeleton>,
+) -> TimelineTrack {
+    match data {
+        AnimationTrackData::Pose(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| PoseKey {
+                    id: key.id,
+                    time: key.time,
+                    pose: pose_from_serialized(&key.pose, skeleton),
+                })
+                .collect();
+            TimelineTrack::Pose(PoseTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                weight: track.weight,
+                additive: track.additive,
+                translation_interpolation: track.translation_interpolation,
+                rotation_interpolation: track.rotation_interpolation,
+                scale_interpolation: track.scale_interpolation,
+                keys,
+            })
+        }
+        AnimationTrackData::Spline(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| SplineKey {
+                    id: key.id,
+                    time: key.time,
+                    spline: key.spline.to_spline(),
+                })
+                .collect();
+            TimelineTrack::Spline(SplineTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                interpolation: track.interpolation,
+                keys,
+            })
+        }
+        AnimationTrackData::Clip(track) => {
+            let segments = track
+                .segments
+                .iter()
+                .map(|segment| ClipSegment {
+                    id: segment.id,
+                    start: segment.start,
+                    duration: segment.duration,
+                    clip_name: segment.clip_name.clone(),
+                    speed: segment.speed,
+                    looping: segment.looping,
+                })
+                .collect();
+            TimelineTrack::Clip(ClipTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                weight: track.weight,
+                additive: track.additive,
+                segments,
+            })
+        }
+    }
+}
+
+fn update_timeline_next_id(timeline: &mut EditorTimelineState) {
+    let mut max_id = timeline.next_id;
+    for group in &timeline.groups {
+        for track in &group.tracks {
+            max_id = max_id.max(track.id());
+            match track {
+                TimelineTrack::Pose(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Spline(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Clip(track) => {
+                    for segment in &track.segments {
+                        max_id = max_id.max(segment.id);
+                    }
+                }
+            }
+        }
+    }
+    timeline.next_id = max_id.saturating_add(1);
+}
+
+pub(crate) fn apply_custom_clips_to_animator(animator: &mut BevyAnimator, clips: &[AnimationClip]) {
+    if clips.is_empty() {
+        return;
+    }
+    for layer in animator.0.layers.iter_mut() {
+        let mut library = (*layer.graph.library).clone();
+        for clip in clips {
+            library.upsert_clip(clip.clone());
+        }
+        layer.graph.library = std::sync::Arc::new(library);
+    }
+}
+
+pub(crate) fn apply_animation_data_to_timeline(
+    timeline: &mut EditorTimelineState,
+    entity: Entity,
+    entity_name: String,
+    data: &AnimationComponentData,
+    skeleton: Option<&Skeleton>,
+) {
+    let group = timeline.ensure_group(entity.to_bits(), entity_name);
+    group.tracks = data
+        .tracks
+        .iter()
+        .map(|track| animation_track_from_data(track, skeleton))
+        .collect();
+    group.custom_clips = data.clips.iter().map(AnimationClipData::to_clip).collect();
+    timeline.apply_requested = true;
+    update_timeline_next_id(timeline);
+}
+
 pub fn reset_editor_scene(world: &mut World) {
     let entities: Vec<Entity> = world
         .query_filtered::<Entity, With<EditorEntity>>()
@@ -198,6 +840,20 @@ pub fn reset_editor_scene(world: &mut World) {
 
     for entity in entities {
         world.despawn(entity);
+    }
+
+    if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
+        timeline.groups.clear();
+        timeline.selected = None;
+        timeline.apply_requested = true;
+        timeline.current_time = 0.0;
+        timeline.next_id = 1;
+    }
+    if let Some(mut pending) = world.get_resource_mut::<PendingSceneChildAnimations>() {
+        pending.entries.clear();
+    }
+    if let Some(mut pending) = world.get_resource_mut::<PendingSceneChildPoseOverrides>() {
+        pending.entries.clear();
     }
 }
 
@@ -258,15 +914,21 @@ pub fn ensure_active_camera(world: &mut World) {
 
 pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocument, Vec<Entity>) {
     let root = project.root.as_deref();
+    let timeline_groups = world
+        .get_resource::<EditorTimelineState>()
+        .map(|timeline| timeline.groups.clone());
 
     let mut entities = Vec::new();
     let mut entity_order = Vec::new();
+    let mut saved_entities = HashSet::new();
     let mut query = world.query_filtered::<(
         Entity,
         Option<&Name>,
         Option<&BevyTransform>,
         Option<&BevyMeshRenderer>,
         Option<&EditorMesh>,
+        Option<&BevySkinnedMeshRenderer>,
+        Option<&EditorSkinnedMesh>,
         Option<&BevyLight>,
         Option<&BevyCamera>,
         Option<&EditorPlayCamera>,
@@ -281,6 +943,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         transform,
         mesh_renderer,
         editor_mesh,
+        skinned_renderer,
+        editor_skinned,
         light,
         camera,
         active_camera,
@@ -305,6 +969,22 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         } else {
             None
         };
+
+        let skinned = editor_skinned.and_then(|skinned| {
+            let path = skinned.scene_path.as_ref()?;
+            if path.trim().is_empty() {
+                return None;
+            }
+            let (casts_shadow, visible) = skinned_renderer
+                .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+                .unwrap_or((skinned.casts_shadow, skinned.visible));
+            Some(SkinnedMeshComponentData {
+                scene_path: normalize_path(path, root),
+                scene_node_index: skinned.node_index,
+                casts_shadow,
+                visible,
+            })
+        });
 
         let light = light.map(|light| LightComponentData {
             kind: match light.0.light_type {
@@ -352,6 +1032,46 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             .get::<DynamicComponents>(entity)
             .map(|components| components.components.clone())
             .unwrap_or_default();
+        let spline = world
+            .get::<BevySpline>(entity)
+            .map(|spline| SplineComponentData {
+                points: spline
+                    .0
+                    .points
+                    .iter()
+                    .map(|point| point.to_array())
+                    .collect(),
+                closed: spline.0.closed,
+                mode: spline.0.mode.into(),
+                tension: spline.0.tension,
+            });
+        let spline_follower =
+            world
+                .get::<BevySplineFollower>(entity)
+                .map(|follower| SplineFollowerData {
+                    spline_name: follower
+                        .0
+                        .spline_entity
+                        .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                        .map(|name| name.to_string()),
+                    t: follower.0.t,
+                    speed: follower.0.speed,
+                    looped: follower.0.looped,
+                    follow_rotation: follower.0.follow_rotation,
+                    up: follower.0.up.to_array(),
+                    offset: follower.0.offset.to_array(),
+                    length_samples: follower.0.length_samples,
+                });
+        let animation = timeline_groups
+            .as_ref()
+            .and_then(|groups| groups.iter().find(|group| group.entity == entity.to_bits()))
+            .and_then(animation_component_from_group);
+        let pose_override = world
+            .get::<BevyPoseOverride>(entity)
+            .map(|pose| PoseOverrideData {
+                enabled: pose.0.enabled,
+                locals: pose_to_serialized(&pose.0.pose),
+            });
         let freecam = world.get::<Freecam>(entity).is_some();
         let physics = world
             .get::<ColliderShape>(entity)
@@ -374,11 +1094,16 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
 
         let components = SceneComponents {
             mesh,
+            skinned,
             light,
             camera,
             scene,
             scripts,
             dynamic,
+            spline,
+            spline_follower,
+            animation,
+            pose_override,
             freecam,
             physics,
         };
@@ -389,12 +1114,60 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             components,
         });
         entity_order.push(entity);
+        saved_entities.insert(entity.to_bits());
+    }
+
+    let mut scene_child_animations: Vec<SceneChildAnimationData> = Vec::new();
+    if let Some(groups) = timeline_groups.as_ref() {
+        for group in groups {
+            if saved_entities.contains(&group.entity) {
+                continue;
+            }
+            let entity = Entity::from_bits(group.entity);
+            let Some(child) = world.get::<SceneChild>(entity) else {
+                continue;
+            };
+            let Some(scene_root) = world.get::<SceneAssetPath>(child.scene_root) else {
+                continue;
+            };
+            let Some(animation) = animation_component_from_group(group) else {
+                continue;
+            };
+            let scene_path = normalize_path(scene_root.path.to_string_lossy().as_ref(), root);
+            scene_child_animations.push(SceneChildAnimationData {
+                scene_path,
+                scene_node_index: child.scene_node_index,
+                animation,
+            });
+        }
+    }
+
+    let mut scene_child_pose_overrides: Vec<SceneChildPoseOverrideData> = Vec::new();
+    let mut pose_query = world.query::<(Entity, &SceneChild, &BevyPoseOverride)>();
+    for (entity, child, pose_override) in pose_query.iter(world) {
+        if saved_entities.contains(&entity.to_bits()) {
+            continue;
+        }
+        let Some(scene_root) = world.get::<SceneAssetPath>(child.scene_root) else {
+            continue;
+        };
+        let scene_path = normalize_path(scene_root.path.to_string_lossy().as_ref(), root);
+        scene_child_pose_overrides.push(SceneChildPoseOverrideData {
+            scene_path,
+            scene_node_index: child.scene_node_index,
+            pose: PoseOverrideData {
+                enabled: pose_override.0.enabled,
+                locals: pose_to_serialized(&pose_override.0.pose),
+            },
+        });
     }
 
     (
         SceneDocument {
             version: 1,
             entities,
+            scene_child_animations,
+            scene_child_pose_overrides,
         },
         entity_order,
     )
@@ -425,10 +1198,12 @@ pub fn spawn_scene_from_document(
     let root = project.root.as_deref();
 
     let mut any_play_camera = false;
+    let mut pending_followers: Vec<(Entity, SplineFollowerData)> = Vec::new();
 
     for entity_data in &document.entities {
         let transform = entity_data.transform.to_transform();
         let mut entity = world.spawn((EditorEntity, BevyWrapper(transform)));
+        let skinned_data = entity_data.components.skinned.clone();
 
         if let Some(name) = &entity_data.name {
             entity.insert(Name::new(name.clone()));
@@ -444,6 +1219,15 @@ pub fn spawn_scene_from_document(
                     material_path: mesh.material.clone(),
                 });
             }
+        }
+
+        if let Some(skinned) = &skinned_data {
+            entity.insert(EditorSkinnedMesh {
+                scene_path: Some(skinned.scene_path.clone()),
+                node_index: skinned.scene_node_index,
+                casts_shadow: skinned.casts_shadow,
+                visible: skinned.visible,
+            });
         }
 
         if let Some(light) = &entity_data.components.light {
@@ -503,6 +1287,34 @@ pub fn spawn_scene_from_document(
             });
         }
 
+        if let Some(spline) = &entity_data.components.spline {
+            let points = spline
+                .points
+                .iter()
+                .map(|point| glam::Vec3::from_array(*point))
+                .collect();
+            entity.insert(BevySpline(Spline {
+                points,
+                closed: spline.closed,
+                mode: spline.mode.to_mode(),
+                tension: spline.tension,
+            }));
+        }
+
+        if let Some(follower) = &entity_data.components.spline_follower {
+            entity.insert(BevySplineFollower(SplineFollower {
+                spline_entity: None,
+                t: follower.t,
+                speed: follower.speed,
+                looped: follower.looped,
+                follow_rotation: follower.follow_rotation,
+                up: glam::Vec3::from_array(follower.up),
+                offset: glam::Vec3::from_array(follower.offset),
+                length_samples: follower.length_samples,
+            }));
+            pending_followers.push((entity.id(), follower.clone()));
+        }
+
         if let Some(physics) = &entity_data.components.physics {
             entity.insert(physics.collider_shape.to_collider_shape());
             match physics.body_kind.clone() {
@@ -515,11 +1327,178 @@ pub fn spawn_scene_from_document(
             }
         }
 
-        created.push(entity.id());
+        let entity_id = entity.id();
+        drop(entity);
+
+        if let Some(skinned) = skinned_data {
+            let path = resolve_path(&skinned.scene_path, root);
+            let (scene_handle, scene) = {
+                let asset_server = asset_server.0.lock();
+                let handle = asset_server.load_scene(path);
+                let scene = asset_server.get_scene(&handle);
+                (handle, scene)
+            };
+
+            let mut node_index = skinned.scene_node_index;
+            if let Some(scene) = scene.as_ref() {
+                if node_index
+                    .and_then(|index| scene.nodes.get(index))
+                    .map(|node| node.skin_index.is_some())
+                    != Some(true)
+                {
+                    node_index = scene
+                        .nodes
+                        .iter()
+                        .position(|node| node.skin_index.is_some());
+                }
+            }
+
+            if node_index.is_none() {
+                world.entity_mut(entity_id).insert(PendingSkinnedMeshAsset {
+                    scene_handle,
+                    node_index,
+                });
+                continue;
+            }
+
+            let Some(scene) = scene else {
+                world.entity_mut(entity_id).insert(PendingSkinnedMeshAsset {
+                    scene_handle,
+                    node_index,
+                });
+                continue;
+            };
+
+            let node_index = node_index.unwrap();
+            let Some(node) = scene.nodes.get(node_index) else {
+                world.entity_mut(entity_id).insert(PendingSkinnedMeshAsset {
+                    scene_handle,
+                    node_index: Some(node_index),
+                });
+                continue;
+            };
+            let Some(skin_index) = node.skin_index else {
+                world.entity_mut(entity_id).insert(PendingSkinnedMeshAsset {
+                    scene_handle,
+                    node_index: Some(node_index),
+                });
+                continue;
+            };
+            let Some(skin) = scene.skins.read().get(skin_index).cloned() else {
+                world.entity_mut(entity_id).insert(PendingSkinnedMeshAsset {
+                    scene_handle,
+                    node_index: Some(node_index),
+                });
+                continue;
+            };
+
+            let skinned_renderer = SkinnedMeshRenderer::new(
+                node.mesh.id,
+                node.material.id,
+                skin,
+                skinned.casts_shadow,
+                skinned.visible,
+            );
+
+            {
+                let mut entity_mut = world.entity_mut(entity_id);
+                entity_mut.remove::<BevyMeshRenderer>();
+                entity_mut.remove::<EditorMesh>();
+                entity_mut.remove::<PendingSkinnedMeshAsset>();
+                entity_mut.insert(BevySkinnedMeshRenderer(skinned_renderer));
+            }
+
+            if world.get::<BevyAnimator>(entity_id).is_none() {
+                if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
+                    world
+                        .entity_mut(entity_id)
+                        .insert(BevyAnimator(build_default_animator(anim_lib)));
+                }
+            }
+        }
+
+        if let Some(animation) = &entity_data.components.animation {
+            let skeleton = world
+                .get::<BevySkinnedMeshRenderer>(entity_id)
+                .map(|skinned| skinned.0.skin.skeleton.clone());
+            let skeleton_ref = skeleton.as_deref();
+            if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
+                let name = entity_data
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Entity {}", entity_id.index()));
+                apply_animation_data_to_timeline(
+                    &mut timeline,
+                    entity_id,
+                    name,
+                    animation,
+                    skeleton_ref,
+                );
+            }
+            if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity_id) {
+                let custom_clips = animation
+                    .clips
+                    .iter()
+                    .map(AnimationClipData::to_clip)
+                    .collect::<Vec<_>>();
+                apply_custom_clips_to_animator(&mut animator, &custom_clips);
+            }
+        }
+
+        if let Some(pose_override) = &entity_data.components.pose_override {
+            let skeleton = world
+                .get::<BevySkinnedMeshRenderer>(entity_id)
+                .map(|skinned| skinned.0.skin.skeleton.clone());
+            let pose = pose_from_serialized(&pose_override.locals, skeleton.as_deref());
+            world
+                .entity_mut(entity_id)
+                .insert(BevyPoseOverride(PoseOverride {
+                    enabled: pose_override.enabled,
+                    pose,
+                }));
+        }
+
+        created.push(entity_id);
+    }
+
+    if !pending_followers.is_empty() {
+        let mut name_map: HashMap<String, Entity> = HashMap::new();
+        for entity in &created {
+            if let Some(name) = world.get::<Name>(*entity) {
+                name_map.insert(name.to_string(), *entity);
+            }
+        }
+        for (entity, follower) in pending_followers {
+            let Some(target_name) = follower.spline_name.as_ref() else {
+                continue;
+            };
+            let Some(target_entity) = name_map.get(target_name) else {
+                continue;
+            };
+            if let Some(mut component) = world.get_mut::<BevySplineFollower>(entity) {
+                component.0.spline_entity = Some(target_entity.to_bits());
+            }
+        }
     }
 
     if !any_play_camera {
         ensure_active_camera(world);
+    }
+
+    if let Some(mut pending) = world.get_resource_mut::<PendingSceneChildAnimations>() {
+        pending.entries = document.scene_child_animations.clone();
+    } else {
+        world.insert_resource(PendingSceneChildAnimations {
+            entries: document.scene_child_animations.clone(),
+        });
+    }
+
+    if let Some(mut pending) = world.get_resource_mut::<PendingSceneChildPoseOverrides>() {
+        pending.entries = document.scene_child_pose_overrides.clone();
+    } else {
+        world.insert_resource(PendingSceneChildPoseOverrides {
+            entries: document.scene_child_pose_overrides.clone(),
+        });
     }
 
     created
@@ -672,7 +1651,7 @@ pub fn next_available_scene_path(project: &EditorProject) -> Option<PathBuf> {
     None
 }
 
-fn normalize_path(path: &str, root: Option<&Path>) -> String {
+pub(crate) fn normalize_path(path: &str, root: Option<&Path>) -> String {
     if let Some(root) = root {
         if let Ok(relative) = Path::new(path).strip_prefix(root) {
             return relative.to_string_lossy().replace('\\', "/");

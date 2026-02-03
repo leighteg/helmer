@@ -1,3 +1,7 @@
+use crate::animation::{
+    AnimationChannel, AnimationClip, AnimationLibrary, Interpolation as AnimInterp, Joint,
+    Keyframe, Skeleton, Skin,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::graphics::common::renderer::MeshletLodData;
 use crate::graphics::common::{
@@ -7,6 +11,7 @@ use crate::graphics::common::{
         build_mip_uploads, calc_mip_level_count, mip_level_data_size, render_message_payload_bytes,
     },
 };
+use crate::provided::components::Transform;
 #[cfg(target_arch = "wasm32")]
 use crate::runtime::asset_worker::{WorkerRequest, WorkerResponse, WorkerTextureFormat};
 use crate::runtime::runtime::RuntimeTuning;
@@ -19,8 +24,11 @@ use basis_universal::{BasisTextureFormat, UASTC_QUALITY_MIN};
 #[cfg(target_arch = "wasm32")]
 use bytemuck::{Zeroable, cast_slice, cast_slice_mut};
 use crossbeam_channel::{Sender, TryRecvError, TrySendError, bounded};
+use glam::Quat;
 use glam::{Mat4, Vec3};
 use gltf::Texture as GltfTexture;
+use gltf::animation::Interpolation as GltfInterpolation;
+use gltf::animation::util::ReadOutputs;
 use hashbrown::{HashMap, HashSet};
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Reflect, Uint8Array};
@@ -381,12 +389,16 @@ pub struct SceneNode {
     pub mesh: Handle<Mesh>,
     pub material: Handle<Material>,
     pub transform: glam::Mat4,
+    pub skin_index: Option<usize>,
+    pub node_index: usize,
 }
 
 /// The final representation of a scene, stored in the AssetServer.
 #[derive(Debug, Clone)]
 pub struct Scene {
     pub nodes: Vec<SceneNode>,
+    pub skins: Arc<RwLock<Vec<Arc<Skin>>>>,
+    pub animations: Arc<RwLock<Vec<Arc<AnimationLibrary>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +509,8 @@ pub(crate) struct GltfNodeDesc {
     pub(crate) primitive_desc_index: usize,
     pub(crate) material_index: usize,
     pub(crate) transform: glam::Mat4,
+    pub(crate) node_index: usize,
+    pub(crate) skin_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1279,6 +1293,8 @@ struct SceneAssetContext {
     base_path: Option<PathBuf>,
     scene_path: Option<PathBuf>,
     pending_assets: usize,
+    skins_loaded: bool,
+    animations_loaded: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1290,6 +1306,8 @@ struct SceneAssetContext {
     base_path: Option<PathBuf>,
     scene_path: Option<PathBuf>,
     pending_assets: usize,
+    skins_loaded: bool,
+    animations_loaded: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2573,6 +2591,21 @@ impl AssetServer {
         Handle::new(id)
     }
 
+    pub fn update_mesh(&self, id: usize, vertices: Vec<Vertex>, indices: Vec<u32>) {
+        let request = AssetLoadRequest::ProceduralMesh {
+            id,
+            vertices,
+            indices,
+            tuning: self.asset_streaming_tuning,
+        };
+        if !self.enqueue_worker_request(request) {
+            warn!(
+                "Failed to queue procedural mesh update {}; worker thread offline",
+                id
+            );
+        }
+    }
+
     pub fn get_mesh(&self, id: usize) -> Option<Arc<Mesh>> {
         self.mesh_cache.read().get(&id).cloned()
     }
@@ -3456,6 +3489,7 @@ impl AssetServer {
                             .fetch_add(buffers_bytes, AtomicOrdering::Relaxed);
                         self.enforce_scene_buffer_budget();
                     }
+                    self.maybe_populate_scene_skinning(scene_id);
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -3638,6 +3672,8 @@ impl AssetServer {
             base_path: base_path.clone(),
             scene_path,
             pending_assets: textures.len() + materials.len() + mesh_primitives.len(),
+            skins_loaded: false,
+            animations_loaded: false,
         };
         self.scene_contexts.write().insert(scene_id, context);
         if buffers_bytes > 0 {
@@ -3722,14 +3758,185 @@ impl AssetServer {
                     mesh: Handle::new(*mesh_id),
                     material: Handle::new(*material_id),
                     transform: node.transform,
+                    skin_index: node.skin_index,
+                    node_index: node.node_index,
                 })
             })
             .collect();
 
-        self.scenes
-            .write()
-            .insert(scene_id, Arc::new(Scene { nodes: scene_nodes }));
+        let skins = Arc::new(RwLock::new(Vec::new()));
+        let animations = Arc::new(RwLock::new(Vec::new()));
+        self.scenes.write().insert(
+            scene_id,
+            Arc::new(Scene {
+                nodes: scene_nodes,
+                skins: skins.clone(),
+                animations: animations.clone(),
+            }),
+        );
+
+        self.maybe_populate_scene_skinning(scene_id);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn maybe_populate_scene_skinning(&self, scene_id: usize) {
+        let (doc, buffers, should_parse) = {
+            let contexts = self.scene_contexts.read();
+            let Some(ctx) = contexts.get(&scene_id) else {
+                return;
+            };
+            let buffers = ctx.buffers.clone();
+            let should_parse = buffers.is_some() && !(ctx.skins_loaded && ctx.animations_loaded);
+            (ctx.doc.clone(), buffers, should_parse)
+        };
+        if !should_parse {
+            return;
+        }
+        let Some(buffers) = buffers else {
+            return;
+        };
+
+        let parent_map = build_parent_map(&doc);
+        let skin_count = doc.skins().len();
+        let mut skins: Vec<Arc<Skin>> = Vec::with_capacity(skin_count);
+        let mut joint_maps: Vec<HashMap<usize, usize>> = Vec::with_capacity(skin_count);
+
+        for skin in doc.skins() {
+            let name = skin
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("skin_{}", skin.index()));
+            let joints: Vec<usize> = skin.joints().map(|node| node.index()).collect();
+            let joint_map: HashMap<usize, usize> = joints
+                .iter()
+                .enumerate()
+                .map(|(idx, node)| (*node, idx))
+                .collect();
+            let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(|b| b.as_slice()));
+            let inverse_bind_matrices: Vec<Mat4> = reader
+                .read_inverse_bind_matrices()
+                .map(|iter| iter.map(|mat| Mat4::from_cols_array_2d(&mat)).collect())
+                .unwrap_or_default();
+
+            let mut skeleton_joints = Vec::with_capacity(joints.len());
+            for (joint_index, node_index) in joints.iter().enumerate() {
+                let node = doc.nodes().nth(*node_index);
+                let bind_transform = node
+                    .as_ref()
+                    .map(|node| {
+                        Transform::from_matrix(Mat4::from_cols_array_2d(&node.transform().matrix()))
+                    })
+                    .unwrap_or_default();
+                let parent = parent_map
+                    .get(*node_index)
+                    .and_then(|p| *p)
+                    .and_then(|parent_node| joint_map.get(&parent_node).copied());
+                let inverse_bind = inverse_bind_matrices
+                    .get(joint_index)
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY);
+                let joint_name = node
+                    .and_then(|node| node.name().map(|s| s.to_string()))
+                    .unwrap_or_else(|| format!("joint_{}", node_index));
+                skeleton_joints.push(Joint {
+                    name: joint_name,
+                    parent,
+                    bind_transform,
+                    inverse_bind,
+                });
+            }
+
+            let skeleton = Skeleton::new(skeleton_joints);
+            let joint_names = skeleton
+                .joints
+                .iter()
+                .map(|joint| joint.name.clone())
+                .collect();
+            skins.push(Arc::new(Skin {
+                name,
+                skeleton: Arc::new(skeleton),
+                joint_names,
+            }));
+            joint_maps.push(joint_map);
+        }
+
+        let mut animations: Vec<Arc<AnimationLibrary>> = Vec::with_capacity(skin_count);
+        for _ in 0..skin_count {
+            animations.push(Arc::new(AnimationLibrary::default()));
+        }
+        if skin_count > 0 && doc.animations().len() > 0 {
+            let mut libraries: Vec<AnimationLibrary> = (0..skin_count)
+                .map(|_| AnimationLibrary::default())
+                .collect();
+            for animation in doc.animations() {
+                let anim_name = animation
+                    .name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("anim_{}", animation.index()));
+                let parsed_channels = parse_animation_channels(&animation, buffers.as_ref());
+                if parsed_channels.is_empty() {
+                    continue;
+                }
+                let mut durations = vec![0.0f32; skin_count];
+                for channel in parsed_channels.iter() {
+                    for (skin_index, map) in joint_maps.iter().enumerate() {
+                        if let Some(&joint_index) = map.get(&channel.node_index) {
+                            let mut channel = channel.channel.clone();
+                            retarget_channel(&mut channel, joint_index);
+                            let clip = libraries[skin_index].name_to_index.get(&anim_name).copied();
+                            let clip_index = clip.unwrap_or_else(|| {
+                                libraries[skin_index].add_clip(AnimationClip {
+                                    name: anim_name.clone(),
+                                    duration: 0.0,
+                                    channels: Vec::new(),
+                                })
+                            });
+                            if let Some(existing) =
+                                libraries[skin_index].clips.get(clip_index).cloned()
+                            {
+                                let mut clip = (*existing).clone();
+                                clip.channels.push(channel);
+                                clip.duration = clip
+                                    .duration
+                                    .max(channel_duration(&clip.channels.last().unwrap()));
+                                let clip_duration = clip.duration;
+                                libraries[skin_index].clips[clip_index] = Arc::new(clip);
+                                durations[skin_index] = durations[skin_index].max(clip_duration);
+                            }
+                        }
+                    }
+                }
+                for (idx, duration) in durations.into_iter().enumerate() {
+                    if duration <= 0.0 {
+                        continue;
+                    }
+                    if let Some(clip_index) = libraries[idx].clip_index(&anim_name) {
+                        let clip = libraries[idx].clips[clip_index].as_ref().clone();
+                        let mut clip = clip.clone();
+                        clip.duration = duration;
+                        libraries[idx].clips[clip_index] = Arc::new(clip);
+                    }
+                }
+            }
+            animations = libraries.into_iter().map(Arc::new).collect();
+        }
+
+        if let Some(scene) = self.scenes.read().get(&scene_id).cloned() {
+            if skin_count > 0 {
+                *scene.skins.write() = skins;
+                *scene.animations.write() = animations;
+            }
+        }
+
+        let mut contexts = self.scene_contexts.write();
+        if let Some(ctx) = contexts.get_mut(&scene_id) {
+            ctx.skins_loaded = true;
+            ctx.animations_loaded = true;
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn maybe_populate_scene_skinning(&self, _scene_id: usize) {}
 
     #[cfg(target_arch = "wasm32")]
     fn register_scene(
@@ -3761,6 +3968,8 @@ impl AssetServer {
             base_path: base_path.map(PathBuf::from),
             scene_path: scene_path.map(PathBuf::from),
             pending_assets: textures.len() + materials.len() + mesh_primitives.len(),
+            skins_loaded: false,
+            animations_loaded: false,
         };
         self.scene_contexts.write().insert(scene_id, context);
         if buffers_bytes > 0 {
@@ -3853,20 +4062,30 @@ impl AssetServer {
 
         let scene_nodes = nodes
             .iter()
-            .filter_map(|node| {
+            .enumerate()
+            .filter_map(|(node_index, node)| {
                 let mesh_id = mesh_ids.get(node.primitive_desc_index)?;
                 let material_id = material_ids.get(node.material_index)?;
                 Some(SceneNode {
                     mesh: Handle::new(*mesh_id),
                     material: Handle::new(*material_id),
                     transform: Mat4::from_cols_array(&node.transform),
+                    skin_index: None,
+                    node_index,
                 })
             })
             .collect();
 
-        self.scenes
-            .write()
-            .insert(scene_id, Arc::new(Scene { nodes: scene_nodes }));
+        let skins = Arc::new(RwLock::new(Vec::new()));
+        let animations = Arc::new(RwLock::new(Vec::new()));
+        self.scenes.write().insert(
+            scene_id,
+            Arc::new(Scene {
+                nodes: scene_nodes,
+                skins,
+                animations,
+            }),
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6483,6 +6702,8 @@ pub(crate) fn process_primitive<B: BufferSource>(
 
     let mut normal_iter = reader.read_normals();
     let mut tex_iter = reader.read_tex_coords(0).map(|tc| tc.into_f32());
+    let mut joints_iter = reader.read_joints(0).map(|j| j.into_u16());
+    let mut weights_iter = reader.read_weights(0).map(|w| w.into_f32());
 
     let mut vertices = Vec::with_capacity(vertex_count);
     let mut min_bounds = Vec3::splat(f32::MAX);
@@ -6498,7 +6719,38 @@ pub(crate) fn process_primitive<B: BufferSource>(
             .as_mut()
             .and_then(|iter| iter.next())
             .unwrap_or([0.0, 0.0]);
-        vertices.push(Vertex::new(position, normal, tex_coord, [0.0; 4]));
+        let joints = joints_iter
+            .as_mut()
+            .and_then(|iter| iter.next())
+            .map(|joint| {
+                [
+                    joint[0] as u32,
+                    joint[1] as u32,
+                    joint[2] as u32,
+                    joint[3] as u32,
+                ]
+            })
+            .unwrap_or([0; 4]);
+        let weights = weights_iter
+            .as_mut()
+            .and_then(|iter| iter.next())
+            .map(|weight| {
+                let sum = weight[0] + weight[1] + weight[2] + weight[3];
+                if sum > 0.0 {
+                    [
+                        weight[0] / sum,
+                        weight[1] / sum,
+                        weight[2] / sum,
+                        weight[3] / sum,
+                    ]
+                } else {
+                    [1.0, 0.0, 0.0, 0.0]
+                }
+            })
+            .unwrap_or([1.0, 0.0, 0.0, 0.0]);
+        vertices.push(Vertex::with_skinning(
+            position, normal, tex_coord, [0.0; 4], joints, weights,
+        ));
         let position_vec = Vec3::from(position);
         min_bounds = min_bounds.min(position_vec);
         max_bounds = max_bounds.max(position_vec);
@@ -6795,6 +7047,8 @@ pub(crate) fn parse_scene_document(
                     primitive_desc_index,
                     material_index,
                     transform,
+                    node_index: node.index(),
+                    skin_index: node.skin().map(|skin| skin.index()),
                 });
             }
         }
@@ -6826,6 +7080,188 @@ pub(crate) fn parse_scene_document(
         mesh_primitives,
         nodes,
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+struct ParsedAnimationChannel {
+    node_index: usize,
+    channel: AnimationChannel,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_parent_map(doc: &gltf::Document) -> Vec<Option<usize>> {
+    let mut parents = vec![None; doc.nodes().len()];
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            traverse_node(&node, None, &mut parents);
+        }
+    }
+    parents
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn traverse_node(node: &gltf::Node, parent: Option<usize>, parents: &mut [Option<usize>]) {
+    let idx = node.index();
+    if idx < parents.len() {
+        parents[idx] = parent;
+    }
+    for child in node.children() {
+        traverse_node(&child, Some(idx), parents);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_animation_channels(
+    animation: &gltf::Animation,
+    buffers: &[StreamedBuffer],
+) -> Vec<ParsedAnimationChannel> {
+    let mut channels = Vec::new();
+    for channel in animation.channels() {
+        let node_index = channel.target().node().index();
+        let sampler = channel.sampler();
+        let interpolation = map_interpolation(sampler.interpolation());
+        let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|b| b.as_slice()));
+        let Some(inputs) = reader.read_inputs().map(|iter| iter.collect::<Vec<f32>>()) else {
+            continue;
+        };
+        let Some(outputs) = reader.read_outputs() else {
+            continue;
+        };
+        match outputs {
+            ReadOutputs::Translations(translations) => {
+                let outputs: Vec<[f32; 3]> = translations.collect();
+                let keyframes = parse_vec3_keyframes(&inputs, &outputs, interpolation);
+                channels.push(ParsedAnimationChannel {
+                    node_index,
+                    channel: AnimationChannel::Translation {
+                        target: node_index,
+                        interpolation,
+                        keyframes,
+                    },
+                });
+            }
+            ReadOutputs::Scales(scales) => {
+                let outputs: Vec<[f32; 3]> = scales.collect();
+                let keyframes = parse_vec3_keyframes(&inputs, &outputs, interpolation);
+                channels.push(ParsedAnimationChannel {
+                    node_index,
+                    channel: AnimationChannel::Scale {
+                        target: node_index,
+                        interpolation,
+                        keyframes,
+                    },
+                });
+            }
+            ReadOutputs::Rotations(rotations) => {
+                let outputs: Vec<[f32; 4]> = rotations.into_f32().collect();
+                let keyframes = parse_quat_keyframes(&inputs, &outputs, interpolation);
+                channels.push(ParsedAnimationChannel {
+                    node_index,
+                    channel: AnimationChannel::Rotation {
+                        target: node_index,
+                        interpolation,
+                        keyframes,
+                    },
+                });
+            }
+            ReadOutputs::MorphTargetWeights(_) => {}
+        }
+    }
+    channels
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_interpolation(interp: GltfInterpolation) -> AnimInterp {
+    match interp {
+        GltfInterpolation::Step => AnimInterp::Step,
+        GltfInterpolation::Linear => AnimInterp::Linear,
+        GltfInterpolation::CubicSpline => AnimInterp::Cubic,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_vec3_keyframes(
+    inputs: &[f32],
+    outputs: &[[f32; 3]],
+    interpolation: AnimInterp,
+) -> Vec<Keyframe<Vec3>> {
+    let mut keyframes = Vec::new();
+    if inputs.is_empty() {
+        return keyframes;
+    }
+    if interpolation == AnimInterp::Cubic && outputs.len() >= inputs.len() * 3 {
+        for (idx, time) in inputs.iter().enumerate() {
+            let base = idx * 3;
+            let in_tangent = Vec3::from(outputs[base]);
+            let value = Vec3::from(outputs[base + 1]);
+            let out_tangent = Vec3::from(outputs[base + 2]);
+            keyframes.push(Keyframe {
+                time: *time,
+                value,
+                in_tangent: Some(in_tangent),
+                out_tangent: Some(out_tangent),
+            });
+        }
+        return keyframes;
+    }
+    for (time, value) in inputs.iter().zip(outputs.iter()) {
+        keyframes.push(Keyframe::new(*time, Vec3::from(*value)));
+    }
+    keyframes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_quat_keyframes(
+    inputs: &[f32],
+    outputs: &[[f32; 4]],
+    interpolation: AnimInterp,
+) -> Vec<Keyframe<Quat>> {
+    let mut keyframes = Vec::new();
+    if inputs.is_empty() {
+        return keyframes;
+    }
+    if interpolation == AnimInterp::Cubic && outputs.len() >= inputs.len() * 3 {
+        for (idx, time) in inputs.iter().enumerate() {
+            let base = idx * 3;
+            let in_tangent = Quat::from_array(outputs[base]).normalize();
+            let value = Quat::from_array(outputs[base + 1]).normalize();
+            let out_tangent = Quat::from_array(outputs[base + 2]).normalize();
+            keyframes.push(Keyframe {
+                time: *time,
+                value,
+                in_tangent: Some(in_tangent),
+                out_tangent: Some(out_tangent),
+            });
+        }
+        return keyframes;
+    }
+    for (time, value) in inputs.iter().zip(outputs.iter()) {
+        keyframes.push(Keyframe::new(*time, Quat::from_array(*value).normalize()));
+    }
+    keyframes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn retarget_channel(channel: &mut AnimationChannel, target: usize) {
+    match channel {
+        AnimationChannel::Translation { target: t, .. } => *t = target,
+        AnimationChannel::Rotation { target: t, .. } => *t = target,
+        AnimationChannel::Scale { target: t, .. } => *t = target,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn channel_duration(channel: &AnimationChannel) -> f32 {
+    match channel {
+        AnimationChannel::Translation { keyframes, .. }
+        | AnimationChannel::Scale { keyframes, .. } => {
+            keyframes.last().map(|k| k.time).unwrap_or(0.0)
+        }
+        AnimationChannel::Rotation { keyframes, .. } => {
+            keyframes.last().map(|k| k.time).unwrap_or(0.0)
+        }
+    }
 }
 
 #[cfg(any())]

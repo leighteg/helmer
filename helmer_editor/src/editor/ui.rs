@@ -12,29 +12,37 @@ use egui::{
     PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 use glam::{EulerRot, Mat3, Quat, Vec3};
+use helmer::animation::{AnimationClip, Skeleton};
+use helmer::graphics::common::config::SkinningMode;
 use helmer::graphics::{
     common::renderer::GizmoMode,
     render_graphs::{graph_templates, template_for_graph},
 };
-use helmer::provided::components::{Light, LightType, MeshRenderer};
-use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh};
+use helmer::provided::components::{
+    Light, LightType, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower,
+    SplineMode,
+};
+use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::EguiResource;
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
-use helmer_becs::systems::scene_system::SceneRoot;
+use helmer_becs::systems::scene_system::{
+    SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
+};
 use helmer_becs::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform,
-    BevyWrapper,
+    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyLight, BevyMeshRenderer,
+    BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
+    BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
 
 use crate::editor::{
-    EditorLayoutState, EditorPlayCamera, EditorUndoState, EditorViewportCamera,
-    EditorViewportState, Freecam, LayoutSaveRequest, UndoEntry,
+    EditorLayoutState, EditorPlayCamera, EditorSplineState, EditorTimelineState, EditorUndoState,
+    EditorViewportCamera, EditorViewportState, Freecam, LayoutSaveRequest, UndoEntry,
     assets::{
-        AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind,
-        SceneAssetPath, is_entry_visible,
+        AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
+        PrimitiveKind, SceneAssetPath, is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -43,8 +51,16 @@ use crate::editor::{
     gizmos::{EditorGizmoSettings, EditorGizmoState},
     project::{EditorProject, ProjectConfig, default_script_template_full, save_project_config},
     push_undo_snapshot, save_layouts,
-    scene::{EditorEntity, EditorSceneState, WorldState, next_available_scene_path},
+    scene::{
+        EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, WorldState,
+        next_available_scene_path,
+    },
     scripting::{ScriptComponent, ScriptEntry},
+    timeline::{
+        ClipSegment, ClipTrack, PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation,
+        TimelineSelection, TimelineTrack, TimelineTrackGroup, build_clip_from_pose_track,
+        build_pose_track_from_clip,
+    },
 };
 
 #[derive(Default, Debug, Clone, Resource)]
@@ -157,6 +173,7 @@ pub struct HierarchyUiState {
     pub rename_entity: Option<Entity>,
     pub rename_buffer: String,
     pub rename_request_focus: bool,
+    pub expanded_entities: HashSet<Entity>,
     pub new_dynamic_component_name: String,
     pub new_dynamic_field_name: String,
     pub new_dynamic_field_kind: DynamicValueKind,
@@ -168,9 +185,68 @@ impl Default for HierarchyUiState {
             rename_entity: None,
             rename_buffer: String::new(),
             rename_request_focus: false,
+            expanded_entities: HashSet::new(),
             new_dynamic_component_name: String::new(),
             new_dynamic_field_name: String::new(),
             new_dynamic_field_kind: DynamicValueKind::Float,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct AnimatorUiState {
+    pub new_float_name: String,
+    pub new_float_value: f32,
+    pub new_bool_name: String,
+    pub new_bool_value: bool,
+    pub new_trigger_name: String,
+}
+
+impl Default for AnimatorUiState {
+    fn default() -> Self {
+        Self {
+            new_float_name: String::new(),
+            new_float_value: 0.0,
+            new_bool_name: String::new(),
+            new_bool_value: false,
+            new_trigger_name: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct PoseEditorState {
+    pub joint_filter: String,
+    pub selected_joint: Option<usize>,
+    pub hover_joint: Option<usize>,
+    pub edit_mode: bool,
+    pub active_entity: Option<u64>,
+    pub use_gizmo: bool,
+    pub show_bones: bool,
+    pub show_joint_handles: bool,
+    pub handle_size_scale: f32,
+    pub handle_size_min: f32,
+    pub pick_radius_scale: f32,
+    pub pick_radius_min: f32,
+    pub dragging: bool,
+}
+
+impl Default for PoseEditorState {
+    fn default() -> Self {
+        Self {
+            joint_filter: String::new(),
+            selected_joint: None,
+            hover_joint: None,
+            edit_mode: false,
+            active_entity: None,
+            use_gizmo: true,
+            show_bones: true,
+            show_joint_handles: true,
+            handle_size_scale: 0.03,
+            handle_size_min: 0.05,
+            pick_radius_scale: 0.025,
+            pick_radius_min: 0.04,
+            dragging: false,
         }
     }
 }
@@ -581,6 +657,14 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.show_spot_light_gizmos)
             .unwrap_or(true);
+        let mut show_spline_paths = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spline_paths)
+            .unwrap_or(true);
+        let mut show_spline_points = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spline_points)
+            .unwrap_or(true);
 
         let selected_label = templates
             .iter()
@@ -609,6 +693,8 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
             viewport_state.show_point_light_gizmos = show_point_light_gizmos;
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
+            viewport_state.show_spline_paths = show_spline_paths;
+            viewport_state.show_spline_points = show_spline_points;
         }
 
         if previous_template != graph_template {
@@ -632,12 +718,16 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         );
         ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
         ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
+        ui.checkbox(&mut show_spline_paths, "Show Spline Paths");
+        ui.checkbox(&mut show_spline_points, "Show Spline Points");
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             viewport_state.gizmos_in_play = gizmos_in_play;
             viewport_state.show_camera_gizmos = show_camera_gizmos;
             viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
             viewport_state.show_point_light_gizmos = show_point_light_gizmos;
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
+            viewport_state.show_spline_paths = show_spline_paths;
+            viewport_state.show_spline_points = show_spline_points;
         }
 
         let mut gizmo_mode = world
@@ -1020,6 +1110,75 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         }
 
         ui.separator();
+
+        ui.heading("Skinning");
+        if let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() {
+            let mut render_config = runtime_config.0.render_config;
+
+            let mode_label = match render_config.skinning_mode {
+                SkinningMode::Auto => "Auto",
+                SkinningMode::Gpu => "GPU",
+                SkinningMode::Cpu => "CPU",
+            };
+            ComboBox::from_id_source("skinning_mode")
+                .selected_text(mode_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            matches!(render_config.skinning_mode, SkinningMode::Auto),
+                            "Auto",
+                        )
+                        .clicked()
+                    {
+                        render_config.skinning_mode = SkinningMode::Auto;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(render_config.skinning_mode, SkinningMode::Gpu),
+                            "GPU",
+                        )
+                        .clicked()
+                    {
+                        render_config.skinning_mode = SkinningMode::Gpu;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(render_config.skinning_mode, SkinningMode::Cpu),
+                            "CPU",
+                        )
+                        .clicked()
+                    {
+                        render_config.skinning_mode = SkinningMode::Cpu;
+                    }
+                });
+
+            ui.horizontal(|ui| {
+                ui.label("Palette Capacity");
+                ui.add(
+                    DragValue::new(&mut render_config.skin_palette_capacity)
+                        .range(0..=u32::MAX)
+                        .speed(1),
+                );
+            });
+            let _ = edit_float(
+                ui,
+                "Palette Growth",
+                &mut render_config.skin_palette_growth,
+                0.01,
+            );
+            ui.horizontal(|ui| {
+                ui.label("CPU Vertex Budget");
+                ui.add(
+                    DragValue::new(&mut render_config.cpu_skinning_vertex_budget)
+                        .range(0..=u32::MAX)
+                        .speed(1),
+                );
+            });
+
+            runtime_config.0.render_config = render_config;
+        } else {
+            ui.label("Runtime config unavailable.");
+        }
 
         ui.heading("Camera");
         let mut camera_query = world
@@ -1751,14 +1910,22 @@ pub fn draw_hierarchy_window(ui: &mut Ui, world: &mut World) {
     draw_scene_window(ui, world);
 }
 
-fn collect_hierarchy_entries(world: &mut World) -> Vec<(Entity, String)> {
-    let mut entries: Vec<(Entity, String)> = Vec::new();
+struct HierarchyEntry {
+    entity: Entity,
+    label: String,
+    is_scene_root: bool,
+}
+
+fn collect_hierarchy_entries(world: &mut World) -> Vec<HierarchyEntry> {
+    let mut entries: Vec<HierarchyEntry> = Vec::new();
     let mut query = world.query::<(
         Entity,
         Option<&Name>,
         Option<&BevyCamera>,
         Option<&BevyLight>,
         Option<&BevyMeshRenderer>,
+        Option<&BevySkinnedMeshRenderer>,
+        Option<&EditorSkinnedMesh>,
         Option<&EditorPlayCamera>,
         Option<&SceneRoot>,
         Option<&SceneAssetPath>,
@@ -1773,6 +1940,8 @@ fn collect_hierarchy_entries(world: &mut World) -> Vec<(Entity, String)> {
         camera,
         light,
         mesh,
+        skinned,
+        editor_skinned,
         active_camera,
         scene_root,
         scene_asset,
@@ -1811,6 +1980,9 @@ fn collect_hierarchy_entries(world: &mut World) -> Vec<(Entity, String)> {
                 .unwrap_or("Mesh");
             tags.push(mesh_tag);
         }
+        if skinned.is_some() || editor_skinned.is_some() {
+            tags.push("Skinned");
+        }
         if scene_root.is_some() {
             if let Some(scene) = scene_asset {
                 if let Some(name) = scene.path.file_name().and_then(|name| name.to_str()) {
@@ -1832,17 +2004,68 @@ fn collect_hierarchy_entries(world: &mut World) -> Vec<(Entity, String)> {
             label.push(']');
         }
 
-        entries.push((entity, label));
+        entries.push(HierarchyEntry {
+            entity,
+            label,
+            is_scene_root: scene_root.is_some(),
+        });
     }
 
-    entries.sort_by_key(|(entity, _)| entity.to_bits());
+    entries.sort_by_key(|entry| entry.entity.to_bits());
     entries
 }
 
-fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[(Entity, String)]) {
+fn build_scene_child_label(world: &World, entity: Entity) -> String {
+    let mut label = world
+        .get::<Name>(entity)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
+
+    let mut tags = Vec::new();
+    if world.get::<BevySkinnedMeshRenderer>(entity).is_some() {
+        tags.push("Skinned");
+    } else if world.get::<BevyMeshRenderer>(entity).is_some() {
+        tags.push("Mesh");
+    }
+    if world.get::<BevyLight>(entity).is_some() {
+        tags.push("Light");
+    }
+    if world.get::<BevyCamera>(entity).is_some() {
+        tags.push("Camera");
+    }
+
+    if !tags.is_empty() {
+        label.push_str(" [");
+        label.push_str(&tags.join(", "));
+        label.push(']');
+    }
+
+    label
+}
+
+fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[HierarchyEntry]) {
     let selection = world
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selection| selection.0);
+
+    if let Some(selected) = selection {
+        let parent_root = world
+            .get::<SceneChild>(selected)
+            .map(|child| child.scene_root);
+        if let Some(root) = parent_root {
+            world.resource_scope::<HierarchyUiState, _>(|_world, mut ui_state| {
+                ui_state.expanded_entities.insert(root);
+            });
+        }
+    }
+
+    let scene_children_map = world
+        .get_resource::<SceneSpawnedChildren>()
+        .map(|state| state.spawned_scenes.clone())
+        .unwrap_or_default();
+
+    const INDENT: f32 = 14.0;
+    const TOGGLE_WIDTH: f32 = 14.0;
 
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     egui::ScrollArea::vertical()
@@ -1850,58 +2073,170 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[(Entity, Stri
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                for (entity, label) in entries.iter() {
-                    let is_selected = selection == Some(*entity);
-                    let is_renaming = world
-                        .get_resource::<HierarchyUiState>()
-                        .map(|state| state.rename_entity == Some(*entity))
-                        .unwrap_or(false);
+                for entry in entries.iter() {
+                    let entity = entry.entity;
+                    let is_selected = selection == Some(entity);
+                    let is_editor_entity = world.get::<EditorEntity>(entity).is_some();
+                    let is_renaming = is_editor_entity
+                        && world
+                            .get_resource::<HierarchyUiState>()
+                            .map(|state| state.rename_entity == Some(entity))
+                            .unwrap_or(false);
+                    let child_entities = if entry.is_scene_root {
+                        scene_children_map.get(&entity).cloned().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let can_expand = entry.is_scene_root;
+                    let mut expanded = if can_expand {
+                        world
+                            .get_resource::<HierarchyUiState>()
+                            .map(|state| state.expanded_entities.contains(&entity))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
 
-                    if is_renaming {
-                        world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
-                            let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
-                            if ui_state.rename_request_focus {
-                                response.request_focus();
-                                ui_state.rename_request_focus = false;
+                    ui.horizontal(|ui| {
+                        if can_expand {
+                            let toggle_label = if expanded { "v" } else { ">" };
+                            let toggle_response = ui.add_sized(
+                                Vec2::new(TOGGLE_WIDTH, 0.0),
+                                egui::Button::new(toggle_label).frame(false),
+                            );
+                            if toggle_response.clicked() {
+                                expanded = !expanded;
+                                world.resource_scope::<HierarchyUiState, _>(
+                                    |_world, mut ui_state| {
+                                        if expanded {
+                                            ui_state.expanded_entities.insert(entity);
+                                        } else {
+                                            ui_state.expanded_entities.remove(&entity);
+                                        }
+                                    },
+                                );
                             }
-                            let commit = response.lost_focus()
-                                || (response.has_focus()
-                                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                            if commit {
-                                apply_entity_name(world, *entity, ui_state.rename_buffer.trim());
-                                ui_state.rename_entity = None;
+                        } else {
+                            ui.add_space(TOGGLE_WIDTH);
+                        }
+
+                        if is_renaming {
+                            world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
+                                let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
+                                if ui_state.rename_request_focus {
+                                    response.request_focus();
+                                    ui_state.rename_request_focus = false;
+                                }
+                                let commit = response.lost_focus()
+                                    || (response.has_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                                if commit {
+                                    apply_entity_name(world, entity, ui_state.rename_buffer.trim());
+                                    ui_state.rename_entity = None;
+                                }
+                            });
+                        } else {
+                            let response = ui.add_sized(
+                                Vec2::new(ui.available_width(), 0.0),
+                                egui::Button::new(&entry.label)
+                                    .wrap()
+                                    .selected(is_selected)
+                                    .sense(Sense::click_and_drag()),
+                            );
+
+                            if is_editor_entity {
+                                response.dnd_set_drag_payload(EntityDragPayload { entity });
                             }
-                        });
-                        continue;
-                    }
 
-                    let response = ui.add_sized(
-                        Vec2::new(ui.available_width(), 0.0),
-                        egui::Button::new(label).wrap().selected(is_selected),
-                    );
+                            if response.clicked() {
+                                set_selection(world, Some(entity));
+                            }
 
-                    if response.clicked() {
-                        set_selection(world, Some(*entity));
-                    }
+                            if response.double_clicked() {
+                                focus_entity_in_view(world, entity);
+                            }
 
-                    if response.double_clicked() {
-                        focus_entity_in_view(world, *entity);
-                    }
-
-                    response.context_menu(|ui| {
-                        if ui.button("Rename").clicked() {
-                            begin_rename(world, *entity);
-                            ui.close_menu();
-                        }
-                        if ui.button("Delete").clicked() {
-                            push_command(world, EditorCommand::DeleteEntity { entity: *entity });
-                            ui.close_menu();
-                        }
-                        if ui.button("Set Game Camera").clicked() {
-                            push_command(world, EditorCommand::SetActiveCamera { entity: *entity });
-                            ui.close_menu();
+                            if is_editor_entity {
+                                response.context_menu(|ui| {
+                                    if ui.button("Rename").clicked() {
+                                        begin_rename(world, entity);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        push_command(world, EditorCommand::DeleteEntity { entity });
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Set Game Camera").clicked() {
+                                        push_command(
+                                            world,
+                                            EditorCommand::SetActiveCamera { entity },
+                                        );
+                                        ui.close_menu();
+                                    }
+                                });
+                            } else if world.get::<SceneChild>(entity).is_some() {
+                                response.context_menu(|ui| {
+                                    if ui.button("Focus").clicked() {
+                                        focus_entity_in_view(world, entity);
+                                        ui.close_menu();
+                                    }
+                                    if let Some(child) = world.get::<SceneChild>(entity) {
+                                        if ui.button("Select Root").clicked() {
+                                            set_selection(world, Some(child.scene_root));
+                                            ui.close_menu();
+                                        }
+                                    }
+                                });
+                            }
                         }
                     });
+
+                    if expanded {
+                        if child_entities.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(INDENT + TOGGLE_WIDTH);
+                                ui.label(RichText::new("No scene nodes yet").small());
+                            });
+                        } else {
+                            for child_entity in child_entities.iter().copied() {
+                                let child_label = build_scene_child_label(world, child_entity);
+                                let child_selected = selection == Some(child_entity);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(INDENT);
+                                    ui.add_space(TOGGLE_WIDTH);
+
+                                    let response = ui.add_sized(
+                                        Vec2::new(ui.available_width(), 0.0),
+                                        egui::Button::new(&child_label)
+                                            .wrap()
+                                            .selected(child_selected)
+                                            .sense(Sense::click_and_drag()),
+                                    );
+
+                                    if response.clicked() {
+                                        set_selection(world, Some(child_entity));
+                                    }
+
+                                    if response.double_clicked() {
+                                        focus_entity_in_view(world, child_entity);
+                                    }
+
+                                    response.context_menu(|ui| {
+                                        if ui.button("Focus").clicked() {
+                                            focus_entity_in_view(world, child_entity);
+                                            ui.close_menu();
+                                        }
+                                        if let Some(child) = world.get::<SceneChild>(child_entity) {
+                                            if ui.button("Select Root").clicked() {
+                                                set_selection(world, Some(child.scene_root));
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                    }
                 }
             });
         });
@@ -2435,6 +2770,976 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
+    let has_skinned_panel = world.get::<BevySkinnedMeshRenderer>(entity).is_some()
+        || world.get::<PendingSkinnedMeshAsset>(entity).is_some()
+        || world.get::<EditorSkinnedMesh>(entity).is_some();
+    if has_skinned_panel {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Skinned Mesh Renderer");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevySkinnedMeshRenderer>();
+            world.entity_mut(entity).remove::<BevyAnimator>();
+            world.entity_mut(entity).remove::<BevyPoseOverride>();
+            world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
+            world.entity_mut(entity).remove::<EditorSkinnedMesh>();
+            push_undo_snapshot(world, "Remove Skinned Mesh");
+        } else {
+            if world.get::<EditorSkinnedMesh>(entity).is_none() {
+                let (casts_shadow, visible) = world
+                    .get::<BevySkinnedMeshRenderer>(entity)
+                    .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+                    .unwrap_or((true, true));
+                world.entity_mut(entity).insert(EditorSkinnedMesh {
+                    scene_path: None,
+                    node_index: None,
+                    casts_shadow,
+                    visible,
+                });
+            }
+
+            let pending = world.get::<PendingSkinnedMeshAsset>(entity).is_some();
+            if pending {
+                ui.label("Status: Pending");
+            }
+
+            if let Some(skinned) = world.get::<EditorSkinnedMesh>(entity) {
+                let path_label = skinned
+                    .scene_path
+                    .as_deref()
+                    .map(|path| format!("Source: {}", path))
+                    .unwrap_or_else(|| "Source: <none>".to_string());
+                ui.add(egui::Label::new(path_label).wrap_mode(egui::TextWrapMode::Extend));
+            }
+
+            let mut skinned_changed = false;
+            let skinned_source_button = ui.menu_button("Skinned Source", |ui| {
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
+                    if ui.button("Use Selected Asset").clicked() {
+                        if apply_skinned_mesh_renderer_from_asset(world, entity, &project, path) {
+                            skinned_changed = true;
+                        }
+                        ui.close_menu();
+                    }
+                } else {
+                    ui.label("Select a glb/gltf asset");
+                }
+
+                if ui.button("Browse...").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Scene", &["glb", "gltf"])
+                        .pick_file()
+                    {
+                        if apply_skinned_mesh_renderer_from_asset(world, entity, &project, &path) {
+                            skinned_changed = true;
+                        }
+                    }
+                    ui.close_menu();
+                }
+
+                if ui.button("Clear").clicked() {
+                    if let Some(mut skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
+                        skinned.scene_path = None;
+                        skinned.node_index = None;
+                    }
+                    world.entity_mut(entity).remove::<BevySkinnedMeshRenderer>();
+                    world.entity_mut(entity).remove::<BevyAnimator>();
+                    world.entity_mut(entity).remove::<BevyPoseOverride>();
+                    world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
+                    skinned_changed = true;
+                    ui.close_menu();
+                }
+            });
+
+            if let Some(payload) = skinned_source_button
+                .response
+                .dnd_release_payload::<AssetDragPayload>()
+            {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_model_file(path) {
+                        if apply_skinned_mesh_renderer_from_asset(world, entity, &project, path) {
+                            skinned_changed = true;
+                        }
+                    }
+                }
+            }
+            highlight_drop_target(ui, &skinned_source_button.response);
+
+            if let Some(skinned_renderer) = world.get::<BevySkinnedMeshRenderer>(entity).cloned() {
+                ui.label(format!("Mesh ID: {}", skinned_renderer.0.mesh_id));
+                ui.label(format!("Material ID: {}", skinned_renderer.0.material_id));
+                ui.label(format!(
+                    "Skin: {} ({} joints)",
+                    skinned_renderer.0.skin.name,
+                    skinned_renderer.0.skin.skeleton.joint_count()
+                ));
+            }
+
+            if let Some(skinned) = world.get::<EditorSkinnedMesh>(entity).cloned() {
+                let mut casts_shadow = world
+                    .get::<BevySkinnedMeshRenderer>(entity)
+                    .map(|renderer| renderer.0.casts_shadow)
+                    .unwrap_or(skinned.casts_shadow);
+                if ui.checkbox(&mut casts_shadow, "Casts Shadow").changed() {
+                    if let Some(mut renderer) = world.get_mut::<BevySkinnedMeshRenderer>(entity) {
+                        renderer.0.casts_shadow = casts_shadow;
+                    }
+                    if let Some(mut editor_skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
+                        editor_skinned.casts_shadow = casts_shadow;
+                    }
+                    skinned_changed = true;
+                }
+
+                let mut visible = world
+                    .get::<BevySkinnedMeshRenderer>(entity)
+                    .map(|renderer| renderer.0.visible)
+                    .unwrap_or(skinned.visible);
+                if ui.checkbox(&mut visible, "Visible").changed() {
+                    if let Some(mut renderer) = world.get_mut::<BevySkinnedMeshRenderer>(entity) {
+                        renderer.0.visible = visible;
+                    }
+                    if let Some(mut editor_skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
+                        editor_skinned.visible = visible;
+                    }
+                    skinned_changed = true;
+                }
+            }
+
+            if skinned_changed {
+                push_undo_snapshot(world, "Skinned Mesh");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevyAnimator>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Animator");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyAnimator>();
+            push_undo_snapshot(world, "Remove Animator");
+        } else {
+            let mut animator_changed = false;
+            world.resource_scope::<AnimatorUiState, _>(|world, mut ui_state| {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                    return;
+                };
+
+                let mut enabled = animator.0.enabled;
+                if ui.checkbox(&mut enabled, "Enabled").changed() {
+                    animator.0.enabled = enabled;
+                    animator_changed = true;
+                }
+
+                let mut time_scale = animator.0.time_scale;
+                let time_response = edit_float(ui, "Time Scale", &mut time_scale, 0.01);
+                if time_response.changed {
+                    animator.0.time_scale = time_scale.max(0.0);
+                    animator_changed = true;
+                }
+
+                ui.collapsing("Layers", |ui| {
+                    for (layer_index, layer) in animator.0.layers.iter_mut().enumerate() {
+                        let header = format!("Layer {}: {}", layer_index, layer.name);
+                        ui.collapsing(header, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Name");
+                                let response = ui.text_edit_singleline(&mut layer.name);
+                                if response.changed() {
+                                    animator_changed = true;
+                                }
+                            });
+
+                            let weight_response = edit_float(ui, "Weight", &mut layer.weight, 0.01);
+                            if weight_response.changed {
+                                animator_changed = true;
+                            }
+
+                            if ui.checkbox(&mut layer.additive, "Additive").changed() {
+                                animator_changed = true;
+                            }
+
+                            let state_name = layer
+                                .state_machine
+                                .states
+                                .get(layer.state_machine.current_state)
+                                .map(|s| s.name.as_str())
+                                .unwrap_or("<missing>");
+                            ui.label(format!("State: {}", state_name));
+
+                            if let Some(state) = layer
+                                .state_machine
+                                .states
+                                .get(layer.state_machine.current_state)
+                            {
+                                if let Some(node) = layer.graph.nodes.get_mut(state.node) {
+                                    if let helmer::animation::AnimationNode::Clip(clip_node) = node
+                                    {
+                                        let clip_names: Vec<String> = layer
+                                            .graph
+                                            .library
+                                            .clips
+                                            .iter()
+                                            .map(|clip| clip.name.clone())
+                                            .collect();
+                                        if !clip_names.is_empty() {
+                                            let current = clip_node
+                                                .clip_index
+                                                .min(clip_names.len().saturating_sub(1));
+                                            let mut selected = current;
+                                            ComboBox::from_id_source(format!(
+                                                "anim_clip_{}_{}",
+                                                entity.to_bits(),
+                                                layer_index
+                                            ))
+                                            .selected_text(
+                                                clip_names
+                                                    .get(current)
+                                                    .map(|s| s.as_str())
+                                                    .unwrap_or("<clip>"),
+                                            )
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for (i, name) in clip_names.iter().enumerate() {
+                                                        if ui
+                                                            .selectable_label(i == current, name)
+                                                            .clicked()
+                                                        {
+                                                            selected = i;
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                            if selected != current {
+                                                clip_node.clip_index = selected;
+                                                animator_changed = true;
+                                            }
+                                        }
+
+                                        let speed_response =
+                                            edit_float(ui, "Speed", &mut clip_node.speed, 0.01);
+                                        if speed_response.changed {
+                                            animator_changed = true;
+                                        }
+
+                                        if ui.checkbox(&mut clip_node.looping, "Looping").changed()
+                                        {
+                                            animator_changed = true;
+                                        }
+
+                                        let offset_response = edit_float(
+                                            ui,
+                                            "Time Offset",
+                                            &mut clip_node.time_offset,
+                                            0.01,
+                                        );
+                                        if offset_response.changed {
+                                            animator_changed = true;
+                                        }
+                                    } else {
+                                        ui.label("Non-clip node");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+
+                ui.collapsing("Parameters", |ui| {
+                    ui.label("Floats");
+                    let mut remove_float = None;
+                    let mut float_keys: Vec<String> =
+                        animator.0.parameters.floats.keys().cloned().collect();
+                    float_keys.sort();
+                    for key in float_keys {
+                        let mut value = animator
+                            .0
+                            .parameters
+                            .floats
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(0.0);
+                        ui.horizontal(|ui| {
+                            ui.label(&key);
+                            let response = ui.add(DragValue::new(&mut value).speed(0.05));
+                            if response.changed() {
+                                animator.0.parameters.set_float(key.clone(), value);
+                                animator_changed = true;
+                            }
+                            if ui.button("X").clicked() {
+                                remove_float = Some(key.clone());
+                            }
+                        });
+                    }
+                    if let Some(key) = remove_float {
+                        animator.0.parameters.floats.remove(&key);
+                        animator_changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut ui_state.new_float_name);
+                        ui.add(DragValue::new(&mut ui_state.new_float_value).speed(0.05));
+                        if ui.button("Add Float").clicked() {
+                            let name = ui_state.new_float_name.trim();
+                            if !name.is_empty() {
+                                animator
+                                    .0
+                                    .parameters
+                                    .set_float(name.to_string(), ui_state.new_float_value);
+                                ui_state.new_float_name.clear();
+                                animator_changed = true;
+                            }
+                        }
+                    });
+
+                    ui.separator();
+                    ui.label("Bools");
+                    let mut remove_bool = None;
+                    let mut bool_keys: Vec<String> =
+                        animator.0.parameters.bools.keys().cloned().collect();
+                    bool_keys.sort();
+                    for key in bool_keys {
+                        let mut value = animator
+                            .0
+                            .parameters
+                            .bools
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(false);
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut value, &key);
+                            if ui.button("X").clicked() {
+                                remove_bool = Some(key.clone());
+                            }
+                        });
+                        if animator
+                            .0
+                            .parameters
+                            .bools
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(false)
+                            != value
+                        {
+                            animator.0.parameters.set_bool(key.clone(), value);
+                            animator_changed = true;
+                        }
+                    }
+                    if let Some(key) = remove_bool {
+                        animator.0.parameters.bools.remove(&key);
+                        animator_changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut ui_state.new_bool_name);
+                        ui.checkbox(&mut ui_state.new_bool_value, "Value");
+                        if ui.button("Add Bool").clicked() {
+                            let name = ui_state.new_bool_name.trim();
+                            if !name.is_empty() {
+                                animator
+                                    .0
+                                    .parameters
+                                    .set_bool(name.to_string(), ui_state.new_bool_value);
+                                ui_state.new_bool_name.clear();
+                                animator_changed = true;
+                            }
+                        }
+                    });
+
+                    ui.separator();
+                    ui.label("Triggers");
+                    let mut trigger_keys: Vec<String> =
+                        animator.0.parameters.triggers.iter().cloned().collect();
+                    trigger_keys.sort();
+                    for key in trigger_keys {
+                        ui.horizontal(|ui| {
+                            ui.label(&key);
+                            if ui.button("Fire").clicked() {
+                                animator.0.parameters.trigger(key.clone());
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut ui_state.new_trigger_name);
+                        if ui.button("Add Trigger").clicked() {
+                            let name = ui_state.new_trigger_name.trim();
+                            if !name.is_empty() {
+                                animator.0.parameters.trigger(name.to_string());
+                                ui_state.new_trigger_name.clear();
+                            }
+                        }
+                    });
+                });
+            });
+            if animator_changed {
+                push_undo_snapshot(world, "Animator");
+            }
+        }
+        ui.separator();
+    }
+
+    if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Pose Override");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyPoseOverride>();
+            push_undo_snapshot(world, "Remove Pose Override");
+        } else {
+            let skeleton = skinned.0.skin.skeleton.clone();
+            let mut enabled = world
+                .get::<BevyPoseOverride>(entity)
+                .map(|pose| pose.0.enabled)
+                .unwrap_or(false);
+            if ui.checkbox(&mut enabled, "Enable Pose Override").changed() {
+                if enabled {
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyPoseOverride(PoseOverride::new(&skeleton)));
+                } else if let Some(mut pose_override) = world.get_mut::<BevyPoseOverride>(entity) {
+                    pose_override.0.enabled = false;
+                }
+                push_undo_snapshot(world, "Pose Override");
+            }
+
+            if enabled {
+                world.resource_scope::<PoseEditorState, _>(|world, mut pose_state| {
+                    let mut pose_changed = false;
+                    let Some(mut pose_override) = world.get_mut::<BevyPoseOverride>(entity) else {
+                        return;
+                    };
+
+                    if pose_override.0.pose.locals.len() != skeleton.joint_count() {
+                        pose_override.0.pose.reset_to_bind(&skeleton);
+                    }
+
+                    let mut edit_mode =
+                        pose_state.edit_mode && pose_state.active_entity == Some(entity.to_bits());
+                    if ui.checkbox(&mut edit_mode, "Edit in Viewport").changed() {
+                        pose_state.edit_mode = edit_mode;
+                        pose_state.active_entity = if edit_mode {
+                            Some(entity.to_bits())
+                        } else {
+                            pose_state.selected_joint = None;
+                            pose_state.hover_joint = None;
+                            None
+                        };
+                        if edit_mode && !pose_override.0.enabled {
+                            pose_override.0.enabled = true;
+                            pose_changed = true;
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut pose_state.use_gizmo, "Use Gizmo");
+                        ui.checkbox(&mut pose_state.show_bones, "Show Bones");
+                        ui.checkbox(&mut pose_state.show_joint_handles, "Show Joint Handles");
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Handle Size");
+                        ui.add(DragValue::new(&mut pose_state.handle_size_scale).speed(0.005));
+                        ui.label("Min");
+                        ui.add(DragValue::new(&mut pose_state.handle_size_min).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pick Radius");
+                        ui.add(DragValue::new(&mut pose_state.pick_radius_scale).speed(0.005));
+                        ui.label("Min");
+                        ui.add(DragValue::new(&mut pose_state.pick_radius_min).speed(0.01));
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset Pose").clicked() {
+                            pose_override.0.pose.reset_to_bind(&skeleton);
+                            pose_changed = true;
+                        }
+                        if ui.button("Clear Selection").clicked() {
+                            pose_state.selected_joint = None;
+                            pose_state.hover_joint = None;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Filter");
+                        ui.text_edit_singleline(&mut pose_state.joint_filter);
+                    });
+
+                    ui.collapsing("Joints", |ui| {
+                        let filter = pose_state.joint_filter.trim().to_lowercase();
+                        if filter.is_empty() {
+                            let children = build_joint_children(&skeleton);
+                            for &root in skeleton.root_joints.iter() {
+                                draw_joint_tree(
+                                    ui,
+                                    &skeleton,
+                                    &children,
+                                    root,
+                                    0,
+                                    &filter,
+                                    &mut pose_state,
+                                );
+                            }
+                        } else {
+                            for (index, joint) in skeleton.joints.iter().enumerate() {
+                                if joint.name.to_lowercase().contains(&filter) {
+                                    ui.push_id(index, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                pose_state.selected_joint == Some(index),
+                                                &joint.name,
+                                            )
+                                            .clicked()
+                                        {
+                                            pose_state.selected_joint = Some(index);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    if let Some(index) = pose_state.selected_joint {
+                        if let Some(joint) = skeleton.joints.get(index) {
+                            ui.separator();
+                            ui.label(format!("Selected: {}", joint.name));
+                        }
+                        let mut transform = pose_override
+                            .0
+                            .pose
+                            .locals
+                            .get(index)
+                            .copied()
+                            .unwrap_or_default();
+                        let response = edit_vec3(ui, "Position", &mut transform.position, 0.05);
+                        if response.changed {
+                            pose_override.0.pose.locals[index].position = transform.position;
+                            pose_changed = true;
+                        }
+                        let (yaw, pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
+                        let mut rotation =
+                            Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees());
+                        let rotation_response = edit_vec3(ui, "Rotation", &mut rotation, 0.5);
+                        if rotation_response.changed {
+                            pose_override.0.pose.locals[index].rotation = Quat::from_euler(
+                                EulerRot::YXZ,
+                                rotation.x.to_radians(),
+                                rotation.y.to_radians(),
+                                rotation.z.to_radians(),
+                            );
+                            pose_changed = true;
+                        }
+                        let scale_response = edit_vec3(ui, "Scale", &mut transform.scale, 0.05);
+                        if scale_response.changed {
+                            pose_override.0.pose.locals[index].scale = transform.scale;
+                            pose_changed = true;
+                        }
+                        if ui.button("Reset Joint").clicked() {
+                            if let Some(joint) = skeleton.joints.get(index) {
+                                pose_override.0.pose.locals[index] = joint.bind_transform;
+                                pose_changed = true;
+                            }
+                        }
+                    }
+                    if pose_changed {
+                        push_undo_snapshot(world, "Pose Override");
+                    }
+                });
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevySpline>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Spline");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevySpline>();
+            push_undo_snapshot(world, "Remove Spline");
+        } else {
+            let mut spline_changed = false;
+            {
+                let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                    return;
+                };
+
+                let mut mode = spline.0.mode;
+                let mode_label = match mode {
+                    SplineMode::Linear => "Linear",
+                    SplineMode::CatmullRom => "Catmull-Rom",
+                    SplineMode::Bezier => "Bezier",
+                };
+                ComboBox::from_id_source(format!("spline_mode_{}", entity.to_bits()))
+                    .selected_text(mode_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(matches!(mode, SplineMode::Linear), "Linear")
+                            .clicked()
+                        {
+                            mode = SplineMode::Linear;
+                        }
+                        if ui
+                            .selectable_label(matches!(mode, SplineMode::CatmullRom), "Catmull-Rom")
+                            .clicked()
+                        {
+                            mode = SplineMode::CatmullRom;
+                        }
+                        if ui
+                            .selectable_label(matches!(mode, SplineMode::Bezier), "Bezier")
+                            .clicked()
+                        {
+                            mode = SplineMode::Bezier;
+                        }
+                    });
+                if mode != spline.0.mode {
+                    spline.0.mode = mode;
+                    spline_changed = true;
+                }
+
+                let mut closed = spline.0.closed;
+                if ui.checkbox(&mut closed, "Closed").changed() {
+                    spline.0.closed = closed;
+                    spline_changed = true;
+                }
+
+                let tension_response = edit_float(ui, "Tension", &mut spline.0.tension, 0.01);
+                if tension_response.changed {
+                    spline_changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Add Point").clicked() {
+                        spline.0.points.push(Vec3::ZERO);
+                        spline_changed = true;
+                    }
+                    if ui.button("Clear").clicked() {
+                        spline.0.points.clear();
+                        spline_changed = true;
+                    }
+                    if ui.button("Reverse").clicked() {
+                        spline.0.points.reverse();
+                        spline_changed = true;
+                    }
+                });
+
+                ui.collapsing("Points", |ui| {
+                    let mut remove_index = None;
+                    for (index, point) in spline.0.points.iter_mut().enumerate() {
+                        let label = format!("Point {}", index);
+                        let response = edit_vec3(ui, &label, point, 0.05);
+                        if response.changed {
+                            spline_changed = true;
+                        }
+                        if ui.button("Remove").clicked() {
+                            remove_index = Some(index);
+                        }
+                        ui.separator();
+                    }
+                    if let Some(index) = remove_index {
+                        if index < spline.0.points.len() {
+                            spline.0.points.remove(index);
+                            spline_changed = true;
+                        }
+                    }
+                });
+            }
+            if spline_changed {
+                push_undo_snapshot(world, "Spline");
+            }
+
+            world.resource_scope::<EditorSplineState, _>(|world, mut spline_state| {
+                ui.collapsing("Spline Tool", |ui| {
+                    let mut enabled = spline_state.enabled;
+                    if ui.checkbox(&mut enabled, "Edit in Viewport").changed() {
+                        spline_state.enabled = enabled;
+                    }
+
+                    ui.checkbox(&mut spline_state.add_mode, "Add Points on Click");
+                    ui.checkbox(&mut spline_state.insert_mode, "Insert After Selection");
+                    ui.checkbox(&mut spline_state.use_gizmo, "Use Gizmo Handles");
+                    if spline_state.use_gizmo {
+                        if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>()
+                        {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Gizmo Mode");
+                                ui.selectable_value(
+                                    &mut gizmo_state.mode,
+                                    GizmoMode::None,
+                                    "Select",
+                                );
+                                ui.selectable_value(
+                                    &mut gizmo_state.mode,
+                                    GizmoMode::Translate,
+                                    "Move",
+                                );
+                                ui.selectable_value(
+                                    &mut gizmo_state.mode,
+                                    GizmoMode::Rotate,
+                                    "Rotate",
+                                );
+                                ui.selectable_value(
+                                    &mut gizmo_state.mode,
+                                    GizmoMode::Scale,
+                                    "Scale/Resize",
+                                );
+                            });
+                        }
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("Pivot");
+                        let mut pivot = spline_state.pivot_mode;
+                        ComboBox::from_id_source("spline_pivot_mode")
+                            .selected_text(match pivot {
+                                crate::editor::SplinePivotMode::Point => "Point",
+                                crate::editor::SplinePivotMode::SplineOrigin => "Spline Origin",
+                            })
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        matches!(pivot, crate::editor::SplinePivotMode::Point),
+                                        "Point",
+                                    )
+                                    .clicked()
+                                {
+                                    pivot = crate::editor::SplinePivotMode::Point;
+                                }
+                                if ui
+                                    .selectable_label(
+                                        matches!(
+                                            pivot,
+                                            crate::editor::SplinePivotMode::SplineOrigin
+                                        ),
+                                        "Spline Origin",
+                                    )
+                                    .clicked()
+                                {
+                                    pivot = crate::editor::SplinePivotMode::SplineOrigin;
+                                }
+                            });
+                        spline_state.pivot_mode = pivot;
+                    });
+
+                    let plane_label = match spline_state.draw_plane {
+                        crate::editor::SplineDrawPlane::WorldXZ => "World XZ",
+                        crate::editor::SplineDrawPlane::View => "View Plane",
+                    };
+                    ComboBox::from_id_source("spline_draw_plane")
+                        .selected_text(plane_label)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    matches!(
+                                        spline_state.draw_plane,
+                                        crate::editor::SplineDrawPlane::WorldXZ
+                                    ),
+                                    "World XZ",
+                                )
+                                .clicked()
+                            {
+                                spline_state.draw_plane = crate::editor::SplineDrawPlane::WorldXZ;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(
+                                        spline_state.draw_plane,
+                                        crate::editor::SplineDrawPlane::View
+                                    ),
+                                    "View Plane",
+                                )
+                                .clicked()
+                            {
+                                spline_state.draw_plane = crate::editor::SplineDrawPlane::View;
+                            }
+                        });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Samples");
+                        ui.add(
+                            DragValue::new(&mut spline_state.samples)
+                                .range(8..=512)
+                                .speed(1),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Handle Scale");
+                        ui.add(DragValue::new(&mut spline_state.handle_size_scale).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Handle Min");
+                        ui.add(DragValue::new(&mut spline_state.handle_size_min).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pick Scale");
+                        ui.add(DragValue::new(&mut spline_state.pick_radius_scale).speed(0.01));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Pick Min");
+                        ui.add(DragValue::new(&mut spline_state.pick_radius_min).speed(0.01));
+                    });
+                });
+            });
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevySplineFollower>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Spline Follower");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevySplineFollower>();
+            push_undo_snapshot(world, "Remove Spline Follower");
+        } else {
+            let pinned_entity = world
+                .get_resource::<InspectorPinnedEntityResource>()
+                .and_then(|res| res.0);
+            let pinned_has_spline = pinned_entity
+                .map(|pinned| world.get::<BevySpline>(pinned).is_some())
+                .unwrap_or(false);
+            let target_name = world
+                .get::<BevySplineFollower>(entity)
+                .and_then(|follower| follower.0.spline_entity)
+                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| "<self>".to_string());
+
+            let mut dropped_entity: Option<Entity> = None;
+            let mut drop_hint: Option<bool> = None;
+            let drop_response = ui.add_sized(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Button::new("Drop Spline Here").sense(Sense::hover()),
+            );
+            if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
+                drop_hint = Some(world.get::<BevySpline>(payload.entity).is_some());
+            }
+            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+                dropped_entity = Some(payload.entity);
+            }
+            if let Some(valid) = drop_hint {
+                let color = if valid {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                };
+                ui.painter().rect_filled(drop_response.rect, 4.0, color);
+                ui.painter().text(
+                    drop_response.rect.center(),
+                    Align2::CENTER_CENTER,
+                    if valid {
+                        "Drop Spline Here"
+                    } else {
+                        "Entity has no Spline"
+                    },
+                    FontId::proportional(12.0),
+                    ui.visuals().text_color(),
+                );
+            }
+            let dropped_valid = dropped_entity
+                .map(|entity| world.get::<BevySpline>(entity).is_some())
+                .unwrap_or(false);
+
+            let mut follower_changed = false;
+            {
+                let Some(mut follower) = world.get_mut::<BevySplineFollower>(entity) else {
+                    return;
+                };
+
+                let speed_response = edit_float(ui, "Speed", &mut follower.0.speed, 0.01);
+                if speed_response.changed {
+                    follower_changed = true;
+                }
+
+                let t_response = edit_float(ui, "T", &mut follower.0.t, 0.01);
+                if t_response.changed {
+                    follower_changed = true;
+                }
+
+                if ui.checkbox(&mut follower.0.looped, "Looped").changed() {
+                    follower_changed = true;
+                }
+
+                if ui
+                    .checkbox(&mut follower.0.follow_rotation, "Follow Rotation")
+                    .changed()
+                {
+                    follower_changed = true;
+                }
+
+                let up_response = edit_vec3(ui, "Up", &mut follower.0.up, 0.01);
+                if up_response.changed {
+                    follower_changed = true;
+                }
+
+                let offset_response = edit_vec3(ui, "Offset", &mut follower.0.offset, 0.01);
+                if offset_response.changed {
+                    follower_changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Length Samples");
+                    ui.add(
+                        DragValue::new(&mut follower.0.length_samples)
+                            .range(4..=512)
+                            .speed(1),
+                    );
+                });
+
+                ui.label(format!("Target: {}", target_name));
+
+                if ui.button("Clear Target").clicked() {
+                    follower.0.spline_entity = None;
+                    follower_changed = true;
+                }
+
+                if let Some(pinned) = pinned_entity {
+                    if ui
+                        .add_enabled(pinned_has_spline, egui::Button::new("Use Pinned Spline"))
+                        .clicked()
+                    {
+                        follower.0.spline_entity = Some(pinned.to_bits());
+                        follower_changed = true;
+                    }
+                }
+
+                if dropped_valid {
+                    follower.0.spline_entity = dropped_entity.map(|entity| entity.to_bits());
+                    follower_changed = true;
+                }
+            }
+            if follower_changed {
+                push_undo_snapshot(world, "Spline Follower");
+            }
+        }
+        ui.separator();
+    }
+
     if world.get::<DynamicRigidBody>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
@@ -2847,6 +4152,11 @@ pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
 #[derive(Clone)]
 struct AssetDragPayload {
     paths: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct EntityDragPayload {
+    entity: Entity,
 }
 
 fn highlight_drop_target(ui: &Ui, response: &Response) {
@@ -4587,11 +5897,16 @@ fn draw_add_component_menu(
     let has_camera = world.get::<BevyCamera>(entity).is_some();
     let has_light = world.get::<BevyLight>(entity).is_some();
     let has_mesh = world.get::<BevyMeshRenderer>(entity).is_some();
+    let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some()
+        || world.get::<EditorSkinnedMesh>(entity).is_some()
+        || world.get::<PendingSkinnedMeshAsset>(entity).is_some();
     let has_scene = world.get::<SceneRoot>(entity).is_some();
     let has_dynamic = world.get::<DynamicComponents>(entity).is_some();
     let has_freecam = world.get::<Freecam>(entity).is_some();
     let has_dynamic_body = world.get::<DynamicRigidBody>(entity).is_some();
     let has_fixed_collider = world.get::<FixedCollider>(entity).is_some();
+    let has_spline = world.get::<BevySpline>(entity).is_some();
+    let has_spline_follower = world.get::<BevySplineFollower>(entity).is_some();
     let collider_shape = world.get::<ColliderShape>(entity).copied();
 
     let selected_mesh_source = selected_asset
@@ -4660,6 +5975,66 @@ fn draw_add_component_menu(
                 true,
             );
             push_undo_snapshot(world, "Add Mesh");
+            ui.close_menu();
+        }
+        if !has_skinned {
+            let skinned_button = ui.button("Skinned Mesh Renderer");
+            if skinned_button.clicked() {
+                ensure_transform(world, entity);
+                if world.get::<EditorSkinnedMesh>(entity).is_none() {
+                    world.entity_mut(entity).insert(EditorSkinnedMesh {
+                        scene_path: None,
+                        node_index: None,
+                        casts_shadow: true,
+                        visible: true,
+                    });
+                }
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
+                    apply_skinned_mesh_renderer_from_asset(world, entity, project, path);
+                } else {
+                    set_status(
+                        world,
+                        "Skinned mesh component added. Assign a glb/gltf asset in the Inspector."
+                            .to_string(),
+                    );
+                }
+                push_undo_snapshot(world, "Add Skinned Mesh");
+                ui.close_menu();
+            }
+            if let Some(payload) = skinned_button.dnd_release_payload::<AssetDragPayload>() {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_model_file(path) {
+                        ensure_transform(world, entity);
+                        if world.get::<EditorSkinnedMesh>(entity).is_none() {
+                            world.entity_mut(entity).insert(EditorSkinnedMesh {
+                                scene_path: None,
+                                node_index: None,
+                                casts_shadow: true,
+                                visible: true,
+                            });
+                        }
+                        apply_skinned_mesh_renderer_from_asset(world, entity, project, path);
+                        push_undo_snapshot(world, "Add Skinned Mesh");
+                    }
+                }
+                ui.close_menu();
+            }
+            highlight_drop_target(ui, &skinned_button);
+        }
+        if !has_spline && ui.button("Spline").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevySpline(Spline::default()));
+            push_undo_snapshot(world, "Add Spline");
+            ui.close_menu();
+        }
+        if !has_spline_follower && ui.button("Spline Follower").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevySplineFollower(SplineFollower::default()));
+            push_undo_snapshot(world, "Add Spline Follower");
             ui.close_menu();
         }
         if !has_scene {
@@ -5242,6 +6617,159 @@ fn apply_mesh_renderer(
     });
 }
 
+fn apply_skinned_mesh_renderer_from_asset(
+    world: &mut World,
+    entity: Entity,
+    project: &Option<EditorProject>,
+    path: &Path,
+) -> bool {
+    let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+        set_status(world, "Asset server missing".to_string());
+        return false;
+    };
+    let path_str = path.to_string_lossy();
+    let resolved_path = resolve_asset_path(project.as_ref(), path_str.as_ref());
+    let relative_path = project_relative_path(project, path);
+
+    let (scene_handle, scene) = {
+        let asset_server = asset_server.0.lock();
+        let handle = asset_server.load_scene(&resolved_path);
+        let scene = asset_server.get_scene(&handle);
+        (handle, scene)
+    };
+
+    let existing_node_index = world
+        .get::<EditorSkinnedMesh>(entity)
+        .and_then(|skinned| skinned.node_index);
+    let (casts_shadow, visible) = world
+        .get::<BevyMeshRenderer>(entity)
+        .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+        .or_else(|| {
+            world
+                .get::<EditorSkinnedMesh>(entity)
+                .map(|skinned| (skinned.casts_shadow, skinned.visible))
+        })
+        .unwrap_or((true, true));
+
+    world.entity_mut(entity).insert(EditorSkinnedMesh {
+        scene_path: Some(relative_path),
+        node_index: existing_node_index,
+        casts_shadow,
+        visible,
+    });
+
+    let Some(scene) = scene else {
+        world.entity_mut(entity).insert(PendingSkinnedMeshAsset {
+            scene_handle: scene_handle,
+            node_index: existing_node_index,
+        });
+        set_status(
+            world,
+            format!(
+                "Scene not ready yet for {}. Will apply when loaded.",
+                resolved_path.display()
+            ),
+        );
+        return true;
+    };
+
+    let mut skinned_nodes = Vec::new();
+    for (index, node) in scene.nodes.iter().enumerate() {
+        if node.skin_index.is_some() {
+            skinned_nodes.push((index, node));
+        }
+    }
+
+    let node_index = existing_node_index
+        .filter(|index| {
+            scene
+                .nodes
+                .get(*index)
+                .map(|node| node.skin_index.is_some())
+                .unwrap_or(false)
+        })
+        .or_else(|| skinned_nodes.first().map(|(index, _)| *index));
+
+    let Some(node_index) = node_index else {
+        set_status(world, "Scene has no skinned nodes.".to_string());
+        return false;
+    };
+
+    let Some(node) = scene.nodes.get(node_index) else {
+        set_status(world, "Selected skinned node missing.".to_string());
+        return false;
+    };
+
+    if skinned_nodes.len() > 1 {
+        set_status(
+            world,
+            format!("Multiple skinned nodes found; using node {}.", node_index),
+        );
+    }
+
+    let Some(skin_index) = node.skin_index else {
+        set_status(world, "Selected node has no skin.".to_string());
+        return false;
+    };
+
+    if let Some(mut skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
+        skinned.node_index = Some(node_index);
+    }
+
+    let Some(skin) = scene.skins.read().get(skin_index).cloned() else {
+        world.entity_mut(entity).insert(PendingSkinnedMeshAsset {
+            scene_handle,
+            node_index: Some(node_index),
+        });
+        set_status(
+            world,
+            "Skin data not ready yet; will apply when loaded.".to_string(),
+        );
+        return true;
+    };
+
+    apply_skinned_mesh_renderer_from_scene_node(world, entity, &scene, node, skin_index, skin)
+}
+
+fn apply_skinned_mesh_renderer_from_scene_node(
+    world: &mut World,
+    entity: Entity,
+    scene: &Scene,
+    node: &helmer::runtime::asset_server::SceneNode,
+    skin_index: usize,
+    skin: std::sync::Arc<helmer::animation::Skin>,
+) -> bool {
+    let (casts_shadow, visible) = world
+        .get::<BevyMeshRenderer>(entity)
+        .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+        .or_else(|| {
+            world
+                .get::<EditorSkinnedMesh>(entity)
+                .map(|skinned| (skinned.casts_shadow, skinned.visible))
+        })
+        .unwrap_or((true, true));
+
+    let skinned =
+        SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
+
+    world.entity_mut(entity).remove::<BevyMeshRenderer>();
+    world.entity_mut(entity).remove::<EditorMesh>();
+    world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
+    world
+        .entity_mut(entity)
+        .insert(BevySkinnedMeshRenderer(skinned));
+
+    if world.get::<BevyAnimator>(entity).is_none() {
+        if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
+            world
+                .entity_mut(entity)
+                .insert(BevyAnimator(build_default_animator(anim_lib)));
+        }
+    }
+
+    true
+}
+
 pub fn refresh_material_usage(world: &mut World, project: &Option<EditorProject>, path: &Path) {
     let material_key = project_relative_path(project, path);
     let mut targets = Vec::new();
@@ -5741,6 +7269,1028 @@ fn toggle_expand(world: &mut World, path: PathBuf) {
             state.expanded.remove(&path);
         } else {
             state.expanded.insert(path);
+        }
+    }
+}
+
+pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
+    bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Timeline");
+
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.heading("Timeline");
+
+        let pinned = world
+            .get_resource::<InspectorPinnedEntityResource>()
+            .and_then(|res| res.0);
+        let selected = world
+            .get_resource::<InspectorSelectedEntityResource>()
+            .and_then(|res| res.0);
+        let active_entity = pinned.or(selected);
+
+        world.resource_scope::<EditorTimelineState, _>(|world, mut timeline| {
+            timeline.recompute_duration();
+            if timeline.current_time > timeline.duration.max(0.01) {
+                timeline.current_time = timeline.duration.max(0.01);
+            }
+            if timeline.view_offset > timeline.duration.max(0.01) {
+                timeline.view_offset = (timeline.duration - 0.01).max(0.0);
+            }
+
+            let EditorTimelineState {
+                playing,
+                loop_playback,
+                playback_rate,
+                current_time,
+                duration,
+                auto_duration,
+                frame_rate,
+                snap_to_frame,
+                pixels_per_second,
+                view_offset,
+                new_clip_index,
+                new_clip_looping,
+                new_clip_speed,
+                new_clip_name,
+                groups,
+                selected,
+                apply_requested,
+                next_id,
+            } = &mut *timeline;
+
+            let mut alloc_id = || {
+                let id = *next_id;
+                *next_id = next_id.saturating_add(1);
+                id
+            };
+
+            ui.horizontal(|ui| {
+                if ui.button(if *playing { "Pause" } else { "Play" }).clicked() {
+                    *playing = !*playing;
+                }
+                if ui.button("Stop").clicked() {
+                    *playing = false;
+                    *current_time = 0.0;
+                    *apply_requested = true;
+                }
+                ui.checkbox(loop_playback, "Loop");
+                ui.checkbox(snap_to_frame, "Snap");
+                ui.checkbox(auto_duration, "Auto Duration");
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Time");
+                let mut time_value = *current_time;
+                let response = ui.add(DragValue::new(&mut time_value).speed(0.01));
+                if response.changed() {
+                    *current_time = snap_time(time_value, *snap_to_frame, *frame_rate);
+                    *apply_requested = true;
+                }
+                ui.label("Duration");
+                let mut duration_value = *duration;
+                if ui
+                    .add(DragValue::new(&mut duration_value).speed(0.05).clamp_range(0.0..=f32::MAX))
+                    .changed()
+                {
+                    *duration = duration_value.max(0.01);
+                }
+                ui.label("Speed");
+                ui.add(DragValue::new(playback_rate).speed(0.05).clamp_range(0.01..=10.0));
+                ui.label("FPS");
+                ui.add(DragValue::new(frame_rate).speed(1.0).clamp_range(1.0..=240.0));
+                ui.label("Zoom");
+                ui.add(DragValue::new(pixels_per_second).speed(5.0).clamp_range(10.0..=1000.0));
+            });
+
+            if let Some(entity) = active_entity {
+                let name = world
+                    .get::<Name>(entity)
+                    .map(|name| name.as_str().to_string())
+                    .unwrap_or_else(|| format!("Entity {}", entity.index()));
+                ui.label(format!("Active: {}", name));
+
+                let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some();
+                let has_spline = world.get::<BevySpline>(entity).is_some();
+                let has_animator = world.get::<BevyAnimator>(entity).is_some();
+
+                let group_index = if let Some(index) =
+                    groups.iter().position(|group| group.entity == entity.to_bits())
+                {
+                    index
+                } else {
+                    groups.push(TimelineTrackGroup {
+                        entity: entity.to_bits(),
+                        name: name.clone(),
+                        tracks: Vec::new(),
+                        custom_clips: Vec::new(),
+                    });
+                    groups.len().saturating_sub(1)
+                };
+
+                ui.horizontal(|ui| {
+                    if has_skinned && ui.button("Add Pose Track").clicked() {
+                        let group = &mut groups[group_index];
+                        group.tracks.push(TimelineTrack::Pose(PoseTrack {
+                            id: alloc_id(),
+                            name: format!("Pose Track {}", group.tracks.len() + 1),
+                            enabled: true,
+                            weight: 1.0,
+                            additive: false,
+                            translation_interpolation: TimelineInterpolation::Linear,
+                            rotation_interpolation: TimelineInterpolation::Linear,
+                            scale_interpolation: TimelineInterpolation::Linear,
+                            keys: Vec::new(),
+                        }));
+                    }
+                    if has_spline && ui.button("Add Spline Track").clicked() {
+                        let group = &mut groups[group_index];
+                        group.tracks.push(TimelineTrack::Spline(SplineTrack {
+                            id: alloc_id(),
+                            name: format!("Spline Track {}", group.tracks.len() + 1),
+                            enabled: true,
+                            interpolation: TimelineInterpolation::Linear,
+                            keys: Vec::new(),
+                        }));
+                    }
+                    if has_animator && ui.button("Add Clip Track").clicked() {
+                        let group = &mut groups[group_index];
+                        group.tracks.push(TimelineTrack::Clip(ClipTrack {
+                            id: alloc_id(),
+                            name: format!("Clip Track {}", group.tracks.len() + 1),
+                            enabled: true,
+                            weight: 1.0,
+                            additive: false,
+                            segments: Vec::new(),
+                        }));
+                    }
+                });
+
+                if has_skinned && has_animator {
+                    if let Some(animator) = world.get::<BevyAnimator>(entity) {
+                        if let Some(layer) = animator.0.layers.first() {
+                            let clips = &layer.graph.library.clips;
+                            if !clips.is_empty() {
+                                ui.horizontal(|ui| {
+                                    ui.label("Fork Clip");
+                                    let current = (*new_clip_index).min(clips.len().saturating_sub(1));
+                                    let mut selected = current;
+                                    ComboBox::from_id_source(format!(
+                                        "timeline_fork_clip_{}",
+                                        entity.to_bits()
+                                    ))
+                                    .selected_text(
+                                        clips
+                                            .get(current)
+                                            .map(|clip| clip.name.as_str())
+                                            .unwrap_or("<clip>"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, clip) in clips.iter().enumerate() {
+                                            if ui
+                                                .selectable_label(i == current, clip.name.as_str())
+                                                .clicked()
+                                            {
+                                                selected = i;
+                                            }
+                                        }
+                                    });
+                                    *new_clip_index = selected;
+
+                                    if ui.button("Fork to Pose Track").clicked() {
+                                        if let Some(skinned) =
+                                            world.get::<BevySkinnedMeshRenderer>(entity)
+                                        {
+                                            let skeleton = &skinned.0.skin.skeleton;
+                                            let clip = clips
+                                                .get(selected)
+                                                .map(|clip| clip.as_ref())
+                                                .unwrap_or_else(|| clips[0].as_ref());
+                                            let track_id = alloc_id();
+                                            let track_name =
+                                                format!("{} (Fork)", clip.name.as_str());
+                                            let track = build_pose_track_from_clip(
+                                                track_id,
+                                                track_name,
+                                                clip,
+                                                skeleton,
+                                                &mut alloc_id,
+                                            );
+                                            let group = &mut groups[group_index];
+                                            group.tracks.push(TimelineTrack::Pose(track));
+                                            *apply_requested = true;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let group = &mut groups[group_index];
+
+                ui.separator();
+                ui.collapsing("Tracks", |ui| {
+                    let duration_limit = (*duration).max(0.01);
+                    let snap_enabled = *snap_to_frame;
+                    let fps = *frame_rate;
+                    let snap_time_to_frame = |time: f32| snap_time(time, snap_enabled, fps);
+
+                    let mut remove_track: Option<u64> = None;
+                    let mut baked_clips: Vec<AnimationClip> = Vec::new();
+                    for track in group.tracks.iter_mut() {
+                        let track_id = track.id();
+                        ui.push_id(track_id, |ui| {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(track.name());
+                                if ui.button("Remove Track").clicked() {
+                                    remove_track = Some(track.id());
+                                }
+                            });
+
+                            match track {
+                            TimelineTrack::Pose(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+                                ui.checkbox(&mut track.additive, "Additive");
+                                ui.add(DragValue::new(&mut track.weight).speed(0.05).clamp_range(0.0..=1.0));
+
+                                let mut interp_changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Pos");
+                                    let mut interp = track.translation_interpolation;
+                                    ComboBox::from_id_source(format!("pose_interp_pos_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.translation_interpolation {
+                                        track.translation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Rot");
+                                    let mut interp = track.rotation_interpolation;
+                                    ComboBox::from_id_source(format!("pose_interp_rot_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.rotation_interpolation {
+                                        track.rotation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Scale");
+                                    let mut interp = track.scale_interpolation;
+                                    ComboBox::from_id_source(format!("pose_interp_scale_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.scale_interpolation {
+                                        track.scale_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                if interp_changed {
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
+                                        let skeleton = &skinned.0.skin.skeleton;
+                                        let pose = world
+                                            .get::<BevyPoseOverride>(entity)
+                                            .map(|pose| pose.0.pose.clone())
+                                            .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
+                                        track.keys.push(PoseKey {
+                                            id: alloc_id(),
+                                            time: *current_time,
+                                            pose,
+                                        });
+                                        track.keys.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+                                        *apply_requested = true;
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_key,
+                                                    format!("Key {}", key.id),
+                                                )
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time = snap_time_to_frame(time).clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
+                                                    let skeleton = &skinned.0.skin.skeleton;
+                                                    let pose = world
+                                                        .get::<BevyPoseOverride>(entity)
+                                                        .map(|pose| pose.0.pose.clone())
+                                                        .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
+                                                    key.pose = pose;
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Clip Name");
+                                    ui.text_edit_singleline(new_clip_name);
+                                    if ui.button("Bake Clip").clicked() {
+                                        if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
+                                            let skeleton = &skinned.0.skin.skeleton;
+                                            if let Some(clip) = build_clip_from_pose_track(
+                                                new_clip_name.clone(),
+                                                track,
+                                                skeleton,
+                                            ) {
+                                                baked_clips.push(clip);
+                                                *apply_requested = true;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            TimelineTrack::Spline(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+
+                                let mut interp_changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("Interpolation");
+                                    let mut interp = track.interpolation;
+                                    ComboBox::from_id_source(format!("spline_interp_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.interpolation {
+                                        track.interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                if interp_changed {
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    if let Some(spline) = world.get::<BevySpline>(entity) {
+                                        track.keys.push(SplineKey {
+                                            id: alloc_id(),
+                                            time: *current_time,
+                                            spline: spline.0.clone(),
+                                        });
+                                        track.keys.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+                                        *apply_requested = true;
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_key,
+                                                    format!("Key {}", key.id),
+                                                )
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time = snap_time_to_frame(time).clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(spline) = world.get::<BevySpline>(entity) {
+                                                    key.spline = spline.0.clone();
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+                            }
+                            TimelineTrack::Clip(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+                                ui.checkbox(&mut track.additive, "Additive");
+                                ui.add(DragValue::new(&mut track.weight).speed(0.05).clamp_range(0.0..=1.0));
+
+                                let clip_names = world
+                                    .get::<BevyAnimator>(entity)
+                                    .and_then(|animator| animator.0.layers.first().map(|layer| layer.graph.library.clips.clone()))
+                                    .unwrap_or_default();
+                                if !clip_names.is_empty() {
+                                    let current = (*new_clip_index).min(clip_names.len().saturating_sub(1));
+                                    let mut selected = current;
+                                    ComboBox::from_id_source(format!("timeline_clip_picker_{}", track.id))
+                                        .selected_text(clip_names
+                                            .get(current)
+                                            .map(|clip| clip.name.as_str())
+                                            .unwrap_or("<clip>"))
+                                        .show_ui(ui, |ui| {
+                                            for (i, clip) in clip_names.iter().enumerate() {
+                                                if ui
+                                                    .selectable_label(i == current, clip.name.as_str())
+                                                    .clicked()
+                                                {
+                                                    selected = i;
+                                                }
+                                            }
+                                        });
+                                    *new_clip_index = selected;
+                                }
+                                ui.add(DragValue::new(new_clip_speed).speed(0.05).clamp_range(0.01..=10.0));
+                                ui.checkbox(new_clip_looping, "Loop Segment");
+
+                                if ui.button("Add Segment").clicked() {
+                                    if let Some(animator) = world.get::<BevyAnimator>(entity) {
+                                        if let Some(layer) = animator.0.layers.first() {
+                                            if let Some(clip) = layer.graph.library.clip(*new_clip_index) {
+                                                let duration = (clip.duration / new_clip_speed.max(0.01)).max(0.01);
+                                                let clip_name = clip.name.clone();
+                                                track.segments.push(ClipSegment {
+                                                    id: alloc_id(),
+                                                    start: *current_time,
+                                                    duration,
+                                                    clip_name,
+                                                    speed: *new_clip_speed,
+                                                    looping: *new_clip_looping,
+                                                });
+                                                track.segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+                                                *apply_requested = true;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ui.collapsing("Segments", |ui| {
+                                    let mut remove_segment: Option<u64> = None;
+                                    for segment in track.segments.iter_mut() {
+                                        let selected_segment = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Clip { track_id, segment_id })
+                                                if *track_id == track.id && *segment_id == segment.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_segment,
+                                                    format!("Seg {}", segment.id),
+                                                )
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Clip {
+                                                    track_id: track.id,
+                                                    segment_id: segment.id,
+                                                });
+                                            }
+                                            let mut start = segment.start;
+                                            if ui
+                                                .add(DragValue::new(&mut start).speed(0.01))
+                                                .changed()
+                                            {
+                                                let max_start = (duration_limit - segment.duration).max(0.0);
+                                                segment.start = snap_time_to_frame(start).clamp(0.0, max_start);
+                                                *apply_requested = true;
+                                            }
+                                            let mut duration_value = segment.duration;
+                                            if ui
+                                                .add(DragValue::new(&mut duration_value).speed(0.01))
+                                                .changed()
+                                            {
+                                                segment.duration = duration_value.max(0.01);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_segment = Some(segment.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(segment_id) = remove_segment {
+                                        track.segments.retain(|segment| segment.id != segment_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+                            }
+                        }
+                        });
+                    }
+                    if let Some(track_id) = remove_track {
+                        group.tracks.retain(|track| track.id() != track_id);
+                    }
+
+                    if !baked_clips.is_empty() {
+                        if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) {
+                            for layer in animator.0.layers.iter_mut() {
+                                let mut library = (*layer.graph.library).clone();
+                                for clip in baked_clips.iter() {
+                                    library.upsert_clip(clip.clone());
+                                }
+                                layer.graph.library = std::sync::Arc::new(library);
+                            }
+                        }
+
+                        for clip in baked_clips {
+                            if let Some(existing) = group
+                                .custom_clips
+                                .iter_mut()
+                                .find(|existing| existing.name == clip.name)
+                            {
+                                *existing = clip;
+                            } else {
+                                group.custom_clips.push(clip);
+                            }
+                        }
+                    }
+                });
+
+                ui.separator();
+                draw_timeline_canvas(
+                    ui,
+                    group,
+                    current_time,
+                    (*duration).max(0.01),
+                    pixels_per_second,
+                    view_offset,
+                    *snap_to_frame,
+                    *frame_rate,
+                    selected,
+                    apply_requested,
+                );
+            } else {
+                ui.label("Select or pin an entity to edit timeline tracks.");
+            }
+        });
+    });
+}
+
+fn draw_timeline_canvas(
+    ui: &mut Ui,
+    group: &mut TimelineTrackGroup,
+    current_time: &mut f32,
+    duration: f32,
+    pixels_per_second: &mut f32,
+    view_offset: &mut f32,
+    snap_to_frame: bool,
+    frame_rate: f32,
+    selected: &mut Option<TimelineSelection>,
+    apply_requested: &mut bool,
+) {
+    let track_count = group.tracks.len().max(1);
+    let row_height = 24.0f32;
+    let ruler_height = 18.0f32;
+    let label_width = 160.0f32;
+    let height = ruler_height + row_height * track_count as f32;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    let ruler_rect = Rect::from_min_max(
+        Pos2::new(rect.min.x + label_width, rect.min.y),
+        Pos2::new(rect.max.x, rect.min.y + ruler_height),
+    );
+    let timeline_rect = Rect::from_min_max(
+        Pos2::new(rect.min.x + label_width, rect.min.y + ruler_height),
+        rect.max,
+    );
+
+    if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
+        if timeline_rect.contains(pointer_pos) || ruler_rect.contains(pointer_pos) {
+            let scroll = ui.ctx().input(|input| input.raw_scroll_delta);
+            if scroll.y.abs() > 0.0 {
+                let cursor_time =
+                    *view_offset + (pointer_pos.x - timeline_rect.left()) / *pixels_per_second;
+                let zoom = (scroll.y / 200.0).exp();
+                *pixels_per_second = (*pixels_per_second * zoom).clamp(10.0, 2000.0);
+                *view_offset = (cursor_time
+                    - (pointer_pos.x - timeline_rect.left()) / *pixels_per_second)
+                    .max(0.0);
+            }
+            if scroll.x.abs() > 0.0 {
+                *view_offset = (*view_offset - scroll.x / *pixels_per_second).max(0.0);
+            }
+        }
+    }
+
+    painter.rect_filled(ruler_rect, 0.0, Color32::from_gray(26));
+
+    let visible_start = *view_offset;
+    let visible_end = visible_start + timeline_rect.width() / *pixels_per_second;
+    let desired_px = 80.0;
+    let mut tick_step = 1.0;
+    for candidate in [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0] {
+        if candidate * *pixels_per_second >= desired_px {
+            tick_step = candidate;
+            break;
+        }
+    }
+    let mut t = (visible_start / tick_step).floor() * tick_step;
+    while t <= visible_end + tick_step {
+        let x = timeline_rect.left() + (t - visible_start) * *pixels_per_second;
+        if x >= timeline_rect.left() - 1.0 && x <= timeline_rect.right() + 1.0 {
+            painter.line_segment(
+                [
+                    Pos2::new(x, timeline_rect.top()),
+                    Pos2::new(x, timeline_rect.bottom()),
+                ],
+                Stroke::new(1.0, Color32::from_gray(60)),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(x, ruler_rect.bottom()),
+                    Pos2::new(x, ruler_rect.bottom() - 6.0),
+                ],
+                Stroke::new(1.0, Color32::from_gray(130)),
+            );
+            painter.text(
+                Pos2::new(x + 2.0, ruler_rect.center().y),
+                Align2::LEFT_CENTER,
+                format!("{:.2}", t),
+                FontId::proportional(11.0),
+                Color32::from_gray(190),
+            );
+        }
+        t += tick_step;
+    }
+
+    let time_x = timeline_rect.left() + (*current_time - visible_start) * *pixels_per_second;
+    painter.line_segment(
+        [
+            Pos2::new(time_x, ruler_rect.top()),
+            Pos2::new(time_x, timeline_rect.bottom()),
+        ],
+        Stroke::new(2.0, Color32::from_rgb(200, 160, 90)),
+    );
+
+    let mut clicked_key = false;
+
+    for (index, track) in group.tracks.iter_mut().enumerate() {
+        let row_top = rect.min.y + ruler_height + index as f32 * row_height;
+        let row_rect = Rect::from_min_max(
+            Pos2::new(rect.min.x, row_top),
+            Pos2::new(rect.max.x, row_top + row_height),
+        );
+        let label_rect = Rect::from_min_max(
+            Pos2::new(row_rect.min.x, row_rect.min.y),
+            Pos2::new(row_rect.min.x + label_width, row_rect.max.y),
+        );
+        let row_timeline_rect =
+            Rect::from_min_max(Pos2::new(label_rect.max.x, row_rect.min.y), row_rect.max);
+
+        painter.rect_filled(row_rect, 0.0, Color32::from_gray(20));
+        match track {
+            TimelineTrack::Pose(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    painter.rect_filled(rect, 2.0, Color32::from_rgb(100, 200, 240));
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id((track.id, key.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Key {
+                            track_id: track.id,
+                            key_id: key.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            key.time =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
+            TimelineTrack::Spline(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    painter.rect_filled(rect, 2.0, Color32::from_rgb(180, 160, 240));
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id((track.id, key.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Key {
+                            track_id: track.id,
+                            key_id: key.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            key.time =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
+            TimelineTrack::Clip(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for segment in track.segments.iter_mut() {
+                    let start_x = row_timeline_rect.left()
+                        + (segment.start - visible_start) * *pixels_per_second;
+                    let end_x = row_timeline_rect.left()
+                        + (segment.start + segment.duration - visible_start) * *pixels_per_second;
+                    let seg_rect = Rect::from_min_max(
+                        Pos2::new(start_x, row_rect.min.y + 4.0),
+                        Pos2::new(end_x.max(start_x + 6.0), row_rect.max.y - 4.0),
+                    );
+                    painter.rect_filled(seg_rect, 2.0, Color32::from_rgb(120, 220, 140));
+                    let response = ui.interact(
+                        seg_rect,
+                        ui.make_persistent_id((track.id, segment.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Clip {
+                            track_id: track.id,
+                            segment_id: segment.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            let max_start = (duration - segment.duration).max(0.0);
+                            segment.start =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, max_start);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let response = ui.interact(
+            row_timeline_rect,
+            ui.make_persistent_id((track.id(), "row")),
+            Sense::click_and_drag(),
+        );
+        if (response.clicked() || response.dragged()) && !clicked_key {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let time = visible_start + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                *current_time = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                *apply_requested = true;
+            }
+        }
+    }
+}
+
+fn snap_time(time: f32, snap_to_frame: bool, frame_rate: f32) -> f32 {
+    if snap_to_frame && frame_rate > 0.0 {
+        let frame = (time * frame_rate).round();
+        frame / frame_rate
+    } else {
+        time
+    }
+}
+
+fn interpolation_label(value: TimelineInterpolation) -> &'static str {
+    match value {
+        TimelineInterpolation::Linear => "Linear",
+        TimelineInterpolation::Step => "Step",
+    }
+}
+
+fn build_joint_children(skeleton: &Skeleton) -> Vec<Vec<usize>> {
+    let mut children = vec![Vec::new(); skeleton.joints.len()];
+    for (index, joint) in skeleton.joints.iter().enumerate() {
+        if let Some(parent) = joint.parent {
+            if let Some(list) = children.get_mut(parent) {
+                list.push(index);
+            }
+        }
+    }
+    children
+}
+
+fn joint_subtree_matches(
+    skeleton: &Skeleton,
+    children: &[Vec<usize>],
+    index: usize,
+    filter: &str,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    if skeleton
+        .joints
+        .get(index)
+        .map(|joint| joint.name.to_lowercase().contains(filter))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if let Some(kids) = children.get(index) {
+        for &child in kids {
+            if joint_subtree_matches(skeleton, children, child, filter) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn draw_joint_tree(
+    ui: &mut Ui,
+    skeleton: &Skeleton,
+    children: &[Vec<usize>],
+    index: usize,
+    depth: usize,
+    filter: &str,
+    pose_state: &mut PoseEditorState,
+) {
+    if !joint_subtree_matches(skeleton, children, index, filter) {
+        return;
+    }
+    let name = skeleton
+        .joints
+        .get(index)
+        .map(|joint| joint.name.as_str())
+        .unwrap_or("<joint>");
+    ui.push_id(index, |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 10.0);
+            if ui
+                .selectable_label(pose_state.selected_joint == Some(index), name)
+                .clicked()
+            {
+                pose_state.selected_joint = Some(index);
+            }
+        });
+    });
+    if let Some(kids) = children.get(index) {
+        for &child in kids {
+            draw_joint_tree(ui, skeleton, children, child, depth + 1, filter, pose_state);
         }
     }
 }

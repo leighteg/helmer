@@ -73,15 +73,19 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
 }
 
 struct InstanceInput {
-    @location(5) model_matrix_col_0: vec4<f32>,
-    @location(6) model_matrix_col_1: vec4<f32>,
-    @location(7) model_matrix_col_2: vec4<f32>,
-    @location(8) model_matrix_col_3: vec4<f32>,
-    @location(9) material_id: u32,
-    @location(10) visibility: u32,
+    @location(6) model_matrix_col_0: vec4<f32>,
+    @location(7) model_matrix_col_1: vec4<f32>,
+    @location(8) model_matrix_col_2: vec4<f32>,
+    @location(9) model_matrix_col_3: vec4<f32>,
+    @location(10) material_id: u32,
+    @location(11) visibility: u32,
+    @location(12) skin_offset: u32,
+    @location(13) skin_count: u32,
 }
 
 struct CameraUniforms {
@@ -113,6 +117,7 @@ struct MaterialData {
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+@group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<uniform> material: MaterialData;
 @group(1) @binding(1) var albedo_tex: texture_2d<f32>;
@@ -152,6 +157,63 @@ fn mat3_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
     return res;
 }
 
+struct SkinnedVertex {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    tangent: vec3<f32>,
+}
+
+fn apply_skinning(vertex: VertexInput, skin_offset: u32, skin_count: u32) -> SkinnedVertex {
+    var out: SkinnedVertex;
+    out.position = vertex.position;
+    out.normal = vertex.normal;
+    out.tangent = vertex.tangent.xyz;
+
+    if (skin_count == 0u) {
+        return out;
+    }
+
+    let weights = vertex.weights;
+    let joint0 = min(vertex.joints.x, skin_count - 1u);
+    let joint1 = min(vertex.joints.y, skin_count - 1u);
+    let joint2 = min(vertex.joints.z, skin_count - 1u);
+    let joint3 = min(vertex.joints.w, skin_count - 1u);
+
+    var skinned_pos = vec4<f32>(0.0);
+    var skinned_norm = vec3<f32>(0.0);
+    var skinned_tan = vec3<f32>(0.0);
+
+    if (weights.x > 0.0) {
+        let m = skin_matrices[skin_offset + joint0];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.x;
+        skinned_norm += (m * vec4<f32>(vertex.normal, 0.0)).xyz * weights.x;
+        skinned_tan += (m * vec4<f32>(vertex.tangent.xyz, 0.0)).xyz * weights.x;
+    }
+    if (weights.y > 0.0) {
+        let m = skin_matrices[skin_offset + joint1];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.y;
+        skinned_norm += (m * vec4<f32>(vertex.normal, 0.0)).xyz * weights.y;
+        skinned_tan += (m * vec4<f32>(vertex.tangent.xyz, 0.0)).xyz * weights.y;
+    }
+    if (weights.z > 0.0) {
+        let m = skin_matrices[skin_offset + joint2];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.z;
+        skinned_norm += (m * vec4<f32>(vertex.normal, 0.0)).xyz * weights.z;
+        skinned_tan += (m * vec4<f32>(vertex.tangent.xyz, 0.0)).xyz * weights.z;
+    }
+    if (weights.w > 0.0) {
+        let m = skin_matrices[skin_offset + joint3];
+        skinned_pos += (m * vec4<f32>(vertex.position, 1.0)) * weights.w;
+        skinned_norm += (m * vec4<f32>(vertex.normal, 0.0)).xyz * weights.w;
+        skinned_tan += (m * vec4<f32>(vertex.tangent.xyz, 0.0)).xyz * weights.w;
+    }
+
+    out.position = skinned_pos.xyz;
+    out.normal = skinned_norm;
+    out.tangent = skinned_tan;
+    return out;
+}
+
 @vertex
 fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
     var out: GBufferInput;
@@ -174,7 +236,8 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
         instance.model_matrix_col_3
     );
 
-    let world_position_vec4 = model_matrix * vec4<f32>(vertex.position, 1.0);
+    let skinned = apply_skinning(vertex, instance.skin_offset, instance.skin_count);
+    let world_position_vec4 = model_matrix * vec4<f32>(skinned.position, 1.0);
     out.world_position = world_position_vec4.xyz;
     out.clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
 
@@ -185,8 +248,8 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
     );
     let normal_matrix = transpose(mat3_inverse(model_mat3));
 
-    let N = safe_normalize(normal_matrix * vertex.normal);
-    let T = safe_normalize(normal_matrix * vertex.tangent.xyz);
+    let N = safe_normalize(normal_matrix * skinned.normal);
+    let T = safe_normalize(normal_matrix * skinned.tangent);
     let B = cross(N, T) * vertex.tangent.w;
 
     out.world_normal = N;

@@ -2,21 +2,24 @@ use crate::ecs::{
     ecs_core::{ECSCore, Entity},
     system::System,
 };
-use glam::{Mat4, Vec4, Vec4Swizzles};
-use hashbrown::HashMap;
+use glam::{Mat3, Mat4, Vec3, Vec4, Vec4Swizzles};
+use hashbrown::{HashMap, HashSet};
 use helmer::{
+    animation::{Animator, Pose, write_skin_palette},
     graphics::{
         common::{
-            config::RenderConfig,
+            config::{RenderConfig, SkinningMode},
             graph::RenderGraphSpec,
             renderer::{
                 Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
-                RenderLightDelta, RenderObjectDelta,
+                RenderLightDelta, RenderObjectDelta, Vertex,
             },
         },
         render_graphs::default_graph_spec,
     },
-    provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
+    provided::components::{
+        ActiveCamera, Camera, Light, MeshRenderer, SkinnedMeshRenderer, Transform,
+    },
     runtime::{asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager},
 };
 use parking_lot::Mutex;
@@ -119,6 +122,219 @@ impl Default for ExtractedState {
 pub struct RenderPacket(pub Option<RenderDelta>);
 
 #[derive(Clone)]
+struct SkinningEntry {
+    offset: usize,
+    count: usize,
+    pose: Pose,
+    globals: Vec<Mat4>,
+}
+
+#[derive(Clone, Copy)]
+struct CpuSkinnedMesh {
+    mesh_id: usize,
+    base_mesh_id: usize,
+}
+
+#[derive(Default)]
+struct SkinningState {
+    palette: Vec<Mat4>,
+    entries: HashMap<Entity, SkinningEntry>,
+    free_ranges: Vec<std::ops::Range<usize>>,
+    cpu_meshes: HashMap<Entity, CpuSkinnedMesh>,
+    mode: SkinningMode,
+    full_sync_requested: bool,
+    has_gpu_skinning: bool,
+    palette_dirty: bool,
+}
+
+impl SkinningState {
+    fn begin_frame(&mut self, mode: SkinningMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.full_sync_requested = true;
+        }
+        self.has_gpu_skinning = !matches!(mode, SkinningMode::Cpu);
+        self.palette_dirty = false;
+    }
+
+    fn take_full_sync(&mut self) -> bool {
+        let flag = self.full_sync_requested;
+        self.full_sync_requested = false;
+        flag
+    }
+
+    fn ensure_entry(
+        &mut self,
+        entity: Entity,
+        joint_count: usize,
+        pose: Pose,
+    ) -> &mut SkinningEntry {
+        let entry = self.entries.entry(entity).or_insert_with(|| {
+            let offset = self.allocate_range(joint_count);
+            SkinningEntry {
+                offset,
+                count: joint_count,
+                pose,
+                globals: vec![Mat4::IDENTITY; joint_count],
+            }
+        });
+        if entry.count != joint_count {
+            self.free_range(entry.offset, entry.count);
+            entry.offset = self.allocate_range(joint_count);
+            entry.count = joint_count;
+            entry.pose = pose;
+            entry.globals.resize(joint_count, Mat4::IDENTITY);
+            self.full_sync_requested = true;
+        }
+        entry
+    }
+
+    fn ensure_palette_capacity(&mut self, required: usize, growth: f32) {
+        if required <= self.palette.len() {
+            return;
+        }
+        let mut new_len = if self.palette.is_empty() {
+            0
+        } else {
+            self.palette.len()
+        };
+        while new_len < required {
+            let grow = (new_len as f32 * growth.max(1.0)).ceil() as usize;
+            new_len = grow.max(required).max(new_len + 1);
+        }
+        self.palette.resize(new_len, Mat4::IDENTITY);
+        self.palette_dirty = true;
+    }
+
+    fn allocate_range(&mut self, count: usize) -> usize {
+        if count == 0 {
+            return 0;
+        }
+        if let Some((idx, range)) = self
+            .free_ranges
+            .iter()
+            .enumerate()
+            .find(|(_, range)| range.len() >= count)
+            .map(|(idx, range)| (idx, range.clone()))
+        {
+            self.free_ranges.swap_remove(idx);
+            let start = range.start;
+            let remaining = range.len().saturating_sub(count);
+            if remaining > 0 {
+                self.free_ranges.push((start + count)..range.end);
+            }
+            return start;
+        }
+        let offset = self.palette.len();
+        self.palette.resize(offset + count, Mat4::IDENTITY);
+        offset
+    }
+
+    fn free_range(&mut self, offset: usize, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.free_ranges.push(offset..(offset + count));
+        self.merge_free_ranges();
+    }
+
+    fn merge_free_ranges(&mut self) {
+        if self.free_ranges.len() < 2 {
+            return;
+        }
+        self.free_ranges.sort_by_key(|range| range.start);
+        let mut merged = Vec::with_capacity(self.free_ranges.len());
+        let mut current = self.free_ranges[0].clone();
+        for range in self.free_ranges.iter().skip(1) {
+            if range.start <= current.end {
+                current.end = current.end.max(range.end);
+            } else {
+                merged.push(current);
+                current = range.clone();
+            }
+        }
+        merged.push(current);
+        self.free_ranges = merged;
+    }
+
+    fn cleanup_missing(&mut self, seen: &HashSet<Entity>) {
+        let mut removed = Vec::new();
+        for id in self.entries.keys() {
+            if !seen.contains(id) {
+                removed.push(*id);
+            }
+        }
+        if removed.is_empty() {
+            return;
+        }
+        for id in removed {
+            if let Some(entry) = self.entries.remove(&id) {
+                self.free_range(entry.offset, entry.count);
+                self.full_sync_requested = true;
+            }
+            self.cpu_meshes.remove(&id);
+        }
+    }
+
+    fn skin_params_for(&self, entity: Entity) -> (u32, u32) {
+        if matches!(self.mode, SkinningMode::Cpu) {
+            return (0, 0);
+        }
+        if let Some(entry) = self.entries.get(&entity) {
+            return (
+                entry.offset.min(u32::MAX as usize) as u32,
+                entry.count.min(u32::MAX as usize) as u32,
+            );
+        }
+        (0, 0)
+    }
+}
+
+fn skin_vertices_cpu(vertices: &[Vertex], palette: &[Mat4]) -> Vec<Vertex> {
+    let mut out = Vec::with_capacity(vertices.len());
+    if palette.is_empty() {
+        return vertices.to_vec();
+    }
+    for v in vertices {
+        let pos = Vec3::from(v.position);
+        let norm = Vec3::from(v.normal);
+        let tan = Vec3::new(v.tangent[0], v.tangent[1], v.tangent[2]);
+        let mut skinned_pos = Vec3::ZERO;
+        let mut skinned_norm = Vec3::ZERO;
+        let mut skinned_tan = Vec3::ZERO;
+
+        for i in 0..4 {
+            let weight = v.weights[i];
+            if weight <= 0.0 {
+                continue;
+            }
+            let mut joint = v.joints[i] as usize;
+            if joint >= palette.len() {
+                joint = palette.len().saturating_sub(1);
+            }
+            let m = palette[joint];
+            let m3 = Mat3::from_cols(m.x_axis.xyz(), m.y_axis.xyz(), m.z_axis.xyz());
+            let p = (m * Vec4::new(pos.x, pos.y, pos.z, 1.0)).xyz();
+            skinned_pos += weight * p;
+            skinned_norm += weight * (m3 * norm);
+            skinned_tan += weight * (m3 * tan);
+        }
+
+        let skinned_norm = skinned_norm.normalize_or_zero();
+        let skinned_tan = skinned_tan.normalize_or_zero();
+        out.push(Vertex::with_skinning(
+            [skinned_pos.x, skinned_pos.y, skinned_pos.z],
+            [skinned_norm.x, skinned_norm.y, skinned_norm.z],
+            v.tex_coord,
+            [skinned_tan.x, skinned_tan.y, skinned_tan.z, v.tangent[3]],
+            v.joints,
+            v.weights,
+        ));
+    }
+    out
+}
+
+#[derive(Clone)]
 pub struct RenderGraphResource(pub RenderGraphSpec);
 
 impl Default for RenderGraphResource {
@@ -130,12 +346,14 @@ impl Default for RenderGraphResource {
 /// Collects all data required for rendering, performs culling and LOD selection.
 pub struct RenderDataSystem {
     previous_state: Option<ExtractedState>,
+    skinning: SkinningState,
 }
 
 impl RenderDataSystem {
     pub fn new() -> Self {
         Self {
             previous_state: None,
+            skinning: SkinningState::default(),
         }
     }
 }
@@ -167,7 +385,7 @@ impl System for RenderDataSystem {
         "RenderDataSystem"
     }
 
-    fn run(&mut self, _dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
+    fn run(&mut self, dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
         let mut streaming_hints: Vec<AssetStreamingRequest> = Vec::new();
         let runtime_config = match ecs.get_resource::<RuntimeConfig>() {
             Some(config) => config.clone(),
@@ -176,6 +394,187 @@ impl System for RenderDataSystem {
                 return;
             }
         };
+        self.skinning
+            .begin_frame(runtime_config.render_config.skinning_mode);
+        let growth = runtime_config.render_config.skin_palette_growth.max(1.0);
+        let mut seen = HashSet::new();
+        let mut vertex_budget = runtime_config.render_config.cpu_skinning_vertex_budget as usize;
+        let unlimited_budget = vertex_budget == 0;
+        let asset_server = ecs.get_resource::<Arc<Mutex<AssetServer>>>().cloned();
+
+        ecs.component_pool
+            .query_mut_for_each::<(Animator, SkinnedMeshRenderer), _>(|entity, (anim, skinned)| {
+                seen.insert(entity);
+                let skeleton = &skinned.skin.skeleton;
+                let joint_count = skeleton.joint_count();
+                if joint_count == 0 {
+                    return;
+                }
+                let entry =
+                    self.skinning
+                        .ensure_entry(entity, joint_count, Pose::from_skeleton(skeleton));
+                self.skinning
+                    .ensure_palette_capacity(entry.offset + entry.count, growth);
+                anim.evaluate(skeleton, dt, &mut entry.pose);
+                let palette_slice =
+                    &mut self.skinning.palette[entry.offset..(entry.offset + entry.count)];
+                write_skin_palette(
+                    skeleton,
+                    &entry.pose.locals,
+                    &mut entry.globals,
+                    palette_slice,
+                );
+                self.skinning.palette_dirty = true;
+
+                if matches!(self.skinning.mode, SkinningMode::Cpu) {
+                    let Some(asset_server) = asset_server.as_ref() else {
+                        return;
+                    };
+                    let base_mesh_id = skinned.mesh_id;
+                    let cpu_entry = self.skinning.cpu_meshes.entry(entity).or_insert_with(|| {
+                        self.skinning.full_sync_requested = true;
+                        let mesh = asset_server.lock().get_mesh(base_mesh_id);
+                        if let Some(mesh) = mesh {
+                            if let Some(lod) = mesh.lods.read().first() {
+                                let skinned_vertices =
+                                    skin_vertices_cpu(&lod.vertices, palette_slice);
+                                let handle = asset_server
+                                    .lock()
+                                    .add_mesh(skinned_vertices, lod.indices.to_vec());
+                                return CpuSkinnedMesh {
+                                    mesh_id: handle.id,
+                                    base_mesh_id,
+                                };
+                            }
+                        }
+                        CpuSkinnedMesh {
+                            mesh_id: base_mesh_id,
+                            base_mesh_id,
+                        }
+                    });
+
+                    if cpu_entry.base_mesh_id != base_mesh_id {
+                        cpu_entry.base_mesh_id = base_mesh_id;
+                        self.skinning.full_sync_requested = true;
+                    }
+
+                    if cpu_entry.mesh_id == base_mesh_id {
+                        return;
+                    }
+                    let mesh = asset_server.lock().get_mesh(base_mesh_id);
+                    let Some(mesh) = mesh else {
+                        return;
+                    };
+                    let lods = mesh.lods.read();
+                    let Some(lod) = lods.first() else {
+                        return;
+                    };
+                    let vertex_count = lod.vertices.len();
+                    if !unlimited_budget {
+                        if vertex_budget < vertex_count {
+                            return;
+                        }
+                        vertex_budget = vertex_budget.saturating_sub(vertex_count);
+                    }
+                    let skinned_vertices = skin_vertices_cpu(&lod.vertices, palette_slice);
+                    asset_server.lock().update_mesh(
+                        cpu_entry.mesh_id,
+                        skinned_vertices,
+                        lod.indices.to_vec(),
+                    );
+                }
+            });
+
+        ecs.component_pool
+            .query_for_each::<(SkinnedMeshRenderer,), _>(|entity, (skinned,)| {
+                if seen.contains(&entity) {
+                    return;
+                }
+                seen.insert(entity);
+                let skeleton = &skinned.skin.skeleton;
+                let joint_count = skeleton.joint_count();
+                if joint_count == 0 {
+                    return;
+                }
+                let entry =
+                    self.skinning
+                        .ensure_entry(entity, joint_count, Pose::from_skeleton(skeleton));
+                self.skinning
+                    .ensure_palette_capacity(entry.offset + entry.count, growth);
+                entry.pose.reset_to_bind(skeleton);
+                let palette_slice =
+                    &mut self.skinning.palette[entry.offset..(entry.offset + entry.count)];
+                write_skin_palette(
+                    skeleton,
+                    &entry.pose.locals,
+                    &mut entry.globals,
+                    palette_slice,
+                );
+                self.skinning.palette_dirty = true;
+
+                if matches!(self.skinning.mode, SkinningMode::Cpu) {
+                    let Some(asset_server) = asset_server.as_ref() else {
+                        return;
+                    };
+                    let base_mesh_id = skinned.mesh_id;
+                    let cpu_entry = self.skinning.cpu_meshes.entry(entity).or_insert_with(|| {
+                        self.skinning.full_sync_requested = true;
+                        let mesh = asset_server.lock().get_mesh(base_mesh_id);
+                        if let Some(mesh) = mesh {
+                            if let Some(lod) = mesh.lods.read().first() {
+                                let skinned_vertices =
+                                    skin_vertices_cpu(&lod.vertices, palette_slice);
+                                let handle = asset_server
+                                    .lock()
+                                    .add_mesh(skinned_vertices, lod.indices.to_vec());
+                                return CpuSkinnedMesh {
+                                    mesh_id: handle.id,
+                                    base_mesh_id,
+                                };
+                            }
+                        }
+                        CpuSkinnedMesh {
+                            mesh_id: base_mesh_id,
+                            base_mesh_id,
+                        }
+                    });
+
+                    if cpu_entry.base_mesh_id != base_mesh_id {
+                        cpu_entry.base_mesh_id = base_mesh_id;
+                        self.skinning.full_sync_requested = true;
+                    }
+
+                    if cpu_entry.mesh_id == base_mesh_id {
+                        return;
+                    }
+                    let mesh = asset_server.lock().get_mesh(base_mesh_id);
+                    let Some(mesh) = mesh else {
+                        return;
+                    };
+                    let lods = mesh.lods.read();
+                    let Some(lod) = lods.first() else {
+                        return;
+                    };
+                    let vertex_count = lod.vertices.len();
+                    if !unlimited_budget {
+                        if vertex_budget < vertex_count {
+                            return;
+                        }
+                        vertex_budget = vertex_budget.saturating_sub(vertex_count);
+                    }
+                    let skinned_vertices = skin_vertices_cpu(&lod.vertices, palette_slice);
+                    asset_server.lock().update_mesh(
+                        cpu_entry.mesh_id,
+                        skinned_vertices,
+                        lod.indices.to_vec(),
+                    );
+                }
+            });
+
+        self.skinning.cleanup_missing(&seen);
+        if self.skinning.take_full_sync() {
+            self.previous_state = None;
+        }
         let transform_epsilon = runtime_config.render_config.transform_epsilon.max(0.0);
         let rotation_epsilon = runtime_config
             .render_config
@@ -335,6 +734,116 @@ impl System for RenderDataSystem {
                     },
                 );
 
+            ecs.component_pool
+                .query_for_each::<(Transform, SkinnedMeshRenderer), _>(
+                    |entity, (transform, skinned)| {
+                        if !skinned.visible {
+                            return;
+                        }
+                        if state.objects.contains_key(&entity) {
+                            return;
+                        }
+
+                        let base_mesh_id = skinned.mesh_id;
+                        if let Some(aabb) = mesh_aabb_map.get(&base_mesh_id) {
+                            let frustum_visible = if runtime_config.render_config.frustum_culling {
+                                frustum.intersects_aabb(aabb, transform)
+                            } else {
+                                true
+                            };
+                            if !frustum_visible && !runtime_config.render_config.gpu_driven {
+                                return;
+                            }
+
+                            let lod_index: usize = if runtime_config.render_config.lod
+                                && !matches!(self.skinning.mode, SkinningMode::Cpu)
+                            {
+                                let model_matrix = Mat4::from_scale_rotation_translation(
+                                    transform.scale,
+                                    transform.rotation,
+                                    transform.position,
+                                );
+                                let inverse_model = model_matrix.inverse();
+                                let camera_pos_local =
+                                    inverse_model.transform_point3(camera_transform.position);
+                                let closest_point_local =
+                                    camera_pos_local.clamp(aabb.min, aabb.max);
+                                let distance_sq =
+                                    camera_pos_local.distance_squared(closest_point_local);
+
+                                LOD_THRESHOLDS
+                                    .iter()
+                                    .filter(|&&threshold| distance_sq > threshold)
+                                    .count()
+                            } else {
+                                0
+                            };
+
+                            if frustum_visible {
+                                let hint_priority = {
+                                    let size = aabb.extents().length();
+                                    let distance =
+                                        (camera_transform.position - transform.position).length();
+                                    let lod_penalty = 1.0 / (lod_index as f32 + 1.0);
+                                    let shadow_boost =
+                                        if skinned.casts_shadow { 1.15 } else { 1.0 };
+                                    (size + 1.0) * shadow_boost * lod_penalty / (distance + 1.0)
+                                };
+                                streaming_map
+                                    .entry((AssetStreamKind::Mesh, base_mesh_id))
+                                    .and_modify(|req| {
+                                        req.priority = req.priority.max(hint_priority);
+                                        req.max_lod = req
+                                            .max_lod
+                                            .map(|l| l.min(lod_index))
+                                            .or(Some(lod_index));
+                                    })
+                                    .or_insert(AssetStreamingRequest {
+                                        id: base_mesh_id,
+                                        kind: AssetStreamKind::Mesh,
+                                        priority: hint_priority,
+                                        max_lod: Some(lod_index),
+                                        force_low_res: false,
+                                    });
+                                streaming_map
+                                    .entry((AssetStreamKind::Material, skinned.material_id))
+                                    .and_modify(|req| {
+                                        req.priority = req.priority.max(hint_priority)
+                                    })
+                                    .or_insert(AssetStreamingRequest {
+                                        id: skinned.material_id,
+                                        kind: AssetStreamKind::Material,
+                                        priority: hint_priority,
+                                        max_lod: None,
+                                        force_low_res: false,
+                                    });
+                            }
+
+                            let render_mesh_id = if matches!(self.skinning.mode, SkinningMode::Cpu)
+                            {
+                                self.skinning
+                                    .cpu_meshes
+                                    .get(&entity)
+                                    .map(|entry| entry.mesh_id)
+                                    .unwrap_or(base_mesh_id)
+                            } else {
+                                base_mesh_id
+                            };
+
+                            state.objects.insert(
+                                entity,
+                                (
+                                    *transform,
+                                    render_mesh_id,
+                                    skinned.material_id,
+                                    skinned.casts_shadow,
+                                    lod_index,
+                                ),
+                            );
+                        }
+                    },
+                );
+
             ecs.component_pool.query_for_each::<(Transform, Light), _>(
                 |entity, (transform, light)| {
                     state.lights.insert(entity, (*transform, *light));
@@ -354,6 +863,7 @@ impl System for RenderDataSystem {
             for (&entity, &(transform, mesh_id, material_id, casts_shadow, lod_index)) in
                 current_state.objects.iter()
             {
+                let (skin_offset, skin_count) = self.skinning.skin_params_for(entity);
                 objects_upsert.push(RenderObjectDelta {
                     id: entity,
                     transform,
@@ -361,6 +871,8 @@ impl System for RenderDataSystem {
                     material_id,
                     casts_shadow,
                     lod_index,
+                    skin_offset,
+                    skin_count,
                 });
             }
         } else {
@@ -383,6 +895,7 @@ impl System for RenderDataSystem {
                     }
                 };
                 if changed {
+                    let (skin_offset, skin_count) = self.skinning.skin_params_for(entity);
                     objects_upsert.push(RenderObjectDelta {
                         id: entity,
                         transform,
@@ -390,6 +903,8 @@ impl System for RenderDataSystem {
                         material_id,
                         casts_shadow,
                         lod_index,
+                        skin_offset,
+                        skin_count,
                     });
                 }
             }
@@ -459,6 +974,7 @@ impl System for RenderDataSystem {
             render_config: None,
             render_graph: None,
             gizmo: None,
+            skin_palette: None,
             streaming_requests: None,
         };
 
@@ -490,6 +1006,13 @@ impl System for RenderDataSystem {
             full_snapshot || current_state.render_graph.version != prev_state.render_graph.version;
         if graph_changed {
             render_delta.render_graph = Some(current_state.render_graph.clone());
+        }
+
+        if self.skinning.has_gpu_skinning
+            && !self.skinning.palette.is_empty()
+            && (full_snapshot || self.skinning.palette_dirty)
+        {
+            render_delta.skin_palette = Some(self.skinning.palette.clone());
         }
 
         if let Some(server) = ecs.get_resource::<Arc<Mutex<AssetServer>>>() {

@@ -30,6 +30,14 @@ pub struct EditorMesh {
 }
 
 #[derive(Component, Debug, Clone)]
+pub struct EditorSkinnedMesh {
+    pub scene_path: Option<String>,
+    pub node_index: Option<usize>,
+    pub casts_shadow: bool,
+    pub visible: bool,
+}
+
+#[derive(Component, Debug, Clone)]
 pub struct SceneAssetPath {
     pub path: PathBuf,
 }

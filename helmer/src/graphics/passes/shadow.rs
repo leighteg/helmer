@@ -393,16 +393,28 @@ impl ShadowPass {
 
         let vp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow/VPBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(mat4_size),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(mat4_size),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let rc_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -616,14 +628,20 @@ impl ShadowPass {
         let vp_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow/VPBG"),
             layout: self.vp_bgl.read().as_ref().unwrap(),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: frame.shadow_matrices_buffer.as_ref().unwrap(),
-                    offset: 0,
-                    size: wgpu::BufferSize::new(std::mem::size_of::<[[f32; 4]; 4]>() as u64),
-                }),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: frame.shadow_matrices_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<[[f32; 4]; 4]>() as u64),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: frame.skin_palette_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let rc_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {

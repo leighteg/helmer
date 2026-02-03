@@ -1271,6 +1271,9 @@ impl ForwardRendererPMU {
 
                     let instance_data = InstanceRaw {
                         model_matrix: model_matrix.to_cols_array_2d(),
+                        skin_offset: 0,
+                        skin_count: 0,
+                        _pad0: [0; 2],
                     };
 
                     let current_offset = all_instances.len() as u32;
@@ -1679,6 +1682,9 @@ impl RenderTrait for ForwardRendererPMU {
 
                 let instance_data = InstanceRaw {
                     model_matrix: model_matrix.to_cols_array_2d(),
+                    skin_offset: 0,
+                    skin_count: 0,
+                    _pad0: [0; 2],
                 };
 
                 let current_offset = all_instances.len() as u32;

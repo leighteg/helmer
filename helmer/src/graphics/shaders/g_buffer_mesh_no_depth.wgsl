@@ -86,7 +86,8 @@ struct GBufferInstance {
     model_matrix: mat4x4<f32>,
     material_id: u32,
     visibility: u32,
-    _pad0: vec2<u32>,
+    skin_offset: u32,
+    skin_count: u32,
     bounds_center: vec4<f32>,
     bounds_extents: vec4<f32>,
 }
@@ -146,6 +147,8 @@ var<workgroup> mesh_output: MeshOutput;
 var<workgroup> mesh_visible: u32;
 var<workgroup> mesh_model: mat4x4<f32>;
 var<workgroup> mesh_material_id: u32;
+var<workgroup> mesh_skin_offset: u32;
+var<workgroup> mesh_skin_count: u32;
 var<workgroup> mesh_normal_matrix: mat3x3<f32>;
 var<workgroup> mesh_vert_count: u32;
 var<workgroup> mesh_prim_count: u32;
@@ -156,6 +159,7 @@ var<workgroup> meshlet_center: vec3<f32>;
 var<workgroup> meshlet_radius: f32;
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
+@group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
 @group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
@@ -204,6 +208,10 @@ fn load_f32(index: u32) -> f32 {
     return bitcast<f32>(vertex_data[index]);
 }
 
+fn load_u32(index: u32) -> u32 {
+    return vertex_data[index];
+}
+
 fn load_vec2(base: u32) -> vec2<f32> {
     return vec2<f32>(load_f32(base), load_f32(base + 1u));
 }
@@ -221,11 +229,80 @@ fn load_vec4(base: u32) -> vec4<f32> {
     );
 }
 
+fn load_uvec4(base: u32) -> vec4<u32> {
+    return vec4<u32>(
+        load_u32(base),
+        load_u32(base + 1u),
+        load_u32(base + 2u),
+        load_u32(base + 3u)
+    );
+}
+
 fn max_scale(model: mat4x4<f32>) -> f32 {
     let x = length(model[0].xyz);
     let y = length(model[1].xyz);
     let z = length(model[2].xyz);
     return max(x, max(y, z));
+}
+
+struct SkinnedVertex {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    tangent: vec4<f32>,
+}
+
+fn apply_skinning(
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    tangent: vec4<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_offset: u32,
+    skin_count: u32
+) -> SkinnedVertex {
+    if (skin_count == 0u) {
+        return SkinnedVertex(position, normal, tangent);
+    }
+
+    let joint0 = min(joints.x, skin_count - 1u);
+    let joint1 = min(joints.y, skin_count - 1u);
+    let joint2 = min(joints.z, skin_count - 1u);
+    let joint3 = min(joints.w, skin_count - 1u);
+
+    var skinned_pos = vec3<f32>(0.0);
+    var skinned_norm = vec3<f32>(0.0);
+    var skinned_tan = vec3<f32>(0.0);
+
+    if (weights.x > 0.0) {
+        let m = skin_matrices[skin_offset + joint0];
+        let n = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        skinned_pos += weights.x * (m * vec4<f32>(position, 1.0)).xyz;
+        skinned_norm += weights.x * (n * normal);
+        skinned_tan += weights.x * (n * tangent.xyz);
+    }
+    if (weights.y > 0.0) {
+        let m = skin_matrices[skin_offset + joint1];
+        let n = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        skinned_pos += weights.y * (m * vec4<f32>(position, 1.0)).xyz;
+        skinned_norm += weights.y * (n * normal);
+        skinned_tan += weights.y * (n * tangent.xyz);
+    }
+    if (weights.z > 0.0) {
+        let m = skin_matrices[skin_offset + joint2];
+        let n = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        skinned_pos += weights.z * (m * vec4<f32>(position, 1.0)).xyz;
+        skinned_norm += weights.z * (n * normal);
+        skinned_tan += weights.z * (n * tangent.xyz);
+    }
+    if (weights.w > 0.0) {
+        let m = skin_matrices[skin_offset + joint3];
+        let n = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        skinned_pos += weights.w * (m * vec4<f32>(position, 1.0)).xyz;
+        skinned_norm += weights.w * (n * normal);
+        skinned_tan += weights.w * (n * tangent.xyz);
+    }
+
+    return SkinnedVertex(skinned_pos, skinned_norm, vec4<f32>(skinned_tan, tangent.w));
 }
 
 fn sphere_in_frustum(view_proj: mat4x4<f32>, center: vec3<f32>, radius: f32) -> bool {
@@ -270,7 +347,7 @@ fn ms_main(
         let meshlet_desc_len = arrayLength(&meshlet_descs);
         let meshlet_vert_len = arrayLength(&meshlet_vertices);
         let meshlet_index_len = arrayLength(&meshlet_indices);
-        mesh_max_vertex = arrayLength(&vertex_data) / 12u;
+        mesh_max_vertex = arrayLength(&vertex_data) / 20u;
 
         if (workgroup_id.y >= draw_params.instance_count) {
             mesh_visible = 0u;
@@ -318,6 +395,8 @@ fn ms_main(
 
                                 mesh_model = inst.model_matrix;
                                 mesh_material_id = inst.material_id;
+                                mesh_skin_offset = inst.skin_offset;
+                                mesh_skin_count = inst.skin_count;
                                 let model_mat3 = mat3x3<f32>(
                                     mesh_model[0].xyz,
                                     mesh_model[1].xyz,
@@ -444,19 +523,30 @@ fn ms_main(
     if (local_id.x < mesh_vert_count) {
         let global_index = meshlet_vertices[meshlet_vertex_offset + local_id.x];
         let safe_index = min(global_index, mesh_max_vertex - 1u);
-        let base = safe_index * 12u;
+        let base = safe_index * 20u;
         let position = load_vec3(base);
         let normal = load_vec3(base + 3u);
         let tex_coord = load_vec2(base + 6u);
         let tangent = load_vec4(base + 8u);
+        let joints = load_uvec4(base + 12u);
+        let weights = load_vec4(base + 16u);
+        let skinned = apply_skinning(
+            position,
+            normal,
+            tangent,
+            joints,
+            weights,
+            mesh_skin_offset,
+            mesh_skin_count
+        );
 
-        let world_position_vec4 = mesh_model * vec4<f32>(position, 1.0);
+        let world_position_vec4 = mesh_model * vec4<f32>(skinned.position, 1.0);
         let world_position = world_position_vec4.xyz;
         let clip_position = camera.projection_matrix * camera.view_matrix * world_position_vec4;
 
-        let N = safe_normalize(mesh_normal_matrix * normal);
-        let T = safe_normalize(mesh_normal_matrix * tangent.xyz);
-        let B = cross(N, T) * tangent.w;
+        let N = safe_normalize(mesh_normal_matrix * skinned.normal);
+        let T = safe_normalize(mesh_normal_matrix * skinned.tangent.xyz);
+        let B = cross(N, T) * skinned.tangent.w;
 
         mesh_output.vertices[local_id.x].clip_position = clip_position;
         mesh_output.vertices[local_id.x].world_position = world_position;

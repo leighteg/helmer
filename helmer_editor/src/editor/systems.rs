@@ -5,36 +5,42 @@ use std::{
     time::Instant,
 };
 
-use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, World};
+use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
 use bevy_ecs::{component::Component, name::Name};
 use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
 use helmer::graphics::render_graphs::template_for_graph;
-use helmer::provided::components::{Light, MeshRenderer, Transform};
+use helmer::provided::components::{
+    Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
+};
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer_becs::egui_integration::{EguiResource, EguiWindowSpec};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::RenderGraphResource;
-use helmer_becs::systems::scene_system::SceneRoot;
+use helmer_becs::systems::scene_system::{
+    SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
+};
 use helmer_becs::{
-    BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer, BevyTransform, BevyWrapper,
-    DeltaTime, DraggedFile,
+    BevyAnimator, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer, BevyPoseOverride,
+    BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
+    DraggedFile,
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
-    EditorLayout, EditorLayoutState, EditorPlayCamera, EditorViewportCamera, EditorViewportState,
-    LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect, activate_play_camera,
-    activate_viewport_camera,
+    EditorLayout, EditorLayoutState, EditorPlayCamera, EditorTimelineState, EditorViewportCamera,
+    EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect,
+    activate_play_camera, activate_viewport_camera,
     assets::{
-        AssetBrowserState, EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
-        scan_asset_entries,
+        AssetBrowserState, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
+        PrimitiveKind, SceneAssetPath, scan_asset_entries,
     },
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::DynamicComponents,
+    gizmos::EditorGizmoState,
     layout_window_ids, mark_undo_clean,
     project::{
         EditorProject, create_project, default_material_template, default_scene_template,
@@ -42,7 +48,10 @@ use crate::editor::{
     },
     push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
-        EditorEntity, EditorSceneState, WorldState, next_available_scene_path, read_scene_document,
+        AnimationClipData, EditorEntity, EditorSceneState, PendingSceneChildAnimations,
+        PendingSceneChildPoseOverrides, PendingSkinnedMeshAsset, WorldState,
+        apply_animation_data_to_timeline, apply_custom_clips_to_animator,
+        next_available_scene_path, normalize_path, pose_from_serialized, read_scene_document,
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
@@ -51,7 +60,8 @@ use crate::editor::{
     ui::{
         EditorUiState, EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
         draw_assets_window, draw_editor_window, draw_history_window, draw_inspector_window,
-        draw_project_window, draw_scene_window, draw_toolbar, draw_viewport_window,
+        draw_project_window, draw_scene_window, draw_timeline_window, draw_toolbar,
+        draw_viewport_window,
     },
     undo_action,
     watch::configure_file_watcher,
@@ -135,6 +145,16 @@ pub fn editor_ui_system(world: &mut World) {
         EguiWindowSpec {
             id: "History".to_string(),
             title: "History".to_string(),
+        },
+    ));
+
+    egui_res.windows.push((
+        Box::new(|ui: &mut Ui, world: &mut World, _| {
+            draw_timeline_window(ui, world);
+        }),
+        EguiWindowSpec {
+            id: "Timeline".to_string(),
+            title: "Timeline".to_string(),
         },
     ));
 
@@ -1380,9 +1400,14 @@ pub fn scene_dirty_system(
             Or<(
                 Changed<BevyTransform>,
                 Changed<BevyMeshRenderer>,
+                Changed<BevySkinnedMeshRenderer>,
                 Changed<EditorMesh>,
+                Changed<EditorSkinnedMesh>,
                 Changed<BevyLight>,
                 Changed<BevyCamera>,
+                Changed<BevyPoseOverride>,
+                Changed<BevySpline>,
+                Changed<BevySplineFollower>,
                 Changed<Name>,
                 Changed<SceneRoot>,
                 Changed<SceneAssetPath>,
@@ -1391,13 +1416,279 @@ pub fn scene_dirty_system(
             )>,
         ),
     >,
+    pose_child_query: Query<(), (With<SceneChild>, Changed<BevyPoseOverride>)>,
 ) {
     if scene_state.world_state == WorldState::Play {
         return;
     }
 
-    if !query.is_empty() {
+    if !query.is_empty() || !pose_child_query.is_empty() {
         scene_state.dirty = true;
+    }
+}
+
+pub fn apply_scene_child_animations_system(
+    mut pending: ResMut<PendingSceneChildAnimations>,
+    mut timeline: ResMut<EditorTimelineState>,
+    project: Res<EditorProject>,
+    scene_children: Res<SceneSpawnedChildren>,
+    scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
+    child_query: Query<&SceneChild>,
+    mut animator_query: Query<&mut BevyAnimator>,
+    skinned_query: Query<&BevySkinnedMeshRenderer>,
+    name_query: Query<&Name>,
+) {
+    if pending.entries.is_empty() {
+        return;
+    }
+
+    let root = project.root.as_deref();
+    let mut root_map: HashMap<String, Entity> = HashMap::new();
+    for (entity, path) in scene_roots.iter() {
+        let normalized = normalize_path(path.path.to_string_lossy().as_ref(), root);
+        root_map.insert(normalized, entity);
+    }
+
+    let mut remaining = Vec::new();
+    for entry in pending.entries.drain(..) {
+        let Some(root_entity) = root_map.get(&entry.scene_path).copied() else {
+            remaining.push(entry);
+            continue;
+        };
+        let Some(children) = scene_children.spawned_scenes.get(&root_entity) else {
+            remaining.push(entry);
+            continue;
+        };
+
+        let mut target_entity = None;
+        for &child_entity in children {
+            if let Ok(child) = child_query.get(child_entity) {
+                if child.scene_node_index == entry.scene_node_index {
+                    target_entity = Some(child_entity);
+                    break;
+                }
+            }
+        }
+
+        let Some(child_entity) = target_entity else {
+            remaining.push(entry);
+            continue;
+        };
+
+        let skeleton = skinned_query
+            .get(child_entity)
+            .map(|skinned| skinned.0.skin.skeleton.as_ref())
+            .ok();
+        let name = name_query
+            .get(child_entity)
+            .map(|name| name.to_string())
+            .unwrap_or_else(|_| format!("Entity {}", child_entity.index()));
+
+        apply_animation_data_to_timeline(
+            &mut timeline,
+            child_entity,
+            name,
+            &entry.animation,
+            skeleton,
+        );
+
+        if let Ok(mut animator) = animator_query.get_mut(child_entity) {
+            let custom_clips = entry
+                .animation
+                .clips
+                .iter()
+                .map(AnimationClipData::to_clip)
+                .collect::<Vec<_>>();
+            apply_custom_clips_to_animator(&mut animator, &custom_clips);
+        }
+    }
+
+    pending.entries = remaining;
+}
+
+pub fn apply_scene_child_pose_overrides_system(
+    mut commands: bevy_ecs::prelude::Commands,
+    mut pending: ResMut<PendingSceneChildPoseOverrides>,
+    project: Res<EditorProject>,
+    scene_children: Res<SceneSpawnedChildren>,
+    scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
+    child_query: Query<&SceneChild>,
+    skinned_query: Query<&BevySkinnedMeshRenderer>,
+    mut pose_query: Query<&mut BevyPoseOverride>,
+) {
+    if pending.entries.is_empty() {
+        return;
+    }
+
+    let root = project.root.as_deref();
+    let mut root_map: HashMap<String, Entity> = HashMap::new();
+    for (entity, path) in scene_roots.iter() {
+        let normalized = normalize_path(path.path.to_string_lossy().as_ref(), root);
+        root_map.insert(normalized, entity);
+    }
+
+    let mut remaining = Vec::new();
+    for entry in pending.entries.drain(..) {
+        let Some(root_entity) = root_map.get(&entry.scene_path).copied() else {
+            remaining.push(entry);
+            continue;
+        };
+        let Some(children) = scene_children.spawned_scenes.get(&root_entity) else {
+            remaining.push(entry);
+            continue;
+        };
+
+        let mut target_entity = None;
+        for &child_entity in children {
+            if let Ok(child) = child_query.get(child_entity) {
+                if child.scene_node_index == entry.scene_node_index {
+                    target_entity = Some(child_entity);
+                    break;
+                }
+            }
+        }
+
+        let Some(child_entity) = target_entity else {
+            remaining.push(entry);
+            continue;
+        };
+
+        let skeleton = match skinned_query.get(child_entity) {
+            Ok(skinned) => skinned.0.skin.skeleton.clone(),
+            Err(_) => {
+                remaining.push(entry);
+                continue;
+            }
+        };
+        let pose = pose_from_serialized(&entry.pose.locals, Some(skeleton.as_ref()));
+        let pose_override = PoseOverride {
+            enabled: entry.pose.enabled,
+            pose,
+        };
+
+        if let Ok(mut existing) = pose_query.get_mut(child_entity) {
+            existing.0 = pose_override;
+        } else {
+            commands
+                .entity(child_entity)
+                .try_insert(BevyPoseOverride(pose_override));
+        }
+    }
+
+    pending.entries = remaining;
+}
+
+pub fn pending_skinned_mesh_system(world: &mut World) {
+    let world_state = world
+        .get_resource::<EditorSceneState>()
+        .map(|state| state.world_state);
+    if world_state != Some(WorldState::Edit) {
+        return;
+    }
+
+    let asset_server = {
+        let Some(asset_server) = world.get_resource::<helmer_becs::BevyAssetServer>() else {
+            return;
+        };
+        asset_server.0.clone()
+    };
+
+    let mut pending_entries = Vec::new();
+    {
+        let mut query = world.query::<(Entity, &PendingSkinnedMeshAsset)>();
+        for (entity, pending) in query.iter(world) {
+            pending_entries.push((entity, pending.clone()));
+        }
+    }
+
+    if pending_entries.is_empty() {
+        return;
+    }
+
+    let mut applied_any = false;
+    for (entity, pending) in pending_entries {
+        let scene = {
+            let asset_server = asset_server.lock();
+            asset_server.get_scene(&pending.scene_handle)
+        };
+        let Some(scene) = scene else {
+            continue;
+        };
+        let desired_index = pending.node_index.or_else(|| {
+            world
+                .get::<EditorSkinnedMesh>(entity)
+                .and_then(|skinned| skinned.node_index)
+        });
+        let node_index = if let Some(index) = desired_index {
+            Some(index)
+        } else {
+            scene
+                .nodes
+                .iter()
+                .position(|node| node.skin_index.is_some())
+        };
+
+        let Some(node_index) = node_index else {
+            world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
+            set_status(world, "Scene has no skinned nodes.".to_string());
+            continue;
+        };
+
+        if pending.node_index.is_none() {
+            world.entity_mut(entity).insert(PendingSkinnedMeshAsset {
+                scene_handle: pending.scene_handle,
+                node_index: Some(node_index),
+            });
+            if let Some(mut editor_skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
+                editor_skinned.node_index = Some(node_index);
+            }
+        }
+
+        let Some(node) = scene.nodes.get(node_index) else {
+            continue;
+        };
+        let Some(skin_index) = node.skin_index else {
+            continue;
+        };
+        let Some(skin) = scene.skins.read().get(skin_index).cloned() else {
+            continue;
+        };
+
+        let (casts_shadow, visible) = world
+            .get::<BevyMeshRenderer>(entity)
+            .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+            .or_else(|| {
+                world
+                    .get::<EditorSkinnedMesh>(entity)
+                    .map(|skinned| (skinned.casts_shadow, skinned.visible))
+            })
+            .unwrap_or((true, true));
+
+        let skinned =
+            SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
+
+        let has_animator = world.get::<BevyAnimator>(entity).is_some();
+        {
+            let mut entity_mut = world.entity_mut(entity);
+            entity_mut.remove::<BevyMeshRenderer>();
+            entity_mut.remove::<EditorMesh>();
+            entity_mut.remove::<PendingSkinnedMeshAsset>();
+            entity_mut.insert(BevySkinnedMeshRenderer(skinned));
+        }
+
+        if !has_animator {
+            if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
+                world
+                    .entity_mut(entity)
+                    .insert(BevyAnimator(build_default_animator(anim_lib)));
+            }
+        }
+
+        applied_any = true;
+    }
+
+    if applied_any {
+        push_undo_snapshot(world, "Skinned Mesh");
     }
 }
 
@@ -2327,6 +2618,7 @@ pub fn freecam_system(
     mut state: bevy_ecs::system::Local<FreecamState>,
     input: Res<BevyInputManager>,
     time: Res<DeltaTime>,
+    gizmo_state: Res<EditorGizmoState>,
     scene_state: Res<EditorSceneState>,
     mut viewport_query: bevy_ecs::prelude::Query<
         (Entity, &mut BevyTransform, &mut BevyCamera),
@@ -2354,6 +2646,7 @@ pub fn freecam_system(
     let dt = time.0;
     let input_manager = &input.0.read();
     let wants_pointer = input_manager.egui_wants_pointer;
+    let gizmo_blocking = gizmo_state.is_drag_active();
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;
@@ -2364,7 +2657,8 @@ pub fn freecam_system(
     let mut yaw_delta = 0.0;
     let mut pitch_delta = 0.0;
 
-    if !wants_pointer && input_manager.is_mouse_button_active(MouseButton::Right) {
+    if !gizmo_blocking && !wants_pointer && input_manager.is_mouse_button_active(MouseButton::Right)
+    {
         if !state.is_looking {
             state.last_cursor_position = input_manager.cursor_position;
             state.is_looking = true;
@@ -2379,37 +2673,51 @@ pub fn freecam_system(
         state.is_looking = false;
     }
 
-    if let Some(gamepad_id) = maybe_gamepad_id {
-        yaw_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX)
-            * CONTROLLER_SENSITIVITY
-            * dt;
-        pitch_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY)
-            * CONTROLLER_SENSITIVITY
-            * dt;
+    if gizmo_blocking {
+        state.is_looking = false;
     }
 
-    if !wants_pointer {
+    let keyboard_active = state.is_looking && !gizmo_blocking;
+
+    if !gizmo_blocking {
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            yaw_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickX)
+                * CONTROLLER_SENSITIVITY
+                * dt;
+            pitch_delta -= input_manager.get_controller_axis(gamepad_id, gilrs::Axis::RightStickY)
+                * CONTROLLER_SENSITIVITY
+                * dt;
+        }
+    }
+
+    if !wants_pointer && keyboard_active {
         state.speed += input_manager.mouse_wheel.y * 2.0;
     }
 
-    if let Some(gamepad_id) = maybe_gamepad_id {
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::RightTrigger) {
-            state.speed += 10.0 * dt;
-        }
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftTrigger) {
-            state.speed -= 10.0 * dt;
+    if !gizmo_blocking {
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::RightTrigger) {
+                state.speed += 10.0 * dt;
+            }
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftTrigger) {
+                state.speed -= 10.0 * dt;
+            }
         }
     }
 
     state.speed = state.speed.max(0.5);
     let mut speed = state.speed;
 
-    let mut boost_active = input_manager.is_key_active(KeyCode::ShiftLeft);
+    let mut boost_active = keyboard_active
+        && (input_manager.is_key_active(KeyCode::ShiftLeft)
+            || input_manager.is_key_active(KeyCode::ShiftRight));
 
-    if let Some(gamepad_id) = maybe_gamepad_id {
-        if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftThumb) {
-            boost_active = true;
-            speed *= 2.5;
+    if !gizmo_blocking {
+        if let Some(gamepad_id) = maybe_gamepad_id {
+            if input_manager.is_controller_button_active(gamepad_id, gilrs::Button::LeftThumb) {
+                boost_active = true;
+                speed *= 2.5;
+            }
         }
     }
 
@@ -2447,28 +2755,32 @@ pub fn freecam_system(
 
             let mut velocity = Vec3::ZERO;
 
-            for key in &input_manager.active_keys {
-                match key {
-                    KeyCode::KeyW => velocity += forward,
-                    KeyCode::KeyS => velocity -= forward,
-                    KeyCode::KeyA => velocity -= right,
-                    KeyCode::KeyD => velocity += right,
-                    KeyCode::Space => velocity += Vec3::Y,
-                    KeyCode::KeyC => velocity -= Vec3::Y,
-                    _ => {}
+            if keyboard_active {
+                for key in &input_manager.active_keys {
+                    match key {
+                        KeyCode::KeyW => velocity += forward,
+                        KeyCode::KeyS => velocity -= forward,
+                        KeyCode::KeyA => velocity -= right,
+                        KeyCode::KeyD => velocity += right,
+                        KeyCode::Space => velocity += Vec3::Y,
+                        KeyCode::KeyC => velocity -= Vec3::Y,
+                        _ => {}
+                    }
                 }
             }
 
-            if let Some(gamepad_id) = maybe_gamepad_id {
-                let lx = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
-                let ly = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
-                velocity += right * lx;
-                velocity += forward * ly;
+            if !gizmo_blocking {
+                if let Some(gamepad_id) = maybe_gamepad_id {
+                    let lx = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
+                    let ly = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
+                    velocity += right * lx;
+                    velocity += forward * ly;
 
-                let up = input_manager.get_right_trigger_value(gamepad_id);
-                let down = input_manager.get_left_trigger_value(gamepad_id);
-                velocity += Vec3::Y * up;
-                velocity -= Vec3::Y * down;
+                    let up = input_manager.get_right_trigger_value(gamepad_id);
+                    let down = input_manager.get_left_trigger_value(gamepad_id);
+                    velocity += Vec3::Y * up;
+                    velocity -= Vec3::Y * down;
+                }
             }
 
             if let Some(norm_velocity) = velocity.try_normalize() {

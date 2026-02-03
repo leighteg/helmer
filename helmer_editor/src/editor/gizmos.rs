@@ -1,23 +1,28 @@
 use bevy_ecs::prelude::{DetectChanges, Entity, Query, Ref, Res, ResMut, Resource, With};
+use bevy_ecs::query::Or;
+use bevy_ecs::system::{ParamSet, SystemParam};
 use glam::{Mat4, Quat, Vec3};
 use winit::event::MouseButton;
+use winit::keyboard::KeyCode;
 
+use helmer::animation::compute_global_matrices;
 use helmer::graphics::common::renderer::{
     Aabb, GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoLine, GizmoMode, GizmoStyle,
     MeshLodPayload,
 };
-use helmer::provided::components::{Camera, LightType, Transform};
+use helmer::provided::components::{Camera, LightType, Spline, Transform};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::RenderGizmoState;
+use helmer_becs::systems::scene_system::SceneChild;
 use helmer_becs::{
     BevyActiveCamera, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
-    BevyTransform,
+    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevyTransform,
 };
 
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
 use crate::editor::{
-    EditorPlayCamera, EditorUndoState, EditorViewportState, request_begin_undo_group,
-    request_end_undo_group,
+    EditorPlayCamera, EditorUndoState, EditorViewportState, PoseEditorState,
+    request_begin_undo_group, request_end_undo_group,
 };
 use std::collections::HashMap;
 
@@ -30,6 +35,8 @@ pub struct EditorGizmoState {
     outline_revision: u64,
     last_mouse_down: bool,
     drag: Option<GizmoDragState>,
+    key_drag_active: bool,
+    suppress_selection: bool,
 }
 
 impl Default for EditorGizmoState {
@@ -42,7 +49,19 @@ impl Default for EditorGizmoState {
             outline_revision: 0,
             last_mouse_down: false,
             drag: None,
+            key_drag_active: false,
+            suppress_selection: false,
         }
+    }
+}
+
+impl EditorGizmoState {
+    pub fn is_drag_active(&self) -> bool {
+        self.drag.is_some() || self.key_drag_active
+    }
+
+    pub fn is_key_drag_active(&self) -> bool {
+        self.key_drag_active
     }
 }
 
@@ -57,6 +76,81 @@ impl Default for EditorSelectionState {
             last_mouse_down: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplineDrawPlane {
+    WorldXZ,
+    View,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplinePivotMode {
+    Point,
+    SplineOrigin,
+}
+
+impl Default for SplineDrawPlane {
+    fn default() -> Self {
+        SplineDrawPlane::WorldXZ
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct EditorSplineState {
+    pub enabled: bool,
+    pub add_mode: bool,
+    pub insert_mode: bool,
+    pub use_gizmo: bool,
+    pub pivot_mode: SplinePivotMode,
+    pub draw_plane: SplineDrawPlane,
+    pub samples: u32,
+    pub handle_size_scale: f32,
+    pub handle_size_min: f32,
+    pub pick_radius_scale: f32,
+    pub pick_radius_min: f32,
+    pub active_point: Option<usize>,
+    pub hover_point: Option<usize>,
+    pub dragging: bool,
+    pub saved_gizmo_mode: Option<GizmoMode>,
+    point_drag: Option<SplinePointDrag>,
+    drag_plane_origin: Vec3,
+    drag_plane_normal: Vec3,
+}
+
+impl Default for EditorSplineState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            add_mode: false,
+            insert_mode: false,
+            use_gizmo: true,
+            pivot_mode: SplinePivotMode::SplineOrigin,
+            draw_plane: SplineDrawPlane::WorldXZ,
+            samples: 64,
+            handle_size_scale: 0.04,
+            handle_size_min: 0.05,
+            pick_radius_scale: 0.03,
+            pick_radius_min: 0.04,
+            active_point: None,
+            hover_point: None,
+            dragging: false,
+            saved_gizmo_mode: None,
+            point_drag: None,
+            drag_plane_origin: Vec3::ZERO,
+            drag_plane_normal: Vec3::Y,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SplinePointDrag {
+    index: usize,
+    start_local: Vec3,
+    start_world: Vec3,
+    pivot_world: Vec3,
+    start_rotation: Quat,
+    mode: GizmoMode,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -281,26 +375,82 @@ enum GizmoDragKind {
     },
 }
 
-pub fn gizmo_system(
-    mut state: ResMut<EditorGizmoState>,
-    mut render_gizmo: ResMut<RenderGizmoState>,
-    settings: Res<EditorGizmoSettings>,
-    mut outline_cache: ResMut<EditorMeshOutlineCache>,
-    viewport_state: Res<EditorViewportState>,
-    selection: Res<InspectorSelectedEntityResource>,
-    scene_state: Res<EditorSceneState>,
-    mut undo_state: ResMut<EditorUndoState>,
-    input: Res<BevyInputManager>,
-    asset_server: Res<BevyAssetServer>,
-    mesh_query: Query<&BevyMeshRenderer>,
-    mut transforms: Query<&mut BevyTransform>,
-    camera_query: Query<(Entity, Ref<BevyCamera>), With<BevyActiveCamera>>,
-    camera_icon_query: Query<
-        (Entity, Ref<BevyCamera>, Option<Ref<EditorPlayCamera>>),
-        With<EditorEntity>,
+#[derive(SystemParam)]
+pub struct GizmoSystemParams<'w, 's> {
+    state: ResMut<'w, EditorGizmoState>,
+    render_gizmo: ResMut<'w, RenderGizmoState>,
+    settings: Res<'w, EditorGizmoSettings>,
+    outline_cache: ResMut<'w, EditorMeshOutlineCache>,
+    spline_state: ResMut<'w, EditorSplineState>,
+    pose_state: ResMut<'w, PoseEditorState>,
+    viewport_state: Res<'w, EditorViewportState>,
+    selection: Res<'w, InspectorSelectedEntityResource>,
+    scene_state: Res<'w, EditorSceneState>,
+    undo_state: ResMut<'w, EditorUndoState>,
+    input: Res<'w, BevyInputManager>,
+    asset_server: Res<'w, BevyAssetServer>,
+    mesh_query: Query<'w, 's, &'static BevyMeshRenderer>,
+    skinned_query: Query<'w, 's, &'static BevySkinnedMeshRenderer>,
+    pose_override_query: Query<'w, 's, &'static mut BevyPoseOverride>,
+    spatial_queries: ParamSet<
+        'w,
+        's,
+        (
+            Query<'w, 's, &'static mut BevyTransform>,
+            Query<'w, 's, &'static BevyTransform>,
+            Query<'w, 's, &'static mut BevySpline>,
+            Query<
+                'w,
+                's,
+                (Entity, &'static BevySpline, Option<&'static BevyTransform>),
+                With<EditorEntity>,
+            >,
+        ),
     >,
-    light_icon_query: Query<(Entity, Ref<BevyLight>), With<EditorEntity>>,
-) {
+    camera_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>), With<BevyActiveCamera>>,
+    camera_icon_query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            Ref<'static, BevyCamera>,
+            Option<Ref<'static, EditorPlayCamera>>,
+        ),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+    light_icon_query: Query<
+        'w,
+        's,
+        (Entity, Ref<'static, BevyLight>),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+}
+
+pub fn gizmo_system(params: GizmoSystemParams) {
+    let GizmoSystemParams {
+        mut state,
+        mut render_gizmo,
+        settings,
+        mut outline_cache,
+        mut spline_state,
+        mut pose_state,
+        viewport_state,
+        selection,
+        scene_state,
+        mut undo_state,
+        input,
+        asset_server,
+        mesh_query,
+        skinned_query,
+        mut pose_override_query,
+        mut spatial_queries,
+        camera_query,
+        camera_icon_query,
+        light_icon_query,
+    } = params;
+
+    state.suppress_selection = false;
+
     let show_gizmos = scene_state.world_state == WorldState::Edit || viewport_state.gizmos_in_play;
     if !show_gizmos {
         clear_gizmo(&mut state, &mut render_gizmo, &settings);
@@ -310,6 +460,25 @@ pub fn gizmo_system(
     let prev_icon_count = render_gizmo.0.icons.len();
     let prev_outline_lines = render_gizmo.0.outline_lines.clone();
 
+    let selected_entity = selection.0;
+    let show_spline_paths = viewport_state.show_spline_paths;
+    let show_spline_points = viewport_state.show_spline_points;
+    let mut global_spline_lines = Vec::new();
+    if show_spline_paths {
+        let samples = spline_state.samples.max(2);
+        let spline_query = spatial_queries.p3();
+        for (entity, spline, spline_transform) in spline_query.iter() {
+            if spline_state.enabled && selected_entity == Some(entity) {
+                continue;
+            }
+            let transform = spline_transform.map(|t| t.0).unwrap_or_default();
+            let lines = build_spline_path_lines(&spline.0, &transform, samples);
+            if !lines.is_empty() {
+                global_spline_lines.extend(lines);
+            }
+        }
+    }
+
     let Some((camera_entity, camera)) = camera_query.iter().next() else {
         if state.drag.is_some() && allow_undo {
             request_end_undo_group(&mut undo_state);
@@ -318,63 +487,59 @@ pub fn gizmo_system(
         return;
     };
 
-    let camera_transform = match transforms.get_mut(camera_entity) {
-        Ok(transform) => transform,
-        Err(_) => {
-            if state.drag.is_some() && allow_undo {
-                request_end_undo_group(&mut undo_state);
+    let (camera_transform, icons, icons_dirty) = {
+        let mut transforms = spatial_queries.p0();
+        let camera_transform = match transforms.get_mut(camera_entity) {
+            Ok(transform) => transform,
+            Err(_) => {
+                if state.drag.is_some() && allow_undo {
+                    request_end_undo_group(&mut undo_state);
+                }
+                clear_gizmo(&mut state, &mut render_gizmo, &settings);
+                return;
             }
-            clear_gizmo(&mut state, &mut render_gizmo, &settings);
-            return;
-        }
-    };
-    let camera_transform_changed = camera_transform.is_changed();
-    let camera_transform = camera_transform.0;
+        };
+        let camera_transform_changed = camera_transform.is_changed();
+        let camera_transform = camera_transform.0;
 
-    let mut icons_dirty =
-        settings.is_changed() || viewport_state.is_changed() || camera_transform_changed;
-    let icons = collect_icon_gizmos(
-        &viewport_state,
-        &settings,
-        &camera_transform,
-        &mut transforms,
-        &camera_icon_query,
-        &light_icon_query,
-        &mut icons_dirty,
-    );
+        let mut icons_dirty =
+            settings.is_changed() || viewport_state.is_changed() || camera_transform_changed;
+        let icons = collect_icon_gizmos(
+            &viewport_state,
+            &settings,
+            &camera_transform,
+            &mut transforms,
+            &camera_icon_query,
+            &light_icon_query,
+            &mut icons_dirty,
+        );
+        (camera_transform, icons, icons_dirty)
+    };
     if icons_dirty || icons.len() != prev_icon_count {
         bump_revision(&mut state.icon_revision);
     }
 
-    let Some(entity) = selection.0 else {
-        if state.drag.is_some() && allow_undo {
-            request_end_undo_group(&mut undo_state);
-        }
-        state.drag = None;
-        state.hover_axis = GizmoAxis::None;
-        state.active_axis = GizmoAxis::None;
-        render_gizmo.0 = GizmoData {
-            icons,
-            icons_revision: state.icon_revision,
-            outline_revision: state.outline_revision,
-            style: settings.to_style(),
-            ..GizmoData::default()
-        };
-        return;
-    };
-
-    let mut target_transform = match transforms.get_mut(entity) {
-        Ok(transform) => transform.0,
-        Err(_) => {
+    let entity = match selected_entity {
+        Some(entity) => entity,
+        None => {
             if state.drag.is_some() && allow_undo {
                 request_end_undo_group(&mut undo_state);
             }
             state.drag = None;
             state.hover_axis = GizmoAxis::None;
             state.active_axis = GizmoAxis::None;
+
+            let outline_lines = if lines_equal(&prev_outline_lines, &global_spline_lines) {
+                prev_outline_lines.clone()
+            } else {
+                bump_revision(&mut state.outline_revision);
+                std::sync::Arc::from(global_spline_lines)
+            };
+
             render_gizmo.0 = GizmoData {
                 icons,
                 icons_revision: state.icon_revision,
+                outline_lines,
                 outline_revision: state.outline_revision,
                 style: settings.to_style(),
                 ..GizmoData::default()
@@ -383,15 +548,127 @@ pub fn gizmo_system(
         }
     };
 
+    let mut target_transform = {
+        let mut transforms = spatial_queries.p0();
+        match transforms.get_mut(entity) {
+            Ok(transform) => transform.0,
+            Err(_) => {
+                if state.drag.is_some() && allow_undo {
+                    request_end_undo_group(&mut undo_state);
+                }
+                state.drag = None;
+                state.hover_axis = GizmoAxis::None;
+                state.active_axis = GizmoAxis::None;
+                render_gizmo.0 = GizmoData {
+                    icons,
+                    icons_revision: state.icon_revision,
+                    outline_revision: state.outline_revision,
+                    style: settings.to_style(),
+                    ..GizmoData::default()
+                };
+                return;
+            }
+        }
+    };
+
+    let mut pose_edit_active = false;
+    let mut pose_world_transforms: Vec<Transform> = Vec::new();
+    let mut pose_parent_indices: Vec<Option<usize>> = Vec::new();
+    let mut selected_joint_world: Option<Transform> = None;
+    let mut selected_parent_world: Option<Transform> = None;
+    if pose_state.edit_mode && pose_state.active_entity == Some(entity.to_bits()) {
+        if let Ok(skinned) = skinned_query.get(entity) {
+            let skeleton = &skinned.0.skin.skeleton;
+            if let Ok(mut pose_override) = pose_override_query.get_mut(entity) {
+                if pose_override.0.pose.locals.len() != skeleton.joint_count() {
+                    pose_override.0.pose.reset_to_bind(skeleton);
+                }
+                if !pose_override.0.enabled {
+                    pose_override.0.enabled = true;
+                }
+                let mut globals = vec![Mat4::IDENTITY; skeleton.joint_count()];
+                compute_global_matrices(skeleton, &pose_override.0.pose.locals, &mut globals);
+                let entity_matrix = target_transform.to_matrix();
+                pose_world_transforms.reserve(globals.len());
+                for global in globals.iter() {
+                    pose_world_transforms.push(Transform::from_matrix(entity_matrix * *global));
+                }
+                pose_parent_indices = skeleton.joints.iter().map(|joint| joint.parent).collect();
+                pose_edit_active = true;
+                if let Some(index) = pose_state.selected_joint {
+                    if index < pose_world_transforms.len() {
+                        selected_joint_world = pose_world_transforms.get(index).copied();
+                        if let Some(parent) =
+                            pose_parent_indices.get(index).and_then(|parent| *parent)
+                        {
+                            selected_parent_world = pose_world_transforms.get(parent).copied();
+                        } else {
+                            selected_parent_world = Some(target_transform);
+                        }
+                    } else {
+                        pose_state.selected_joint = None;
+                    }
+                }
+            }
+        } else {
+            pose_state.edit_mode = false;
+            pose_state.active_entity = None;
+            pose_state.selected_joint = None;
+            pose_state.hover_joint = None;
+        }
+    }
+
+    let mut spline_query = spatial_queries.p2();
+    let mut spline = spline_query.get_mut(entity).ok();
+    let spline_selected = spline.is_some();
+    let spline_edit_active = spline_state.enabled && spline_selected && !pose_edit_active;
+    if !spline_selected {
+        spline_state.point_drag = None;
+    }
+
     let input_manager = input.0.read();
     let wants_pointer = input_manager.egui_wants_pointer;
+    let wants_key = input_manager.egui_wants_key;
+    let freecam_looking = input_manager.is_mouse_button_active(MouseButton::Right);
     let left_down = input_manager.is_mouse_button_active(MouseButton::Left);
     let left_pressed = left_down && !state.last_mouse_down;
     let left_released = !left_down && state.last_mouse_down;
     state.last_mouse_down = left_down;
 
+    if spline_edit_active
+        && !wants_key
+        && state.drag.is_none()
+        && !spline_state.dragging
+        && spline_state.point_drag.is_none()
+        && input_manager.was_just_pressed(KeyCode::KeyE)
+    {
+        if let (Some(active_index), Some(spline_mut)) = (spline_state.active_point, spline.as_mut())
+        {
+            if allow_undo {
+                request_begin_undo_group(&mut undo_state, "Spline");
+            }
+            if let Some(new_index) = extrude_spline_point(
+                &mut spline_mut.0,
+                active_index,
+                &target_transform,
+                &camera_transform,
+                spline_state.draw_plane,
+                spline_state.handle_size_scale,
+                spline_state.handle_size_min,
+            ) {
+                spline_state.active_point = Some(new_index);
+                spline_state.hover_point = Some(new_index);
+                spline_state.point_drag = None;
+            }
+            if allow_undo {
+                request_end_undo_group(&mut undo_state);
+            }
+        }
+    }
+
     let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform);
-    let ray = if wants_pointer {
+    let allow_ui_raycast = state.drag.is_some() || state.key_drag_active;
+    let ray = if wants_pointer && !allow_ui_raycast {
         None
     } else {
         screen_ray(
@@ -402,31 +679,194 @@ pub fn gizmo_system(
         )
     };
 
-    let origin = target_transform.position;
-    let rotation = target_transform.rotation;
+    if !pose_edit_active {
+        pose_state.hover_joint = None;
+        pose_state.dragging = false;
+    } else if wants_pointer && !allow_ui_raycast {
+        pose_state.hover_joint = None;
+        if !left_down {
+            pose_state.dragging = false;
+        }
+    } else if let Some((ray_origin, ray_dir)) = ray {
+        let pick_radius = (camera_transform
+            .position
+            .distance(target_transform.position)
+            * pose_state.pick_radius_scale)
+            .max(pose_state.pick_radius_min)
+            .max(1.0e-4);
+        let mut best_joint = None;
+        let mut best_dist = f32::MAX;
+        for (index, joint_transform) in pose_world_transforms.iter().enumerate() {
+            let dist = ray_point_distance(ray_origin, ray_dir, joint_transform.position);
+            if dist <= pick_radius && dist < best_dist {
+                best_dist = dist;
+                best_joint = Some(index);
+            }
+        }
+        pose_state.hover_joint = best_joint;
+        if left_pressed {
+            if let Some(index) = best_joint {
+                pose_state.selected_joint = Some(index);
+            }
+        }
+    }
+
+    let spline_point_world = if spline_selected {
+        match (spline_state.active_point, spline.as_ref()) {
+            (Some(index), Some(spline_ref)) if index < spline_ref.0.points.len() => Some(
+                target_transform
+                    .to_matrix()
+                    .transform_point3(spline_ref.0.points[index]),
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let spline_points_active = show_spline_points && spline_edit_active;
+    let point_gizmo_active = spline_points_active
+        && spline_state.use_gizmo
+        && spline_point_world.is_some()
+        && state.mode != GizmoMode::None;
+    let bone_gizmo_active = pose_edit_active
+        && pose_state.use_gizmo
+        && selected_joint_world.is_some()
+        && state.mode != GizmoMode::None;
+    let lock_entity_gizmo = spline_points_active || pose_edit_active;
+    if lock_entity_gizmo && !(point_gizmo_active || bone_gizmo_active) {
+        state.drag = None;
+        state.hover_axis = GizmoAxis::None;
+        state.active_axis = GizmoAxis::None;
+    }
+    let mut point_world = target_transform.position;
+    let mut pivot_world = target_transform.position;
+    let mut gizmo_origin = target_transform.position;
+    let mut rotation = target_transform.rotation;
+    let mut edit_gizmo_active = false;
+    if bone_gizmo_active {
+        if let Some(joint_world) = selected_joint_world {
+            point_world = joint_world.position;
+            pivot_world = joint_world.position;
+            gizmo_origin = joint_world.position;
+            rotation = joint_world.rotation;
+            edit_gizmo_active = true;
+        }
+    } else if point_gizmo_active {
+        point_world = spline_point_world.unwrap_or(target_transform.position);
+        pivot_world = match spline_state.pivot_mode {
+            SplinePivotMode::Point => point_world,
+            SplinePivotMode::SplineOrigin => target_transform.position,
+        };
+        gizmo_origin = if !matches!(state.mode, GizmoMode::Translate) {
+            pivot_world
+        } else {
+            point_world
+        };
+        edit_gizmo_active = true;
+    }
     let (size_min, size_max) = settings.size_bounds();
-    let distance = camera_transform.position.distance(origin).max(0.001);
+    let distance = camera_transform.position.distance(gizmo_origin).max(0.001);
     let gizmo_size = (distance * settings.size_scale).clamp(size_min, size_max);
-    let mut view_dir = camera_transform.position - origin;
+    let mut view_dir = camera_transform.position - gizmo_origin;
     if view_dir.length_squared() < 1.0e-6 {
         view_dir = camera_transform.forward();
     }
     let view_dir = view_dir.normalize_or_zero();
+    let drag_start_transform = if bone_gizmo_active {
+        selected_joint_world.unwrap_or_else(|| Transform::new(gizmo_origin, rotation, Vec3::ONE))
+    } else if point_gizmo_active {
+        Transform::new(gizmo_origin, rotation, Vec3::ONE)
+    } else {
+        target_transform
+    };
 
-    if wants_pointer {
+    if wants_pointer && !allow_ui_raycast {
         let had_drag = state.drag.is_some();
         if left_released || had_drag {
             state.drag = None;
             state.active_axis = GizmoAxis::None;
+            state.key_drag_active = false;
+            spline_state.point_drag = None;
         }
         if had_drag && allow_undo {
             request_end_undo_group(&mut undo_state);
         }
         state.hover_axis = GizmoAxis::None;
     } else if let Some((ray_origin, ray_dir)) = ray {
-        if state.drag.is_none() && state.mode != GizmoMode::None {
+        let control_active = input_manager.is_key_active(KeyCode::ControlLeft)
+            || input_manager.is_key_active(KeyCode::ControlRight);
+        let key_drag_mode = if !wants_key && !control_active && !freecam_looking {
+            if input_manager.was_just_pressed(KeyCode::KeyG) {
+                Some(GizmoMode::Translate)
+            } else if input_manager.was_just_pressed(KeyCode::KeyR) {
+                Some(GizmoMode::Rotate)
+            } else if input_manager.was_just_pressed(KeyCode::KeyS) {
+                Some(GizmoMode::Scale)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(mode) = key_drag_mode {
+            state.mode = mode;
+            if state.drag.is_none()
+                && mode != GizmoMode::None
+                && (!lock_entity_gizmo || point_gizmo_active || bone_gizmo_active)
+            {
+                if let Some(drag_state) = begin_drag(
+                    mode,
+                    GizmoAxis::Center,
+                    ray_origin,
+                    ray_dir,
+                    gizmo_origin,
+                    view_dir,
+                    drag_start_transform,
+                    &settings,
+                ) {
+                    state.active_axis = drag_state.axis;
+                    state.drag = Some(drag_state);
+                    state.key_drag_active = true;
+                    if point_gizmo_active {
+                        if let Some(index) = spline_state.active_point {
+                            spline_state.point_drag = Some(SplinePointDrag {
+                                index,
+                                start_local: spline
+                                    .as_ref()
+                                    .and_then(|spline| spline.0.points.get(index))
+                                    .copied()
+                                    .unwrap_or(Vec3::ZERO),
+                                start_world: point_world,
+                                pivot_world,
+                                start_rotation: rotation,
+                                mode,
+                            });
+                        }
+                    }
+                    if bone_gizmo_active {
+                        pose_state.dragging = true;
+                    }
+                    if allow_undo {
+                        request_begin_undo_group(&mut undo_state, undo_label_for_mode(mode));
+                    }
+                }
+            }
+        }
+
+        if state.drag.is_none()
+            && state.mode != GizmoMode::None
+            && (!lock_entity_gizmo || point_gizmo_active || bone_gizmo_active)
+        {
             state.hover_axis = pick_gizmo(
-                state.mode, ray_origin, ray_dir, origin, rotation, gizmo_size, &settings,
+                state.mode,
+                ray_origin,
+                ray_dir,
+                gizmo_origin,
+                rotation,
+                gizmo_size,
+                &settings,
             );
         }
 
@@ -434,19 +874,40 @@ pub fn gizmo_system(
             && state.drag.is_none()
             && state.mode != GizmoMode::None
             && state.hover_axis != GizmoAxis::None
+            && (!lock_entity_gizmo || point_gizmo_active || bone_gizmo_active)
         {
             if let Some(drag_state) = begin_drag(
                 state.mode,
                 state.hover_axis,
                 ray_origin,
                 ray_dir,
-                origin,
+                gizmo_origin,
                 view_dir,
-                target_transform,
+                drag_start_transform,
                 &settings,
             ) {
                 state.active_axis = drag_state.axis;
                 state.drag = Some(drag_state);
+                state.key_drag_active = false;
+                if point_gizmo_active {
+                    if let Some(index) = spline_state.active_point {
+                        spline_state.point_drag = Some(SplinePointDrag {
+                            index,
+                            start_local: spline
+                                .as_ref()
+                                .and_then(|spline| spline.0.points.get(index))
+                                .copied()
+                                .unwrap_or(Vec3::ZERO),
+                            start_world: point_world,
+                            pivot_world,
+                            start_rotation: rotation,
+                            mode: state.mode,
+                        });
+                    }
+                }
+                if bone_gizmo_active {
+                    pose_state.dragging = true;
+                }
                 if allow_undo {
                     request_begin_undo_group(&mut undo_state, undo_label_for_mode(state.mode));
                 }
@@ -454,13 +915,88 @@ pub fn gizmo_system(
         }
 
         if let Some(drag) = state.drag.take() {
-            if left_down {
-                apply_drag(&mut target_transform, &drag, ray_origin, ray_dir, &settings);
+            let mut did_apply = false;
+            if state.key_drag_active || left_down {
+                if let Some(point_drag) = spline_state.point_drag.as_ref() {
+                    let mut drag_transform =
+                        Transform::new(drag.start_transform.position, rotation, Vec3::ONE);
+                    apply_drag(&mut drag_transform, &drag, ray_origin, ray_dir, &settings);
+                    let new_world = match point_drag.mode {
+                        GizmoMode::Translate => drag_transform.position,
+                        GizmoMode::Rotate => {
+                            let delta =
+                                drag_transform.rotation * point_drag.start_rotation.inverse();
+                            point_drag.pivot_world
+                                + delta * (point_drag.start_world - point_drag.pivot_world)
+                        }
+                        GizmoMode::Scale => {
+                            let scale = drag_transform.scale;
+                            let local_offset = point_drag.start_rotation.inverse()
+                                * (point_drag.start_world - point_drag.pivot_world);
+                            let scaled_local = Vec3::new(
+                                local_offset.x * scale.x,
+                                local_offset.y * scale.y,
+                                local_offset.z * scale.z,
+                            );
+                            point_drag.pivot_world + point_drag.start_rotation * scaled_local
+                        }
+                        GizmoMode::None => point_drag.start_world,
+                    };
+                    if let Some(spline_mut) = spline.as_mut() {
+                        let inv_spline_matrix = target_transform.to_matrix().inverse();
+                        let local_hit = inv_spline_matrix.transform_point3(new_world);
+                        if point_drag.index < spline_mut.0.points.len() {
+                            spline_mut.0.points[point_drag.index] = local_hit;
+                        }
+                    }
+                    did_apply = true;
+                } else if bone_gizmo_active {
+                    if let (Some(index), Some(parent_world)) =
+                        (pose_state.selected_joint, selected_parent_world)
+                    {
+                        let mut drag_transform = drag.start_transform;
+                        apply_drag(&mut drag_transform, &drag, ray_origin, ray_dir, &settings);
+                        let parent_matrix = parent_world.to_matrix();
+                        let local_matrix = parent_matrix.inverse() * drag_transform.to_matrix();
+                        let local = Transform::from_matrix(local_matrix);
+                        if let Ok(mut pose_override) = pose_override_query.get_mut(entity) {
+                            if index < pose_override.0.pose.locals.len() {
+                                pose_override.0.pose.locals[index] = local;
+                            }
+                        }
+                        did_apply = true;
+                    }
+                } else if !lock_entity_gizmo {
+                    apply_drag(&mut target_transform, &drag, ray_origin, ray_dir, &settings);
+                    did_apply = true;
+                }
+            }
+
+            if state.key_drag_active {
+                if did_apply {
+                    state.active_axis = drag.axis;
+                    state.drag = Some(drag);
+                }
+                if left_pressed {
+                    state.suppress_selection = true;
+                    state.active_axis = GizmoAxis::None;
+                    state.drag = None;
+                    state.key_drag_active = false;
+                    spline_state.point_drag = None;
+                    pose_state.dragging = false;
+                    if allow_undo {
+                        request_end_undo_group(&mut undo_state);
+                    }
+                }
+            } else if left_down {
                 state.active_axis = drag.axis;
                 state.drag = Some(drag);
             } else {
                 state.active_axis = GizmoAxis::None;
                 state.drag = None;
+                state.key_drag_active = false;
+                spline_state.point_drag = None;
+                pose_state.dragging = false;
                 if allow_undo {
                     request_end_undo_group(&mut undo_state);
                 }
@@ -472,6 +1008,133 @@ pub fn gizmo_system(
         }
         state.active_axis = GizmoAxis::None;
         state.drag = None;
+        state.key_drag_active = false;
+        spline_state.point_drag = None;
+        pose_state.dragging = false;
+    }
+
+    if spline_selected {
+        let allow_plane_drag = spline_points_active
+            && spline_edit_active
+            && (!spline_state.use_gizmo || matches!(state.mode, GizmoMode::None));
+        if !spline_points_active {
+            if spline_state.dragging && allow_undo {
+                request_end_undo_group(&mut undo_state);
+            }
+            spline_state.dragging = false;
+            spline_state.hover_point = None;
+        } else if wants_pointer && !allow_ui_raycast {
+            if spline_state.dragging && allow_undo {
+                request_end_undo_group(&mut undo_state);
+            }
+            spline_state.dragging = false;
+            spline_state.hover_point = None;
+        } else if let Some((ray_origin, ray_dir)) = ray {
+            let plane_normal = spline_plane_normal(spline_state.draw_plane, &camera_transform);
+            let pick_radius = (distance * spline_state.pick_radius_scale)
+                .max(spline_state.pick_radius_min)
+                .max(1.0e-4);
+            let spline_matrix = target_transform.to_matrix();
+            let inv_spline_matrix = spline_matrix.inverse();
+
+            let hover_point = if let Some(spline_ref) = spline.as_ref() {
+                let mut closest = None;
+                let mut closest_dist = f32::MAX;
+                for (index, point) in spline_ref.0.points.iter().enumerate() {
+                    let world_point = spline_matrix.transform_point3(*point);
+                    let dist = ray_point_distance(ray_origin, ray_dir, world_point);
+                    if dist <= pick_radius && dist < closest_dist {
+                        closest = Some(index);
+                        closest_dist = dist;
+                    }
+                }
+                closest
+            } else {
+                None
+            };
+
+            spline_state.hover_point = hover_point;
+
+            if left_pressed && !spline_state.dragging {
+                if let Some(index) = hover_point {
+                    spline_state.active_point = Some(index);
+                    if allow_plane_drag {
+                        spline_state.dragging = true;
+                        spline_state.drag_plane_origin = spline_matrix.transform_point3(
+                            spline
+                                .as_ref()
+                                .map(|spline| spline.0.points[index])
+                                .unwrap_or(Vec3::ZERO),
+                        );
+                        spline_state.drag_plane_normal = plane_normal;
+                        if allow_undo {
+                            request_begin_undo_group(&mut undo_state, "Spline");
+                        }
+                    }
+                } else if spline_edit_active && spline_state.add_mode {
+                    if let Some(hit) = intersect_ray_plane(
+                        ray_origin,
+                        ray_dir,
+                        target_transform.position,
+                        plane_normal,
+                    ) {
+                        let local_hit = inv_spline_matrix.transform_point3(hit);
+                        if let Some(spline_mut) = spline.as_mut() {
+                            let insert_index = if spline_state.insert_mode {
+                                spline_state.active_point.map(|idx| idx + 1)
+                            } else {
+                                None
+                            };
+                            if let Some(index) = insert_index {
+                                let index = index.min(spline_mut.0.points.len());
+                                spline_mut.0.points.insert(index, local_hit);
+                                spline_state.active_point = Some(index);
+                            } else {
+                                spline_mut.0.points.push(local_hit);
+                                spline_state.active_point = Some(spline_mut.0.points.len() - 1);
+                            }
+                        }
+                        if allow_undo {
+                            request_begin_undo_group(&mut undo_state, "Spline");
+                            request_end_undo_group(&mut undo_state);
+                        }
+                    }
+                } else if !spline_edit_active {
+                    spline_state.active_point = None;
+                }
+            }
+
+            if spline_state.dragging && allow_plane_drag {
+                if left_down {
+                    if let Some(hit) = intersect_ray_plane(
+                        ray_origin,
+                        ray_dir,
+                        spline_state.drag_plane_origin,
+                        spline_state.drag_plane_normal,
+                    ) {
+                        let local_hit = inv_spline_matrix.transform_point3(hit);
+                        if let Some(spline_mut) = spline.as_mut() {
+                            if let Some(index) = spline_state.active_point {
+                                if index < spline_mut.0.points.len() {
+                                    spline_mut.0.points[index] = local_hit;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    spline_state.dragging = false;
+                    if allow_undo {
+                        request_end_undo_group(&mut undo_state);
+                    }
+                }
+            } else if !allow_plane_drag {
+                spline_state.dragging = false;
+            }
+        }
+    } else {
+        spline_state.dragging = false;
+        spline_state.hover_point = None;
+        spline_state.active_point = None;
     }
 
     if state.mode == GizmoMode::None {
@@ -481,12 +1144,10 @@ pub fn gizmo_system(
         state.drag = None;
         state.hover_axis = GizmoAxis::None;
         state.active_axis = GizmoAxis::None;
+        spline_state.point_drag = None;
     }
 
-    let output_distance = camera_transform
-        .position
-        .distance(target_transform.position)
-        .max(0.001);
+    let output_distance = camera_transform.position.distance(gizmo_origin).max(0.001);
     let output_size = (output_distance * settings.size_scale).clamp(size_min, size_max);
 
     let (bounds_enabled, selection_min, selection_max) = if settings.show_bounds_outline {
@@ -497,29 +1158,130 @@ pub fn gizmo_system(
     } else {
         (false, Vec3::ZERO, Vec3::ZERO)
     };
-    let outline_lines = collect_mesh_outline_lines(
+    let mut combined_lines = global_spline_lines;
+    let mesh_outline_lines = collect_mesh_outline_lines(
         &asset_server,
         &mesh_query,
         &settings,
         &mut outline_cache,
         entity,
     );
-    let outline_equal = std::sync::Arc::ptr_eq(&prev_outline_lines, &outline_lines)
-        || (prev_outline_lines.is_empty() && outline_lines.is_empty());
-    if !outline_equal {
-        bump_revision(&mut state.outline_revision);
+    if !mesh_outline_lines.is_empty() {
+        let matrix = target_transform.to_matrix();
+        combined_lines.extend(mesh_outline_lines.iter().map(|line| GizmoLine {
+            start: matrix.transform_point3(line.start),
+            end: matrix.transform_point3(line.end),
+        }));
     }
+    if show_spline_paths && spline_selected && spline_state.enabled {
+        if let Some(spline_ref) = spline.as_ref() {
+            let samples = spline_state.samples.max(2);
+            let path_lines = build_spline_path_lines(&spline_ref.0, &target_transform, samples);
+            if !path_lines.is_empty() {
+                combined_lines.extend(path_lines);
+            }
+        }
+    }
+    if spline_points_active {
+        if let Some(spline_ref) = spline.as_ref() {
+            let handle_size =
+                (distance * spline_state.handle_size_scale).max(spline_state.handle_size_min);
+            let handle_lines =
+                build_spline_handle_lines(&spline_ref.0, &target_transform, handle_size);
+            if !handle_lines.is_empty() {
+                combined_lines.extend(handle_lines);
+            }
+        }
+    }
+    if pose_edit_active {
+        if pose_state.show_bones {
+            for (index, joint_transform) in pose_world_transforms.iter().enumerate() {
+                let Some(parent) = pose_parent_indices.get(index).and_then(|parent| *parent) else {
+                    continue;
+                };
+                let Some(parent_transform) = pose_world_transforms.get(parent) else {
+                    continue;
+                };
+                combined_lines.push(GizmoLine {
+                    start: parent_transform.position,
+                    end: joint_transform.position,
+                });
+            }
+        }
+        if pose_state.show_joint_handles {
+            for (index, joint_transform) in pose_world_transforms.iter().enumerate() {
+                let distance = camera_transform
+                    .position
+                    .distance(joint_transform.position)
+                    .max(0.001);
+                let mut handle_size =
+                    (distance * pose_state.handle_size_scale).max(pose_state.handle_size_min);
+                if pose_state.selected_joint == Some(index) {
+                    handle_size *= 1.35;
+                } else if pose_state.hover_joint == Some(index) {
+                    handle_size *= 1.15;
+                }
+                let basis = joint_transform.rotation;
+                let x = basis * Vec3::X * handle_size;
+                let y = basis * Vec3::Y * handle_size;
+                let z = basis * Vec3::Z * handle_size;
+                let origin = joint_transform.position;
+                combined_lines.push(GizmoLine {
+                    start: origin - x,
+                    end: origin + x,
+                });
+                combined_lines.push(GizmoLine {
+                    start: origin - y,
+                    end: origin + y,
+                });
+                combined_lines.push(GizmoLine {
+                    start: origin - z,
+                    end: origin + z,
+                });
+            }
+        }
+    }
+    if !combined_lines.is_empty() {
+        let gizmo_scale = if edit_gizmo_active {
+            Vec3::ONE
+        } else {
+            target_transform.scale
+        };
+        let gizmo_matrix =
+            Mat4::from_scale_rotation_translation(gizmo_scale, rotation, gizmo_origin);
+        let inv_gizmo = gizmo_matrix.inverse();
+        for line in combined_lines.iter_mut() {
+            line.start = inv_gizmo.transform_point3(line.start);
+            line.end = inv_gizmo.transform_point3(line.end);
+        }
+    }
+    let outline_lines = if lines_equal(&prev_outline_lines, &combined_lines) {
+        prev_outline_lines.clone()
+    } else {
+        bump_revision(&mut state.outline_revision);
+        std::sync::Arc::from(combined_lines)
+    };
     let selection_enabled = settings.show_bounds_outline && bounds_enabled;
 
-    if let Ok(mut transform) = transforms.get_mut(entity) {
-        transform.0 = target_transform;
+    drop(spline);
+    drop(spline_query);
+
+    if !edit_gizmo_active {
+        let mut transforms = spatial_queries.p0();
+        if let Ok(mut transform) = transforms.get_mut(entity) {
+            transform.0 = target_transform;
+        }
     }
 
     render_gizmo.0 = GizmoData {
         mode: state.mode,
-        position: target_transform.position,
-        rotation: target_transform.rotation,
-        scale: target_transform.scale,
+        position: gizmo_origin,
+        rotation,
+        scale: if edit_gizmo_active {
+            Vec3::ONE
+        } else {
+            target_transform.scale
+        },
         size: output_size,
         hover_axis: state.hover_axis,
         active_axis: state.active_axis,
@@ -534,22 +1296,94 @@ pub fn gizmo_system(
     };
 }
 
-pub fn selection_system(
-    mut selection_state: ResMut<EditorSelectionState>,
-    mut selection: ResMut<InspectorSelectedEntityResource>,
-    gizmo_state: Res<EditorGizmoState>,
-    settings: Res<EditorGizmoSettings>,
-    viewport_state: Res<EditorViewportState>,
-    scene_state: Res<EditorSceneState>,
-    input: Res<BevyInputManager>,
-    asset_server: Res<BevyAssetServer>,
-    mesh_query: Query<(Entity, &BevyMeshRenderer, &BevyTransform), With<EditorEntity>>,
-    transform_query: Query<&BevyTransform>,
-    camera_icon_query: Query<(Entity, &BevyCamera, Option<&EditorPlayCamera>), With<EditorEntity>>,
-    light_icon_query: Query<(Entity, &BevyLight), With<EditorEntity>>,
-    camera_query: Query<(&BevyCamera, &BevyTransform), With<BevyActiveCamera>>,
-) {
+#[derive(SystemParam)]
+pub struct SelectionSystemParams<'w, 's> {
+    selection_state: ResMut<'w, EditorSelectionState>,
+    selection: ResMut<'w, InspectorSelectedEntityResource>,
+    gizmo_state: Res<'w, EditorGizmoState>,
+    spline_state: Res<'w, EditorSplineState>,
+    pose_state: Res<'w, PoseEditorState>,
+    settings: Res<'w, EditorGizmoSettings>,
+    viewport_state: Res<'w, EditorViewportState>,
+    scene_state: Res<'w, EditorSceneState>,
+    input: Res<'w, BevyInputManager>,
+    asset_server: Res<'w, BevyAssetServer>,
+    mesh_query: Query<
+        'w,
+        's,
+        (Entity, &'static BevyMeshRenderer, &'static BevyTransform),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+    skinned_query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static BevySkinnedMeshRenderer,
+            &'static BevyTransform,
+        ),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+    spline_query: Query<
+        'w,
+        's,
+        (Entity, &'static BevySpline, Option<&'static BevyTransform>),
+        With<EditorEntity>,
+    >,
+    transform_query: Query<'w, 's, &'static BevyTransform>,
+    camera_icon_query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static BevyCamera,
+            Option<&'static EditorPlayCamera>,
+        ),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+    light_icon_query:
+        Query<'w, 's, (Entity, &'static BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    camera_query:
+        Query<'w, 's, (&'static BevyCamera, &'static BevyTransform), With<BevyActiveCamera>>,
+}
+
+pub fn selection_system(params: SelectionSystemParams) {
+    let SelectionSystemParams {
+        mut selection_state,
+        mut selection,
+        gizmo_state,
+        spline_state,
+        pose_state,
+        settings,
+        viewport_state,
+        scene_state,
+        input,
+        asset_server,
+        mesh_query,
+        skinned_query,
+        spline_query,
+        transform_query,
+        camera_icon_query,
+        light_icon_query,
+        camera_query,
+    } = params;
     if scene_state.world_state != WorldState::Edit && !viewport_state.gizmos_in_play {
+        return;
+    }
+
+    if spline_state.dragging || spline_state.hover_point.is_some() {
+        return;
+    }
+    if spline_state.enabled && spline_state.add_mode {
+        return;
+    }
+    if pose_state.edit_mode
+        && selection
+            .0
+            .map(|entity| pose_state.active_entity == Some(entity.to_bits()))
+            .unwrap_or(false)
+        && (pose_state.dragging || pose_state.hover_joint.is_some())
+    {
         return;
     }
 
@@ -562,7 +1396,11 @@ pub fn selection_system(
         return;
     }
 
-    if gizmo_state.active_axis != GizmoAxis::None {
+    if gizmo_state.suppress_selection
+        || gizmo_state.key_drag_active
+        || gizmo_state.drag.is_some()
+        || gizmo_state.active_axis != GizmoAxis::None
+    {
         return;
     }
 
@@ -596,6 +1434,18 @@ pub fn selection_system(
             best = Some((entity, distance));
         }
     }
+    for (entity, renderer, transform) in skinned_query.iter() {
+        let Some(bounds) = mesh_aabb_map.0.get(&renderer.0.mesh_id) else {
+            continue;
+        };
+        let Some(distance) = ray_aabb_intersection(ray_origin, ray_dir, &transform.0, bounds)
+        else {
+            continue;
+        };
+        if best.map_or(true, |(_, best_distance)| distance < best_distance) {
+            best = Some((entity, distance));
+        }
+    }
 
     if let Some((entity, distance)) = pick_icon_entity(
         &viewport_state,
@@ -612,6 +1462,35 @@ pub fn selection_system(
         }
     }
 
+    if viewport_state.show_spline_paths {
+        let samples = spline_state.samples.max(2);
+        let mut best_spline: Option<(Entity, f32)> = None;
+        for (entity, spline, spline_transform) in spline_query.iter() {
+            let transform = spline_transform.map(|t| t.0).unwrap_or_default();
+            let lines = build_spline_path_lines(&spline.0, &transform, samples);
+            for line in lines {
+                let mid = (line.start + line.end) * 0.5;
+                let distance_scale = camera_transform.0.position.distance(mid).max(0.001);
+                let pick_radius = (distance_scale * spline_state.pick_radius_scale)
+                    .max(spline_state.pick_radius_min)
+                    .max(1.0e-4);
+                let Some((dist, ray_t)) =
+                    ray_segment_distance(ray_origin, ray_dir, line.start, line.end)
+                else {
+                    continue;
+                };
+                if dist <= pick_radius && best_spline.map_or(true, |(_, best_t)| ray_t < best_t) {
+                    best_spline = Some((entity, ray_t));
+                }
+            }
+        }
+        if let Some((entity, ray_t)) = best_spline {
+            if best.map_or(true, |(_, best_distance)| ray_t < best_distance) {
+                best = Some((entity, ray_t));
+            }
+        }
+    }
+
     selection.0 = best.map(|(entity, _)| entity);
 }
 
@@ -621,6 +1500,13 @@ fn bump_revision(value: &mut u64) {
         // reserve 0 to indicate "no revision" for fallback hashing
         *value = 1;
     }
+}
+
+fn lines_equal(prev: &std::sync::Arc<[GizmoLine]>, current: &[GizmoLine]) -> bool {
+    if prev.len() != current.len() {
+        return false;
+    }
+    prev.iter().zip(current.iter()).all(|(a, b)| a == b)
 }
 
 fn clear_gizmo(
@@ -753,9 +1639,9 @@ fn collect_icon_gizmos(
     transforms: &mut Query<&mut BevyTransform>,
     camera_query: &Query<
         (Entity, Ref<BevyCamera>, Option<Ref<EditorPlayCamera>>),
-        With<EditorEntity>,
+        Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    light_query: &Query<(Entity, Ref<BevyLight>), With<EditorEntity>>,
+    light_query: &Query<(Entity, Ref<BevyLight>), Or<(With<EditorEntity>, With<SceneChild>)>>,
     icons_dirty: &mut bool,
 ) -> Vec<GizmoIcon> {
     let mut icons = Vec::new();
@@ -888,8 +1774,11 @@ fn pick_icon_entity(
     ray_origin: Vec3,
     ray_dir: Vec3,
     transforms: &Query<&BevyTransform>,
-    camera_query: &Query<(Entity, &BevyCamera, Option<&EditorPlayCamera>), With<EditorEntity>>,
-    light_query: &Query<(Entity, &BevyLight), With<EditorEntity>>,
+    camera_query: &Query<
+        (Entity, &BevyCamera, Option<&EditorPlayCamera>),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
+    light_query: &Query<(Entity, &BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
 ) -> Option<(Entity, f32)> {
     if !viewport_state.show_camera_gizmos
         && !viewport_state.show_directional_light_gizmos
@@ -1434,6 +2323,214 @@ fn ray_point_distance(ray_origin: Vec3, ray_dir: Vec3, point: Vec3) -> f32 {
     }
     let closest = ray_origin + ray_dir * t;
     closest.distance(point)
+}
+
+fn ray_segment_distance(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    start: Vec3,
+    end: Vec3,
+) -> Option<(f32, f32)> {
+    let dir = ray_dir.normalize_or_zero();
+    if dir.length_squared() < 1.0e-6 {
+        return None;
+    }
+    let seg = end - start;
+    let seg_len_sq = seg.length_squared();
+    if seg_len_sq < 1.0e-8 {
+        let dist = ray_point_distance(ray_origin, dir, start);
+        let ray_t = (start - ray_origin).dot(dir).max(0.0);
+        return Some((dist, ray_t));
+    }
+
+    let w = start - ray_origin;
+    let uv = dir.dot(seg);
+    let vv = seg_len_sq;
+    let uw = dir.dot(w);
+    let vw = seg.dot(w);
+    let denom = vv - uv * uv;
+    let mut t = if denom.abs() > 1.0e-6 {
+        (uw * uv - vw) / denom
+    } else {
+        0.0
+    };
+    t = t.clamp(0.0, 1.0);
+    let closest_seg = start + seg * t;
+    let mut ray_t = (closest_seg - ray_origin).dot(dir);
+    if ray_t < 0.0 {
+        ray_t = 0.0;
+    }
+    let closest_ray = ray_origin + dir * ray_t;
+    Some((closest_ray.distance(closest_seg), ray_t))
+}
+
+fn spline_plane_normal(plane: SplineDrawPlane, camera_transform: &Transform) -> Vec3 {
+    match plane {
+        SplineDrawPlane::WorldXZ => Vec3::Y,
+        SplineDrawPlane::View => camera_transform.forward().normalize_or_zero(),
+    }
+}
+
+fn extrude_spline_point(
+    spline: &mut Spline,
+    active_index: usize,
+    spline_transform: &Transform,
+    camera_transform: &Transform,
+    draw_plane: SplineDrawPlane,
+    handle_size_scale: f32,
+    handle_size_min: f32,
+) -> Option<usize> {
+    let count = spline.points.len();
+    if count == 0 {
+        return None;
+    }
+    let active_index = active_index.min(count.saturating_sub(1));
+    let spline_matrix = spline_transform.to_matrix();
+    let inv_spline_matrix = spline_matrix.inverse();
+    let active_world = spline_matrix.transform_point3(spline.points[active_index]);
+
+    let (prev_index, next_index) = if count > 1 {
+        if spline.closed {
+            (
+                Some((active_index + count - 1) % count),
+                Some((active_index + 1) % count),
+            )
+        } else {
+            (
+                if active_index > 0 {
+                    Some(active_index - 1)
+                } else {
+                    None
+                },
+                if active_index + 1 < count {
+                    Some(active_index + 1)
+                } else {
+                    None
+                },
+            )
+        }
+    } else {
+        (None, None)
+    };
+
+    let mut direction = if let (Some(prev), Some(next)) = (prev_index, next_index) {
+        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
+        let next_world = spline_matrix.transform_point3(spline.points[next]);
+        next_world - prev_world
+    } else if let Some(prev) = prev_index {
+        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
+        active_world - prev_world
+    } else if let Some(next) = next_index {
+        let next_world = spline_matrix.transform_point3(spline.points[next]);
+        active_world - next_world
+    } else {
+        camera_transform.forward()
+    };
+
+    if direction.length_squared() < 1.0e-6 {
+        direction = camera_transform.right();
+    }
+
+    let plane_normal = spline_plane_normal(draw_plane, camera_transform).normalize_or_zero();
+    let mut dir = direction - plane_normal * direction.dot(plane_normal);
+    if dir.length_squared() < 1.0e-6 {
+        let mut fallback = camera_transform.right();
+        if fallback.dot(plane_normal).abs() > 0.9 {
+            fallback = camera_transform.up();
+        }
+        dir = fallback - plane_normal * fallback.dot(plane_normal);
+    }
+    if dir.length_squared() < 1.0e-6 {
+        return None;
+    }
+    dir = dir.normalize();
+
+    let mut step = 0.0;
+    let mut samples = 0.0;
+    if let Some(prev) = prev_index {
+        let prev_world = spline_matrix.transform_point3(spline.points[prev]);
+        step += active_world.distance(prev_world);
+        samples += 1.0;
+    }
+    if let Some(next) = next_index {
+        let next_world = spline_matrix.transform_point3(spline.points[next]);
+        step += active_world.distance(next_world);
+        samples += 1.0;
+    }
+    if samples > 0.0 {
+        step /= samples;
+    }
+    if step <= 1.0e-4 {
+        let distance = camera_transform.position.distance(active_world).max(0.001);
+        step = (distance * handle_size_scale).max(handle_size_min);
+    }
+
+    let new_world = active_world + dir * step;
+    let new_local = inv_spline_matrix.transform_point3(new_world);
+    let insert_index = (active_index + 1).min(spline.points.len());
+    spline.points.insert(insert_index, new_local);
+    Some(insert_index)
+}
+
+fn build_spline_path_lines(spline: &Spline, transform: &Transform, samples: u32) -> Vec<GizmoLine> {
+    let mut lines = Vec::new();
+    if !spline.is_valid() {
+        return lines;
+    }
+
+    let matrix = transform.to_matrix();
+    let steps = samples.max(2);
+    let mut prev = matrix.transform_point3(spline.sample(0.0));
+    for i in 1..steps {
+        let t = i as f32 / (steps.saturating_sub(1) as f32);
+        let current = matrix.transform_point3(spline.sample(t));
+        lines.push(GizmoLine {
+            start: prev,
+            end: current,
+        });
+        prev = current;
+    }
+    if spline.closed {
+        let first = matrix.transform_point3(spline.sample(0.0));
+        lines.push(GizmoLine {
+            start: prev,
+            end: first,
+        });
+    }
+
+    lines
+}
+
+fn build_spline_handle_lines(
+    spline: &Spline,
+    transform: &Transform,
+    handle_size: f32,
+) -> Vec<GizmoLine> {
+    let mut lines = Vec::new();
+    let handle = handle_size.max(0.0);
+    if handle <= 0.0 {
+        return lines;
+    }
+
+    let matrix = transform.to_matrix();
+    let half = handle * 0.5;
+    for point in &spline.points {
+        let p = matrix.transform_point3(*point);
+        lines.push(GizmoLine {
+            start: p - Vec3::X * half,
+            end: p + Vec3::X * half,
+        });
+        lines.push(GizmoLine {
+            start: p - Vec3::Y * half,
+            end: p + Vec3::Y * half,
+        });
+        lines.push(GizmoLine {
+            start: p - Vec3::Z * half,
+            end: p + Vec3::Z * half,
+        });
+    }
+
+    lines
 }
 
 fn axis_direction(rotation: Quat, axis: GizmoAxis) -> Vec3 {

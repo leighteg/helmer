@@ -11,12 +11,15 @@ use crate::{
     systems::{
         renderer_system::{RenderDataSystem, RenderPacket},
         scene_system::SceneSpawningSystem,
+        spline_system::SplineFollowSystem,
     },
 };
 
 use std::{any::TypeId, collections::HashSet, sync::Arc};
 
+use helmer::provided::components::{SkinnedMeshRenderer, Spline, SplineFollower};
 use helmer::{
+    animation::Animator,
     provided::components::{ActiveCamera, Camera, Light, MeshRenderer, Transform},
     runtime::{
         asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager,
@@ -68,6 +71,46 @@ impl Component for ActiveCamera {
 }
 
 impl Component for Light {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl Component for SkinnedMeshRenderer {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl Component for Animator {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl Component for Spline {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl Component for SplineFollower {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -139,6 +182,14 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
             scheduler.register_system(
                 CleanupPhysicsSystem::default(),
                 4,
+                vec![],
+                HashSet::from([TypeId::of::<Transform>()]),
+                HashSet::from([TypeId::of::<Transform>()]),
+            );
+
+            scheduler.register_system(
+                SplineFollowSystem {},
+                3,
                 vec![],
                 HashSet::from([TypeId::of::<Transform>()]),
                 HashSet::from([TypeId::of::<Transform>()]),

@@ -4,7 +4,11 @@ use crate::ecs::{
     system::System,
 };
 use helmer::{
-    provided::components::{MeshRenderer, Transform},
+    animation::{
+        AnimationGraph, AnimationLayer, AnimationLibrary, AnimationNode, AnimationParameters,
+        AnimationState, AnimationStateMachine, Animator, BlendMode, BlendNode, ClipNode,
+    },
+    provided::components::{MeshRenderer, SkinnedMeshRenderer, Transform},
     runtime::{
         asset_server::{AssetServer, Handle, Scene},
         input_manager::InputManager,
@@ -12,6 +16,7 @@ use helmer::{
 };
 use parking_lot::Mutex;
 use proc::Component as ComponentDerive;
+use std::sync::Arc;
 use std::{any::TypeId, sync::Arc};
 use tracing::info;
 
@@ -77,10 +82,26 @@ impl System for SceneSpawningSystem {
                 let child_entity = ecs.create_entity();
                 let final_matrix = root_transform.to_matrix() * node.transform;
                 ecs.add_component(child_entity, Transform::from_matrix(final_matrix));
-                ecs.add_component(
-                    child_entity,
-                    MeshRenderer::new(node.mesh.id, node.material.id, true, true),
-                );
+                if let Some(skin) = node
+                    .skin_index
+                    .and_then(|idx| scene.0.skins.read().get(idx).cloned())
+                {
+                    ecs.add_component(
+                        child_entity,
+                        SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, true, true),
+                    );
+                    if let Some(anim_lib) = node
+                        .skin_index
+                        .and_then(|idx| scene.0.animations.read().get(idx).cloned())
+                    {
+                        ecs.add_component(child_entity, build_default_animator(anim_lib));
+                    }
+                } else {
+                    ecs.add_component(
+                        child_entity,
+                        MeshRenderer::new(node.mesh.id, node.material.id, true, true),
+                    );
+                }
                 ecs.add_component(
                     child_entity,
                     SceneChild {
@@ -92,5 +113,44 @@ impl System for SceneSpawningSystem {
 
             info!("Spawned scene {} for entity {}", scene.1, root_entity);
         }
+    }
+}
+
+fn build_default_animator(library: Arc<AnimationLibrary>) -> Animator {
+    let mut nodes = Vec::new();
+    if !library.clips.is_empty() {
+        nodes.push(AnimationNode::Clip(ClipNode {
+            clip_index: 0,
+            speed: 1.0,
+            looping: true,
+            time_offset: 0.0,
+        }));
+    } else {
+        nodes.push(AnimationNode::Blend(BlendNode {
+            children: Vec::new(),
+            normalize: true,
+            mode: BlendMode::Linear,
+        }));
+    }
+
+    let graph = AnimationGraph { library, nodes };
+    let state = AnimationState {
+        name: "Default".to_string(),
+        node: 0,
+    };
+    let state_machine = AnimationStateMachine::new(vec![state], Vec::new());
+    let layer = AnimationLayer {
+        name: "Base".to_string(),
+        weight: 1.0,
+        additive: false,
+        mask: Vec::new(),
+        graph,
+        state_machine,
+    };
+    Animator {
+        layers: vec![layer],
+        parameters: AnimationParameters::default(),
+        enabled: true,
+        time_scale: 1.0,
     }
 }

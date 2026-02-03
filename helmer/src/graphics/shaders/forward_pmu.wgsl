@@ -78,13 +78,17 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) tex_coord: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(4) joints: vec4<u32>,
+    @location(5) weights: vec4<f32>,
 }
 
 struct InstanceInput {
-    @location(5) model_matrix_col_0: vec4<f32>,
-    @location(6) model_matrix_col_1: vec4<f32>,
-    @location(7) model_matrix_col_2: vec4<f32>,
-    @location(8) model_matrix_col_3: vec4<f32>,
+    @location(6) model_matrix_col_0: vec4<f32>,
+    @location(7) model_matrix_col_1: vec4<f32>,
+    @location(8) model_matrix_col_2: vec4<f32>,
+    @location(9) model_matrix_col_3: vec4<f32>,
+    @location(10) skin_offset: u32,
+    @location(11) skin_count: u32,
 }
 
 struct VertexOutput {

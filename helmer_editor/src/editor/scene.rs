@@ -1159,7 +1159,9 @@ pub fn reset_editor_scene(world: &mut World) {
 
     if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
         timeline.groups.clear();
-        timeline.selected = None;
+        timeline.selected.clear();
+        timeline.selection_drag = None;
+        timeline.selection_drag_pending = None;
         timeline.apply_requested = true;
         timeline.current_time = 0.0;
         timeline.next_id = 1;

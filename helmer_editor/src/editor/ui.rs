@@ -58,9 +58,10 @@ use crate::editor::{
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
-        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation, TimelineSelection,
-        TimelineTrack, TimelineTrackGroup, TransformKey, TransformTrack,
-        build_clip_from_pose_track, build_pose_track_from_clip,
+        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineDragSelect, TimelineDragSelectMode,
+        TimelineDragSelectPending, TimelineInterpolation, TimelineSelection, TimelineTrack,
+        TimelineTrackGroup, TransformKey, TransformTrack, build_clip_from_pose_track,
+        build_pose_track_from_clip,
     },
 };
 
@@ -7795,6 +7796,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
             apply_requested,
             next_id,
             middle_drag_active,
+            selection_drag,
+            selection_drag_pending,
         } = &mut *timeline;
 
         let mut alloc_id = || {
@@ -8374,10 +8377,12 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
@@ -8387,10 +8392,14 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 )
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -8580,10 +8589,12 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
@@ -8593,10 +8604,14 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 )
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -8745,20 +8760,26 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
                                                 .selectable_label(selected_key, format!("Key {}", key.id))
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -8836,20 +8857,26 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
                                                 .selectable_label(selected_key, format!("Key {}", key.id))
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -8927,20 +8954,26 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
                                                 .selectable_label(selected_key, format!("Key {}", key.id))
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -9025,10 +9058,12 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Keyframes", |ui| {
                                     let mut remove_key: Option<u64> = None;
                                     for key in track.keys.iter_mut() {
-                                        let selected_key = matches!(
+                                        let selected_key = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Key { track_id, key_id })
-                                                if *track_id == track.id && *key_id == key.id
+                                            TimelineSelection::Key {
+                                                track_id: track.id,
+                                                key_id: key.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
@@ -9038,10 +9073,14 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 )
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Key {
-                                                    track_id: track.id,
-                                                    key_id: key.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Key {
+                                                        track_id: track.id,
+                                                        key_id: key.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut time = key.time;
                                             if ui
@@ -9124,10 +9163,12 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.collapsing("Segments", |ui| {
                                     let mut remove_segment: Option<u64> = None;
                                     for segment in track.segments.iter_mut() {
-                                        let selected_segment = matches!(
+                                        let selected_segment = selection_contains(
                                             selected,
-                                            Some(TimelineSelection::Clip { track_id, segment_id })
-                                                if *track_id == track.id && *segment_id == segment.id
+                                            TimelineSelection::Clip {
+                                                track_id: track.id,
+                                                segment_id: segment.id,
+                                            },
                                         );
                                         ui.horizontal(|ui| {
                                             if ui
@@ -9137,10 +9178,14 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 )
                                                 .clicked()
                                             {
-                                                *selected = Some(TimelineSelection::Clip {
-                                                    track_id: track.id,
-                                                    segment_id: segment.id,
-                                                });
+                                                apply_selection_click(
+                                                    selected,
+                                                    TimelineSelection::Clip {
+                                                        track_id: track.id,
+                                                        segment_id: segment.id,
+                                                    },
+                                                    ui.ctx().input(|input| input.modifiers),
+                                                );
                                             }
                                             let mut start = segment.start;
                                             if ui
@@ -9215,6 +9260,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     *frame_rate,
                     selected,
                     apply_requested,
+                    selection_drag,
+                    selection_drag_pending,
                 );
             } else {
                 ui.label("Select or pin an entity to edit timeline tracks.");
@@ -9235,7 +9282,7 @@ fn timeline_handle_key(
     key_rect: Rect,
     color: Color32,
     row_timeline_rect: Rect,
-    selected: &mut Option<TimelineSelection>,
+    selected: &mut Vec<TimelineSelection>,
     current_time: &mut f32,
     apply_requested: &mut bool,
     clicked_key: &mut bool,
@@ -9246,11 +9293,7 @@ fn timeline_handle_key(
     duration: f32,
     allow_interactions: bool,
 ) -> (Option<f32>, bool) {
-    let selected_key = matches!(
-        selected,
-        Some(TimelineSelection::Key { track_id: sel_track, key_id: sel_key })
-            if *sel_track == track_id && *sel_key == key_id
-    );
+    let selected_key = selection_contains(selected, TimelineSelection::Key { track_id, key_id });
     painter.rect_filled(key_rect, 2.0, color);
     if selected_key {
         painter.rect_stroke(
@@ -9268,8 +9311,22 @@ fn timeline_handle_key(
         ui.make_persistent_id((track_id, key_id, "key")),
         Sense::click_and_drag(),
     );
-    if response.clicked() || response.secondary_clicked() {
-        *selected = Some(TimelineSelection::Key { track_id, key_id });
+    let modifiers = ui.ctx().input(|input| input.modifiers);
+    if response.clicked() {
+        apply_selection_click(
+            selected,
+            TimelineSelection::Key { track_id, key_id },
+            modifiers,
+        );
+        *clicked_key = true;
+    } else if response.secondary_clicked() {
+        if !selected_key {
+            apply_selection_click(
+                selected,
+                TimelineSelection::Key { track_id, key_id },
+                modifiers,
+            );
+        }
         *clicked_key = true;
     }
     let mut delete = false;
@@ -9306,8 +9363,10 @@ fn draw_timeline_canvas(
     middle_drag_active: &mut bool,
     snap_to_frame: bool,
     frame_rate: f32,
-    selected: &mut Option<TimelineSelection>,
+    selected: &mut Vec<TimelineSelection>,
     apply_requested: &mut bool,
+    selection_drag: &mut Option<TimelineDragSelect>,
+    selection_drag_pending: &mut Option<TimelineDragSelectPending>,
 ) {
     let track_count = group.tracks.len().max(1);
     let row_height = 24.0f32;
@@ -9419,6 +9478,20 @@ fn draw_timeline_canvas(
         Stroke::new(2.0, Color32::from_rgb(200, 160, 90)),
     );
 
+    let modifiers = ui.ctx().input(|input| input.modifiers);
+    let (primary_down, primary_pressed) = ui.ctx().input(|input| {
+        (
+            input.pointer.button_down(PointerButton::Primary),
+            input.pointer.button_pressed(PointerButton::Primary),
+        )
+    });
+    let pointer_in_timeline = pointer_pos
+        .map(|pos| timeline_rect.contains(pos))
+        .unwrap_or(false);
+    let pointer_in_ruler = pointer_pos
+        .map(|pos| ruler_rect.contains(pos))
+        .unwrap_or(false);
+
     let mut clicked_key = false;
     let allow_interactions = !*middle_drag_active;
     let mut playhead_dragging = false;
@@ -9426,6 +9499,9 @@ fn draw_timeline_canvas(
         Pos2::new(time_x - 4.0, ruler_rect.top()),
         Pos2::new(time_x + 4.0, ruler_rect.bottom()),
     );
+    let pointer_over_playhead = pointer_pos
+        .map(|pos| playhead_handle_rect.contains(pos))
+        .unwrap_or(false);
     let ruler_response = if allow_interactions {
         Some(ui.interact(
             ruler_rect,
@@ -9459,6 +9535,16 @@ fn draw_timeline_canvas(
             }
         }
     }
+
+    let mut key_hits: Vec<(TimelineSelection, Rect)> = Vec::new();
+    let mut pointer_over_key = false;
+    let mut pointer_over_segment = false;
+    let mut record_key_hit = |track_id: u64, key_id: u64, rect: Rect| {
+        key_hits.push((TimelineSelection::Key { track_id, key_id }, rect));
+        if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+            pointer_over_key = true;
+        }
+    };
 
     for (index, track) in group.tracks.iter_mut().enumerate() {
         let row_top = rect.min.y + ruler_height + index as f32 * row_height;
@@ -9496,6 +9582,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9550,6 +9637,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9604,6 +9692,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9658,6 +9747,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9712,6 +9802,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9766,6 +9857,7 @@ fn draw_timeline_canvas(
                     if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
                         pointer_on_key = true;
                     }
+                    record_key_hit(track.id, key.id, rect);
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9824,12 +9916,15 @@ fn draw_timeline_canvas(
                         .unwrap_or(false)
                     {
                         pointer_on_segment = true;
+                        pointer_over_segment = true;
                     }
                     painter.rect_filled(seg_rect, 2.0, Color32::from_rgb(120, 220, 140));
-                    let selected_segment = matches!(
+                    let selected_segment = selection_contains(
                         selected,
-                        Some(TimelineSelection::Clip { track_id, segment_id })
-                            if *track_id == track.id && *segment_id == segment.id
+                        TimelineSelection::Clip {
+                            track_id: track.id,
+                            segment_id: segment.id,
+                        },
                     );
                     if selected_segment {
                         painter.rect_stroke(
@@ -9846,10 +9941,14 @@ fn draw_timeline_canvas(
                             Sense::click_and_drag(),
                         );
                         if response.clicked() || response.secondary_clicked() {
-                            *selected = Some(TimelineSelection::Clip {
-                                track_id: track.id,
-                                segment_id: segment.id,
-                            });
+                            apply_selection_click(
+                                selected,
+                                TimelineSelection::Clip {
+                                    track_id: track.id,
+                                    segment_id: segment.id,
+                                },
+                                ui.ctx().input(|input| input.modifiers),
+                            );
                             clicked_key = true;
                         }
                         response.context_menu(|ui| {
@@ -9887,7 +9986,12 @@ fn draw_timeline_canvas(
         let pointer_on_playhead = pointer_pos
             .map(|pos| playhead_handle_rect.contains(pos))
             .unwrap_or(false);
-        if allow_interactions && !pointer_on_item && !playhead_dragging && !pointer_on_playhead {
+        if allow_interactions
+            && selection_drag.is_none()
+            && !pointer_on_item
+            && !playhead_dragging
+            && !pointer_on_playhead
+        {
             let response = ui.interact(
                 row_timeline_rect,
                 ui.make_persistent_id((track.id(), "row")),
@@ -9903,6 +10007,79 @@ fn draw_timeline_canvas(
             }
         }
     }
+
+    let pointer_over_item = pointer_over_key || pointer_over_segment;
+    if allow_interactions {
+        if let Some(drag) = selection_drag.as_mut() {
+            if primary_down {
+                if let Some(pos) = pointer_pos {
+                    drag.current = glam::Vec2::new(pos.x, pos.y);
+                }
+                apply_drag_selection(selected, drag, &key_hits);
+            } else {
+                *selection_drag = None;
+            }
+        } else {
+            let drag_threshold = 4.0f32;
+            if let Some(pending) = selection_drag_pending.as_mut() {
+                if primary_down {
+                    if let Some(pos) = pointer_pos {
+                        let current = glam::Vec2::new(pos.x, pos.y);
+                        let delta = current - pending.start;
+                        if delta.length() >= drag_threshold {
+                            *selection_drag = Some(TimelineDragSelect {
+                                start: pending.start,
+                                current,
+                                mode: pending.mode,
+                                base_selection: pending.base_selection.clone(),
+                            });
+                            *selection_drag_pending = None;
+                            if let Some(drag) = selection_drag.as_ref() {
+                                apply_drag_selection(selected, drag, &key_hits);
+                            }
+                        }
+                    }
+                } else {
+                    *selection_drag_pending = None;
+                }
+            } else if primary_pressed
+                && pointer_in_timeline
+                && !pointer_in_ruler
+                && !pointer_over_item
+                && !clicked_key
+                && !pointer_over_playhead
+            {
+                if let Some(pos) = pointer_pos {
+                    let mode = if modifiers.ctrl || modifiers.command {
+                        TimelineDragSelectMode::Toggle
+                    } else if modifiers.shift {
+                        TimelineDragSelectMode::Add
+                    } else {
+                        TimelineDragSelectMode::Replace
+                    };
+                    *selection_drag_pending = Some(TimelineDragSelectPending {
+                        start: glam::Vec2::new(pos.x, pos.y),
+                        mode,
+                        base_selection: selected.clone(),
+                    });
+                }
+            }
+        }
+    } else {
+        *selection_drag = None;
+        *selection_drag_pending = None;
+    }
+
+    if let Some(drag) = selection_drag.as_ref() {
+        let rect = selection_drag_rect(drag);
+        painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(80, 160, 255, 24));
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(1.0, Color32::from_rgb(120, 180, 255)),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 fn snap_time(time: f32, snap_to_frame: bool, frame_rate: f32) -> f32 {
@@ -9911,6 +10088,91 @@ fn snap_time(time: f32, snap_to_frame: bool, frame_rate: f32) -> f32 {
         frame / frame_rate
     } else {
         time
+    }
+}
+
+fn selection_contains(selected: &[TimelineSelection], target: TimelineSelection) -> bool {
+    selected.iter().any(|entry| *entry == target)
+}
+
+fn selection_add(selected: &mut Vec<TimelineSelection>, target: TimelineSelection) {
+    if !selection_contains(selected, target) {
+        selected.push(target);
+    }
+}
+
+fn selection_remove(selected: &mut Vec<TimelineSelection>, target: TimelineSelection) {
+    selected.retain(|entry| *entry != target);
+}
+
+fn selection_set_single(selected: &mut Vec<TimelineSelection>, target: TimelineSelection) {
+    selected.clear();
+    selected.push(target);
+}
+
+fn selection_toggle(selected: &mut Vec<TimelineSelection>, target: TimelineSelection) {
+    if selection_contains(selected, target) {
+        selection_remove(selected, target);
+    } else {
+        selection_add(selected, target);
+    }
+}
+
+fn apply_selection_click(
+    selected: &mut Vec<TimelineSelection>,
+    target: TimelineSelection,
+    modifiers: Modifiers,
+) {
+    let toggle = modifiers.ctrl || modifiers.command;
+    let additive = modifiers.shift;
+    if toggle {
+        selection_toggle(selected, target);
+    } else if additive {
+        selection_add(selected, target);
+    } else {
+        selection_set_single(selected, target);
+    }
+}
+
+fn selection_drag_rect(drag: &TimelineDragSelect) -> Rect {
+    let start = Pos2::new(drag.start.x, drag.start.y);
+    let current = Pos2::new(drag.current.x, drag.current.y);
+    Rect::from_two_pos(start, current)
+}
+
+fn apply_drag_selection(
+    selected: &mut Vec<TimelineSelection>,
+    drag: &TimelineDragSelect,
+    key_hits: &[(TimelineSelection, Rect)],
+) {
+    let rect = selection_drag_rect(drag);
+    let hits: Vec<TimelineSelection> = key_hits
+        .iter()
+        .filter_map(|(selection, hit_rect)| {
+            if rect.intersects(*hit_rect) {
+                Some(*selection)
+            } else {
+                None
+            }
+        })
+        .collect();
+    match drag.mode {
+        TimelineDragSelectMode::Replace => {
+            selected.clear();
+            selected.extend(hits);
+        }
+        TimelineDragSelectMode::Add => {
+            *selected = drag.base_selection.clone();
+            for hit in hits {
+                selection_add(selected, hit);
+            }
+        }
+        TimelineDragSelectMode::Toggle => {
+            *selected = drag.base_selection.clone();
+            for hit in hits {
+                selection_toggle(selected, hit);
+            }
+        }
     }
 }
 

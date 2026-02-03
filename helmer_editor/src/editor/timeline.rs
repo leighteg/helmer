@@ -23,7 +23,9 @@ pub struct EditorTimelineState {
     pub new_clip_speed: f32,
     pub new_clip_name: String,
     pub groups: Vec<TimelineTrackGroup>,
-    pub selected: Option<TimelineSelection>,
+    pub selected: Vec<TimelineSelection>,
+    pub selection_drag: Option<TimelineDragSelect>,
+    pub selection_drag_pending: Option<TimelineDragSelectPending>,
     pub apply_requested: bool,
     pub middle_drag_active: bool,
     pub(crate) next_id: u64,
@@ -48,9 +50,11 @@ impl Default for EditorTimelineState {
             new_clip_speed: 1.0,
             new_clip_name: "New Clip".to_string(),
             groups: Vec::new(),
-            selected: None,
+            selected: Vec::new(),
             apply_requested: true,
             middle_drag_active: false,
+            selection_drag: None,
+            selection_drag_pending: None,
             next_id: 1,
         }
     }
@@ -313,10 +317,32 @@ pub struct ClipSegment {
     pub looping: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimelineSelection {
     Key { track_id: u64, key_id: u64 },
     Clip { track_id: u64, segment_id: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineDragSelectMode {
+    Replace,
+    Add,
+    Toggle,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineDragSelect {
+    pub start: glam::Vec2,
+    pub current: glam::Vec2,
+    pub mode: TimelineDragSelectMode,
+    pub base_selection: Vec<TimelineSelection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TimelineDragSelectPending {
+    pub start: glam::Vec2,
+    pub mode: TimelineDragSelectMode,
+    pub base_selection: Vec<TimelineSelection>,
 }
 
 pub fn timeline_playback_system(

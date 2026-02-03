@@ -43,8 +43,8 @@ use crate::editor::{
     gizmos::EditorGizmoState,
     layout_window_ids, mark_undo_clean,
     project::{
-        EditorProject, create_project, default_material_template, default_scene_template,
-        default_script_template_full, load_project, save_recent_projects,
+        EditorProject, create_project, default_animation_template, default_material_template,
+        default_scene_template, default_script_template_full, load_project, save_recent_projects,
     },
     push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
@@ -1504,7 +1504,7 @@ pub fn apply_scene_child_animations_system(
                 .animation
                 .clips
                 .iter()
-                .map(AnimationClipData::to_clip)
+                .map(|clip| clip.to_clip_for_skeleton(skeleton))
                 .collect::<Vec<_>>();
             apply_custom_clips_to_animator(&mut animator, &custom_clips);
         }
@@ -2241,6 +2241,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Scene => directory.join(format!("{}.hscene.ron", name)),
         AssetCreateKind::Material => directory.join(format!("{}.ron", name)),
         AssetCreateKind::Script => directory.join(format!("{}.lua", name)),
+        AssetCreateKind::Animation => directory.join(format!("{}.hanim.ron", name)),
     };
 
     let target_path = unique_path(&target_path);
@@ -2255,6 +2256,9 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         }
         AssetCreateKind::Script => {
             fs::write(&target_path, default_script_template_full()).map_err(|err| err.to_string())
+        }
+        AssetCreateKind::Animation => {
+            fs::write(&target_path, default_animation_template()).map_err(|err| err.to_string())
         }
     };
 

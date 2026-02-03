@@ -53,15 +53,18 @@ use crate::editor::{
     push_undo_snapshot, save_layouts,
     scene::{
         EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, WorldState,
-        next_available_scene_path,
+        animation_asset_from_group, apply_custom_clips_to_animator,
+        merge_animation_asset_into_timeline, next_available_scene_path,
+        read_animation_asset_document, write_animation_asset_document,
     },
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
-        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineDragSelect, TimelineDragSelectMode,
-        TimelineDragSelectPending, TimelineInterpolation, TimelineSelection, TimelineTrack,
-        TimelineTrackGroup, TransformKey, TransformTrack, build_clip_from_pose_track,
-        build_pose_track_from_clip,
+        PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineClipExpandRequest, TimelineDragSelect,
+        TimelineDragSelectMode, TimelineDragSelectPending, TimelineInterpolation,
+        TimelineSelection, TimelineTrack, TimelineTrackGroup, TransformKey, TransformTrack,
+        build_clip_from_clip_track, build_clip_from_pose_track, build_pose_track_from_clip,
+        build_pose_track_from_clip_segment,
     },
 };
 
@@ -3026,6 +3029,28 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             push_undo_snapshot(world, "Remove Animator");
         } else {
             let mut animator_changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Animation Asset");
+                let apply_button = ui.button("Apply...");
+                if apply_button.clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Animation", &["ron"])
+                        .pick_file()
+                    {
+                        apply_animation_asset_to_entity(world, entity, &path);
+                    }
+                }
+                if let Some(payload) = apply_button.dnd_release_payload::<AssetDragPayload>() {
+                    if let Some(path) = payload_primary_path(&payload) {
+                        if is_animation_file(path) {
+                            apply_animation_asset_to_entity(world, entity, path);
+                        } else {
+                            set_status(world, "Drop a .hanim.ron animation asset".to_string());
+                        }
+                    }
+                }
+                highlight_drop_target(ui, &apply_button);
+            });
             world.resource_scope::<AnimatorUiState, _>(|world, mut ui_state| {
                 let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
                     return;
@@ -5241,6 +5266,8 @@ fn asset_tag_for(entry: &AssetEntry) -> &'static str {
                 .unwrap_or("");
             if name.eq_ignore_ascii_case("helmer_project.ron") {
                 "[CFG]"
+            } else if name.ends_with(".hanim.ron") {
+                "[ANIM]"
             } else if name.ends_with(".hscene.ron") {
                 "[SCENE]"
             } else {
@@ -5259,6 +5286,7 @@ fn asset_thumbnail_tag(entry: &AssetEntry) -> &'static str {
         "[DIR]" => "DIR",
         "[SCENE]" => "SCN",
         "[MAT]" => "MAT",
+        "[ANIM]" => "ANIM",
         "[SCRIPT]" => "LUA",
         "[MODEL]" => "MOD",
         "[TEX]" => "TEX",
@@ -5277,7 +5305,18 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
     };
 
     match ext.to_ascii_lowercase().as_str() {
-        "ron" => Color32::from_rgb(120, 90, 60),
+        "ron" => {
+            let name = entry
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.ends_with(".hanim.ron") {
+                Color32::from_rgb(70, 110, 150)
+            } else {
+                Color32::from_rgb(120, 90, 60)
+            }
+        }
         "lua" => Color32::from_rgb(60, 110, 70),
         "glb" | "gltf" => Color32::from_rgb(90, 70, 130),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => Color32::from_rgb(120, 80, 80),
@@ -5337,6 +5376,11 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
 
     if is_material_file(path) && ui.button("Open in Editor").clicked() {
         open_material_editor_tab(world, path.to_path_buf());
+        ui.close_menu();
+    }
+
+    if is_animation_file(path) && ui.button("Open in Editor").clicked() {
+        open_in_external_editor(world, path);
         ui.close_menu();
     }
 
@@ -5410,6 +5454,17 @@ fn asset_create_menu(world: &mut World, ui: &mut Ui, path: &Path) {
                 directory: path.to_path_buf(),
                 name: "new_script".to_string(),
                 kind: AssetCreateKind::Script,
+            },
+        );
+        ui.close_menu();
+    }
+    if ui.button("New Animation").clicked() {
+        push_command(
+            world,
+            EditorCommand::CreateAsset {
+                directory: path.to_path_buf(),
+                name: "new_animation".to_string(),
+                kind: AssetCreateKind::Animation,
             },
         );
         ui.close_menu();
@@ -5531,6 +5586,8 @@ fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
         );
     } else if is_material_file(&entry.path) {
         open_material_editor_tab(world, entry.path.clone());
+    } else if is_animation_file(&entry.path) {
+        open_in_external_editor(world, &entry.path);
     } else if is_script_file(&entry.path) {
         open_in_external_editor(world, &entry.path);
     }
@@ -7530,6 +7587,30 @@ fn is_scene_file(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
+fn is_animation_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("ron"))
+        .unwrap_or(false)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.ends_with(".hanim.ron"))
+            .unwrap_or(false)
+}
+
+fn ensure_animation_asset_extension(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str.ends_with(".hanim.ron") {
+        return path.to_path_buf();
+    }
+    if path_str.ends_with(".ron") {
+        let trimmed = path_str.trim_end_matches(".ron");
+        return PathBuf::from(format!("{}.hanim.ron", trimmed));
+    }
+    PathBuf::from(format!("{}.hanim.ron", path_str))
+}
+
 fn is_model_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -7550,7 +7631,9 @@ fn is_material_file(path: &Path) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
-    !(name.eq_ignore_ascii_case("helmer_project.ron") || name.ends_with(".hscene.ron"))
+    !(name.eq_ignore_ascii_case("helmer_project.ron")
+        || name.ends_with(".hscene.ron")
+        || name.ends_with(".hanim.ron"))
 }
 
 fn is_script_file(path: &Path) -> bool {
@@ -7576,6 +7659,38 @@ fn set_selection(world: &mut World, entity: Option<Entity>) {
     if let Some(mut selection) = world.get_resource_mut::<InspectorSelectedEntityResource>() {
         selection.0 = entity;
     }
+}
+
+fn apply_animation_asset_to_entity(world: &mut World, entity: Entity, path: &Path) {
+    let document = match read_animation_asset_document(path) {
+        Ok(document) => document,
+        Err(err) => {
+            set_status(world, format!("Failed to load animation asset: {}", err));
+            return;
+        }
+    };
+
+    let skeleton = world
+        .get::<BevySkinnedMeshRenderer>(entity)
+        .map(|skinned| skinned.0.skin.skeleton.clone());
+    let skeleton_ref = skeleton.as_deref();
+    let name = world
+        .get::<Name>(entity)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("Entity {}", entity.index()));
+
+    let clips = if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
+        merge_animation_asset_into_timeline(&mut timeline, entity, name, &document, skeleton_ref)
+    } else {
+        Vec::new()
+    };
+
+    if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) {
+        apply_custom_clips_to_animator(&mut animator, &clips);
+    }
+
+    push_undo_snapshot(world, "Apply Animation Asset");
+    set_status(world, format!("Applied animation asset {}", path.display()));
 }
 
 fn set_current_dir(world: &mut World, path: PathBuf) {
@@ -7798,6 +7913,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
             middle_drag_active,
             selection_drag,
             selection_drag_pending,
+            pending_clip_expand,
         } = &mut *timeline;
 
         let mut alloc_id = || {
@@ -7872,6 +7988,52 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     });
                     groups.len().saturating_sub(1)
                 };
+
+                {
+                    let group = &mut groups[group_index];
+                    ui.horizontal(|ui| {
+                        if ui.button("Export Anim Asset").clicked() {
+                            let project = world.get_resource::<EditorProject>().cloned();
+                            let mut dialog =
+                                rfd::FileDialog::new().add_filter("Animation", &["ron"]);
+                            if let Some(project) = project.as_ref() {
+                                if let (Some(root), Some(config)) =
+                                    (project.root.as_ref(), project.config.as_ref())
+                                {
+                                    dialog = dialog.set_directory(config.assets_root(root));
+                                }
+                            }
+                            let default_name =
+                                format!("{}.hanim.ron", name.replace(' ', "_").to_lowercase());
+                            if let Some(path) = dialog.set_file_name(default_name).save_file() {
+                                let path = ensure_animation_asset_extension(&path);
+                                let skeleton = world
+                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .map(|skinned| skinned.0.skin.skeleton.as_ref());
+                                let doc = animation_asset_from_group(group, skeleton);
+                                match write_animation_asset_document(&path, &doc) {
+                                    Ok(()) => {
+                                        if let Some(mut assets) =
+                                            world.get_resource_mut::<AssetBrowserState>()
+                                        {
+                                            assets.refresh_requested = true;
+                                        }
+                                        set_status(
+                                            world,
+                                            format!("Saved animation asset {}", path.display()),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        set_status(
+                                            world,
+                                            format!("Failed to save animation asset: {}", err),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
 
                 let selected_joint = world
                     .get_resource::<PoseEditorState>()
@@ -9160,6 +9322,41 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                     }
                                 }
 
+                                ui.horizontal(|ui| {
+                                    ui.label("Bake Name");
+                                    ui.text_edit_singleline(new_clip_name);
+                                    if ui.button("Bake Arrangement").clicked() {
+                                        if let (Some(skinned), Some(animator)) = (
+                                            world.get::<BevySkinnedMeshRenderer>(entity),
+                                            world.get::<BevyAnimator>(entity),
+                                        ) {
+                                            let skeleton = &skinned.0.skin.skeleton;
+                                            if let Some(clip) = build_clip_from_clip_track(
+                                                new_clip_name.clone(),
+                                                track,
+                                                animator,
+                                                skeleton,
+                                                *frame_rate,
+                                            ) {
+                                                baked_clips.push(clip);
+                                                *apply_requested = true;
+                                            } else {
+                                                set_status(
+                                                    world,
+                                                    "Unable to bake arrangement (missing clips?)"
+                                                        .to_string(),
+                                                );
+                                            }
+                                        } else {
+                                            set_status(
+                                                world,
+                                                "Select a skinned entity with an animator to bake"
+                                                    .to_string(),
+                                            );
+                                        }
+                                    }
+                                });
+
                                 ui.collapsing("Segments", |ui| {
                                     let mut remove_segment: Option<u64> = None;
                                     for segment in track.segments.iter_mut() {
@@ -9262,7 +9459,52 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     apply_requested,
                     selection_drag,
                     selection_drag_pending,
+                    pending_clip_expand,
                 );
+
+                if let Some(request) = pending_clip_expand.take() {
+                    let mut target_segment: Option<ClipSegment> = None;
+                    for track in group.tracks.iter() {
+                        if track.id() == request.track_id {
+                            if let TimelineTrack::Clip(track) = track {
+                                target_segment = track
+                                    .segments
+                                    .iter()
+                                    .find(|segment| segment.id == request.segment_id)
+                                    .cloned();
+                            }
+                            break;
+                        }
+                    }
+
+                    if let Some(segment) = target_segment {
+                        if let (Some(skinned), Some(animator)) = (
+                            world.get::<BevySkinnedMeshRenderer>(entity),
+                            world.get::<BevyAnimator>(entity),
+                        ) {
+                            let skeleton = &skinned.0.skin.skeleton;
+                            let name = format!("{} (Expanded)", segment.clip_name);
+                            if let Some(track) = build_pose_track_from_clip_segment(
+                                alloc_id(),
+                                name,
+                                &segment,
+                                animator,
+                                skeleton,
+                                *frame_rate,
+                                &mut alloc_id,
+                            ) {
+                                group.tracks.push(TimelineTrack::Pose(track));
+                                *apply_requested = true;
+                            }
+                        } else {
+                            set_status(
+                                world,
+                                "Select a skinned entity with an animator to expand clips"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
             } else {
                 ui.label("Select or pin an entity to edit timeline tracks.");
             }
@@ -9367,6 +9609,7 @@ fn draw_timeline_canvas(
     apply_requested: &mut bool,
     selection_drag: &mut Option<TimelineDragSelect>,
     selection_drag_pending: &mut Option<TimelineDragSelectPending>,
+    pending_clip_expand: &mut Option<TimelineClipExpandRequest>,
 ) {
     let track_count = group.tracks.len().max(1);
     let row_height = 24.0f32;
@@ -9949,6 +10192,13 @@ fn draw_timeline_canvas(
                                 },
                                 ui.ctx().input(|input| input.modifiers),
                             );
+                            clicked_key = true;
+                        }
+                        if response.double_clicked() {
+                            *pending_clip_expand = Some(TimelineClipExpandRequest {
+                                track_id: track.id,
+                                segment_id: segment.id,
+                            });
                             clicked_key = true;
                         }
                         response.context_menu(|ui| {

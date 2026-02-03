@@ -26,6 +26,7 @@ pub struct EditorTimelineState {
     pub selected: Vec<TimelineSelection>,
     pub selection_drag: Option<TimelineDragSelect>,
     pub selection_drag_pending: Option<TimelineDragSelectPending>,
+    pub pending_clip_expand: Option<TimelineClipExpandRequest>,
     pub apply_requested: bool,
     pub middle_drag_active: bool,
     pub(crate) next_id: u64,
@@ -55,6 +56,7 @@ impl Default for EditorTimelineState {
             middle_drag_active: false,
             selection_drag: None,
             selection_drag_pending: None,
+            pending_clip_expand: None,
             next_id: 1,
         }
     }
@@ -343,6 +345,12 @@ pub struct TimelineDragSelectPending {
     pub start: glam::Vec2,
     pub mode: TimelineDragSelectMode,
     pub base_selection: Vec<TimelineSelection>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimelineClipExpandRequest {
+    pub track_id: u64,
+    pub segment_id: u64,
 }
 
 pub fn timeline_playback_system(
@@ -871,6 +879,15 @@ fn apply_joint_sample(
     }
 }
 
+const BAKE_EPS: f32 = 1e-4;
+
+fn bake_transform_differs(a: &Transform, b: &Transform) -> bool {
+    let pos_diff = (a.position - b.position).length_squared();
+    let scale_diff = (a.scale - b.scale).length_squared();
+    let rot_diff = 1.0 - a.rotation.dot(b.rotation).abs();
+    pos_diff > (BAKE_EPS * BAKE_EPS) || scale_diff > (BAKE_EPS * BAKE_EPS) || rot_diff > BAKE_EPS
+}
+
 fn apply_additive_pose(target: &mut Pose, additive: &Pose, skeleton: &Skeleton, weight: f32) {
     let weight = weight.clamp(0.0, 1.0);
     if weight <= 0.0 {
@@ -977,6 +994,132 @@ pub fn build_clip_from_pose_track(
         duration,
         channels,
     })
+}
+
+pub fn build_clip_from_clip_track(
+    name: String,
+    track: &ClipTrack,
+    animator: &BevyAnimator,
+    skeleton: &Skeleton,
+    frame_rate: f32,
+) -> Option<AnimationClip> {
+    if track.segments.is_empty() {
+        return None;
+    }
+    let duration = track
+        .segments
+        .iter()
+        .map(|segment| segment.start + segment.duration)
+        .fold(0.0, f32::max);
+    if duration <= 0.0 {
+        return None;
+    }
+
+    let joint_count = skeleton.joint_count();
+    let mut translation_channels = vec![Vec::new(); joint_count];
+    let mut rotation_channels = vec![Vec::new(); joint_count];
+    let mut scale_channels = vec![Vec::new(); joint_count];
+    let mut last: Vec<Option<Transform>> = vec![None; joint_count];
+
+    let sample_rate = frame_rate.max(1.0);
+    let step = 1.0 / sample_rate;
+    let samples = (duration * sample_rate).ceil() as usize;
+    let bind_pose = Pose::from_skeleton(skeleton);
+
+    for i in 0..=samples {
+        let time = (i as f32 * step).min(duration);
+        let mut pose = sample_clip_track(track, Some(animator), skeleton, time)
+            .unwrap_or_else(|| bind_pose.clone());
+        if pose.locals.len() != joint_count {
+            pose.reset_to_bind(skeleton);
+        }
+        for joint_index in 0..joint_count {
+            let transform = pose.locals[joint_index];
+            let differs = last[joint_index]
+                .as_ref()
+                .map(|prev| bake_transform_differs(prev, &transform))
+                .unwrap_or(true);
+            if differs {
+                translation_channels[joint_index].push((time, transform.position));
+                rotation_channels[joint_index].push((time, transform.rotation));
+                scale_channels[joint_index].push((time, transform.scale));
+                last[joint_index] = Some(transform);
+            }
+        }
+    }
+
+    let mut channels = Vec::new();
+    for joint_index in 0..joint_count {
+        if !translation_channels[joint_index].is_empty() {
+            channels.push(helmer::animation::AnimationChannel::Translation {
+                target: joint_index,
+                interpolation: helmer::animation::Interpolation::Linear,
+                keyframes: translation_channels[joint_index]
+                    .iter()
+                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .collect(),
+            });
+        }
+        if !rotation_channels[joint_index].is_empty() {
+            channels.push(helmer::animation::AnimationChannel::Rotation {
+                target: joint_index,
+                interpolation: helmer::animation::Interpolation::Linear,
+                keyframes: rotation_channels[joint_index]
+                    .iter()
+                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .collect(),
+            });
+        }
+        if !scale_channels[joint_index].is_empty() {
+            channels.push(helmer::animation::AnimationChannel::Scale {
+                target: joint_index,
+                interpolation: helmer::animation::Interpolation::Linear,
+                keyframes: scale_channels[joint_index]
+                    .iter()
+                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .collect(),
+            });
+        }
+    }
+
+    Some(AnimationClip {
+        name,
+        duration,
+        channels,
+    })
+}
+
+pub fn build_pose_track_from_clip_segment<F: FnMut() -> u64>(
+    id: u64,
+    name: String,
+    segment: &ClipSegment,
+    animator: &BevyAnimator,
+    skeleton: &Skeleton,
+    frame_rate: f32,
+    alloc_id: &mut F,
+) -> Option<PoseTrack> {
+    let temp_track = ClipTrack {
+        id: segment.id,
+        name: segment.clip_name.clone(),
+        enabled: true,
+        weight: 1.0,
+        additive: false,
+        segments: vec![ClipSegment {
+            id: segment.id,
+            start: 0.0,
+            duration: segment.duration,
+            clip_name: segment.clip_name.clone(),
+            speed: segment.speed,
+            looping: segment.looping,
+        }],
+    };
+    let clip =
+        build_clip_from_clip_track(name.clone(), &temp_track, animator, skeleton, frame_rate)?;
+    let mut pose_track = build_pose_track_from_clip(id, name, &clip, skeleton, alloc_id);
+    for key in &mut pose_track.keys {
+        key.time += segment.start;
+    }
+    Some(pose_track)
 }
 
 pub fn build_pose_track_from_clip<F: FnMut() -> u64>(

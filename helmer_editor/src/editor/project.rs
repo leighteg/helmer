@@ -150,6 +150,10 @@ pub fn default_scene_template() -> &'static str {
     "(\n    version: 1,\n    entities: [],\n)\n"
 }
 
+pub fn default_animation_template() -> &'static str {
+    "(\n    version: 1,\n    name: \"New Animation\",\n    tracks: [],\n    clips: [],\n)\n"
+}
+
 pub fn default_script_template_simple() -> &'static str {
     r#"local mover = nil
 local t = 0.0

@@ -94,6 +94,17 @@ pub struct SceneDocument {
     pub scene_child_pose_overrides: Vec<SceneChildPoseOverrideData>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimationAssetDocument {
+    pub version: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tracks: Vec<AnimationTrackData>,
+    #[serde(default)]
+    pub clips: Vec<AnimationClipData>,
+}
+
 #[derive(Resource, Debug, Default, Clone)]
 pub struct PendingSceneChildAnimations {
     pub entries: Vec<SceneChildAnimationData>,
@@ -309,6 +320,8 @@ pub struct JointTrackData {
     pub name: String,
     pub enabled: bool,
     pub joint_index: usize,
+    #[serde(default)]
+    pub joint_name: Option<String>,
     pub weight: f32,
     pub additive: bool,
     pub translation_interpolation: TimelineInterpolation,
@@ -421,16 +434,22 @@ pub struct AnimationClipData {
 pub enum AnimationChannelData {
     Translation {
         target: usize,
+        #[serde(default)]
+        target_name: Option<String>,
         interpolation: Interpolation,
         keyframes: Vec<Vec3KeyframeData>,
     },
     Rotation {
         target: usize,
+        #[serde(default)]
+        target_name: Option<String>,
         interpolation: Interpolation,
         keyframes: Vec<QuatKeyframeData>,
     },
     Scale {
         target: usize,
+        #[serde(default)]
+        target_name: Option<String>,
         interpolation: Interpolation,
         keyframes: Vec<Vec3KeyframeData>,
     },
@@ -554,7 +573,7 @@ impl SplineComponentData {
 }
 
 impl AnimationClipData {
-    pub fn from_clip(clip: &AnimationClip) -> Self {
+    pub fn from_clip(clip: &AnimationClip, skeleton: Option<&Skeleton>) -> Self {
         let channels = clip
             .channels
             .iter()
@@ -565,6 +584,9 @@ impl AnimationClipData {
                     keyframes,
                 } => AnimationChannelData::Translation {
                     target: *target,
+                    target_name: skeleton
+                        .and_then(|skeleton| skeleton.joints.get(*target))
+                        .map(|joint| joint.name.clone()),
                     interpolation: *interpolation,
                     keyframes: keyframes
                         .iter()
@@ -582,6 +604,9 @@ impl AnimationClipData {
                     keyframes,
                 } => AnimationChannelData::Rotation {
                     target: *target,
+                    target_name: skeleton
+                        .and_then(|skeleton| skeleton.joints.get(*target))
+                        .map(|joint| joint.name.clone()),
                     interpolation: *interpolation,
                     keyframes: keyframes
                         .iter()
@@ -599,6 +624,9 @@ impl AnimationClipData {
                     keyframes,
                 } => AnimationChannelData::Scale {
                     target: *target,
+                    target_name: skeleton
+                        .and_then(|skeleton| skeleton.joints.get(*target))
+                        .map(|joint| joint.name.clone()),
                     interpolation: *interpolation,
                     keyframes: keyframes
                         .iter()
@@ -620,78 +648,91 @@ impl AnimationClipData {
     }
 
     pub fn to_clip(&self) -> AnimationClip {
-        let channels = self
-            .channels
-            .iter()
-            .map(|channel| match channel {
-                AnimationChannelData::Translation {
-                    target,
-                    interpolation,
-                    keyframes,
-                } => AnimationChannel::Translation {
-                    target: *target,
-                    interpolation: *interpolation,
-                    keyframes: keyframes
-                        .iter()
-                        .map(|key| {
-                            let mut frame =
-                                Keyframe::new(key.time, glam::Vec3::from_array(key.value));
-                            frame.in_tangent = key
-                                .in_tangent
-                                .map(|tangent| glam::Vec3::from_array(tangent));
-                            frame.out_tangent = key
-                                .out_tangent
-                                .map(|tangent| glam::Vec3::from_array(tangent));
-                            frame
-                        })
-                        .collect(),
-                },
-                AnimationChannelData::Rotation {
-                    target,
-                    interpolation,
-                    keyframes,
-                } => AnimationChannel::Rotation {
-                    target: *target,
-                    interpolation: *interpolation,
-                    keyframes: keyframes
-                        .iter()
-                        .map(|key| {
-                            let mut frame =
-                                Keyframe::new(key.time, glam::Quat::from_array(key.value));
-                            frame.in_tangent = key
-                                .in_tangent
-                                .map(|tangent| glam::Quat::from_array(tangent));
-                            frame.out_tangent = key
-                                .out_tangent
-                                .map(|tangent| glam::Quat::from_array(tangent));
-                            frame
-                        })
-                        .collect(),
-                },
-                AnimationChannelData::Scale {
-                    target,
-                    interpolation,
-                    keyframes,
-                } => AnimationChannel::Scale {
-                    target: *target,
-                    interpolation: *interpolation,
-                    keyframes: keyframes
-                        .iter()
-                        .map(|key| {
-                            let mut frame =
-                                Keyframe::new(key.time, glam::Vec3::from_array(key.value));
-                            frame.in_tangent = key
-                                .in_tangent
-                                .map(|tangent| glam::Vec3::from_array(tangent));
-                            frame.out_tangent = key
-                                .out_tangent
-                                .map(|tangent| glam::Vec3::from_array(tangent));
-                            frame
-                        })
-                        .collect(),
-                },
-            })
-            .collect();
+        self.to_clip_for_skeleton(None)
+    }
+
+    pub fn to_clip_for_skeleton(&self, skeleton: Option<&Skeleton>) -> AnimationClip {
+        let channels =
+            self.channels
+                .iter()
+                .filter_map(|channel| match channel {
+                    AnimationChannelData::Translation {
+                        target,
+                        target_name,
+                        interpolation,
+                        keyframes,
+                    } => resolve_channel_target(skeleton, *target, target_name.as_ref()).map(
+                        |target| AnimationChannel::Translation {
+                            target,
+                            interpolation: *interpolation,
+                            keyframes: keyframes
+                                .iter()
+                                .map(|key| {
+                                    let mut frame =
+                                        Keyframe::new(key.time, glam::Vec3::from_array(key.value));
+                                    frame.in_tangent = key
+                                        .in_tangent
+                                        .map(|tangent| glam::Vec3::from_array(tangent));
+                                    frame.out_tangent = key
+                                        .out_tangent
+                                        .map(|tangent| glam::Vec3::from_array(tangent));
+                                    frame
+                                })
+                                .collect(),
+                        },
+                    ),
+                    AnimationChannelData::Rotation {
+                        target,
+                        target_name,
+                        interpolation,
+                        keyframes,
+                    } => resolve_channel_target(skeleton, *target, target_name.as_ref()).map(
+                        |target| AnimationChannel::Rotation {
+                            target,
+                            interpolation: *interpolation,
+                            keyframes: keyframes
+                                .iter()
+                                .map(|key| {
+                                    let mut frame =
+                                        Keyframe::new(key.time, glam::Quat::from_array(key.value));
+                                    frame.in_tangent = key
+                                        .in_tangent
+                                        .map(|tangent| glam::Quat::from_array(tangent));
+                                    frame.out_tangent = key
+                                        .out_tangent
+                                        .map(|tangent| glam::Quat::from_array(tangent));
+                                    frame
+                                })
+                                .collect(),
+                        },
+                    ),
+                    AnimationChannelData::Scale {
+                        target,
+                        target_name,
+                        interpolation,
+                        keyframes,
+                    } => resolve_channel_target(skeleton, *target, target_name.as_ref()).map(
+                        |target| AnimationChannel::Scale {
+                            target,
+                            interpolation: *interpolation,
+                            keyframes: keyframes
+                                .iter()
+                                .map(|key| {
+                                    let mut frame =
+                                        Keyframe::new(key.time, glam::Vec3::from_array(key.value));
+                                    frame.in_tangent = key
+                                        .in_tangent
+                                        .map(|tangent| glam::Vec3::from_array(tangent));
+                                    frame.out_tangent = key
+                                        .out_tangent
+                                        .map(|tangent| glam::Vec3::from_array(tangent));
+                                    frame
+                                })
+                                .collect(),
+                        },
+                    ),
+                })
+                .collect();
 
         AnimationClip {
             name: self.name.clone(),
@@ -701,16 +742,59 @@ impl AnimationClipData {
     }
 }
 
-fn animation_component_from_group(group: &TimelineTrackGroup) -> Option<AnimationComponentData> {
+fn resolve_channel_target(
+    skeleton: Option<&Skeleton>,
+    target: usize,
+    target_name: Option<&String>,
+) -> Option<usize> {
+    if let Some(skeleton) = skeleton {
+        if let Some(name) = target_name {
+            if let Some(index) = skeleton.joints.iter().position(|joint| joint.name == *name) {
+                return Some(index);
+            }
+        }
+        if target < skeleton.joint_count() {
+            return Some(target);
+        }
+        None
+    } else {
+        Some(target)
+    }
+}
+
+fn resolve_joint_index(
+    skeleton: Option<&Skeleton>,
+    joint_index: usize,
+    joint_name: Option<&String>,
+) -> Option<usize> {
+    if let Some(skeleton) = skeleton {
+        if let Some(name) = joint_name {
+            if let Some(index) = skeleton.joints.iter().position(|joint| joint.name == *name) {
+                return Some(index);
+            }
+        }
+        if joint_index < skeleton.joint_count() {
+            return Some(joint_index);
+        }
+        None
+    } else {
+        Some(joint_index)
+    }
+}
+
+fn animation_component_from_group(
+    group: &TimelineTrackGroup,
+    skeleton: Option<&Skeleton>,
+) -> Option<AnimationComponentData> {
     let tracks = group
         .tracks
         .iter()
-        .map(animation_track_to_data)
+        .map(|track| animation_track_to_data(track, skeleton))
         .collect::<Vec<_>>();
     let clips = group
         .custom_clips
         .iter()
-        .map(AnimationClipData::from_clip)
+        .map(|clip| AnimationClipData::from_clip(clip, skeleton))
         .collect::<Vec<_>>();
     if tracks.is_empty() && clips.is_empty() {
         None
@@ -719,7 +803,10 @@ fn animation_component_from_group(group: &TimelineTrackGroup) -> Option<Animatio
     }
 }
 
-fn animation_track_to_data(track: &TimelineTrack) -> AnimationTrackData {
+fn animation_track_to_data(
+    track: &TimelineTrack,
+    skeleton: Option<&Skeleton>,
+) -> AnimationTrackData {
     match track {
         TimelineTrack::Pose(track) => AnimationTrackData::Pose(PoseTrackData {
             id: track.id,
@@ -750,6 +837,9 @@ fn animation_track_to_data(track: &TimelineTrack) -> AnimationTrackData {
             name: track.name.clone(),
             enabled: track.enabled,
             joint_index: track.joint_index,
+            joint_name: skeleton
+                .and_then(|skeleton| skeleton.joints.get(track.joint_index))
+                .map(|joint| joint.name.clone()),
             weight: track.weight,
             additive: track.additive,
             translation_interpolation: track.translation_interpolation,
@@ -894,7 +984,7 @@ pub(crate) fn pose_from_serialized(
 fn animation_track_from_data(
     data: &AnimationTrackData,
     skeleton: Option<&Skeleton>,
-) -> TimelineTrack {
+) -> Option<TimelineTrack> {
     match data {
         AnimationTrackData::Pose(track) => {
             let keys = track
@@ -906,7 +996,7 @@ fn animation_track_from_data(
                     pose: pose_from_serialized(&key.pose, skeleton),
                 })
                 .collect();
-            TimelineTrack::Pose(PoseTrack {
+            Some(TimelineTrack::Pose(PoseTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
@@ -916,9 +1006,11 @@ fn animation_track_from_data(
                 rotation_interpolation: track.rotation_interpolation,
                 scale_interpolation: track.scale_interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Joint(track) => {
+            let joint_index =
+                resolve_joint_index(skeleton, track.joint_index, track.joint_name.as_ref())?;
             let keys = track
                 .keys
                 .iter()
@@ -928,18 +1020,18 @@ fn animation_track_from_data(
                     transform: key.transform.to_transform(),
                 })
                 .collect();
-            TimelineTrack::Joint(JointTrack {
+            Some(TimelineTrack::Joint(JointTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
-                joint_index: track.joint_index,
+                joint_index,
                 weight: track.weight,
                 additive: track.additive,
                 translation_interpolation: track.translation_interpolation,
                 rotation_interpolation: track.rotation_interpolation,
                 scale_interpolation: track.scale_interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Transform(track) => {
             let keys = track
@@ -951,7 +1043,7 @@ fn animation_track_from_data(
                     transform: key.transform.to_transform(),
                 })
                 .collect();
-            TimelineTrack::Transform(TransformTrack {
+            Some(TimelineTrack::Transform(TransformTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
@@ -959,7 +1051,7 @@ fn animation_track_from_data(
                 rotation_interpolation: track.rotation_interpolation,
                 scale_interpolation: track.scale_interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Camera(track) => {
             let keys = track
@@ -976,13 +1068,13 @@ fn animation_track_from_data(
                     },
                 })
                 .collect();
-            TimelineTrack::Camera(CameraTrack {
+            Some(TimelineTrack::Camera(CameraTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
                 interpolation: track.interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Light(track) => {
             let keys = track
@@ -1006,13 +1098,13 @@ fn animation_track_from_data(
                     },
                 })
                 .collect();
-            TimelineTrack::Light(LightTrack {
+            Some(TimelineTrack::Light(LightTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
                 interpolation: track.interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Spline(track) => {
             let keys = track
@@ -1024,13 +1116,13 @@ fn animation_track_from_data(
                     spline: key.spline.to_spline(),
                 })
                 .collect();
-            TimelineTrack::Spline(SplineTrack {
+            Some(TimelineTrack::Spline(SplineTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
                 interpolation: track.interpolation,
                 keys,
-            })
+            }))
         }
         AnimationTrackData::Clip(track) => {
             let segments = track
@@ -1045,14 +1137,61 @@ fn animation_track_from_data(
                     looping: segment.looping,
                 })
                 .collect();
-            TimelineTrack::Clip(ClipTrack {
+            Some(TimelineTrack::Clip(ClipTrack {
                 id: track.id,
                 name: track.name.clone(),
                 enabled: track.enabled,
                 weight: track.weight,
                 additive: track.additive,
                 segments,
-            })
+            }))
+        }
+    }
+}
+
+fn remap_track_ids(track: &mut TimelineTrack, alloc_id: &mut impl FnMut() -> u64) {
+    match track {
+        TimelineTrack::Pose(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Joint(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Transform(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Camera(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Light(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Spline(track) => {
+            track.id = alloc_id();
+            for key in &mut track.keys {
+                key.id = alloc_id();
+            }
+        }
+        TimelineTrack::Clip(track) => {
+            track.id = alloc_id();
+            for segment in &mut track.segments {
+                segment.id = alloc_id();
+            }
         }
     }
 }
@@ -1128,11 +1267,82 @@ pub(crate) fn apply_animation_data_to_timeline(
     group.tracks = data
         .tracks
         .iter()
-        .map(|track| animation_track_from_data(track, skeleton))
+        .filter_map(|track| animation_track_from_data(track, skeleton))
         .collect();
-    group.custom_clips = data.clips.iter().map(AnimationClipData::to_clip).collect();
+    group.custom_clips = data
+        .clips
+        .iter()
+        .map(|clip| clip.to_clip_for_skeleton(skeleton))
+        .collect();
     timeline.apply_requested = true;
     update_timeline_next_id(timeline);
+}
+
+pub(crate) fn animation_asset_from_group(
+    group: &TimelineTrackGroup,
+    skeleton: Option<&Skeleton>,
+) -> AnimationAssetDocument {
+    let tracks = group
+        .tracks
+        .iter()
+        .map(|track| animation_track_to_data(track, skeleton))
+        .collect();
+    let clips = group
+        .custom_clips
+        .iter()
+        .map(|clip| AnimationClipData::from_clip(clip, skeleton))
+        .collect();
+    AnimationAssetDocument {
+        version: 1,
+        name: group.name.clone(),
+        tracks,
+        clips,
+    }
+}
+
+pub(crate) fn merge_animation_asset_into_timeline(
+    timeline: &mut EditorTimelineState,
+    entity: Entity,
+    entity_name: String,
+    asset: &AnimationAssetDocument,
+    skeleton: Option<&Skeleton>,
+) -> Vec<AnimationClip> {
+    let group_index = timeline.ensure_group_index(entity.to_bits(), entity_name);
+    let mut next_id = timeline.next_id;
+    let mut alloc_id = || {
+        let id = next_id;
+        next_id = next_id.saturating_add(1);
+        id
+    };
+
+    let mut clips = Vec::new();
+    {
+        let group = &mut timeline.groups[group_index];
+        for track_data in &asset.tracks {
+            if let Some(mut track) = animation_track_from_data(track_data, skeleton) {
+                remap_track_ids(&mut track, &mut alloc_id);
+                group.tracks.push(track);
+            }
+        }
+        for clip_data in &asset.clips {
+            let clip = clip_data.to_clip_for_skeleton(skeleton);
+            if let Some(existing) = group
+                .custom_clips
+                .iter_mut()
+                .find(|existing| existing.name == clip.name)
+            {
+                *existing = clip.clone();
+            } else {
+                group.custom_clips.push(clip.clone());
+            }
+            clips.push(clip);
+        }
+    }
+
+    timeline.next_id = next_id;
+    timeline.apply_requested = true;
+    update_timeline_next_id(timeline);
+    clips
 }
 
 pub fn reset_editor_scene(world: &mut World) {
@@ -1162,6 +1372,7 @@ pub fn reset_editor_scene(world: &mut World) {
         timeline.selected.clear();
         timeline.selection_drag = None;
         timeline.selection_drag_pending = None;
+        timeline.pending_clip_expand = None;
         timeline.apply_requested = true;
         timeline.current_time = 0.0;
         timeline.next_id = 1;
@@ -1405,10 +1616,13 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                     position_smooth_time: follower.0.position_smooth_time,
                     rotation_smooth_time: follower.0.rotation_smooth_time,
                 });
+        let skeleton = world
+            .get::<BevySkinnedMeshRenderer>(entity)
+            .map(|skinned| skinned.0.skin.skeleton.as_ref());
         let animation = timeline_groups
             .as_ref()
             .and_then(|groups| groups.iter().find(|group| group.entity == entity.to_bits()))
-            .and_then(animation_component_from_group);
+            .and_then(|group| animation_component_from_group(group, skeleton));
         let pose_override = world
             .get::<BevyPoseOverride>(entity)
             .map(|pose| PoseOverrideData {
@@ -1475,7 +1689,10 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             let Some(scene_root) = world.get::<SceneAssetPath>(child.scene_root) else {
                 continue;
             };
-            let Some(animation) = animation_component_from_group(group) else {
+            let skeleton = world
+                .get::<BevySkinnedMeshRenderer>(entity)
+                .map(|skinned| skinned.0.skin.skeleton.as_ref());
+            let Some(animation) = animation_component_from_group(group, skeleton) else {
                 continue;
             };
             let scene_path = normalize_path(scene_root.path.to_string_lossy().as_ref(), root);
@@ -1530,6 +1747,23 @@ pub fn write_scene_document(path: &Path, document: &SceneDocument) -> Result<(),
 pub fn read_scene_document(path: &Path) -> Result<SceneDocument, String> {
     let data = fs::read_to_string(path).map_err(|err| err.to_string())?;
     ron::de::from_str::<SceneDocument>(&data).map_err(|err| err.to_string())
+}
+
+pub fn write_animation_asset_document(
+    path: &Path,
+    document: &AnimationAssetDocument,
+) -> Result<(), String> {
+    let pretty = PrettyConfig::new()
+        .compact_arrays(false)
+        .depth_limit(6)
+        .enumerate_arrays(true);
+    let data = ron::ser::to_string_pretty(document, pretty).map_err(|err| err.to_string())?;
+    fs::write(path, data).map_err(|err| err.to_string())
+}
+
+pub fn read_animation_asset_document(path: &Path) -> Result<AnimationAssetDocument, String> {
+    let data = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    ron::de::from_str::<AnimationAssetDocument>(&data).map_err(|err| err.to_string())
 }
 
 pub fn spawn_scene_from_document(
@@ -1808,7 +2042,7 @@ pub fn spawn_scene_from_document(
                 let custom_clips = animation
                     .clips
                     .iter()
-                    .map(AnimationClipData::to_clip)
+                    .map(|clip| clip.to_clip_for_skeleton(skeleton_ref))
                     .collect::<Vec<_>>();
                 apply_custom_clips_to_animator(&mut animator, &custom_clips);
             }

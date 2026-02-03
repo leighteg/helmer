@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::{Commands, Entity, Query, Res, ResMut, Resource};
-use glam::Quat;
+use glam::{Quat, Vec3};
 use helmer::animation::{AnimationChannel, AnimationClip, Interpolation, Pose, Skeleton};
-use helmer::provided::components::{PoseOverride, Spline, Transform};
+use helmer::provided::components::{Camera, Light, LightType, PoseOverride, Spline, Transform};
 use helmer_becs::{BevyAnimator, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, DeltaTime};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,7 @@ pub struct EditorTimelineState {
     pub auto_duration: bool,
     pub frame_rate: f32,
     pub snap_to_frame: bool,
+    pub smart_key: bool,
     pub pixels_per_second: f32,
     pub view_offset: f32,
     pub new_clip_index: usize,
@@ -38,6 +39,7 @@ impl Default for EditorTimelineState {
             auto_duration: true,
             frame_rate: 30.0,
             snap_to_frame: true,
+            smart_key: true,
             pixels_per_second: 120.0,
             view_offset: 0.0,
             new_clip_index: 0,
@@ -120,6 +122,9 @@ impl Default for TimelineInterpolation {
 #[derive(Debug, Clone)]
 pub enum TimelineTrack {
     Pose(PoseTrack),
+    Transform(TransformTrack),
+    Camera(CameraTrack),
+    Light(LightTrack),
     Spline(SplineTrack),
     Clip(ClipTrack),
 }
@@ -128,6 +133,9 @@ impl TimelineTrack {
     pub fn id(&self) -> u64 {
         match self {
             TimelineTrack::Pose(track) => track.id,
+            TimelineTrack::Transform(track) => track.id,
+            TimelineTrack::Camera(track) => track.id,
+            TimelineTrack::Light(track) => track.id,
             TimelineTrack::Spline(track) => track.id,
             TimelineTrack::Clip(track) => track.id,
         }
@@ -136,6 +144,9 @@ impl TimelineTrack {
     pub fn name(&self) -> &str {
         match self {
             TimelineTrack::Pose(track) => track.name.as_str(),
+            TimelineTrack::Transform(track) => track.name.as_str(),
+            TimelineTrack::Camera(track) => track.name.as_str(),
+            TimelineTrack::Light(track) => track.name.as_str(),
             TimelineTrack::Spline(track) => track.name.as_str(),
             TimelineTrack::Clip(track) => track.name.as_str(),
         }
@@ -144,6 +155,9 @@ impl TimelineTrack {
     pub fn enabled(&self) -> bool {
         match self {
             TimelineTrack::Pose(track) => track.enabled,
+            TimelineTrack::Transform(track) => track.enabled,
+            TimelineTrack::Camera(track) => track.enabled,
+            TimelineTrack::Light(track) => track.enabled,
             TimelineTrack::Spline(track) => track.enabled,
             TimelineTrack::Clip(track) => track.enabled,
         }
@@ -152,6 +166,9 @@ impl TimelineTrack {
     pub fn end_time(&self) -> f32 {
         match self {
             TimelineTrack::Pose(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
+            TimelineTrack::Transform(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
+            TimelineTrack::Camera(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
+            TimelineTrack::Light(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
             TimelineTrack::Spline(track) => track.keys.last().map(|key| key.time).unwrap_or(0.0),
             TimelineTrack::Clip(track) => track
                 .segments
@@ -180,6 +197,56 @@ pub struct PoseKey {
     pub id: u64,
     pub time: f32,
     pub pose: Pose,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransformTrack {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub translation_interpolation: TimelineInterpolation,
+    pub rotation_interpolation: TimelineInterpolation,
+    pub scale_interpolation: TimelineInterpolation,
+    pub keys: Vec<TransformKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransformKey {
+    pub id: u64,
+    pub time: f32,
+    pub transform: Transform,
+}
+
+#[derive(Debug, Clone)]
+pub struct CameraTrack {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub interpolation: TimelineInterpolation,
+    pub keys: Vec<CameraKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CameraKey {
+    pub id: u64,
+    pub time: f32,
+    pub camera: Camera,
+}
+
+#[derive(Debug, Clone)]
+pub struct LightTrack {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub interpolation: TimelineInterpolation,
+    pub keys: Vec<LightKey>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LightKey {
+    pub id: u64,
+    pub time: f32,
+    pub light: Light,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +296,9 @@ pub fn timeline_playback_system(
     mut timeline: ResMut<EditorTimelineState>,
     mut commands: Commands,
     mut pose_overrides: Query<&mut BevyPoseOverride>,
+    mut transform_query: Query<&mut helmer_becs::BevyTransform>,
+    mut camera_query: Query<&mut helmer_becs::BevyCamera>,
+    mut light_query: Query<&mut helmer_becs::BevyLight>,
     mut spline_query: Query<&mut BevySpline>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     animator_query: Query<&BevyAnimator>,
@@ -253,6 +323,55 @@ pub fn timeline_playback_system(
     let time_cursor = timeline.current_time;
     for group in &timeline.groups {
         let entity = Entity::from_bits(group.entity);
+
+        let mut transform_sample = None;
+        let mut camera_sample = None;
+        let mut light_sample = None;
+        let mut spline_sample = None;
+        for track in &group.tracks {
+            if !track.enabled() {
+                continue;
+            }
+            match track {
+                TimelineTrack::Transform(track) => {
+                    if let Some(sample) = sample_transform_track(track, time_cursor) {
+                        transform_sample = Some(sample);
+                    }
+                }
+                TimelineTrack::Camera(track) => {
+                    if let Some(sample) = sample_camera_track(track, time_cursor) {
+                        camera_sample = Some(sample);
+                    }
+                }
+                TimelineTrack::Light(track) => {
+                    if let Some(sample) = sample_light_track(track, time_cursor) {
+                        light_sample = Some(sample);
+                    }
+                }
+                TimelineTrack::Spline(track) => {
+                    if let Some(sample) = sample_spline_track(track, time_cursor) {
+                        spline_sample = Some(sample);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(sample) = transform_sample {
+            if let Ok(mut transform) = transform_query.get_mut(entity) {
+                transform.0 = sample;
+            }
+        }
+        if let Some(sample) = camera_sample {
+            if let Ok(mut camera) = camera_query.get_mut(entity) {
+                camera.0 = sample;
+            }
+        }
+        if let Some(sample) = light_sample {
+            if let Ok(mut light) = light_query.get_mut(entity) {
+                light.0 = sample;
+            }
+        }
 
         if let Ok(skinned) = skinned_query.get(entity) {
             let skeleton = &skinned.0.skin.skeleton;
@@ -286,7 +405,7 @@ pub fn timeline_playback_system(
                             has_pose = true;
                         }
                     }
-                    TimelineTrack::Spline(_) => {}
+                    _ => {}
                 }
             }
 
@@ -305,21 +424,9 @@ pub fn timeline_playback_system(
             }
         }
 
-        if let Ok(mut spline) = spline_query.get_mut(entity) {
-            let mut applied = false;
-            for track in &group.tracks {
-                if !track.enabled() {
-                    continue;
-                }
-                if let TimelineTrack::Spline(track) = track {
-                    if let Some(sample) = sample_spline_track(track, time_cursor) {
-                        spline.0 = sample;
-                        applied = true;
-                    }
-                }
-            }
-            if applied {
-                // Keep the sampled spline in sync with edits.
+        if let Some(sample) = spline_sample {
+            if let Ok(mut spline) = spline_query.get_mut(entity) {
+                spline.0 = sample;
             }
         }
     }
@@ -392,6 +499,143 @@ fn sample_spline_track(track: &SplineTrack, time: f32) -> Option<Spline> {
                 *point = a.spline.points[idx].lerp(b.spline.points[idx], t);
             }
             return Some(out);
+        }
+    }
+    None
+}
+
+fn sample_transform_track(track: &TransformTrack, time: f32) -> Option<Transform> {
+    if track.keys.is_empty() {
+        return None;
+    }
+    if track.keys.len() == 1 {
+        return Some(track.keys[0].transform);
+    }
+    if time <= track.keys[0].time {
+        return Some(track.keys[0].transform);
+    }
+    if time >= track.keys[track.keys.len() - 1].time {
+        return Some(track.keys[track.keys.len() - 1].transform);
+    }
+    for i in 0..track.keys.len() - 1 {
+        let a = &track.keys[i];
+        let b = &track.keys[i + 1];
+        if time >= a.time && time <= b.time {
+            let span = (b.time - a.time).max(0.0001);
+            let t = ((time - a.time) / span).clamp(0.0, 1.0);
+            let step_translation =
+                matches!(track.translation_interpolation, TimelineInterpolation::Step);
+            let step_rotation = matches!(track.rotation_interpolation, TimelineInterpolation::Step);
+            let step_scale = matches!(track.scale_interpolation, TimelineInterpolation::Step);
+            let position = if step_translation {
+                a.transform.position
+            } else {
+                a.transform.position.lerp(b.transform.position, t)
+            };
+            let rotation = if step_rotation {
+                a.transform.rotation
+            } else {
+                a.transform
+                    .rotation
+                    .slerp(b.transform.rotation, t)
+                    .normalize()
+            };
+            let scale = if step_scale {
+                a.transform.scale
+            } else {
+                a.transform.scale.lerp(b.transform.scale, t)
+            };
+            return Some(Transform {
+                position,
+                rotation,
+                scale,
+            });
+        }
+    }
+    None
+}
+
+fn sample_camera_track(track: &CameraTrack, time: f32) -> Option<Camera> {
+    if track.keys.is_empty() {
+        return None;
+    }
+    if track.keys.len() == 1 {
+        return Some(track.keys[0].camera);
+    }
+    if time <= track.keys[0].time {
+        return Some(track.keys[0].camera);
+    }
+    if time >= track.keys[track.keys.len() - 1].time {
+        return Some(track.keys[track.keys.len() - 1].camera);
+    }
+    for i in 0..track.keys.len() - 1 {
+        let a = &track.keys[i];
+        let b = &track.keys[i + 1];
+        if time >= a.time && time <= b.time {
+            let span = (b.time - a.time).max(0.0001);
+            let t = ((time - a.time) / span).clamp(0.0, 1.0);
+            if matches!(track.interpolation, TimelineInterpolation::Step) {
+                return Some(a.camera);
+            }
+            return Some(Camera {
+                fov_y_rad: a.camera.fov_y_rad + (b.camera.fov_y_rad - a.camera.fov_y_rad) * t,
+                aspect_ratio: a.camera.aspect_ratio
+                    + (b.camera.aspect_ratio - a.camera.aspect_ratio) * t,
+                near_plane: a.camera.near_plane + (b.camera.near_plane - a.camera.near_plane) * t,
+                far_plane: a.camera.far_plane + (b.camera.far_plane - a.camera.far_plane) * t,
+            });
+        }
+    }
+    None
+}
+
+fn sample_light_track(track: &LightTrack, time: f32) -> Option<Light> {
+    if track.keys.is_empty() {
+        return None;
+    }
+    if track.keys.len() == 1 {
+        return Some(track.keys[0].light);
+    }
+    if time <= track.keys[0].time {
+        return Some(track.keys[0].light);
+    }
+    if time >= track.keys[track.keys.len() - 1].time {
+        return Some(track.keys[track.keys.len() - 1].light);
+    }
+    for i in 0..track.keys.len() - 1 {
+        let a = &track.keys[i];
+        let b = &track.keys[i + 1];
+        if time >= a.time && time <= b.time {
+            let span = (b.time - a.time).max(0.0001);
+            let t = ((time - a.time) / span).clamp(0.0, 1.0);
+            if matches!(track.interpolation, TimelineInterpolation::Step) {
+                return Some(a.light);
+            }
+            let type_matches = std::mem::discriminant(&a.light.light_type)
+                == std::mem::discriminant(&b.light.light_type);
+            if !type_matches {
+                return Some(if t < 0.5 { a.light } else { b.light });
+            }
+            let angle = match (a.light.light_type, b.light.light_type) {
+                (LightType::Spot { angle: a_angle }, LightType::Spot { angle: b_angle }) => {
+                    Some(a_angle + (b_angle - a_angle) * t)
+                }
+                _ => None,
+            };
+            let light_type = match a.light.light_type {
+                LightType::Directional => LightType::Directional,
+                LightType::Point => LightType::Point,
+                LightType::Spot { .. } => LightType::Spot {
+                    angle: angle.unwrap_or(0.0),
+                },
+            };
+            let color = a.light.color.lerp(b.light.color, t);
+            let intensity = a.light.intensity + (b.light.intensity - a.light.intensity) * t;
+            return Some(Light {
+                light_type,
+                color,
+                intensity,
+            });
         }
     }
     None

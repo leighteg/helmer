@@ -35,8 +35,9 @@ use crate::editor::{
     project::EditorProject,
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
-        ClipSegment, ClipTrack, PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation,
-        TimelineTrack, TimelineTrackGroup,
+        CameraKey, CameraTrack, ClipSegment, ClipTrack, LightKey, LightTrack, PoseKey, PoseTrack,
+        SplineKey, SplineTrack, TimelineInterpolation, TimelineTrack, TimelineTrackGroup,
+        TransformKey, TransformTrack,
     },
 };
 
@@ -274,6 +275,9 @@ pub struct PoseOverrideData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AnimationTrackData {
     Pose(PoseTrackData),
+    Transform(TransformTrackData),
+    Camera(CameraTrackData),
+    Light(LightTrackData),
     Spline(SplineTrackData),
     Clip(ClipTrackData),
 }
@@ -296,6 +300,56 @@ pub struct PoseKeyData {
     pub id: u64,
     pub time: f32,
     pub pose: Vec<SerializedTransform>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransformTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub translation_interpolation: TimelineInterpolation,
+    pub rotation_interpolation: TimelineInterpolation,
+    pub scale_interpolation: TimelineInterpolation,
+    pub keys: Vec<TransformKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransformKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub transform: SerializedTransform,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub interpolation: TimelineInterpolation,
+    pub keys: Vec<CameraKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub camera: CameraComponentData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightTrackData {
+    pub id: u64,
+    pub name: String,
+    pub enabled: bool,
+    pub interpolation: TimelineInterpolation,
+    pub keys: Vec<LightKeyData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightKeyData {
+    pub id: u64,
+    pub time: f32,
+    pub light: LightComponentData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -669,6 +723,67 @@ fn animation_track_to_data(track: &TimelineTrack) -> AnimationTrackData {
                 })
                 .collect(),
         }),
+        TimelineTrack::Transform(track) => AnimationTrackData::Transform(TransformTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            translation_interpolation: track.translation_interpolation,
+            rotation_interpolation: track.rotation_interpolation,
+            scale_interpolation: track.scale_interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| TransformKeyData {
+                    id: key.id,
+                    time: key.time,
+                    transform: SerializedTransform::from(&key.transform),
+                })
+                .collect(),
+        }),
+        TimelineTrack::Camera(track) => AnimationTrackData::Camera(CameraTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            interpolation: track.interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| CameraKeyData {
+                    id: key.id,
+                    time: key.time,
+                    camera: CameraComponentData {
+                        fov_y_rad: key.camera.fov_y_rad,
+                        aspect_ratio: key.camera.aspect_ratio,
+                        near_plane: key.camera.near_plane,
+                        far_plane: key.camera.far_plane,
+                        active: false,
+                    },
+                })
+                .collect(),
+        }),
+        TimelineTrack::Light(track) => AnimationTrackData::Light(LightTrackData {
+            id: track.id,
+            name: track.name.clone(),
+            enabled: track.enabled,
+            interpolation: track.interpolation,
+            keys: track
+                .keys
+                .iter()
+                .map(|key| LightKeyData {
+                    id: key.id,
+                    time: key.time,
+                    light: LightComponentData {
+                        kind: match key.light.light_type {
+                            LightType::Directional => LightKind::Directional,
+                            LightType::Point => LightKind::Point,
+                            LightType::Spot { angle } => LightKind::Spot { angle },
+                        },
+                        color: [key.light.color.x, key.light.color.y, key.light.color.z],
+                        intensity: key.light.intensity,
+                    },
+                })
+                .collect(),
+        }),
         TimelineTrack::Spline(track) => AnimationTrackData::Spline(SplineTrackData {
             id: track.id,
             name: track.name.clone(),
@@ -761,6 +876,79 @@ fn animation_track_from_data(
                 keys,
             })
         }
+        AnimationTrackData::Transform(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| TransformKey {
+                    id: key.id,
+                    time: key.time,
+                    transform: key.transform.to_transform(),
+                })
+                .collect();
+            TimelineTrack::Transform(TransformTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                translation_interpolation: track.translation_interpolation,
+                rotation_interpolation: track.rotation_interpolation,
+                scale_interpolation: track.scale_interpolation,
+                keys,
+            })
+        }
+        AnimationTrackData::Camera(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| CameraKey {
+                    id: key.id,
+                    time: key.time,
+                    camera: Camera {
+                        fov_y_rad: key.camera.fov_y_rad,
+                        aspect_ratio: key.camera.aspect_ratio,
+                        near_plane: key.camera.near_plane,
+                        far_plane: key.camera.far_plane,
+                    },
+                })
+                .collect();
+            TimelineTrack::Camera(CameraTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                interpolation: track.interpolation,
+                keys,
+            })
+        }
+        AnimationTrackData::Light(track) => {
+            let keys = track
+                .keys
+                .iter()
+                .map(|key| LightKey {
+                    id: key.id,
+                    time: key.time,
+                    light: Light {
+                        light_type: match key.light.kind {
+                            LightKind::Directional => LightType::Directional,
+                            LightKind::Point => LightType::Point,
+                            LightKind::Spot { angle } => LightType::Spot { angle },
+                        },
+                        color: glam::Vec3::new(
+                            key.light.color[0],
+                            key.light.color[1],
+                            key.light.color[2],
+                        ),
+                        intensity: key.light.intensity,
+                    },
+                })
+                .collect();
+            TimelineTrack::Light(LightTrack {
+                id: track.id,
+                name: track.name.clone(),
+                enabled: track.enabled,
+                interpolation: track.interpolation,
+                keys,
+            })
+        }
         AnimationTrackData::Spline(track) => {
             let keys = track
                 .keys
@@ -811,6 +999,21 @@ fn update_timeline_next_id(timeline: &mut EditorTimelineState) {
             max_id = max_id.max(track.id());
             match track {
                 TimelineTrack::Pose(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Transform(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Camera(track) => {
+                    for key in &track.keys {
+                        max_id = max_id.max(key.id);
+                    }
+                }
+                TimelineTrack::Light(track) => {
                     for key in &track.keys {
                         max_id = max_id.max(key.id);
                     }

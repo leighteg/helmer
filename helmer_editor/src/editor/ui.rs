@@ -12,7 +12,7 @@ use egui::{
     PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 use glam::{EulerRot, Mat3, Quat, Vec3};
-use helmer::animation::{AnimationClip, Skeleton};
+use helmer::animation::{AnimationClip, Pose, Skeleton};
 use helmer::graphics::common::config::SkinningMode;
 use helmer::graphics::{
     common::renderer::GizmoMode,
@@ -57,8 +57,9 @@ use crate::editor::{
     },
     scripting::{ScriptComponent, ScriptEntry},
     timeline::{
-        ClipSegment, ClipTrack, PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation,
-        TimelineSelection, TimelineTrack, TimelineTrackGroup, build_clip_from_pose_track,
+        CameraKey, CameraTrack, ClipSegment, ClipTrack, LightKey, LightTrack, PoseKey, PoseTrack,
+        SplineKey, SplineTrack, TimelineInterpolation, TimelineSelection, TimelineTrack,
+        TimelineTrackGroup, TransformKey, TransformTrack, build_clip_from_pose_track,
         build_pose_track_from_clip,
     },
 };
@@ -7785,6 +7786,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                 auto_duration,
                 frame_rate,
                 snap_to_frame,
+                smart_key,
                 pixels_per_second,
                 view_offset,
                 new_clip_index,
@@ -7814,6 +7816,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                 }
                 ui.checkbox(loop_playback, "Loop");
                 ui.checkbox(snap_to_frame, "Snap");
+                ui.checkbox(smart_key, "Smart Key");
                 ui.checkbox(auto_duration, "Auto Duration");
             });
 
@@ -7848,6 +7851,9 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     .unwrap_or_else(|| format!("Entity {}", entity.index()));
                 ui.label(format!("Active: {}", name));
 
+                let has_transform = world.get::<BevyTransform>(entity).is_some();
+                let has_camera = world.get::<BevyCamera>(entity).is_some();
+                let has_light = world.get::<BevyLight>(entity).is_some();
                 let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some();
                 let has_spline = world.get::<BevySpline>(entity).is_some();
                 let has_animator = world.get::<BevyAnimator>(entity).is_some();
@@ -7867,6 +7873,53 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                 };
 
                 ui.horizontal(|ui| {
+                    if has_transform && ui.button("Add Transform Track").clicked() {
+                        let group = &mut groups[group_index];
+                        let count = group
+                            .tracks
+                            .iter()
+                            .filter(|track| matches!(track, TimelineTrack::Transform(_)))
+                            .count();
+                        group.tracks.push(TimelineTrack::Transform(TransformTrack {
+                            id: alloc_id(),
+                            name: format!("Transform Track {}", count + 1),
+                            enabled: true,
+                            translation_interpolation: TimelineInterpolation::Linear,
+                            rotation_interpolation: TimelineInterpolation::Linear,
+                            scale_interpolation: TimelineInterpolation::Linear,
+                            keys: Vec::new(),
+                        }));
+                    }
+                    if has_camera && ui.button("Add Camera Track").clicked() {
+                        let group = &mut groups[group_index];
+                        let count = group
+                            .tracks
+                            .iter()
+                            .filter(|track| matches!(track, TimelineTrack::Camera(_)))
+                            .count();
+                        group.tracks.push(TimelineTrack::Camera(CameraTrack {
+                            id: alloc_id(),
+                            name: format!("Camera Track {}", count + 1),
+                            enabled: true,
+                            interpolation: TimelineInterpolation::Linear,
+                            keys: Vec::new(),
+                        }));
+                    }
+                    if has_light && ui.button("Add Light Track").clicked() {
+                        let group = &mut groups[group_index];
+                        let count = group
+                            .tracks
+                            .iter()
+                            .filter(|track| matches!(track, TimelineTrack::Light(_)))
+                            .count();
+                        group.tracks.push(TimelineTrack::Light(LightTrack {
+                            id: alloc_id(),
+                            name: format!("Light Track {}", count + 1),
+                            enabled: true,
+                            interpolation: TimelineInterpolation::Linear,
+                            keys: Vec::new(),
+                        }));
+                    }
                     if has_skinned && ui.button("Add Pose Track").clicked() {
                         let group = &mut groups[group_index];
                         group.tracks.push(TimelineTrack::Pose(PoseTrack {
@@ -7901,6 +7954,134 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                             additive: false,
                             segments: Vec::new(),
                         }));
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Keyframe").clicked() {
+                        let key_time = snap_time(*current_time, *snap_to_frame, *frame_rate);
+                        let mut any_changed = false;
+                        let group = &mut groups[group_index];
+
+                        if has_transform {
+                            if let Some(transform) = world.get::<BevyTransform>(entity) {
+                                let index = ensure_transform_track(group, &mut alloc_id);
+                                if let TimelineTrack::Transform(track) =
+                                    &mut group.tracks[index]
+                                {
+                                    if upsert_transform_key(
+                                        track,
+                                        key_time,
+                                        transform.0,
+                                        *smart_key,
+                                        &mut alloc_id,
+                                    ) {
+                                        any_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if has_camera {
+                            if let Some(camera) = world.get::<BevyCamera>(entity) {
+                                let index = ensure_camera_track(group, &mut alloc_id);
+                                if let TimelineTrack::Camera(track) = &mut group.tracks[index] {
+                                    if upsert_camera_key(
+                                        track,
+                                        key_time,
+                                        camera.0,
+                                        *smart_key,
+                                        &mut alloc_id,
+                                    ) {
+                                        any_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if has_light {
+                            if let Some(light) = world.get::<BevyLight>(entity) {
+                                let index = ensure_light_track(group, &mut alloc_id);
+                                if let TimelineTrack::Light(track) = &mut group.tracks[index] {
+                                    if upsert_light_key(
+                                        track,
+                                        key_time,
+                                        light.0,
+                                        *smart_key,
+                                        &mut alloc_id,
+                                    ) {
+                                        any_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if has_skinned {
+                            let pose_track_exists = group
+                                .tracks
+                                .iter()
+                                .any(|track| matches!(track, TimelineTrack::Pose(_)));
+                            let pose_edit_active = world
+                                .get_resource::<PoseEditorState>()
+                                .map(|state| {
+                                    state.edit_mode
+                                        && state.active_entity == Some(entity.to_bits())
+                                })
+                                .unwrap_or(false);
+                            let pose_override_enabled = world
+                                .get::<BevyPoseOverride>(entity)
+                                .map(|pose| pose.0.enabled)
+                                .unwrap_or(false);
+                            if pose_track_exists || pose_edit_active || pose_override_enabled {
+                                if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity)
+                                {
+                                    let skeleton = &skinned.0.skin.skeleton;
+                                    let pose = world
+                                        .get::<BevyPoseOverride>(entity)
+                                        .map(|pose| pose.0.pose.clone())
+                                        .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
+                                    let index = ensure_pose_track(group, &mut alloc_id);
+                                    if let TimelineTrack::Pose(track) =
+                                        &mut group.tracks[index]
+                                    {
+                                        if upsert_pose_key(
+                                            track,
+                                            key_time,
+                                            pose,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            any_changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if has_spline {
+                            let spline_track_exists = group
+                                .tracks
+                                .iter()
+                                .any(|track| matches!(track, TimelineTrack::Spline(_)));
+                            if spline_track_exists {
+                                if let Some(spline) = world.get::<BevySpline>(entity) {
+                                    let index = ensure_spline_track(group, &mut alloc_id);
+                                    if let TimelineTrack::Spline(track) =
+                                        &mut group.tracks[index]
+                                    {
+                                        if upsert_spline_key(
+                                            track,
+                                            key_time,
+                                            spline.0.clone(),
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            any_changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if any_changed {
+                            *apply_requested = true;
+                        }
                     }
                 });
 
@@ -8095,13 +8276,17 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                             .get::<BevyPoseOverride>(entity)
                                             .map(|pose| pose.0.pose.clone())
                                             .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
-                                        track.keys.push(PoseKey {
-                                            id: alloc_id(),
-                                            time: *current_time,
+                                        let key_time =
+                                            snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                        if upsert_pose_key(
+                                            track,
+                                            key_time,
                                             pose,
-                                        });
-                                        track.keys.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-                                        *apply_requested = true;
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
                                     }
                                 }
 
@@ -8174,6 +8359,346 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                     }
                                 });
                             }
+                            TimelineTrack::Transform(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+
+                                let mut interp_changed = false;
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Pos");
+                                    let mut interp = track.translation_interpolation;
+                                    ComboBox::from_id_source(format!("transform_interp_pos_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.translation_interpolation {
+                                        track.translation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Rot");
+                                    let mut interp = track.rotation_interpolation;
+                                    ComboBox::from_id_source(format!("transform_interp_rot_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.rotation_interpolation {
+                                        track.rotation_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Interp Scale");
+                                    let mut interp = track.scale_interpolation;
+                                    ComboBox::from_id_source(format!("transform_interp_scale_{}", track.id))
+                                        .selected_text(interpolation_label(interp))
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Linear),
+                                                    "Linear",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Linear;
+                                            }
+                                            if ui
+                                                .selectable_label(
+                                                    matches!(interp, TimelineInterpolation::Step),
+                                                    "Step",
+                                                )
+                                                .clicked()
+                                            {
+                                                interp = TimelineInterpolation::Step;
+                                            }
+                                        });
+                                    if interp != track.scale_interpolation {
+                                        track.scale_interpolation = interp;
+                                        interp_changed = true;
+                                    }
+                                });
+                                if interp_changed {
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    if let Some(transform) = world.get::<BevyTransform>(entity) {
+                                        let key_time =
+                                            snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                        if upsert_transform_key(
+                                            track,
+                                            key_time,
+                                            transform.0,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(selected_key, format!("Key {}", key.id))
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time =
+                                                    snap_time_to_frame(time).clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(transform) = world.get::<BevyTransform>(entity) {
+                                                    key.transform = transform.0;
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+                            }
+                            TimelineTrack::Camera(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+
+                                let mut interp = track.interpolation;
+                                ComboBox::from_id_source(format!("camera_interp_{}", track.id))
+                                    .selected_text(interpolation_label(interp))
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                matches!(interp, TimelineInterpolation::Linear),
+                                                "Linear",
+                                            )
+                                            .clicked()
+                                        {
+                                            interp = TimelineInterpolation::Linear;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                matches!(interp, TimelineInterpolation::Step),
+                                                "Step",
+                                            )
+                                            .clicked()
+                                        {
+                                            interp = TimelineInterpolation::Step;
+                                        }
+                                    });
+                                if interp != track.interpolation {
+                                    track.interpolation = interp;
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    if let Some(camera) = world.get::<BevyCamera>(entity) {
+                                        let key_time =
+                                            snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                        if upsert_camera_key(
+                                            track,
+                                            key_time,
+                                            camera.0,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(selected_key, format!("Key {}", key.id))
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time =
+                                                    snap_time_to_frame(time).clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(camera) = world.get::<BevyCamera>(entity) {
+                                                    key.camera = camera.0;
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+                            }
+                            TimelineTrack::Light(track) => {
+                                ui.checkbox(&mut track.enabled, "Enabled");
+
+                                let mut interp = track.interpolation;
+                                ComboBox::from_id_source(format!("light_interp_{}", track.id))
+                                    .selected_text(interpolation_label(interp))
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                matches!(interp, TimelineInterpolation::Linear),
+                                                "Linear",
+                                            )
+                                            .clicked()
+                                        {
+                                            interp = TimelineInterpolation::Linear;
+                                        }
+                                        if ui
+                                            .selectable_label(
+                                                matches!(interp, TimelineInterpolation::Step),
+                                                "Step",
+                                            )
+                                            .clicked()
+                                        {
+                                            interp = TimelineInterpolation::Step;
+                                        }
+                                    });
+                                if interp != track.interpolation {
+                                    track.interpolation = interp;
+                                    *apply_requested = true;
+                                }
+
+                                if ui.button("Add Keyframe").clicked() {
+                                    if let Some(light) = world.get::<BevyLight>(entity) {
+                                        let key_time =
+                                            snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                        if upsert_light_key(
+                                            track,
+                                            key_time,
+                                            light.0,
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
+                                    }
+                                }
+
+                                ui.collapsing("Keyframes", |ui| {
+                                    let mut remove_key: Option<u64> = None;
+                                    for key in track.keys.iter_mut() {
+                                        let selected_key = matches!(
+                                            selected,
+                                            Some(TimelineSelection::Key { track_id, key_id })
+                                                if *track_id == track.id && *key_id == key.id
+                                        );
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .selectable_label(selected_key, format!("Key {}", key.id))
+                                                .clicked()
+                                            {
+                                                *selected = Some(TimelineSelection::Key {
+                                                    track_id: track.id,
+                                                    key_id: key.id,
+                                                });
+                                            }
+                                            let mut time = key.time;
+                                            if ui
+                                                .add(DragValue::new(&mut time).speed(0.01))
+                                                .changed()
+                                            {
+                                                key.time =
+                                                    snap_time_to_frame(time).clamp(0.0, duration_limit);
+                                                *apply_requested = true;
+                                            }
+                                            if ui.button("Capture").clicked() {
+                                                if let Some(light) = world.get::<BevyLight>(entity) {
+                                                    key.light = light.0;
+                                                    *apply_requested = true;
+                                                }
+                                            }
+                                            if ui.button("Delete").clicked() {
+                                                remove_key = Some(key.id);
+                                            }
+                                        });
+                                    }
+                                    if let Some(key_id) = remove_key {
+                                        track.keys.retain(|key| key.id != key_id);
+                                        *apply_requested = true;
+                                    }
+                                });
+                            }
                             TimelineTrack::Spline(track) => {
                                 ui.checkbox(&mut track.enabled, "Enabled");
 
@@ -8214,13 +8739,17 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
 
                                 if ui.button("Add Keyframe").clicked() {
                                     if let Some(spline) = world.get::<BevySpline>(entity) {
-                                        track.keys.push(SplineKey {
-                                            id: alloc_id(),
-                                            time: *current_time,
-                                            spline: spline.0.clone(),
-                                        });
-                                        track.keys.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-                                        *apply_requested = true;
+                                        let key_time =
+                                            snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
+                                        if upsert_spline_key(
+                                            track,
+                                            key_time,
+                                            spline.0.clone(),
+                                            *smart_key,
+                                            &mut alloc_id,
+                                        ) {
+                                            *apply_requested = true;
+                                        }
                                     }
                                 }
 
@@ -8581,6 +9110,135 @@ fn draw_timeline_canvas(
                     .keys
                     .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
             }
+            TimelineTrack::Transform(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    painter.rect_filled(rect, 2.0, Color32::from_rgb(240, 180, 80));
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id((track.id, key.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Key {
+                            track_id: track.id,
+                            key_id: key.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            key.time =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
+            TimelineTrack::Camera(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    painter.rect_filled(rect, 2.0, Color32::from_rgb(120, 170, 240));
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id((track.id, key.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Key {
+                            track_id: track.id,
+                            key_id: key.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            key.time =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
+            TimelineTrack::Light(track) => {
+                painter.text(
+                    label_rect.left_center() + Vec2::new(4.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    track.name.as_str(),
+                    FontId::proportional(12.0),
+                    Color32::from_gray(220),
+                );
+                for key in track.keys.iter_mut() {
+                    let x =
+                        row_timeline_rect.left() + (key.time - visible_start) * *pixels_per_second;
+                    let rect = Rect::from_center_size(
+                        Pos2::new(x, row_rect.center().y),
+                        Vec2::new(8.0, 8.0),
+                    );
+                    painter.rect_filled(rect, 2.0, Color32::from_rgb(220, 220, 120));
+                    let response = ui.interact(
+                        rect,
+                        ui.make_persistent_id((track.id, key.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if response.clicked() {
+                        *selected = Some(TimelineSelection::Key {
+                            track_id: track.id,
+                            key_id: key.id,
+                        });
+                        clicked_key = true;
+                    }
+                    if response.dragged() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = visible_start
+                                + (pos.x - row_timeline_rect.left()) / *pixels_per_second;
+                            key.time =
+                                snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                            *apply_requested = true;
+                            clicked_key = true;
+                        }
+                    }
+                }
+                track
+                    .keys
+                    .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+            }
             TimelineTrack::Spline(track) => {
                 painter.text(
                     label_rect.left_center() + Vec2::new(4.0, 0.0),
@@ -8698,6 +9356,372 @@ fn interpolation_label(value: TimelineInterpolation) -> &'static str {
         TimelineInterpolation::Linear => "Linear",
         TimelineInterpolation::Step => "Step",
     }
+}
+
+const KEY_TIME_EPS: f32 = 1e-4;
+const FLOAT_EPS: f32 = 1e-4;
+const ROT_EPS: f32 = 1e-4;
+
+fn key_index_at_time<T, F>(keys: &[T], time: f32, mut get_time: F) -> Option<usize>
+where
+    F: FnMut(&T) -> f32,
+{
+    keys.iter()
+        .position(|key| (get_time(key) - time).abs() <= KEY_TIME_EPS)
+}
+
+fn last_key_before_time<T, F>(keys: &[T], time: f32, mut get_time: F) -> Option<&T>
+where
+    F: FnMut(&T) -> f32,
+{
+    for key in keys.iter().rev() {
+        if get_time(key) <= time + KEY_TIME_EPS {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn quat_differs(a: Quat, b: Quat) -> bool {
+    (1.0 - a.dot(b).abs()) > ROT_EPS
+}
+
+fn vec3_differs(a: Vec3, b: Vec3) -> bool {
+    (a - b).length_squared() > (FLOAT_EPS * FLOAT_EPS)
+}
+
+fn transform_differs(
+    a: &helmer::provided::components::Transform,
+    b: &helmer::provided::components::Transform,
+) -> bool {
+    vec3_differs(a.position, b.position)
+        || vec3_differs(a.scale, b.scale)
+        || quat_differs(a.rotation, b.rotation)
+}
+
+fn camera_differs(
+    a: &helmer::provided::components::Camera,
+    b: &helmer::provided::components::Camera,
+) -> bool {
+    (a.fov_y_rad - b.fov_y_rad).abs() > FLOAT_EPS
+        || (a.aspect_ratio - b.aspect_ratio).abs() > FLOAT_EPS
+        || (a.near_plane - b.near_plane).abs() > FLOAT_EPS
+        || (a.far_plane - b.far_plane).abs() > FLOAT_EPS
+}
+
+fn light_differs(a: &Light, b: &Light) -> bool {
+    if std::mem::discriminant(&a.light_type) != std::mem::discriminant(&b.light_type) {
+        return true;
+    }
+    let angle_differs = match (a.light_type, b.light_type) {
+        (LightType::Spot { angle: a_angle }, LightType::Spot { angle: b_angle }) => {
+            (a_angle - b_angle).abs() > FLOAT_EPS
+        }
+        _ => false,
+    };
+    angle_differs || vec3_differs(a.color, b.color) || (a.intensity - b.intensity).abs() > FLOAT_EPS
+}
+
+fn pose_differs(a: &Pose, b: &Pose) -> bool {
+    if a.locals.len() != b.locals.len() {
+        return true;
+    }
+    for (left, right) in a.locals.iter().zip(b.locals.iter()) {
+        if transform_differs(left, right) {
+            return true;
+        }
+    }
+    false
+}
+
+fn spline_differs(a: &Spline, b: &Spline) -> bool {
+    if a.points.len() != b.points.len() || a.closed != b.closed || a.mode != b.mode {
+        return true;
+    }
+    if (a.tension - b.tension).abs() > FLOAT_EPS {
+        return true;
+    }
+    for (pa, pb) in a.points.iter().zip(b.points.iter()) {
+        if vec3_differs(*pa, *pb) {
+            return true;
+        }
+    }
+    false
+}
+
+fn upsert_pose_key(
+    track: &mut PoseTrack,
+    time: f32,
+    pose: Pose,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].pose = pose;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !pose_differs(&prev.pose, &pose) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(PoseKey {
+        id: alloc_id(),
+        time,
+        pose,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn upsert_transform_key(
+    track: &mut TransformTrack,
+    time: f32,
+    transform: helmer::provided::components::Transform,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].transform = transform;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !transform_differs(&prev.transform, &transform) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(TransformKey {
+        id: alloc_id(),
+        time,
+        transform,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn upsert_camera_key(
+    track: &mut CameraTrack,
+    time: f32,
+    camera: helmer::provided::components::Camera,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].camera = camera;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !camera_differs(&prev.camera, &camera) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(CameraKey {
+        id: alloc_id(),
+        time,
+        camera,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn upsert_light_key(
+    track: &mut LightTrack,
+    time: f32,
+    light: Light,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].light = light;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !light_differs(&prev.light, &light) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(LightKey {
+        id: alloc_id(),
+        time,
+        light,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn upsert_spline_key(
+    track: &mut SplineTrack,
+    time: f32,
+    spline: Spline,
+    smart_key: bool,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> bool {
+    if let Some(index) = key_index_at_time(&track.keys, time, |key| key.time) {
+        track.keys[index].spline = spline;
+        return true;
+    }
+    if smart_key {
+        if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
+            if !spline_differs(&prev.spline, &spline) {
+                return false;
+            }
+        }
+    }
+    track.keys.push(SplineKey {
+        id: alloc_id(),
+        time,
+        spline,
+    });
+    track
+        .keys
+        .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    true
+}
+
+fn ensure_transform_track(
+    group: &mut TimelineTrackGroup,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> usize {
+    if let Some(index) = group
+        .tracks
+        .iter()
+        .position(|track| matches!(track, TimelineTrack::Transform(_)))
+    {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Transform(_)))
+        .count();
+    group.tracks.push(TimelineTrack::Transform(TransformTrack {
+        id: alloc_id(),
+        name: format!("Transform Track {}", count + 1),
+        enabled: true,
+        translation_interpolation: TimelineInterpolation::Linear,
+        rotation_interpolation: TimelineInterpolation::Linear,
+        scale_interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
+}
+
+fn ensure_camera_track(
+    group: &mut TimelineTrackGroup,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> usize {
+    if let Some(index) = group
+        .tracks
+        .iter()
+        .position(|track| matches!(track, TimelineTrack::Camera(_)))
+    {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Camera(_)))
+        .count();
+    group.tracks.push(TimelineTrack::Camera(CameraTrack {
+        id: alloc_id(),
+        name: format!("Camera Track {}", count + 1),
+        enabled: true,
+        interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
+}
+
+fn ensure_light_track(group: &mut TimelineTrackGroup, alloc_id: &mut impl FnMut() -> u64) -> usize {
+    if let Some(index) = group
+        .tracks
+        .iter()
+        .position(|track| matches!(track, TimelineTrack::Light(_)))
+    {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Light(_)))
+        .count();
+    group.tracks.push(TimelineTrack::Light(LightTrack {
+        id: alloc_id(),
+        name: format!("Light Track {}", count + 1),
+        enabled: true,
+        interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
+}
+
+fn ensure_pose_track(group: &mut TimelineTrackGroup, alloc_id: &mut impl FnMut() -> u64) -> usize {
+    if let Some(index) = group
+        .tracks
+        .iter()
+        .position(|track| matches!(track, TimelineTrack::Pose(_)))
+    {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Pose(_)))
+        .count();
+    group.tracks.push(TimelineTrack::Pose(PoseTrack {
+        id: alloc_id(),
+        name: format!("Pose Track {}", count + 1),
+        enabled: true,
+        weight: 1.0,
+        additive: false,
+        translation_interpolation: TimelineInterpolation::Linear,
+        rotation_interpolation: TimelineInterpolation::Linear,
+        scale_interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
+}
+
+fn ensure_spline_track(
+    group: &mut TimelineTrackGroup,
+    alloc_id: &mut impl FnMut() -> u64,
+) -> usize {
+    if let Some(index) = group
+        .tracks
+        .iter()
+        .position(|track| matches!(track, TimelineTrack::Spline(_)))
+    {
+        return index;
+    }
+    let count = group
+        .tracks
+        .iter()
+        .filter(|track| matches!(track, TimelineTrack::Spline(_)))
+        .count();
+    group.tracks.push(TimelineTrack::Spline(SplineTrack {
+        id: alloc_id(),
+        name: format!("Spline Track {}", count + 1),
+        enabled: true,
+        interpolation: TimelineInterpolation::Linear,
+        keys: Vec::new(),
+    }));
+    group.tracks.len().saturating_sub(1)
 }
 
 fn build_joint_children(skeleton: &Skeleton) -> Vec<Vec<usize>> {

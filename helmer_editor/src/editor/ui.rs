@@ -9421,6 +9421,44 @@ fn draw_timeline_canvas(
 
     let mut clicked_key = false;
     let allow_interactions = !*middle_drag_active;
+    let mut playhead_dragging = false;
+    let playhead_handle_rect = Rect::from_min_max(
+        Pos2::new(time_x - 4.0, ruler_rect.top()),
+        Pos2::new(time_x + 4.0, ruler_rect.bottom()),
+    );
+    let ruler_response = if allow_interactions {
+        Some(ui.interact(
+            ruler_rect,
+            ui.make_persistent_id("timeline_ruler"),
+            Sense::click(),
+        ))
+    } else {
+        None
+    };
+    if allow_interactions {
+        let response = ui.interact(
+            playhead_handle_rect,
+            ui.make_persistent_id("timeline_playhead"),
+            Sense::click_and_drag(),
+        );
+        if response.dragged() || response.drag_started() {
+            playhead_dragging = true;
+            if let Some(pos) = response.interact_pointer_pos() {
+                let time = visible_start + (pos.x - timeline_rect.left()) / *pixels_per_second;
+                *current_time = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                *apply_requested = true;
+            }
+        }
+    }
+    if let Some(response) = ruler_response {
+        if response.clicked() && !playhead_dragging {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let time = visible_start + (pos.x - timeline_rect.left()) / *pixels_per_second;
+                *current_time = snap_time(time, snap_to_frame, frame_rate).clamp(0.0, duration);
+                *apply_requested = true;
+            }
+        }
+    }
 
     for (index, track) in group.tracks.iter_mut().enumerate() {
         let row_top = rect.min.y + ruler_height + index as f32 * row_height;
@@ -9435,6 +9473,8 @@ fn draw_timeline_canvas(
         let row_timeline_rect =
             Rect::from_min_max(Pos2::new(label_rect.max.x, row_rect.min.y), row_rect.max);
 
+        let mut pointer_on_key = false;
+        let mut pointer_on_segment = false;
         painter.rect_filled(row_rect, 0.0, Color32::from_gray(20));
         match track {
             TimelineTrack::Pose(track) => {
@@ -9453,6 +9493,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9504,6 +9547,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9555,6 +9601,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9606,6 +9655,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9657,6 +9709,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9708,6 +9763,9 @@ fn draw_timeline_canvas(
                         Pos2::new(x, row_rect.center().y),
                         Vec2::new(8.0, 8.0),
                     );
+                    if pointer_pos.map(|pos| rect.contains(pos)).unwrap_or(false) {
+                        pointer_on_key = true;
+                    }
                     let (new_time, delete) = timeline_handle_key(
                         ui,
                         &painter,
@@ -9761,6 +9819,12 @@ fn draw_timeline_canvas(
                         Pos2::new(start_x, row_rect.min.y + 4.0),
                         Pos2::new(end_x.max(start_x + 6.0), row_rect.max.y - 4.0),
                     );
+                    if pointer_pos
+                        .map(|pos| seg_rect.contains(pos))
+                        .unwrap_or(false)
+                    {
+                        pointer_on_segment = true;
+                    }
                     painter.rect_filled(seg_rect, 2.0, Color32::from_rgb(120, 220, 140));
                     let selected_segment = matches!(
                         selected,
@@ -9819,13 +9883,17 @@ fn draw_timeline_canvas(
             }
         }
 
-        if allow_interactions {
+        let pointer_on_item = pointer_on_key || pointer_on_segment;
+        let pointer_on_playhead = pointer_pos
+            .map(|pos| playhead_handle_rect.contains(pos))
+            .unwrap_or(false);
+        if allow_interactions && !pointer_on_item && !playhead_dragging && !pointer_on_playhead {
             let response = ui.interact(
                 row_timeline_rect,
                 ui.make_persistent_id((track.id(), "row")),
-                Sense::click_and_drag(),
+                Sense::click(),
             );
-            if (response.clicked() || response.dragged()) && !clicked_key {
+            if response.clicked() && !clicked_key {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let time =
                         visible_start + (pos.x - row_timeline_rect.left()) / *pixels_per_second;

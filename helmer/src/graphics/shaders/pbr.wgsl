@@ -63,6 +63,10 @@ struct MaterialData {
     emission_texture_index: i32,  // Added emission texture index
     emission_color: vec3<f32>,    // Added emission color
     _padding: f32,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
+    _pad_alpha0: u32,
+    _pad_alpha1: u32,
 }
 
 struct CascadeData {

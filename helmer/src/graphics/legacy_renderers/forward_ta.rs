@@ -2141,6 +2141,8 @@ impl RenderTrait for ForwardRendererTA {
                     normal_texture_index: indices.normal as i32,
                     metallic_roughness_texture_index: indices.metallic_roughness as i32,
                     emission_texture_index: 0, // Simplified: no emission textures
+                    alpha_mode: mat_data.alpha_mode,
+                    alpha_cutoff: mat_data.alpha_cutoff,
                 };
 
                 newly_completed.push((mat_data.id, final_material));

@@ -42,6 +42,13 @@ pub enum BundleMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardBlendMode {
+    Alpha,
+    Premultiplied,
+    Additive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GBufferBundleKey {
     pub mode: BundleMode,
     pub draw_version: u64,
@@ -56,6 +63,9 @@ pub struct ShadowBundleKey {
     pub mode: BundleMode,
     pub draw_version: u64,
     pub matrices_version: u64,
+    pub material_bindings_version: u64,
+    pub texture_array_size: u32,
+    pub binding_backend: BindingBackendKind,
     pub resource_epoch: u64,
 }
 
@@ -112,8 +122,8 @@ pub struct FrameGlobals {
     pub shadow_mesh_tasks: Option<wgpu::Buffer>,
     pub gpu_draws: Arc<Vec<IndirectDrawBatch>>,
     pub gpu_instance_count: u32,
-    pub forward_instances: Option<InstanceBuffer>,
-    pub forward_batches: Arc<Vec<DrawBatch>>,
+    pub transparent_instances: Option<InstanceBuffer>,
+    pub transparent_batches: Arc<Vec<TransparentDrawBatch>>,
     pub alpha: f32,
     pub camera_view_proj: Mat4,
     pub prev_view_proj: Mat4,
@@ -250,6 +260,12 @@ pub struct DrawBatch {
     pub meshlet_vertices: ResourceId,
     pub meshlet_indices: ResourceId,
     pub meshlet_count: u32,
+}
+
+#[derive(Clone)]
+pub struct TransparentDrawBatch {
+    pub blend_mode: ForwardBlendMode,
+    pub batch: DrawBatch,
 }
 
 #[derive(Clone)]

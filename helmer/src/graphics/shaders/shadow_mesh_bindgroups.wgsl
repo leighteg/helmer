@@ -139,7 +139,7 @@ var<workgroup> meshlet_radius: f32;
 @group(0) @binding(0) var<uniform> light_vp: LightVP;
 @group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
-@group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
+@group(1) @binding(1) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(2) var pbr_sampler: sampler;
 @group(2) @binding(0) var<uniform> render_constants: Constants;
 @group(3) @binding(0) var<storage, read> instances: array<ShadowInstance>;
@@ -190,20 +190,24 @@ fn apply_skinning_position(
     let joint2 = min(joints.z, skin_count - 1u);
     let joint3 = min(joints.w, skin_count - 1u);
 
-    var skinned_pos = vec3<f32>(0.0);
+    var skinned_pos = vec4<f32>(0.0);
     if (weights.x > 0.0) {
-        skinned_pos += weights.x * (skin_matrices[skin_offset + joint0] * vec4<f32>(position, 1.0)).xyz;
+        let m = skin_matrices[skin_offset + joint0];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.x;
     }
     if (weights.y > 0.0) {
-        skinned_pos += weights.y * (skin_matrices[skin_offset + joint1] * vec4<f32>(position, 1.0)).xyz;
+        let m = skin_matrices[skin_offset + joint1];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.y;
     }
     if (weights.z > 0.0) {
-        skinned_pos += weights.z * (skin_matrices[skin_offset + joint2] * vec4<f32>(position, 1.0)).xyz;
+        let m = skin_matrices[skin_offset + joint2];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.z;
     }
     if (weights.w > 0.0) {
-        skinned_pos += weights.w * (skin_matrices[skin_offset + joint3] * vec4<f32>(position, 1.0)).xyz;
+        let m = skin_matrices[skin_offset + joint3];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.w;
     }
-    return skinned_pos;
+    return skinned_pos.xyz;
 }
 
 fn max_scale(model: mat4x4<f32>) -> f32 {
@@ -225,7 +229,7 @@ fn sphere_in_frustum(view_proj: mat4x4<f32>, center: vec3<f32>, radius: f32) -> 
         row3 + row1,
         row3 - row1,
         row3 + row2,
-        row3 - row2
+        row3 - row2,
     );
 
     for (var i = 0u; i < 6u; i = i + 1u) {
@@ -385,9 +389,8 @@ fn alpha_clip(in: VertexOutput) {
         return;
     }
     let has_albedo = material.albedo_idx >= 0i;
-    let albedo_idx = select(0i, material.albedo_idx, has_albedo);
     let albedo_sample = textureSampleBias(
-        textures[albedo_idx],
+        albedo_tex,
         pbr_sampler,
         in.tex_coord,
         render_constants.mip_bias

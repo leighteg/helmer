@@ -199,6 +199,22 @@ pub async fn initialize_renderer(
 
 // --- SHARED DATA STRUCTURES ---
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlphaMode {
+    Opaque = 0,
+    Mask = 1,
+    Blend = 2,
+    Premultiplied = 3,
+    Additive = 4,
+}
+
+impl Default for AlphaMode {
+    fn default() -> Self {
+        AlphaMode::Opaque
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Material {
     pub albedo: [f32; 4],
@@ -211,6 +227,8 @@ pub struct Material {
     pub normal_texture_index: i32,
     pub metallic_roughness_texture_index: i32,
     pub emission_texture_index: i32,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: Option<f32>,
 }
 
 impl Default for Material {
@@ -226,6 +244,8 @@ impl Default for Material {
             normal_texture_index: 0,
             metallic_roughness_texture_index: 0,
             emission_texture_index: -1,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: None,
         }
     }
 }
@@ -244,10 +264,14 @@ pub struct MaterialShaderData {
     pub emission_idx: i32,
     pub emission_color: [f32; 3],
     pub _padding: f32,
+    pub alpha_mode: u32,
+    pub alpha_cutoff: f32,
+    pub _pad_alpha: [u32; 2],
 }
 
 impl From<&Material> for MaterialShaderData {
     fn from(material: &Material) -> Self {
+        let alpha_cutoff = material.alpha_cutoff.unwrap_or(0.0);
         Self {
             albedo: material.albedo,
             metallic: material.metallic,
@@ -260,6 +284,9 @@ impl From<&Material> for MaterialShaderData {
             emission_idx: material.emission_texture_index,
             emission_color: material.emission_color,
             _padding: 0.0,
+            alpha_mode: material.alpha_mode as u32,
+            alpha_cutoff,
+            _pad_alpha: [0; 2],
         }
     }
 }

@@ -22,7 +22,8 @@ struct InstanceInput {
     casts_shadow: u32,
     skin_offset: u32,
     skin_count: u32,
-    _pad0: array<u32, 3>,
+    alpha_mode: u32,
+    _pad0: array<u32, 2>,
 }
 
 struct GBufferInstance {
@@ -37,10 +38,18 @@ struct GBufferInstance {
 
 struct ShadowInstance {
     model_matrix: mat4x4<f32>,
+    material_id: u32,
     skin_offset: u32,
     skin_count: u32,
-    _pad0: vec2<u32>,
+    _pad0: u32,
 }
+
+const ALPHA_MODE_OPAQUE: u32 = 0u;
+const ALPHA_MODE_MASK: u32 = 1u;
+const ALPHA_MODE_BLEND: u32 = 2u;
+const ALPHA_MODE_PREMULTIPLIED: u32 = 3u;
+const ALPHA_MODE_ADDITIVE: u32 = 4u;
+const FLAG_TRANSPARENT_SHADOWS: u32 = 8u;
 
 struct MeshMeta {
     lod_count: u32,
@@ -157,6 +166,7 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     let frustum_enabled = (flags & 1u) != 0u;
     let occlusion_enabled = (flags & 2u) != 0u;
     let lod_enabled = (flags & 4u) != 0u;
+    let transparent_shadows = (flags & FLAG_TRANSPARENT_SHADOWS) != 0u;
 
     let model = select_model(inst.prev_model, inst.curr_model, params.alpha);
     let view_proj = camera.projection_matrix * camera.view_matrix;
@@ -282,23 +292,29 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (capacity > remaining) {
         return;
     }
-    let write_idx = atomicAdd(&gbuffer_draws[draw_index].instance_count, 1u);
-    if (write_idx < capacity) {
-        let out_idx = base + write_idx;
-        gbuffer_out[out_idx].model_matrix = model;
-        gbuffer_out[out_idx].material_id = inst.material_id;
-        gbuffer_out[out_idx].visibility = 1u;
-        gbuffer_out[out_idx].skin_offset = inst.skin_offset;
-        gbuffer_out[out_idx].skin_count = inst.skin_count;
-        gbuffer_out[out_idx].bounds_center = inst.bounds_center;
-        gbuffer_out[out_idx].bounds_extents = inst.bounds_extents;
+    let transparent_mode = inst.alpha_mode == ALPHA_MODE_BLEND
+        || inst.alpha_mode == ALPHA_MODE_PREMULTIPLIED
+        || inst.alpha_mode == ALPHA_MODE_ADDITIVE;
+    if (!transparent_mode) {
+        let write_idx = atomicAdd(&gbuffer_draws[draw_index].instance_count, 1u);
+        if (write_idx < capacity) {
+            let out_idx = base + write_idx;
+            gbuffer_out[out_idx].model_matrix = model;
+            gbuffer_out[out_idx].material_id = inst.material_id;
+            gbuffer_out[out_idx].visibility = 1u;
+            gbuffer_out[out_idx].skin_offset = inst.skin_offset;
+            gbuffer_out[out_idx].skin_count = inst.skin_count;
+            gbuffer_out[out_idx].bounds_center = inst.bounds_center;
+            gbuffer_out[out_idx].bounds_extents = inst.bounds_extents;
+        }
     }
 
-    if (inst.casts_shadow != 0u) {
+    if (inst.casts_shadow != 0u && (!transparent_mode || transparent_shadows)) {
         let shadow_idx = atomicAdd(&shadow_draws[draw_index].instance_count, 1u);
         if (shadow_idx < capacity) {
             let out_idx = base + shadow_idx;
             shadow_out[out_idx].model_matrix = model;
+            shadow_out[out_idx].material_id = inst.material_id;
             shadow_out[out_idx].skin_offset = inst.skin_offset;
             shadow_out[out_idx].skin_count = inst.skin_count;
         }

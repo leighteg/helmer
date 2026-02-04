@@ -3,11 +3,12 @@ use std::{
     any::Any,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
 use crate::graphics::{
+    backend::binding_backend::BindingBackendKind,
     common::{
         constants::MAX_SHADOW_CASCADES,
         renderer::{
@@ -34,6 +35,70 @@ pub struct ShadowOutputs {
     pub depth: ResourceId,
 }
 
+struct MaterialBindGroupCache {
+    version: u64,
+    groups: Arc<Vec<wgpu::BindGroup>>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowInstanceRaw {
+    pub model_matrix: [[f32; 4]; 4],
+    pub material_id: u32,
+    pub skin_offset: u32,
+    pub skin_count: u32,
+    pub _pad0: u32,
+}
+
+impl ShadowInstanceRaw {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<ShadowInstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress
+                        + mem::size_of::<u32>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress
+                        + 2 * mem::size_of::<u32>() as wgpu::BufferAddress,
+                    shader_location: 12,
+                    format: wgpu::VertexFormat::Uint32,
+                },
+            ],
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ShadowPass {
     outputs: ShadowOutputs,
@@ -43,11 +108,15 @@ pub struct ShadowPass {
     pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     mesh_pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     vp_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
+    material_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     rc_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     mesh_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     mesh_params: Arc<RwLock<Option<wgpu::Buffer>>>,
     mesh_params_capacity: Arc<AtomicU64>,
     aligned_mat4_size: Arc<AtomicU64>,
+    texture_array_size: Arc<AtomicU32>,
+    backend_kind: Arc<RwLock<Option<BindingBackendKind>>>,
+    material_bind_groups: Arc<RwLock<Option<MaterialBindGroupCache>>>,
     bundle_cache: Arc<RwLock<Vec<ShadowBundleSlot>>>,
 }
 
@@ -121,11 +190,15 @@ impl ShadowPass {
             pipeline: Arc::new(RwLock::new(None)),
             mesh_pipeline: Arc::new(RwLock::new(None)),
             vp_bgl: Arc::new(RwLock::new(None)),
+            material_bgl: Arc::new(RwLock::new(None)),
             rc_bgl: Arc::new(RwLock::new(None)),
             mesh_bgl: Arc::new(RwLock::new(None)),
             mesh_params: Arc::new(RwLock::new(None)),
             mesh_params_capacity: Arc::new(AtomicU64::new(0)),
             aligned_mat4_size: Arc::new(AtomicU64::new(0)),
+            texture_array_size: Arc::new(AtomicU32::new(1)),
+            backend_kind: Arc::new(RwLock::new(None)),
+            material_bind_groups: Arc::new(RwLock::new(None)),
             bundle_cache: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -365,9 +438,44 @@ impl ShadowPass {
         (map_view, depth_view)
     }
 
-    fn ensure_pipeline(&self, device: &wgpu::Device) {
-        if self.pipeline.read().is_some() {
-            return;
+    fn ensure_backend(&self, binding_backend: BindingBackendKind) {
+        let mut current = self.backend_kind.write();
+        if current.map_or(true, |kind| kind != binding_backend) {
+            *self.pipeline.write() = None;
+            *self.mesh_pipeline.write() = None;
+            *self.vp_bgl.write() = None;
+            *self.material_bgl.write() = None;
+            *self.rc_bgl.write() = None;
+            *self.mesh_bgl.write() = None;
+            *self.material_bind_groups.write() = None;
+            self.texture_array_size.store(1, Ordering::Relaxed);
+            *current = Some(binding_backend);
+        }
+    }
+
+    fn ensure_pipeline(
+        &self,
+        device: &wgpu::Device,
+        binding_backend: BindingBackendKind,
+        texture_array_size: u32,
+    ) {
+        self.ensure_backend(binding_backend);
+        if binding_backend == BindingBackendKind::BindGroups {
+            if self.pipeline.read().is_some() {
+                return;
+            }
+        } else {
+            let current_size = self.texture_array_size.load(Ordering::Relaxed);
+            if self.pipeline.read().is_some() && current_size == texture_array_size {
+                return;
+            }
+        }
+
+        let array_size = texture_array_size.max(1);
+        if binding_backend != BindingBackendKind::BindGroups {
+            self.texture_array_size.store(array_size, Ordering::Relaxed);
+        } else {
+            self.texture_array_size.store(1, Ordering::Relaxed);
         }
 
         let output_is_rg = shadow_format_is_rg(self.format);
@@ -382,7 +490,11 @@ impl ShadowPass {
             wgpu::ColorWrites::ALL
         };
         let mesh_stage = mesh_shader_visibility(device);
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"));
+        let shader = if binding_backend == BindingBackendKind::BindGroups {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow_bindgroups.wgsl"))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow.wgsl"))
+        };
 
         let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
         let alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
@@ -417,6 +529,70 @@ impl ShadowPass {
             ],
         });
 
+        let material_entries = if binding_backend == BindingBackendKind::BindGroups {
+            vec![
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ]
+        } else {
+            vec![
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: Some(std::num::NonZeroU32::new(array_size).unwrap()),
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ]
+        };
+        let material_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow/MaterialBGL"),
+            entries: &material_entries,
+        });
+
         let rc_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow/RCBGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -435,7 +611,7 @@ impl ShadowPass {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow/PipelineLayout"),
-            bind_group_layouts: &[&vp_bgl, &rc_bgl],
+            bind_group_layouts: &[&vp_bgl, &material_bgl, &rc_bgl],
             immediate_size: 0,
         });
 
@@ -447,7 +623,7 @@ impl ShadowPass {
                 entry_point: Some("vs_main"),
                 buffers: &[
                     crate::graphics::common::renderer::Vertex::desc(),
-                    crate::graphics::common::renderer::InstanceRaw::desc(),
+                    ShadowInstanceRaw::desc(),
                 ],
                 compilation_options: Default::default(),
             },
@@ -482,23 +658,44 @@ impl ShadowPass {
         });
 
         *self.vp_bgl.write() = Some(vp_bgl);
+        *self.material_bgl.write() = Some(material_bgl);
         *self.rc_bgl.write() = Some(rc_bgl);
         *self.pipeline.write() = Some(pipeline);
     }
 
-    fn ensure_mesh_pipeline(&self, device: &wgpu::Device) {
-        if self.mesh_pipeline.read().is_some() {
-            return;
+    fn ensure_mesh_pipeline(
+        &self,
+        device: &wgpu::Device,
+        binding_backend: BindingBackendKind,
+        texture_array_size: u32,
+    ) {
+        if binding_backend == BindingBackendKind::BindGroups {
+            if self.mesh_pipeline.read().is_some() {
+                return;
+            }
+        } else {
+            let current_size = self.texture_array_size.load(Ordering::Relaxed);
+            if self.mesh_pipeline.read().is_some() && current_size == texture_array_size {
+                return;
+            }
         }
 
         if mesh_shader_visibility(device).is_empty() {
             return;
         }
 
-        self.ensure_pipeline(device);
+        self.ensure_pipeline(device, binding_backend, texture_array_size);
 
-        let (vp_bgl, rc_bgl) = (self.vp_bgl.read(), self.rc_bgl.read());
-        let (vp_bgl, rc_bgl) = (vp_bgl.as_ref().unwrap(), rc_bgl.as_ref().unwrap());
+        let (vp_bgl, material_bgl, rc_bgl) = (
+            self.vp_bgl.read(),
+            self.material_bgl.read(),
+            self.rc_bgl.read(),
+        );
+        let (vp_bgl, material_bgl, rc_bgl) = (
+            vp_bgl.as_ref().unwrap(),
+            material_bgl.as_ref().unwrap(),
+            rc_bgl.as_ref().unwrap(),
+        );
 
         let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow/MeshBGL"),
@@ -570,12 +767,22 @@ impl ShadowPass {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow/MeshPipelineLayout"),
-            bind_group_layouts: &[vp_bgl, rc_bgl, &mesh_bgl],
+            bind_group_layouts: &[vp_bgl, material_bgl, rc_bgl, &mesh_bgl],
             immediate_size: 0,
         });
 
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow_mesh.wgsl"));
+        let shader = if binding_backend == BindingBackendKind::BindGroups {
+            device.create_shader_module(wgpu::include_wgsl!(
+                "../shaders/shadow_mesh_bindgroups.wgsl"
+            ))
+        } else {
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/shadow_mesh.wgsl"))
+        };
+        let write_mask = if shadow_format_is_rg(self.format) {
+            wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN
+        } else {
+            wgpu::ColorWrites::ALL
+        };
 
         let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
             label: Some("Shadow/MeshPipeline"),
@@ -592,7 +799,7 @@ impl ShadowPass {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.format,
                     blend: None,
-                    write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
+                    write_mask,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -656,6 +863,94 @@ impl ShadowPass {
         (vp_bg, rc_bg)
     }
 
+    fn create_material_bind_group_bindless(
+        &self,
+        device: &wgpu::Device,
+        frame: &FrameGlobals,
+    ) -> Option<wgpu::BindGroup> {
+        let material_layout = self.material_bgl.read();
+        let material_layout = material_layout.as_ref()?;
+        let array_size = self.texture_array_size.load(Ordering::Relaxed);
+        let mut texture_views: Vec<&wgpu::TextureView> = Vec::with_capacity(array_size as usize);
+        for view in frame.texture_views.iter() {
+            texture_views.push(view);
+        }
+        while texture_views.len() < array_size as usize {
+            texture_views.push(&frame.fallback_view);
+        }
+
+        Some(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow/MaterialBG"),
+                layout: material_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: frame
+                            .material_buffer
+                            .as_ref()
+                            .expect("material buffer missing")
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureViewArray(&texture_views),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                    },
+                ],
+            }),
+        )
+    }
+
+    fn ensure_material_bind_groups(
+        &self,
+        device: &wgpu::Device,
+        frame: &FrameGlobals,
+    ) -> Option<Arc<Vec<wgpu::BindGroup>>> {
+        let material_buffer = frame.material_buffer.as_ref()?;
+        let material_textures = frame.material_textures.as_ref()?;
+        let material_layout = self.material_bgl.read();
+        let material_layout = material_layout.as_ref()?;
+        let version = frame.material_bindings_version;
+        if let Some(cache) = self.material_bind_groups.read().as_ref() {
+            if cache.version == version && cache.groups.len() == material_textures.len() {
+                return Some(cache.groups.clone());
+            }
+        }
+
+        let mut groups = Vec::with_capacity(material_textures.len());
+        for set in material_textures.iter() {
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow/MaterialBG"),
+                layout: material_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: material_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&set.albedo),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                    },
+                ],
+            });
+            groups.push(group);
+        }
+        let groups = Arc::new(groups);
+        *self.material_bind_groups.write() = Some(MaterialBindGroupCache {
+            version,
+            groups: groups.clone(),
+        });
+        Some(groups)
+    }
+
     fn ensure_bundle_cache(&self, frames_in_flight: usize) {
         let slots = frames_in_flight.max(1);
         let mut cache = self.bundle_cache.write();
@@ -669,11 +964,22 @@ impl ShadowPass {
         &self,
         ctx: &RenderGraphExecCtx,
         frame: &FrameGlobals,
+        binding_backend: BindingBackendKind,
         use_indirect: bool,
     ) -> Option<Vec<wgpu::RenderBundle>> {
         let pipeline = self.pipeline.read();
         let pipeline = pipeline.as_ref()?;
         let (vp_bg, rc_bg) = self.create_bind_groups(ctx.device(), frame);
+        let material_bg = if binding_backend == BindingBackendKind::BindGroups {
+            None
+        } else {
+            self.create_material_bind_group_bindless(ctx.device(), frame)
+        };
+        let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+            self.ensure_material_bind_groups(ctx.device(), frame)
+        } else {
+            None
+        };
         let instances = frame.shadow_instances.as_ref()?;
 
         let aligned_size = self.aligned_mat4_size.load(Ordering::Relaxed) as u32;
@@ -697,11 +1003,20 @@ impl ShadowPass {
 
             encoder.set_pipeline(pipeline);
             encoder.set_bind_group(0, &vp_bg, &[aligned_size.saturating_mul(cascade as u32)]);
-            encoder.set_bind_group(1, &rc_bg, &[]);
+            if binding_backend != BindingBackendKind::BindGroups {
+                let material_bg = material_bg.as_ref()?;
+                encoder.set_bind_group(1, material_bg, &[]);
+            }
+            encoder.set_bind_group(2, &rc_bg, &[]);
             encoder.set_vertex_buffer(1, instances.buffer.slice(..));
 
             if use_indirect {
                 let indirect = frame.shadow_indirect.as_ref()?;
+                let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                    material_groups.as_ref()
+                } else {
+                    None
+                };
                 for draw in frame.gpu_draws.iter() {
                     let vertex = ctx
                         .rpctx
@@ -716,11 +1031,24 @@ impl ShadowPass {
                     let (Some(vertex), Some(index)) = (vertex, index) else {
                         continue;
                     };
+                    if let Some(groups) = material_groups {
+                        let material_idx = draw.material_id as usize;
+                        let material_bg = groups
+                            .get(material_idx)
+                            .or_else(|| groups.first())
+                            .expect("material bind groups empty");
+                        encoder.set_bind_group(1, material_bg, &[]);
+                    }
                     encoder.set_vertex_buffer(0, vertex.slice(..));
                     encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
                     encoder.draw_indexed_indirect(indirect, draw.indirect_offset);
                 }
             } else {
+                let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                    material_groups.as_ref()
+                } else {
+                    None
+                };
                 for batch in frame.shadow_batches.iter() {
                     let vertex = ctx
                         .rpctx
@@ -735,6 +1063,14 @@ impl ShadowPass {
                     let (Some(vertex), Some(index)) = (vertex, index) else {
                         continue;
                     };
+                    if let Some(groups) = material_groups {
+                        let material_idx = batch.material_id as usize;
+                        let material_bg = groups
+                            .get(material_idx)
+                            .or_else(|| groups.first())
+                            .expect("material bind groups empty");
+                        encoder.set_bind_group(1, material_bg, &[]);
+                    }
                     encoder.set_vertex_buffer(0, vertex.slice(..));
                     encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
                     encoder.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
@@ -772,6 +1108,11 @@ impl RenderPass for ShadowPass {
 
         let device = ctx.device().clone();
         let queue = ctx.queue().clone();
+        let binding_backend = frame.binding_backend;
+        let texture_array_size = frame.texture_array_size;
+        let has_materials = frame.material_buffer.is_some()
+            && (binding_backend != BindingBackendKind::BindGroups
+                || frame.material_textures.is_some());
 
         let mut use_mesh =
             frame.render_config.use_mesh_shaders && frame.device_caps.supports_mesh_pipeline();
@@ -783,7 +1124,8 @@ impl RenderPass for ShadowPass {
             && !frame.gpu_draws.is_empty();
         let use_multi_draw = use_indirect
             && frame.render_config.gpu_multi_draw_indirect
-            && frame.device_caps.supports_multi_draw_indirect();
+            && frame.device_caps.supports_multi_draw_indirect()
+            && binding_backend != BindingBackendKind::BindGroups;
         let (_map_view, depth_view) = self.ensure_targets(ctx);
 
         let shadow_texture = ctx
@@ -798,6 +1140,7 @@ impl RenderPass for ShadowPass {
         };
 
         let mesh_draw_enabled = frame.render_config.shadow_pass
+            && has_materials
             && frame.shadow_instances.is_some()
             && frame.shadow_matrices_buffer.is_some()
             && (use_mesh_indirect || !frame.shadow_batches.is_empty());
@@ -895,8 +1238,24 @@ impl RenderPass for ShadowPass {
                 return;
             }
 
-            self.ensure_mesh_pipeline(&device);
+            self.ensure_mesh_pipeline(&device, binding_backend, texture_array_size);
             let (vp_bg, rc_bg) = self.create_bind_groups(&device, frame.as_ref());
+            let material_bg = if binding_backend == BindingBackendKind::BindGroups {
+                None
+            } else {
+                self.create_material_bind_group_bindless(&device, frame.as_ref())
+            };
+            let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                self.ensure_material_bind_groups(&device, frame.as_ref())
+            } else {
+                None
+            };
+            if binding_backend == BindingBackendKind::BindGroups && material_groups.is_none() {
+                return;
+            }
+            if binding_backend != BindingBackendKind::BindGroups && material_bg.is_none() {
+                return;
+            }
             let instances = match frame.shadow_instances.as_ref() {
                 Some(buf) => buf,
                 None => return,
@@ -1336,7 +1695,14 @@ impl RenderPass for ShadowPass {
 
                 pass.set_pipeline(mesh_pipeline);
                 pass.set_bind_group(0, &vp_bg, &[aligned_size.saturating_mul(cascade as u32)]);
-                pass.set_bind_group(1, &rc_bg, &[]);
+                if binding_backend != BindingBackendKind::BindGroups {
+                    let material_bg = match material_bg.as_ref() {
+                        Some(bg) => bg,
+                        None => return,
+                    };
+                    pass.set_bind_group(1, material_bg, &[]);
+                }
+                pass.set_bind_group(2, &rc_bg, &[]);
 
                 let mut params_tile_index = 0u32;
                 if use_mesh_indirect {
@@ -1366,6 +1732,14 @@ impl RenderPass for ShadowPass {
                             params_tile_index = params_tile_index.saturating_add(draw_tiles);
                             continue;
                         };
+                        if let Some(groups) = material_groups.as_ref() {
+                            let material_idx = draw.material_id as usize;
+                            let material_bg = groups
+                                .get(material_idx)
+                                .or_else(|| groups.first())
+                                .expect("material bind groups empty");
+                            pass.set_bind_group(1, material_bg, &[]);
+                        }
 
                         let mut draw_tile_index = 0u32;
                         for _tile_y in 0..tiles_y {
@@ -1376,7 +1750,7 @@ impl RenderPass for ShadowPass {
                                 }
                                 let task_offset =
                                     draw.mesh_task_offset + (draw_tile_index as u64) * task_stride;
-                                pass.set_bind_group(2, mesh_bg, &[params_offset as u32]);
+                                pass.set_bind_group(3, mesh_bg, &[params_offset as u32]);
                                 pass.draw_mesh_tasks_indirect(mesh_tasks, task_offset);
                                 params_tile_index = params_tile_index.saturating_add(1);
                                 draw_tile_index = draw_tile_index.saturating_add(1);
@@ -1397,6 +1771,14 @@ impl RenderPass for ShadowPass {
                             params_tile_index = params_tile_index.saturating_add(tiling.task_count);
                             continue;
                         };
+                        if let Some(groups) = material_groups.as_ref() {
+                            let material_idx = batch.material_id as usize;
+                            let material_bg = groups
+                                .get(material_idx)
+                                .or_else(|| groups.first())
+                                .expect("material bind groups empty");
+                            pass.set_bind_group(1, material_bg, &[]);
+                        }
 
                         for tile_y in 0..tiling.tiles_y {
                             for tile_x in 0..tiling.tiles_x {
@@ -1404,7 +1786,7 @@ impl RenderPass for ShadowPass {
                                 if params_offset > u32::MAX as u64 {
                                     return;
                                 }
-                                pass.set_bind_group(2, mesh_bg, &[params_offset as u32]);
+                                pass.set_bind_group(3, mesh_bg, &[params_offset as u32]);
                                 let meshlet_base = tile_x * tiling.tile_meshlets;
                                 let meshlet_count = batch
                                     .meshlet_count
@@ -1427,8 +1809,9 @@ impl RenderPass for ShadowPass {
             return;
         }
 
-        self.ensure_pipeline(&device);
+        self.ensure_pipeline(&device, binding_backend, texture_array_size);
         let clear_only = !frame.render_config.shadow_pass
+            || !has_materials
             || frame.shadow_instances.is_none()
             || frame.shadow_matrices_buffer.is_none()
             || (!use_indirect && frame.shadow_batches.is_empty());
@@ -1463,7 +1846,8 @@ impl RenderPass for ShadowPass {
                 || slot.draw_signature != draw_signature
             {
                 slot.key = Some(frame.shadow_bundle_key);
-                slot.bundles = self.build_bundles(ctx, frame.as_ref(), use_indirect);
+                slot.bundles =
+                    self.build_bundles(ctx, frame.as_ref(), binding_backend, use_indirect);
                 slot.resources = Self::gather_bundle_resources(frame.as_ref(), use_indirect);
                 slot.draw_signature = draw_signature;
             }
@@ -1471,11 +1855,27 @@ impl RenderPass for ShadowPass {
         } else {
             None
         };
-        let bind_groups = if cached_bundles.is_none() && !clear_only {
-            Some(self.create_bind_groups(&device, frame.as_ref()))
-        } else {
-            None
-        };
+        let (vp_bg, rc_bg, material_bg, material_groups) =
+            if cached_bundles.is_none() && !clear_only {
+                let (vp_bg, rc_bg) = self.create_bind_groups(&device, frame.as_ref());
+                if binding_backend == BindingBackendKind::BindGroups {
+                    let material_groups =
+                        match self.ensure_material_bind_groups(&device, frame.as_ref()) {
+                            Some(groups) => groups,
+                            None => return,
+                        };
+                    (Some(vp_bg), Some(rc_bg), None, Some(material_groups))
+                } else {
+                    let material_bg =
+                        match self.create_material_bind_group_bindless(&device, frame.as_ref()) {
+                            Some(bg) => bg,
+                            None => return,
+                        };
+                    (Some(vp_bg), Some(rc_bg), Some(material_bg), None)
+                }
+            } else {
+                (None, None, None, None)
+            };
 
         // Render each cascade separately
         for cascade in 0..self.cascade_count {
@@ -1525,14 +1925,18 @@ impl RenderPass for ShadowPass {
                 }
             }
 
-            if let Some((ref vp_bg, ref rc_bg)) = bind_groups {
+            if let (Some(vp_bg), Some(rc_bg)) = (vp_bg.as_ref(), rc_bg.as_ref()) {
                 pass.set_pipeline(self.pipeline.read().as_ref().unwrap());
                 pass.set_bind_group(
                     0,
                     vp_bg,
                     &[self.aligned_mat4_size.load(Ordering::Relaxed) as u32 * cascade as u32],
                 );
-                pass.set_bind_group(1, rc_bg, &[]);
+                if binding_backend != BindingBackendKind::BindGroups {
+                    let material_bg = material_bg.as_ref().expect("material bind group missing");
+                    pass.set_bind_group(1, material_bg, &[]);
+                }
+                pass.set_bind_group(2, rc_bg, &[]);
 
                 pass.set_vertex_buffer(
                     1,
@@ -1619,6 +2023,14 @@ impl RenderPass for ShadowPass {
                                 Some(buf) => buf,
                                 None => continue,
                             };
+                            if let Some(groups) = material_groups.as_ref() {
+                                let material_idx = draw.material_id as usize;
+                                let material_bg = groups
+                                    .get(material_idx)
+                                    .or_else(|| groups.first())
+                                    .expect("material bind groups empty");
+                                pass.set_bind_group(1, material_bg, &[]);
+                            }
                             pass.set_index_buffer(
                                 index_buffer.slice(..),
                                 wgpu::IndexFormat::Uint32,
@@ -1648,6 +2060,14 @@ impl RenderPass for ShadowPass {
                             Some(buf) => buf,
                             None => continue,
                         };
+                        if let Some(groups) = material_groups.as_ref() {
+                            let material_idx = batch.material_id as usize;
+                            let material_bg = groups
+                                .get(material_idx)
+                                .or_else(|| groups.first())
+                                .expect("material bind groups empty");
+                            pass.set_bind_group(1, material_bg, &[]);
+                        }
                         pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
                     }

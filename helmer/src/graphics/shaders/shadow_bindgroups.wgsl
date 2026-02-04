@@ -105,7 +105,7 @@ const ALPHA_MODE_OPAQUE: u32 = 0u;
 @group(0) @binding(1) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read> materials_buffer: array<MaterialData>;
-@group(1) @binding(1) var textures: binding_array<texture_2d<f32>>;
+@group(1) @binding(1) var albedo_tex: texture_2d<f32>;
 @group(1) @binding(2) var pbr_sampler: sampler;
 
 @group(2) @binding(0) var<uniform> render_constants: Constants;
@@ -157,7 +157,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     let world_pos = model_matrix * vec4<f32>(skinned_pos, 1.0);
     let clip_pos = light_vp.view_proj * world_pos;
 
-    // NDC z is already 0..1 for WebGPU.
+    // NDC z is already 0..1 for WebGPU
     let ndc_z = clip_pos.z / clip_pos.w;
     out.clip_position = clip_pos;
     out.depth = ndc_z;
@@ -178,9 +178,8 @@ fn alpha_clip(in: VertexOutput) {
         return;
     }
     let has_albedo = material.albedo_idx >= 0i;
-    let albedo_idx = select(0i, material.albedo_idx, has_albedo);
     let albedo_sample = textureSampleBias(
-        textures[albedo_idx],
+        albedo_tex,
         pbr_sampler,
         in.tex_coord,
         render_constants.mip_bias

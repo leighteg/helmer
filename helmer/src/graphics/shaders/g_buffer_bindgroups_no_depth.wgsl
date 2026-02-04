@@ -1,6 +1,11 @@
 //=============== CONSTANTS ===============//
 
 const EPSILON: f32 = 0.00001;
+const ALPHA_MODE_OPAQUE: u32 = 0u;
+const ALPHA_MODE_MASK: u32 = 1u;
+const ALPHA_MODE_BLEND: u32 = 2u;
+const ALPHA_MODE_PREMULTIPLIED: u32 = 3u;
+const ALPHA_MODE_ADDITIVE: u32 = 4u;
 
 //=============== STRUCTS ===============//
 
@@ -113,6 +118,10 @@ struct MaterialData {
     emission_idx: i32,
     emission_color: vec3<f32>,
     _padding: f32,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
+    _pad_alpha0: u32,
+    _pad_alpha1: u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -307,10 +316,21 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
     let mapped_normal = safe_normalize(tbn * tangent_space_normal);
     let N = select(geom_normal, mapped_normal, has_normal);
 
+    let alpha_mode = material.alpha_mode;
+    if alpha_mode == ALPHA_MODE_MASK && alpha < material.alpha_cutoff {
+        discard;
+    }
+    if alpha_mode == ALPHA_MODE_BLEND
+        || alpha_mode == ALPHA_MODE_PREMULTIPLIED
+        || alpha_mode == ALPHA_MODE_ADDITIVE
+    {
+        discard;
+    }
+
     // --- Pack and Output ---
     // Ensure the normal written to the G-Buffer is also valid
     out.normal = vec4<f32>(N * 0.5 + 0.5, 1.0);
-    out.albedo = vec4<f32>(albedo_color, alpha);
+    out.albedo = vec4<f32>(albedo_color, 1.0);
     out.mra = vec4<f32>(metallic, roughness, ao, 1.0);
     out.emission = vec4<f32>(emission_color, 1.0);
     return out;

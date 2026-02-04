@@ -25,6 +25,7 @@ use crate::graphics::{
         depth_copy::{DepthCopyOutputs, DepthCopyPass},
         downsample::{DownsampleOutputs, DownsamplePass},
         egui::{EguiOutputs, EguiPass},
+        forward::{ForwardOutputs, ForwardPass},
         gbuffer::{GBufferFormats, GBufferOutputs, GBufferPass},
         gizmo::{GizmoOutputs, GizmoPass},
         hiz::{HiZOutputs, HiZPass},
@@ -58,6 +59,7 @@ pub enum RenderPassToggleFlag {
     Egui,
     Gizmo,
     Occlusion,
+    Transparent,
 }
 
 impl RenderPassToggleFlag {
@@ -74,6 +76,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Egui => config.egui_pass,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling,
+            RenderPassToggleFlag::Transparent => config.transparent_pass,
         }
     }
 
@@ -90,6 +93,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Egui => config.egui_pass = value,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass = value,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling = value,
+            RenderPassToggleFlag::Transparent => config.transparent_pass = value,
         }
     }
 }
@@ -145,6 +149,10 @@ const DEFAULT_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Ssr,
     },
     RenderPassToggle {
+        label: "Transparency",
+        toggle: RenderPassToggleFlag::Transparent,
+    },
+    RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
     },
@@ -178,6 +186,10 @@ const HYBRID_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "DDGI Resampling",
         toggle: RenderPassToggleFlag::Ddgi,
+    },
+    RenderPassToggle {
+        label: "Transparency",
+        toggle: RenderPassToggleFlag::Transparent,
     },
     RenderPassToggle {
         label: "Egui",
@@ -221,6 +233,10 @@ const DEBUG_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "SSR",
         toggle: RenderPassToggleFlag::Ssr,
+    },
+    RenderPassToggle {
+        label: "Transparency",
+        toggle: RenderPassToggleFlag::Transparent,
     },
     RenderPassToggle {
         label: "Egui",
@@ -476,6 +492,12 @@ impl PassResourceOutput for DebugCompositeInputs {
 impl PassResourceOutput for RayTracingCompositeInputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.accumulation, self.swapchain]
+    }
+}
+
+impl PassResourceOutput for ForwardOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.swapchain]
     }
 }
 
@@ -825,6 +847,27 @@ fn build_default_graph(
     });
     let swapchain_id = composite.outputs.swapchain;
 
+    if toggles.transparent_pass {
+        builder.add::<ForwardPass, ForwardOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let shadow = *store
+                .outputs::<ShadowOutputs>()
+                .expect("Shadow pass missing");
+            let pass = ForwardPass::new(
+                pool,
+                swapchain_id,
+                gbuffer.depth,
+                shadow.map,
+                params.surface_format,
+                params.supports_fragment_storage_buffers,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
@@ -1149,6 +1192,27 @@ fn build_hybrid_graph(
     });
     let swapchain_id = composite.outputs.swapchain;
 
+    if toggles.transparent_pass {
+        builder.add::<ForwardPass, ForwardOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let shadow = *store
+                .outputs::<ShadowOutputs>()
+                .expect("Shadow pass missing");
+            let pass = ForwardPass::new(
+                pool,
+                swapchain_id,
+                gbuffer.depth,
+                shadow.map,
+                params.surface_format,
+                params.supports_fragment_storage_buffers,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
@@ -1452,6 +1516,27 @@ fn build_debug_graph(
             (pass, outputs)
         });
     let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.transparent_pass {
+        builder.add::<ForwardPass, ForwardOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
+            let shadow = *store
+                .outputs::<ShadowOutputs>()
+                .expect("Shadow pass missing");
+            let pass = ForwardPass::new(
+                pool,
+                swapchain_id,
+                gbuffer.depth,
+                shadow.map,
+                params.surface_format,
+                params.supports_fragment_storage_buffers,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
 
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {

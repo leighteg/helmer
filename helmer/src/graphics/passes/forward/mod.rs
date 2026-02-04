@@ -7,23 +7,20 @@ use std::sync::{
 use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
     common::renderer::{
-        MeshDrawParams, MeshTaskTiling, ShaderConstants, Vertex, mesh_shader_visibility,
-        mesh_task_tiling, transient_usage,
+        LightData, MeshDrawParams, MeshTaskTiling, ShaderConstants, ShadowUniforms, SkyUniforms,
+        Vertex, mesh_shader_visibility, mesh_task_tiling,
     },
     graph::{
-        definition::{
-            render_pass::RenderPass, resource_desc::ResourceDesc, resource_flags::ResourceFlags,
-            resource_id::ResourceId,
-        },
+        definition::{render_pass::RenderPass, resource_id::ResourceId},
         logic::{
             gpu_resource_pool::GpuResourcePool, graph_context::RenderGraphContext,
             graph_exec_ctx::RenderGraphExecCtx,
         },
     },
-    passes::FrameGlobals,
+    passes::{FrameGlobals, SwapchainFrameInput},
 };
 
-use super::gbuffer::GBufferInstanceRaw;
+use super::{ForwardBlendMode, gbuffer::GBufferInstanceRaw};
 
 struct MaterialBindGroupCache {
     version: u64,
@@ -32,71 +29,69 @@ struct MaterialBindGroupCache {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ForwardOutputs {
-    pub color: ResourceId,
+    pub swapchain: ResourceId,
 }
 
 #[derive(Clone)]
 pub struct ForwardPass {
     outputs: ForwardOutputs,
-    extent: (u32, u32),
-    pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
-    mesh_pipeline: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    pipeline_alpha: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    pipeline_premultiplied: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    pipeline_additive: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    mesh_pipeline_alpha: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    mesh_pipeline_premultiplied: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
+    mesh_pipeline_additive: Arc<RwLock<Option<wgpu::RenderPipeline>>>,
     camera_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
+    scene_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     material_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
-    constants_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     mesh_bgl: Arc<RwLock<Option<wgpu::BindGroupLayout>>>,
     mesh_params: Arc<RwLock<Option<wgpu::Buffer>>>,
     mesh_params_capacity: Arc<AtomicU64>,
     texture_array_size: Arc<AtomicU32>,
     backend_kind: Arc<RwLock<Option<BindingBackendKind>>>,
     material_bind_groups: Arc<RwLock<Option<MaterialBindGroupCache>>>,
+    format: Arc<RwLock<Option<wgpu::TextureFormat>>>,
     depth: ResourceId,
-    use_transient_textures: bool,
+    shadow_map: ResourceId,
+    use_uniform_lights: bool,
+    max_uniform_lights: usize,
 }
 
 impl ForwardPass {
     pub fn new(
         pool: &mut GpuResourcePool,
+        swapchain: ResourceId,
         depth: ResourceId,
-        width: u32,
-        height: u32,
-        use_transient_textures: bool,
-        use_transient_aliasing: bool,
+        shadow_map: ResourceId,
+        surface_format: wgpu::TextureFormat,
+        supports_fragment_storage_buffers: bool,
     ) -> Self {
-        let usage = transient_usage(
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            use_transient_textures,
-        );
-        let (desc, mut hints) = ResourceDesc::Texture2D {
-            width,
-            height,
-            mip_levels: 1,
-            layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage,
-        }
-        .with_hints();
-        if use_transient_aliasing {
-            hints.flags |= ResourceFlags::TRANSIENT;
-        }
-        let color = pool.create_logical(desc, Some(hints), 0, None);
+        let _ = pool.entry(swapchain);
+        let use_uniform_lights = !supports_fragment_storage_buffers;
+        let max_uniform_lights = crate::graphics::common::constants::WEBGL_MAX_LIGHTS;
 
         Self {
-            outputs: ForwardOutputs { color },
-            extent: (width, height),
-            pipeline: Arc::new(RwLock::new(None)),
-            mesh_pipeline: Arc::new(RwLock::new(None)),
+            outputs: ForwardOutputs { swapchain },
+            pipeline_alpha: Arc::new(RwLock::new(None)),
+            pipeline_premultiplied: Arc::new(RwLock::new(None)),
+            pipeline_additive: Arc::new(RwLock::new(None)),
+            mesh_pipeline_alpha: Arc::new(RwLock::new(None)),
+            mesh_pipeline_premultiplied: Arc::new(RwLock::new(None)),
+            mesh_pipeline_additive: Arc::new(RwLock::new(None)),
             camera_bgl: Arc::new(RwLock::new(None)),
+            scene_bgl: Arc::new(RwLock::new(None)),
             material_bgl: Arc::new(RwLock::new(None)),
-            constants_bgl: Arc::new(RwLock::new(None)),
             mesh_bgl: Arc::new(RwLock::new(None)),
             mesh_params: Arc::new(RwLock::new(None)),
             mesh_params_capacity: Arc::new(AtomicU64::new(0)),
             texture_array_size: Arc::new(AtomicU32::new(1)),
             backend_kind: Arc::new(RwLock::new(None)),
             material_bind_groups: Arc::new(RwLock::new(None)),
+            format: Arc::new(RwLock::new(Some(surface_format))),
             depth,
-            use_transient_textures,
+            shadow_map,
+            use_uniform_lights,
+            max_uniform_lights,
         }
     }
 
@@ -104,96 +99,18 @@ impl ForwardPass {
         self.outputs
     }
 
-    fn ensure_target(
-        &self,
-        ctx: &mut RenderGraphExecCtx,
-        extent: (u32, u32),
-    ) -> Option<wgpu::TextureView> {
-        let usage = transient_usage(
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            self.use_transient_textures,
-        );
-        let desc = ResourceDesc::Texture2D {
-            width: extent.0,
-            height: extent.1,
-            mip_levels: 1,
-            layers: 1,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage,
-        };
-        let needs_create = match ctx.rpctx.pool.entry(self.outputs.color) {
-            Some(entry) => {
-                let tex_ok = entry.texture.as_ref().map_or(false, |t| {
-                    let size = t.size();
-                    size.width == extent.0 && size.height == extent.1
-                });
-                !tex_ok
-            }
-            None => true,
-        };
-        let view = if needs_create {
-            let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
-                label: Some("Forward/Color"),
-                size: wgpu::Extent3d {
-                    width: extent.0,
-                    height: extent.1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: 0,
-                mip_level_count: Some(1),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                ..Default::default()
-            });
-            ctx.rpctx.pool.realize_texture(
-                self.outputs.color,
-                desc,
-                texture,
-                view.clone(),
-                ctx.rpctx.frame_index,
-            );
-            Some(view)
-        } else {
-            ctx.rpctx
-                .pool
-                .entry(self.outputs.color)
-                .and_then(|e| e.texture.as_ref())
-                .map(|tex| {
-                    tex.create_view(&wgpu::TextureViewDescriptor {
-                        base_mip_level: 0,
-                        mip_level_count: Some(1),
-                        dimension: Some(wgpu::TextureViewDimension::D2),
-                        ..Default::default()
-                    })
-                })
-        };
-        if let Some(entry) = ctx.rpctx.pool.entry_mut(self.outputs.color) {
-            if let Some(ref v) = view {
-                entry.texture_view = Some(v.clone());
-            }
-        }
-
-        ctx.rpctx
-            .pool
-            .mark_resident(self.outputs.color, ctx.rpctx.frame_index);
-        view
-    }
-
     fn ensure_backend(&self, binding_backend: BindingBackendKind) {
         let mut current = self.backend_kind.write();
         if current.map_or(true, |kind| kind != binding_backend) {
-            *self.pipeline.write() = None;
-            *self.mesh_pipeline.write() = None;
+            *self.pipeline_alpha.write() = None;
+            *self.pipeline_premultiplied.write() = None;
+            *self.pipeline_additive.write() = None;
+            *self.mesh_pipeline_alpha.write() = None;
+            *self.mesh_pipeline_premultiplied.write() = None;
+            *self.mesh_pipeline_additive.write() = None;
             *self.camera_bgl.write() = None;
+            *self.scene_bgl.write() = None;
             *self.material_bgl.write() = None;
-            *self.constants_bgl.write() = None;
             *self.mesh_bgl.write() = None;
             *self.material_bind_groups.write() = None;
             self.texture_array_size.store(1, Ordering::Relaxed);
@@ -206,55 +123,215 @@ impl ForwardPass {
         device: &wgpu::Device,
         binding_backend: BindingBackendKind,
         texture_array_size: u32,
+        format: wgpu::TextureFormat,
     ) {
         self.ensure_backend(binding_backend);
-        if binding_backend == BindingBackendKind::BindGroups {
-            if self.pipeline.read().is_some() {
-                return;
-            }
-        } else {
-            let current_size = self.texture_array_size.load(Ordering::Relaxed);
-            if self.pipeline.read().is_some() && current_size == texture_array_size {
-                return;
-            }
+
+        let format_changed = self.format.read().map_or(true, |current| current != format);
+        if format_changed {
+            *self.pipeline_alpha.write() = None;
+            *self.pipeline_premultiplied.write() = None;
+            *self.pipeline_additive.write() = None;
+            *self.mesh_pipeline_alpha.write() = None;
+            *self.mesh_pipeline_premultiplied.write() = None;
+            *self.mesh_pipeline_additive.write() = None;
+            *self.format.write() = Some(format);
         }
 
         let array_size = texture_array_size.max(1);
         if binding_backend != BindingBackendKind::BindGroups {
-            self.texture_array_size.store(array_size, Ordering::Relaxed);
+            let current_size = self.texture_array_size.load(Ordering::Relaxed);
+            if current_size != array_size {
+                *self.pipeline_alpha.write() = None;
+                *self.pipeline_premultiplied.write() = None;
+                *self.pipeline_additive.write() = None;
+                *self.mesh_pipeline_alpha.write() = None;
+                *self.mesh_pipeline_premultiplied.write() = None;
+                *self.mesh_pipeline_additive.write() = None;
+                *self.material_bgl.write() = None;
+                *self.material_bind_groups.write() = None;
+                self.texture_array_size.store(array_size, Ordering::Relaxed);
+            }
         } else {
             self.texture_array_size.store(1, Ordering::Relaxed);
         }
 
+        if self.pipeline_alpha.read().is_some()
+            && self.pipeline_premultiplied.read().is_some()
+            && self.pipeline_additive.read().is_some()
+        {
+            return;
+        }
+
         let mesh_stage = mesh_shader_visibility(device);
-        let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Forward/CameraBGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX
-                        | wgpu::ShaderStages::FRAGMENT
-                        | mesh_stage,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        // Leave size unspecified to avoid validation mismatches across backends
-                        min_binding_size: None,
+        let camera_bgl = if let Some(layout) = self.camera_bgl.read().clone() {
+            layout
+        } else {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Forward/CameraBGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX
+                            | wgpu::ShaderStages::FRAGMENT
+                            | mesh_stage,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX | mesh_stage,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
+                ],
+            });
+            *self.camera_bgl.write() = Some(layout.clone());
+            layout
+        };
+
+        let lights_binding = if self.use_uniform_lights {
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        (std::mem::size_of::<LightData>() * self.max_uniform_lights) as u64,
+                    ),
                 },
-            ],
-        });
+                count: None,
+            }
+        } else {
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        };
+
+        let scene_bgl = if let Some(layout) = self.scene_bgl.read().clone() {
+            layout
+        } else {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Forward/SceneBGL"),
+                entries: &[
+                    lights_binding,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                ShadowUniforms,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<SkyUniforms>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                ShaderConstants,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::Cube,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+            *self.scene_bgl.write() = Some(layout.clone());
+            layout
+        };
 
         let material_entries = if binding_backend == BindingBackendKind::BindGroups {
             vec![
@@ -345,90 +422,117 @@ impl ForwardPass {
                 },
             ]
         };
-        let material_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Forward/MaterialBGL"),
-            entries: &material_entries,
-        });
-
-        let constants_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Forward/ConstantsBGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<ShaderConstants>() as u64
-                    ),
-                },
-                count: None,
-            }],
-        });
+        let material_bgl = if let Some(layout) = self.material_bgl.read().clone() {
+            layout
+        } else {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Forward/MaterialBGL"),
+                entries: &material_entries,
+            });
+            *self.material_bgl.write() = Some(layout.clone());
+            layout
+        };
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Forward/PipelineLayout"),
-            bind_group_layouts: &[&camera_bgl, &material_bgl, &constants_bgl],
+            bind_group_layouts: &[&camera_bgl, &scene_bgl, &material_bgl],
             immediate_size: 0,
         });
 
-        let shader = if binding_backend == BindingBackendKind::BindGroups {
+        let shader = if self.use_uniform_lights {
+            if binding_backend == BindingBackendKind::BindGroups {
+                device.create_shader_module(wgpu::include_wgsl!("forward_webgl_bindgroups.wgsl"))
+            } else {
+                device.create_shader_module(wgpu::include_wgsl!("forward_webgl.wgsl"))
+            }
+        } else if binding_backend == BindingBackendKind::BindGroups {
             device.create_shader_module(wgpu::include_wgsl!("forward_bindgroups.wgsl"))
         } else {
             device.create_shader_module(wgpu::include_wgsl!("forward.wgsl"))
         };
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Forward/Pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc(), GBufferInstanceRaw::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    // additive blend to accumulate unlit forward color without masking lighting
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let blend_state = |mode: ForwardBlendMode| -> wgpu::BlendState {
+            match mode {
+                ForwardBlendMode::Alpha => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                ForwardBlendMode::Premultiplied => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                ForwardBlendMode::Additive => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+            }
+        };
 
-        *self.pipeline.write() = Some(pipeline);
-        *self.camera_bgl.write() = Some(camera_bgl);
-        *self.material_bgl.write() = Some(material_bgl);
-        *self.constants_bgl.write() = Some(constants_bgl);
+        let create_pipeline = |mode: ForwardBlendMode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Forward/Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex::desc(), GBufferInstanceRaw::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend_state(mode)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        *self.pipeline_alpha.write() = Some(create_pipeline(ForwardBlendMode::Alpha));
+        *self.pipeline_premultiplied.write() =
+            Some(create_pipeline(ForwardBlendMode::Premultiplied));
+        *self.pipeline_additive.write() = Some(create_pipeline(ForwardBlendMode::Additive));
     }
 
     fn ensure_mesh_pipeline(
@@ -436,116 +540,119 @@ impl ForwardPass {
         device: &wgpu::Device,
         binding_backend: BindingBackendKind,
         texture_array_size: u32,
+        format: wgpu::TextureFormat,
     ) {
-        if mesh_shader_visibility(device).is_empty() {
+        if self.use_uniform_lights || mesh_shader_visibility(device).is_empty() {
+            return;
+        }
+        self.ensure_pipeline(device, binding_backend, texture_array_size, format);
+
+        if self.mesh_pipeline_alpha.read().is_some()
+            && self.mesh_pipeline_premultiplied.read().is_some()
+            && self.mesh_pipeline_additive.read().is_some()
+        {
             return;
         }
 
-        if binding_backend == BindingBackendKind::BindGroups {
-            if self.mesh_pipeline.read().is_some() {
-                return;
-            }
-        } else {
-            let current_size = self.texture_array_size.load(Ordering::Relaxed);
-            if self.mesh_pipeline.read().is_some() && current_size == texture_array_size {
-                return;
-            }
-        }
-
-        self.ensure_pipeline(device, binding_backend, texture_array_size);
-
-        let (camera_bgl, material_bgl, constants_bgl) = (
+        let (camera_bgl, scene_bgl, material_bgl) = (
             self.camera_bgl.read(),
+            self.scene_bgl.read(),
             self.material_bgl.read(),
-            self.constants_bgl.read(),
         );
-        let (camera_bgl, material_bgl, constants_bgl) = (
+        let (camera_bgl, scene_bgl, material_bgl) = (
             camera_bgl.as_ref().unwrap(),
+            scene_bgl.as_ref().unwrap(),
             material_bgl.as_ref().unwrap(),
-            constants_bgl.as_ref().unwrap(),
         );
 
-        let mesh_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Forward/MeshBGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let mesh_bgl = if let Some(layout) = self.mesh_bgl.read().clone() {
+            layout
+        } else {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Forward/MeshBGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<MeshDrawParams>() as u64,
-                        ),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                MeshDrawParams,
+                            >()
+                                as u64),
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::MESH,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::MESH,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
+            *self.mesh_bgl.write() = Some(layout.clone());
+            layout
+        };
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Forward/MeshPipelineLayout"),
-            bind_group_layouts: &[camera_bgl, material_bgl, constants_bgl, &mesh_bgl],
+            bind_group_layouts: &[camera_bgl, scene_bgl, material_bgl, &mesh_bgl],
             immediate_size: 0,
         });
 
@@ -555,54 +662,88 @@ impl ForwardPass {
             device.create_shader_module(wgpu::include_wgsl!("forward_mesh.wgsl"))
         };
 
-        let pipeline = device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
-            label: Some("Forward/MeshPipeline"),
-            layout: Some(&layout),
-            task: None,
-            mesh: wgpu::MeshState {
-                module: &shader,
-                entry_point: Some("ms_main"),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let blend_state = |mode: ForwardBlendMode| -> wgpu::BlendState {
+            match mode {
+                ForwardBlendMode::Alpha => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                ForwardBlendMode::Premultiplied => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                ForwardBlendMode::Additive => wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+            }
+        };
 
-        *self.mesh_pipeline.write() = Some(pipeline);
-        *self.mesh_bgl.write() = Some(mesh_bgl);
+        let create_pipeline = |mode: ForwardBlendMode| {
+            device.create_mesh_pipeline(&wgpu::MeshPipelineDescriptor {
+                label: Some("Forward/MeshPipeline"),
+                layout: Some(&layout),
+                task: None,
+                mesh: wgpu::MeshState {
+                    module: &shader,
+                    entry_point: Some("ms_main"),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend_state(mode)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        *self.mesh_pipeline_alpha.write() = Some(create_pipeline(ForwardBlendMode::Alpha));
+        *self.mesh_pipeline_premultiplied.write() =
+            Some(create_pipeline(ForwardBlendMode::Premultiplied));
+        *self.mesh_pipeline_additive.write() = Some(create_pipeline(ForwardBlendMode::Additive));
     }
 
     fn create_camera_bind_group(
@@ -628,20 +769,82 @@ impl ForwardPass {
         }))
     }
 
-    fn create_constants_bind_group(
+    fn create_scene_bind_group(
         &self,
         device: &wgpu::Device,
         frame: &FrameGlobals,
+        shadow_view: &wgpu::TextureView,
     ) -> Option<wgpu::BindGroup> {
-        let constants_layout = self.constants_bgl.read();
-        let constants_layout = constants_layout.as_ref()?;
+        let scene_layout = self.scene_bgl.read();
+        let scene_layout = scene_layout.as_ref()?;
+        let lights_buffer = frame.lights_buffer.clone().unwrap_or_else(|| {
+            let size = if self.use_uniform_lights {
+                (std::mem::size_of::<LightData>() * self.max_uniform_lights) as u64
+            } else {
+                std::mem::size_of::<LightData>() as u64
+            };
+            let usage = if self.use_uniform_lights {
+                wgpu::BufferUsages::UNIFORM
+            } else {
+                wgpu::BufferUsages::STORAGE
+            };
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Forward/EmptyLights"),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        });
+        let shadow_uniforms = frame.shadow_uniforms_buffer.as_ref()?;
         Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Forward/ConstantsBG"),
-            layout: constants_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame.render_constants_buffer.as_entire_binding(),
-            }],
+            label: Some("Forward/SceneBG"),
+            layout: scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lights_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&frame.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: shadow_uniforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: frame.sky_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: frame.render_constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&frame.ibl_brdf_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&frame.ibl_irradiance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&frame.ibl_prefiltered_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::Sampler(&frame.ibl_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::Sampler(&frame.brdf_lut_sampler),
+                },
+            ],
         }))
     }
 
@@ -753,7 +956,8 @@ impl RenderPass for ForwardPass {
 
     fn setup(&self, ctx: &mut RenderGraphContext) {
         ctx.read(self.depth);
-        ctx.write(self.outputs.color);
+        ctx.read(self.shadow_map);
+        ctx.rw(self.outputs.swapchain);
     }
 
     fn execute(&self, ctx: &mut RenderGraphExecCtx) {
@@ -761,45 +965,58 @@ impl RenderPass for ForwardPass {
             Some(f) => f,
             None => return,
         };
+        if !frame.render_config.transparent_pass {
+            return;
+        }
         let binding_backend = frame.binding_backend;
-        let use_mesh =
+        let mut use_mesh =
             frame.render_config.use_mesh_shaders && frame.device_caps.supports_mesh_pipeline();
-        let use_indirect = frame.render_config.gpu_driven
-            && frame.gbuffer_indirect.is_some()
-            && !frame.gpu_draws.is_empty();
-        let use_multi_draw = use_indirect
-            && frame.render_config.gpu_multi_draw_indirect
-            && frame.device_caps.supports_multi_draw_indirect()
-            && binding_backend != BindingBackendKind::BindGroups;
         let has_materials = frame.material_buffer.is_some()
             && (binding_backend != BindingBackendKind::BindGroups
                 || frame.material_textures.is_some());
         let draw_enabled = has_materials
-            && frame.forward_instances.is_some()
-            && (use_indirect || !frame.forward_batches.is_empty());
+            && frame.transparent_instances.is_some()
+            && !frame.transparent_batches.is_empty();
         if !draw_enabled {
             return;
         }
 
-        if use_mesh {
-            self.ensure_mesh_pipeline(ctx.device(), binding_backend, frame.texture_array_size);
-        } else {
-            self.ensure_pipeline(ctx.device(), binding_backend, frame.texture_array_size);
-        }
-        let depth_tex_size = ctx
-            .rpctx
-            .pool
-            .entry(self.depth)
-            .and_then(|e| e.texture.as_ref())
-            .map(|t| t.size());
-        let desired_extent = depth_tex_size
-            .map(|s| (s.width, s.height))
-            .unwrap_or(self.extent);
-        let color_view = match self.ensure_target(ctx, desired_extent) {
+        let swapchain = match ctx.rpctx.frame_inputs.get::<SwapchainFrameInput>() {
             Some(v) => v,
             None => return,
         };
+        let format = swapchain.format;
+        use_mesh = use_mesh && !self.use_uniform_lights;
+        if use_mesh
+            && frame
+                .transparent_batches
+                .iter()
+                .any(|batch| batch.batch.meshlet_count == 0)
+        {
+            use_mesh = false;
+        }
+
+        if use_mesh {
+            self.ensure_mesh_pipeline(
+                ctx.device(),
+                binding_backend,
+                frame.texture_array_size,
+                format,
+            );
+        } else {
+            self.ensure_pipeline(
+                ctx.device(),
+                binding_backend,
+                frame.texture_array_size,
+                format,
+            );
+        }
+
         let depth_view = match ctx.rpctx.pool.texture_view(self.depth) {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        let shadow_view = match ctx.rpctx.pool.texture_view(self.shadow_map) {
             Some(v) => v.clone(),
             None => return,
         };
@@ -808,10 +1025,11 @@ impl RenderPass for ForwardPass {
             Some(bg) => bg,
             None => return,
         };
-        let constants_bg = match self.create_constants_bind_group(ctx.device(), frame.as_ref()) {
-            Some(bg) => bg,
-            None => return,
-        };
+        let scene_bg =
+            match self.create_scene_bind_group(ctx.device(), frame.as_ref(), &shadow_view) {
+                Some(bg) => bg,
+                None => return,
+            };
         let material_bg = if binding_backend == BindingBackendKind::BindGroups {
             None
         } else {
@@ -835,11 +1053,11 @@ impl RenderPass for ForwardPass {
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("RenderGraph/Forward"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &color_view,
+                view: &swapchain.view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -856,25 +1074,9 @@ impl RenderPass for ForwardPass {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(self.pipeline.read().as_ref().unwrap());
-        pass.set_bind_group(0, &camera_bg, &[]);
-        if binding_backend != BindingBackendKind::BindGroups {
-            let material_bg = match material_bg.as_ref() {
-                Some(bg) => bg,
-                None => return,
-            };
-            pass.set_bind_group(1, material_bg, &[]);
-        }
-        pass.set_bind_group(2, &constants_bg, &[]);
-
         if use_mesh {
-            let instances = match frame.forward_instances.as_ref() {
+            let instances = match frame.transparent_instances.as_ref() {
                 Some(buf) => buf,
-                None => return,
-            };
-            let mesh_pipeline = self.mesh_pipeline.read();
-            let mesh_pipeline = match mesh_pipeline.as_ref() {
-                Some(pipeline) => pipeline,
                 None => return,
             };
             let mesh_bgl = self.mesh_bgl.read();
@@ -887,28 +1089,20 @@ impl RenderPass for ForwardPass {
             let alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
             let params_stride = wgpu::util::align_to(params_size, alignment);
 
-            let mut direct_tilings: Vec<MeshTaskTiling> = Vec::new();
-            let total_tiles = if use_indirect {
-                frame
-                    .gpu_draws
-                    .iter()
-                    .map(|draw| draw.mesh_task_count)
-                    .sum()
-            } else {
-                let limits = &frame.device_caps.limits;
-                direct_tilings.reserve(frame.forward_batches.len());
-                let mut total = 0u32;
-                for batch in frame.forward_batches.iter() {
-                    let instance_count = batch
-                        .instance_range
-                        .end
-                        .saturating_sub(batch.instance_range.start);
-                    let tiling = mesh_task_tiling(limits, batch.meshlet_count, instance_count);
-                    total = total.saturating_add(tiling.task_count);
-                    direct_tilings.push(tiling);
-                }
-                total
-            };
+            let limits = &frame.device_caps.limits;
+            let mut direct_tilings: Vec<MeshTaskTiling> =
+                Vec::with_capacity(frame.transparent_batches.len());
+            let mut total_tiles = 0u32;
+            for batch in frame.transparent_batches.iter() {
+                let batch = &batch.batch;
+                let instance_count = batch
+                    .instance_range
+                    .end
+                    .saturating_sub(batch.instance_range.start);
+                let tiling = mesh_task_tiling(limits, batch.meshlet_count, instance_count);
+                total_tiles = total_tiles.saturating_add(tiling.task_count);
+                direct_tilings.push(tiling);
+            }
 
             if total_tiles == 0 {
                 return;
@@ -943,537 +1137,289 @@ impl RenderPass for ForwardPass {
 
             let mut params_bytes = vec![0u8; needed as usize];
             let mut tile_cursor = 0u32;
-            if use_indirect {
-                for draw in frame.gpu_draws.iter() {
-                    if draw.mesh_task_count == 0 {
-                        continue;
-                    }
-                    let tile_meshlets = draw.mesh_task_tile_meshlets;
-                    let tile_instances = draw.mesh_task_tile_instances;
-                    if tile_meshlets == 0 || tile_instances == 0 {
-                        continue;
-                    }
-                    let tiles_x = (draw.meshlet_count + tile_meshlets - 1) / tile_meshlets;
-                    let tiles_y = (draw.instance_capacity + tile_instances - 1) / tile_instances;
-
-                    for tile_y in 0..tiles_y {
-                        let instance_base = draw.instance_base + tile_y * tile_instances;
-                        let instance_count = draw
-                            .instance_capacity
-                            .saturating_sub(tile_y * tile_instances)
-                            .min(tile_instances);
-                        for tile_x in 0..tiles_x {
-                            let meshlet_base = tile_x * tile_meshlets;
-                            let meshlet_count = draw
-                                .meshlet_count
-                                .saturating_sub(meshlet_base)
-                                .min(tile_meshlets);
-                            let params = MeshDrawParams {
-                                instance_base,
-                                instance_count,
-                                meshlet_base,
-                                meshlet_count,
-                                flags,
-                                _pad0: 0,
-                                _pad1: 0,
-                                _pad2: 0,
-                                depth_bias,
-                                rect_pad,
-                                _pad3: [0.0; 2],
-                            };
-                            let offset = (tile_cursor as u64) * params_stride;
-                            let start = offset as usize;
-                            params_bytes[start..start + params_size as usize]
-                                .copy_from_slice(bytemuck::bytes_of(&params));
-                            tile_cursor = tile_cursor.saturating_add(1);
-                        }
-                    }
+            for (idx, batch) in frame.transparent_batches.iter().enumerate() {
+                let batch = &batch.batch;
+                let tiling = direct_tilings[idx];
+                if tiling.task_count == 0 {
+                    continue;
                 }
-            } else {
-                for (idx, batch) in frame.forward_batches.iter().enumerate() {
-                    let tiling = direct_tilings[idx];
-                    if tiling.task_count == 0 {
-                        continue;
-                    }
-                    for tile_y in 0..tiling.tiles_y {
-                        let instance_base =
-                            batch.instance_range.start + tile_y * tiling.tile_instances;
-                        let instance_count = batch
-                            .instance_range
-                            .end
-                            .saturating_sub(
-                                batch.instance_range.start + tile_y * tiling.tile_instances,
-                            )
-                            .min(tiling.tile_instances);
-                        for tile_x in 0..tiling.tiles_x {
-                            let meshlet_base = tile_x * tiling.tile_meshlets;
-                            let meshlet_count = batch
-                                .meshlet_count
-                                .saturating_sub(meshlet_base)
-                                .min(tiling.tile_meshlets);
-                            let params = MeshDrawParams {
-                                instance_base,
-                                instance_count,
-                                meshlet_base,
-                                meshlet_count,
-                                flags,
-                                _pad0: 0,
-                                _pad1: 0,
-                                _pad2: 0,
-                                depth_bias,
-                                rect_pad,
-                                _pad3: [0.0; 2],
-                            };
-                            let offset = (tile_cursor as u64) * params_stride;
-                            let start = offset as usize;
-                            params_bytes[start..start + params_size as usize]
-                                .copy_from_slice(bytemuck::bytes_of(&params));
-                            tile_cursor = tile_cursor.saturating_add(1);
-                        }
+                for tile_y in 0..tiling.tiles_y {
+                    let instance_base = batch.instance_range.start + tile_y * tiling.tile_instances;
+                    let instance_count = batch
+                        .instance_range
+                        .end
+                        .saturating_sub(batch.instance_range.start + tile_y * tiling.tile_instances)
+                        .min(tiling.tile_instances);
+                    for tile_x in 0..tiling.tiles_x {
+                        let meshlet_base = tile_x * tiling.tile_meshlets;
+                        let meshlet_count = batch
+                            .meshlet_count
+                            .saturating_sub(meshlet_base)
+                            .min(tiling.tile_meshlets);
+                        let params = MeshDrawParams {
+                            instance_base,
+                            instance_count,
+                            meshlet_base,
+                            meshlet_count,
+                            flags,
+                            _pad0: 0,
+                            _pad1: 0,
+                            _pad2: 0,
+                            depth_bias,
+                            rect_pad,
+                            _pad3: [0.0; 2],
+                        };
+                        let offset = (tile_cursor as u64) * params_stride;
+                        let start = offset as usize;
+                        params_bytes[start..start + params_size as usize]
+                            .copy_from_slice(bytemuck::bytes_of(&params));
+                        tile_cursor = tile_cursor.saturating_add(1);
                     }
                 }
             }
             queue.write_buffer(&params_buffer, 0, &params_bytes);
 
-            pass.set_pipeline(mesh_pipeline);
-            pass.set_bind_group(0, &camera_bg, &[]);
-            if binding_backend != BindingBackendKind::BindGroups {
-                let material_bg = match material_bg.as_ref() {
-                    Some(bg) => bg,
-                    None => return,
-                };
-                pass.set_bind_group(1, material_bg, &[]);
-            }
-            pass.set_bind_group(2, &constants_bg, &[]);
-
             let hiz_view = frame.hiz_view.as_ref().unwrap_or(&frame.fallback_view);
-            let task_stride = std::mem::size_of::<wgpu::util::DispatchIndirectArgs>() as u64;
             let mut params_tile_index = 0u32;
-            if use_indirect {
-                let mesh_tasks = match frame.gbuffer_mesh_tasks.as_ref() {
-                    Some(buf) => buf,
+            let mut current_blend: Option<ForwardBlendMode> = None;
+            let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                match material_groups.as_ref() {
+                    Some(groups) => Some(groups),
                     None => return,
-                };
-                let material_groups = if binding_backend == BindingBackendKind::BindGroups {
-                    match material_groups.as_ref() {
-                        Some(groups) => Some(groups),
-                        None => return,
-                    }
-                } else {
-                    None
-                };
-                for draw in frame.gpu_draws.iter() {
-                    let draw_tiles = draw.mesh_task_count;
-                    if draw_tiles == 0 {
-                        continue;
-                    }
-                    let tile_meshlets = draw.mesh_task_tile_meshlets;
-                    let tile_instances = draw.mesh_task_tile_instances;
-                    if tile_meshlets == 0 || tile_instances == 0 {
-                        params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                        continue;
-                    }
-                    let tiles_x = (draw.meshlet_count + tile_meshlets - 1) / tile_meshlets;
-                    let tiles_y = (draw.instance_capacity + tile_instances - 1) / tile_instances;
-                    if tiles_x == 0 || tiles_y == 0 {
-                        params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                        continue;
-                    }
-                    let meshlet_descs = match ctx
-                        .rpctx
-                        .pool
-                        .entry(draw.meshlet_descs)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                            continue;
-                        }
-                    };
-                    let meshlet_vertices = match ctx
-                        .rpctx
-                        .pool
-                        .entry(draw.meshlet_vertices)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                            continue;
-                        }
-                    };
-                    let meshlet_indices = match ctx
-                        .rpctx
-                        .pool
-                        .entry(draw.meshlet_indices)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                            continue;
-                        }
-                    };
-                    let vertex_data = match ctx
-                        .rpctx
-                        .pool
-                        .entry(draw.vertex)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(draw_tiles);
-                            continue;
-                        }
-                    };
-
-                    let mesh_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Forward/MeshBG"),
-                        layout: mesh_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: instances.buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: meshlet_descs.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: meshlet_vertices.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: meshlet_indices.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: vertex_data.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &params_buffer,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(params_size),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: wgpu::BindingResource::TextureView(hiz_view),
-                            },
-                        ],
-                    });
-
-                    if let Some(groups) = material_groups.as_ref() {
-                        let material_idx = draw.material_id as usize;
-                        let material_bg = groups
-                            .get(material_idx)
-                            .or_else(|| groups.first())
-                            .expect("material bind groups empty");
-                        pass.set_bind_group(1, material_bg, &[]);
-                    }
-                    let mut draw_tile_index = 0u32;
-                    for _tile_y in 0..tiles_y {
-                        for _tile_x in 0..tiles_x {
-                            let params_offset = (params_tile_index as u64) * params_stride;
-                            if params_offset > u32::MAX as u64 {
-                                return;
-                            }
-                            let task_offset =
-                                draw.mesh_task_offset + (draw_tile_index as u64) * task_stride;
-                            pass.set_bind_group(3, &mesh_bg, &[params_offset as u32]);
-                            pass.draw_mesh_tasks_indirect(mesh_tasks, task_offset);
-                            params_tile_index = params_tile_index.saturating_add(1);
-                            draw_tile_index = draw_tile_index.saturating_add(1);
-                        }
-                    }
                 }
             } else {
-                for (idx, batch) in frame.forward_batches.iter().enumerate() {
-                    let tiling = direct_tilings[idx];
-                    if tiling.task_count == 0 {
-                        continue;
+                None
+            };
+
+            for (idx, batch) in frame.transparent_batches.iter().enumerate() {
+                let blend_mode = batch.blend_mode;
+                if current_blend != Some(blend_mode) {
+                    let pipeline = match blend_mode {
+                        ForwardBlendMode::Alpha => self.mesh_pipeline_alpha.read(),
+                        ForwardBlendMode::Premultiplied => self.mesh_pipeline_premultiplied.read(),
+                        ForwardBlendMode::Additive => self.mesh_pipeline_additive.read(),
+                    };
+                    let pipeline = match pipeline.as_ref() {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &camera_bg, &[]);
+                    pass.set_bind_group(1, &scene_bg, &[]);
+                    if binding_backend != BindingBackendKind::BindGroups {
+                        let material_bg = match material_bg.as_ref() {
+                            Some(bg) => bg,
+                            None => return,
+                        };
+                        pass.set_bind_group(2, material_bg, &[]);
                     }
-                    if tiling.tiles_x == 0 || tiling.tiles_y == 0 {
+                    current_blend = Some(blend_mode);
+                }
+
+                let batch = &batch.batch;
+                let tiling = direct_tilings[idx];
+                if tiling.task_count == 0 {
+                    continue;
+                }
+                if tiling.tiles_x == 0 || tiling.tiles_y == 0 {
+                    params_tile_index = params_tile_index.saturating_add(tiling.task_count);
+                    continue;
+                }
+                let meshlet_descs = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.meshlet_descs)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => {
                         params_tile_index = params_tile_index.saturating_add(tiling.task_count);
                         continue;
                     }
-                    let meshlet_descs = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.meshlet_descs)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(tiling.task_count);
-                            continue;
-                        }
-                    };
-                    let meshlet_vertices = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.meshlet_vertices)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(tiling.task_count);
-                            continue;
-                        }
-                    };
-                    let meshlet_indices = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.meshlet_indices)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(tiling.task_count);
-                            continue;
-                        }
-                    };
-                    let vertex_data = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.vertex)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => {
-                            params_tile_index = params_tile_index.saturating_add(tiling.task_count);
-                            continue;
-                        }
-                    };
-
-                    let mesh_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Forward/MeshBG"),
-                        layout: mesh_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: instances.buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: meshlet_descs.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: meshlet_vertices.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: meshlet_indices.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: vertex_data.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: &params_buffer,
-                                    offset: 0,
-                                    size: wgpu::BufferSize::new(params_size),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: wgpu::BindingResource::TextureView(hiz_view),
-                            },
-                        ],
-                    });
-
-                    if let Some(groups) = material_groups.as_ref() {
-                        let material_idx = batch.material_id as usize;
-                        let material_bg = groups
-                            .get(material_idx)
-                            .or_else(|| groups.first())
-                            .expect("material bind groups empty");
-                        pass.set_bind_group(1, material_bg, &[]);
+                };
+                let meshlet_vertices = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.meshlet_vertices)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => {
+                        params_tile_index = params_tile_index.saturating_add(tiling.task_count);
+                        continue;
                     }
-                    for tile_y in 0..tiling.tiles_y {
-                        for tile_x in 0..tiling.tiles_x {
-                            let params_offset = (params_tile_index as u64) * params_stride;
-                            if params_offset > u32::MAX as u64 {
-                                return;
-                            }
-                            pass.set_bind_group(3, &mesh_bg, &[params_offset as u32]);
-                            let meshlet_base = tile_x * tiling.tile_meshlets;
-                            let meshlet_count = batch
-                                .meshlet_count
-                                .saturating_sub(meshlet_base)
-                                .min(tiling.tile_meshlets);
-                            let instance_base =
-                                batch.instance_range.start + tile_y * tiling.tile_instances;
-                            let instance_count = batch
-                                .instance_range
-                                .end
-                                .saturating_sub(instance_base)
-                                .min(tiling.tile_instances);
-                            pass.draw_mesh_tasks(meshlet_count, instance_count, 1);
-                            params_tile_index = params_tile_index.saturating_add(1);
+                };
+                let meshlet_indices = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.meshlet_indices)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => {
+                        params_tile_index = params_tile_index.saturating_add(tiling.task_count);
+                        continue;
+                    }
+                };
+                let vertex_data = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.vertex)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => {
+                        params_tile_index = params_tile_index.saturating_add(tiling.task_count);
+                        continue;
+                    }
+                };
+
+                let mesh_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Forward/MeshBG"),
+                    layout: mesh_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: instances.buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: meshlet_descs.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: meshlet_vertices.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: meshlet_indices.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: vertex_data.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &params_buffer,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(params_size),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(hiz_view),
+                        },
+                    ],
+                });
+
+                if let Some(groups) = material_groups.as_ref() {
+                    let material_idx = batch.material_id as usize;
+                    let material_bg = groups
+                        .get(material_idx)
+                        .or_else(|| groups.first())
+                        .expect("material bind groups empty");
+                    pass.set_bind_group(2, material_bg, &[]);
+                }
+                for tile_y in 0..tiling.tiles_y {
+                    for tile_x in 0..tiling.tiles_x {
+                        let params_offset = (params_tile_index as u64) * params_stride;
+                        if params_offset > u32::MAX as u64 {
+                            return;
                         }
+                        pass.set_bind_group(3, &mesh_bg, &[params_offset as u32]);
+                        let meshlet_base = tile_x * tiling.tile_meshlets;
+                        let meshlet_count = batch
+                            .meshlet_count
+                            .saturating_sub(meshlet_base)
+                            .min(tiling.tile_meshlets);
+                        let instance_base =
+                            batch.instance_range.start + tile_y * tiling.tile_instances;
+                        let instance_count = batch
+                            .instance_range
+                            .end
+                            .saturating_sub(instance_base)
+                            .min(tiling.tile_instances);
+                        pass.draw_mesh_tasks(meshlet_count, instance_count, 1);
+                        params_tile_index = params_tile_index.saturating_add(1);
                     }
                 }
             }
         } else {
-            pass.set_pipeline(self.pipeline.read().as_ref().unwrap());
-            pass.set_bind_group(0, &camera_bg, &[]);
-            if binding_backend != BindingBackendKind::BindGroups {
-                let material_bg = match material_bg.as_ref() {
-                    Some(bg) => bg,
-                    None => return,
-                };
-                pass.set_bind_group(1, material_bg, &[]);
-            }
-            pass.set_bind_group(2, &constants_bg, &[]);
-
             pass.set_vertex_buffer(
                 1,
-                frame.forward_instances.as_ref().unwrap().buffer.slice(..),
+                frame
+                    .transparent_instances
+                    .as_ref()
+                    .unwrap()
+                    .buffer
+                    .slice(..),
             );
-
-            if use_indirect {
-                let indirect = frame.gbuffer_indirect.as_ref().unwrap();
-                if use_multi_draw {
-                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
-                    let draws = frame.gpu_draws.as_ref();
-                    let mut i = 0usize;
-                    while i < draws.len() {
-                        let draw = &draws[i];
-                        let vertex = match ctx
-                            .rpctx
-                            .pool
-                            .entry(draw.vertex)
-                            .and_then(|e| e.buffer.as_ref())
-                        {
-                            Some(buf) => buf,
-                            None => {
-                                i += 1;
-                                continue;
-                            }
-                        };
-                        let index = match ctx
-                            .rpctx
-                            .pool
-                            .entry(draw.index)
-                            .and_then(|e| e.buffer.as_ref())
-                        {
-                            Some(buf) => buf,
-                            None => {
-                                i += 1;
-                                continue;
-                            }
-                        };
-                        pass.set_vertex_buffer(0, vertex.slice(..));
-                        pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-
-                        let mut count = 1u32;
-                        let mut next_offset = draw.indirect_offset + stride;
-                        let mut j = i + 1;
-                        while j < draws.len() {
-                            let next = &draws[j];
-                            if next.vertex != draw.vertex
-                                || next.index != draw.index
-                                || next.indirect_offset != next_offset
-                            {
-                                break;
-                            }
-                            count += 1;
-                            next_offset += stride;
-                            j += 1;
-                        }
-                        pass.multi_draw_indexed_indirect(indirect, draw.indirect_offset, count);
-                        i = j;
-                    }
-                } else {
-                    let material_groups = if binding_backend == BindingBackendKind::BindGroups {
-                        match material_groups.as_ref() {
-                            Some(groups) => Some(groups),
-                            None => return,
-                        }
-                    } else {
-                        None
-                    };
-                    for draw in frame.gpu_draws.iter() {
-                        let vertex = match ctx
-                            .rpctx
-                            .pool
-                            .entry(draw.vertex)
-                            .and_then(|e| e.buffer.as_ref())
-                        {
-                            Some(buf) => buf,
-                            None => continue,
-                        };
-                        let index = match ctx
-                            .rpctx
-                            .pool
-                            .entry(draw.index)
-                            .and_then(|e| e.buffer.as_ref())
-                        {
-                            Some(buf) => buf,
-                            None => continue,
-                        };
-                        if let Some(groups) = material_groups.as_ref() {
-                            let material_idx = draw.material_id as usize;
-                            let material_bg = groups
-                                .get(material_idx)
-                                .or_else(|| groups.first())
-                                .expect("material bind groups empty");
-                            pass.set_bind_group(1, material_bg, &[]);
-                        }
-                        pass.set_vertex_buffer(0, vertex.slice(..));
-                        pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed_indirect(indirect, draw.indirect_offset);
-                    }
+            let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                match material_groups.as_ref() {
+                    Some(groups) => Some(groups),
+                    None => return,
                 }
             } else {
-                let material_groups = if binding_backend == BindingBackendKind::BindGroups {
-                    match material_groups.as_ref() {
-                        Some(groups) => Some(groups),
+                None
+            };
+            let mut current_blend: Option<ForwardBlendMode> = None;
+            for batch in frame.transparent_batches.iter() {
+                let blend_mode = batch.blend_mode;
+                if current_blend != Some(blend_mode) {
+                    let pipeline = match blend_mode {
+                        ForwardBlendMode::Alpha => self.pipeline_alpha.read(),
+                        ForwardBlendMode::Premultiplied => self.pipeline_premultiplied.read(),
+                        ForwardBlendMode::Additive => self.pipeline_additive.read(),
+                    };
+                    let pipeline = match pipeline.as_ref() {
+                        Some(p) => p,
                         None => return,
-                    }
-                } else {
-                    None
-                };
-                for batch in frame.forward_batches.iter() {
-                    let vertex = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.vertex)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => continue,
                     };
-                    let index = match ctx
-                        .rpctx
-                        .pool
-                        .entry(batch.index)
-                        .and_then(|e| e.buffer.as_ref())
-                    {
-                        Some(buf) => buf,
-                        None => continue,
-                    };
-
-                    if let Some(groups) = material_groups.as_ref() {
-                        let material_idx = batch.material_id as usize;
-                        let material_bg = groups
-                            .get(material_idx)
-                            .or_else(|| groups.first())
-                            .expect("material bind groups empty");
-                        pass.set_bind_group(1, material_bg, &[]);
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &camera_bg, &[]);
+                    pass.set_bind_group(1, &scene_bg, &[]);
+                    if binding_backend != BindingBackendKind::BindGroups {
+                        let material_bg = match material_bg.as_ref() {
+                            Some(bg) => bg,
+                            None => return,
+                        };
+                        pass.set_bind_group(2, material_bg, &[]);
                     }
-                    pass.set_vertex_buffer(0, vertex.slice(..));
-                    pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
+                    current_blend = Some(blend_mode);
                 }
+
+                let batch = &batch.batch;
+                let vertex = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.vertex)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => continue,
+                };
+                let index = match ctx
+                    .rpctx
+                    .pool
+                    .entry(batch.index)
+                    .and_then(|e| e.buffer.as_ref())
+                {
+                    Some(buf) => buf,
+                    None => continue,
+                };
+
+                if let Some(groups) = material_groups.as_ref() {
+                    let material_idx = batch.material_id as usize;
+                    let material_bg = groups
+                        .get(material_idx)
+                        .or_else(|| groups.first())
+                        .expect("material bind groups empty");
+                    pass.set_bind_group(2, material_bg, &[]);
+                }
+                pass.set_vertex_buffer(0, vertex.slice(..));
+                pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
             }
         }
     }

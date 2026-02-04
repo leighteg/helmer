@@ -3003,6 +3003,9 @@ impl DeferredRenderer {
                     emission_offset + material.emission_texture_index
                 },
                 _padding: 0.0,
+                alpha_mode: material.alpha_mode as u32,
+                alpha_cutoff: material.alpha_cutoff.unwrap_or(0.0),
+                _pad_alpha: [0; 2],
             };
 
             // Calculate the exact byte offset for this material in the buffer.
@@ -3415,6 +3418,8 @@ impl RenderTrait for DeferredRenderer {
                     normal_texture_index: normal_idx,
                     metallic_roughness_texture_index: mr_idx,
                     emission_texture_index: emission_idx,
+                    alpha_mode: mat_data.alpha_mode,
+                    alpha_cutoff: mat_data.alpha_cutoff,
                 };
 
                 newly_completed.push((mat_data.id, final_material));

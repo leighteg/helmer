@@ -1,5 +1,5 @@
 use crate::animation::{Pose, Skeleton, Skin};
-use crate::graphics::common::renderer::Vertex;
+use crate::graphics::common::renderer::{AlphaMode, Vertex};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use std::sync::Arc;
 
@@ -227,8 +227,7 @@ pub struct ActiveCamera {}
 // --- Material Asset Component ---
 // This component acts as a descriptor for a material that can be loaded and used by the renderer.
 // It doesn't reside on an entity directly but rather describes a material asset.
-// You would register these with your asset manager.
-#[derive(Debug, Clone)] // Make it a Component if you store materials in your ECS
+#[derive(Debug, Clone)]
 pub struct MaterialAsset {
     pub name: String,
     pub albedo: Vec3, // Base color
@@ -238,6 +237,8 @@ pub struct MaterialAsset {
     pub albedo_texture_path: Option<String>,
     pub normal_texture_path: Option<String>,
     pub metallic_roughness_texture_path: Option<String>,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: Option<f32>,
     // Add other texture paths (e.g., emissive, height) as needed
 }
 
@@ -261,6 +262,8 @@ impl MaterialAsset {
             albedo_texture_path,
             normal_texture_path,
             metallic_roughness_texture_path,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: None,
         }
     }
 }

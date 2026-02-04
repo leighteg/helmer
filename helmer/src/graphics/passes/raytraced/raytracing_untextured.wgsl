@@ -51,6 +51,10 @@ struct MaterialData {
     emission_idx: i32,
     emission_color: vec3<f32>,
     _padding: f32,
+    alpha_mode: u32,
+    alpha_cutoff: f32,
+    _pad_alpha0: u32,
+    _pad_alpha1: u32,
 }
 
 struct RtBvhNode {

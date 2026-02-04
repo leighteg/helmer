@@ -13,6 +13,19 @@ impl Default for SkinningMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransparentSortMode {
+    None,
+    BackToFront,
+    FrontToBack,
+}
+
+impl Default for TransparentSortMode {
+    fn default() -> Self {
+        TransparentSortMode::BackToFront
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderConfig {
     pub gbuffer_pass: bool,
@@ -25,11 +38,15 @@ pub struct RenderConfig {
     pub ddgi_pass: bool,
     pub egui_pass: bool,
     pub gizmo_pass: bool,
+    pub transparent_pass: bool,
 
     pub freeze_render_camera: bool,
 
     pub max_lights_forward: usize,
     pub max_lights_deferred: usize,
+    pub transparent_sort_mode: TransparentSortMode,
+    pub transparent_shadows: bool,
+    pub alpha_cutoff_default: f32,
 
     pub frames_in_flight: u32,
     pub shadow_map_resolution: u32,
@@ -190,11 +207,15 @@ impl Default for RenderConfig {
             ddgi_pass: true,
             egui_pass: true,
             gizmo_pass: true,
+            transparent_pass: true,
 
             freeze_render_camera: false,
 
             max_lights_forward: 256,
             max_lights_deferred: 2048,
+            transparent_sort_mode: TransparentSortMode::BackToFront,
+            transparent_shadows: false,
+            alpha_cutoff_default: 0.5,
 
             frames_in_flight: 3,
             shadow_map_resolution: 2048,

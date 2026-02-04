@@ -10,7 +10,7 @@ use helmer::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
         common::{
-            config::RenderConfig,
+            config::{RenderConfig, TransparentSortMode},
             constants::MAX_SHADOW_CASCADES,
             renderer::{
                 OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
@@ -1521,6 +1521,45 @@ impl StatsUI {
                             egui::DragValue::new(&mut render_cfg.shader_constants.mip_bias)
                                 .speed(0.1)
                                 .prefix("mip bias: "),
+                        );
+
+                        ui.separator();
+                        ui.heading("transparency");
+                        ui.checkbox(&mut render_cfg.transparent_pass, "transparent pass");
+                        let sort_labels = ["none", "back-to-front", "front-to-back"];
+                        let sort_idx = match render_cfg.transparent_sort_mode {
+                            TransparentSortMode::None => 0,
+                            TransparentSortMode::BackToFront => 1,
+                            TransparentSortMode::FrontToBack => 2,
+                        };
+                        ComboBox::from_label("transparent sort")
+                            .selected_text(sort_labels[sort_idx])
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut render_cfg.transparent_sort_mode,
+                                    TransparentSortMode::None,
+                                    sort_labels[0],
+                                );
+                                ui.selectable_value(
+                                    &mut render_cfg.transparent_sort_mode,
+                                    TransparentSortMode::BackToFront,
+                                    sort_labels[1],
+                                );
+                                ui.selectable_value(
+                                    &mut render_cfg.transparent_sort_mode,
+                                    TransparentSortMode::FrontToBack,
+                                    sort_labels[2],
+                                );
+                            });
+                        ui.checkbox(
+                            &mut render_cfg.transparent_shadows,
+                            "transparent shadows (blend as mask)",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.alpha_cutoff_default)
+                                .speed(0.01)
+                                .range(0.0..=1.0)
+                                .prefix("alpha cutoff default: "),
                         );
 
                         ui.separator();

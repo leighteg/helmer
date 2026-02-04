@@ -11,7 +11,7 @@ use web_time::Instant;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
-use crate::graphics::passes::shadow::ShadowPass;
+use crate::graphics::passes::shadow::{ShadowInstanceRaw, ShadowPass};
 use crate::graphics::{
     backend::{
         bind_group::BindGroupBackend,
@@ -34,9 +34,9 @@ use crate::graphics::{
             build_blas, build_tlas, transform_aabb,
         },
         renderer::{
-            Aabb, AssetStreamKind, AssetStreamingRequest, CameraUniforms, CascadeUniform,
-            DdgiGridConstants, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw, LightData,
-            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
+            Aabb, AlphaMode, AssetStreamKind, AssetStreamingRequest, CameraUniforms,
+            CascadeUniform, DdgiGridConstants, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw,
+            LightData, MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
             OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
             OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
             RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
@@ -60,9 +60,9 @@ use crate::graphics::{
         },
     },
     passes::{
-        BundleMode, FrameGlobals, GBufferBundleKey, GizmoIconParams, GizmoLineParams, GizmoParams,
-        IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput, RayTracingTextureArrays,
-        ShadowBundleKey, SwapchainFrameInput,
+        BundleMode, ForwardBlendMode, FrameGlobals, GBufferBundleKey, GizmoIconParams,
+        GizmoLineParams, GizmoParams, IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput,
+        RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput, TransparentDrawBatch,
     },
     render_graphs::default_graph_spec,
 };
@@ -260,7 +260,8 @@ struct GpuInstanceInput {
     casts_shadow: u32,
     skin_offset: u32,
     skin_count: u32,
-    _pad0: [u32; 3],
+    alpha_mode: u32,
+    _pad0: [u32; 2],
 }
 
 #[repr(C)]
@@ -300,6 +301,7 @@ struct GpuCullSignature {
     depth_bias: f32,
     rect_pad: f32,
     mesh_tasks_enabled: bool,
+    transparent_shadows: bool,
 }
 
 #[repr(C)]
@@ -1027,6 +1029,7 @@ struct BufferCache {
     occlusion_params: ReusableBuffer,
     gpu_cull_params: ReusableBuffer,
     gbuffer_instances: ReusableBuffer,
+    transparent_instances: ReusableBuffer,
     shadow_instances: ReusableBuffer,
 }
 
@@ -1072,6 +1075,10 @@ impl BufferCache {
                 "GraphRenderer/GBufferInstances",
                 frames_in_flight,
             ),
+            transparent_instances: ReusableBuffer::new(
+                "GraphRenderer/TransparentInstances",
+                frames_in_flight,
+            ),
             shadow_instances: ReusableBuffer::new(
                 "GraphRenderer/ShadowInstances",
                 frames_in_flight,
@@ -1096,6 +1103,7 @@ impl BufferCache {
         self.occlusion_params.resize_slots(frames_in_flight);
         self.gpu_cull_params.resize_slots(frames_in_flight);
         self.gbuffer_instances.resize_slots(frames_in_flight);
+        self.transparent_instances.resize_slots(frames_in_flight);
         self.shadow_instances.resize_slots(frames_in_flight);
     }
 }
@@ -1648,7 +1656,7 @@ pub struct GraphRenderer {
     recently_evicted: SlotVec<u32>,
     gbuffer_batcher:
         InstanceBatcher<MeshLodMaterialKey, crate::graphics::passes::gbuffer::GBufferInstanceRaw>,
-    shadow_batcher: InstanceBatcher<MeshLodKey, InstanceRaw>,
+    shadow_batcher: InstanceBatcher<MeshLodMaterialKey, ShadowInstanceRaw>,
     streaming_tuning: StreamingTuning,
     streaming_pressure: MemoryPressure,
     streaming_pressure_frame: u32,
@@ -5369,6 +5377,12 @@ impl GraphRenderer {
         let mra_idx = texture_index(&mut self.pool, mat_data.metallic_roughness_texture_id);
         let emission_idx = texture_index(&mut self.pool, mat_data.emission_texture_id);
 
+        let default_alpha_cutoff = self
+            .current_render_data
+            .as_ref()
+            .map(|state| state.data.render_config.alpha_cutoff_default)
+            .unwrap_or(RenderConfig::default().alpha_cutoff_default);
+        let alpha_cutoff = mat_data.alpha_cutoff.unwrap_or(default_alpha_cutoff);
         let shader_data = MaterialShaderData {
             albedo: mat_data.albedo,
             metallic: mat_data.metallic,
@@ -5381,6 +5395,9 @@ impl GraphRenderer {
             emission_idx,
             emission_color: mat_data.emission_color,
             _padding: 0.0,
+            alpha_mode: mat_data.alpha_mode as u32,
+            alpha_cutoff,
+            _pad_alpha: [0; 2],
         };
 
         let desc = ResourceDesc::Buffer {
@@ -5447,6 +5464,12 @@ impl GraphRenderer {
             .get(id)
             .map(|m| &m.meta)
             .or_else(|| self.pending_materials.get(&id))
+    }
+
+    fn material_alpha_mode(&self, id: usize) -> AlphaMode {
+        self.material_meta(id)
+            .map(|meta| meta.alpha_mode)
+            .unwrap_or(AlphaMode::Opaque)
     }
 
     fn material_index(&self, id: usize) -> Option<u32> {
@@ -7094,8 +7117,16 @@ impl GraphRenderer {
             )
         };
 
-        let forward_instances = gbuffer_instances.clone();
-        let forward_batches = gbuffer_batches.clone();
+        let (transparent_instances, transparent_batches) = if frame_render_config.transparent_pass {
+            self.build_transparent_instances(
+                render_data,
+                alpha,
+                camera_uniforms.view_position.into(),
+                draw_require_meshlets,
+            )
+        } else {
+            (None, Arc::new(Vec::new()))
+        };
         let shadow_uniforms_buffer = match shadow_uniforms_buffer {
             Some(buf) => Some(buf),
             None => {
@@ -7146,6 +7177,9 @@ impl GraphRenderer {
                 self.shadow_draws_version
             },
             matrices_version: self.shadow_matrices_version,
+            material_bindings_version: self.material_bindings_version,
+            texture_array_size,
+            binding_backend: frame_binding_backend,
             resource_epoch: bundle_resource_epoch,
         };
 
@@ -7470,8 +7504,8 @@ impl GraphRenderer {
             shadow_mesh_tasks,
             gpu_draws,
             gpu_instance_count,
-            forward_instances,
-            forward_batches,
+            transparent_instances,
+            transparent_batches,
             alpha,
             camera_view_proj: view_proj,
             prev_view_proj,
@@ -8271,6 +8305,7 @@ impl GraphRenderer {
             depth_bias: globals.render_config.gpu_cull_depth_bias.max(0.0),
             rect_pad: globals.render_config.gpu_cull_rect_pad.max(0.0),
             mesh_tasks_enabled,
+            transparent_shadows: globals.render_config.transparent_shadows,
         };
         let config_changed = self
             .last_gpu_cull_signature
@@ -8294,7 +8329,8 @@ impl GraphRenderer {
 
         let flags = (globals.render_config.frustum_culling as u32)
             | ((occlusion_enabled as u32) << 1)
-            | ((globals.render_config.lod as u32) << 2);
+            | ((globals.render_config.lod as u32) << 2)
+            | ((globals.render_config.transparent_shadows as u32) << 3);
         let mesh_count = (self.gpu_mesh_meta_len).min(u32::MAX as usize) as u32;
         let output_capacity = (self.gpu_total_capacity).min(u32::MAX as usize) as u32;
         let params = GpuCullParams {
@@ -8579,6 +8615,7 @@ impl GraphRenderer {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let default_alpha_cutoff = scene.data.render_config.alpha_cutoff_default;
         let mut textures: Vec<wgpu::TextureView> = Vec::new();
         textures.push(self.fallback_view.clone());
         let fallback_idx = 0i32;
@@ -8698,6 +8735,11 @@ impl GraphRenderer {
                 meta.metallic_roughness_texture_id
                     .hash(&mut material_sig_hasher);
                 meta.emission_texture_id.hash(&mut material_sig_hasher);
+                (meta.alpha_mode as u32).hash(&mut material_sig_hasher);
+                meta.alpha_cutoff
+                    .unwrap_or(default_alpha_cutoff)
+                    .to_bits()
+                    .hash(&mut material_sig_hasher);
             } else {
                 0u8.hash(&mut material_sig_hasher);
             }
@@ -8747,6 +8789,9 @@ impl GraphRenderer {
             emission_idx: -1,
             emission_color: [0.0, 0.0, 0.0],
             _padding: 0.0,
+            alpha_mode: AlphaMode::Opaque as u32,
+            alpha_cutoff: default_alpha_cutoff,
+            _pad_alpha: [0; 2],
         };
         let material_capacity = self.material_index_order.len() + 1;
         let mut material_gpu = vec![fallback_material; material_capacity];
@@ -8769,6 +8814,7 @@ impl GraphRenderer {
             let mra_idx = tex_idx(meta.metallic_roughness_texture_id);
             let emission_idx = tex_idx(meta.emission_texture_id);
 
+            let alpha_cutoff = meta.alpha_cutoff.unwrap_or(default_alpha_cutoff);
             let shader_data = MaterialShaderData {
                 albedo: meta.albedo,
                 metallic: meta.metallic,
@@ -8781,6 +8827,9 @@ impl GraphRenderer {
                 emission_idx,
                 emission_color: meta.emission_color,
                 _padding: 0.0,
+                alpha_mode: meta.alpha_mode as u32,
+                alpha_cutoff,
+                _pad_alpha: [0; 2],
             };
 
             if let Some(entry) = self.material_index_map.get(*mat_id) {
@@ -9283,6 +9332,13 @@ impl GraphRenderer {
         let interp = alpha > 0.0 && alpha < 1.0;
 
         for object in &render_data.objects {
+            let alpha_mode = self.material_alpha_mode(object.material_id);
+            if matches!(
+                alpha_mode,
+                AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Additive
+            ) {
+                continue;
+            }
             let mat_idx = self.material_index_for(object.material_id, material_version);
 
             let mut desired_lod = object.lod_index.saturating_add(lod_bias);
@@ -9431,6 +9487,256 @@ impl GraphRenderer {
         )
     }
 
+    fn build_transparent_instances(
+        &mut self,
+        render_data: &RenderData,
+        alpha: f32,
+        camera_position: Vec3,
+        require_meshlets: bool,
+    ) -> (
+        Option<crate::graphics::passes::InstanceBuffer>,
+        Arc<Vec<TransparentDrawBatch>>,
+    ) {
+        let pressure = self.streaming_pressure;
+        let lod_bias = match pressure {
+            MemoryPressure::Hard => self.streaming_tuning.lod_bias_hard,
+            MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
+            MemoryPressure::None => 0,
+        };
+        let force_lowest =
+            matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
+        let meshes = &self.meshes;
+        let material_version = self.material_version;
+        let interp = alpha > 0.0 && alpha < 1.0;
+
+        #[derive(Clone, Copy)]
+        struct TransparentItem {
+            sort_key: f32,
+            object_id: usize,
+            blend_mode: ForwardBlendMode,
+            key: MeshLodMaterialKey,
+            instance: crate::graphics::passes::gbuffer::GBufferInstanceRaw,
+        }
+
+        let mut items: Vec<TransparentItem> = Vec::new();
+        for object in &render_data.objects {
+            let alpha_mode = self.material_alpha_mode(object.material_id);
+            let blend_mode = match alpha_mode {
+                AlphaMode::Blend => ForwardBlendMode::Alpha,
+                AlphaMode::Premultiplied => ForwardBlendMode::Premultiplied,
+                AlphaMode::Additive => ForwardBlendMode::Additive,
+                _ => continue,
+            };
+
+            let mat_idx = self.material_index_for(object.material_id, material_version);
+            let mut desired_lod = object.lod_index.saturating_add(lod_bias);
+            if force_lowest {
+                desired_lod = usize::MAX;
+            } else if let Some(mesh) = meshes.get(object.mesh_id) {
+                let max_idx = mesh.available_lods.saturating_sub(1);
+                desired_lod = desired_lod.min(max_idx);
+            }
+            let resolved =
+                match self.resolve_draw_mesh(object.mesh_id, desired_lod, require_meshlets) {
+                    Some(resolved) => resolved,
+                    None => continue,
+                };
+            let batch_material_id = if self.use_material_batches() {
+                mat_idx
+            } else {
+                0
+            };
+            let key = MeshLodMaterialKey {
+                mesh_id: resolved.mesh_id,
+                lod: resolved.lod_index,
+                material_id: batch_material_id,
+            };
+
+            let position = if interp {
+                object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, alpha)
+            } else if alpha <= 0.0 {
+                object.previous_transform.position
+            } else {
+                object.current_transform.position
+            };
+            let rotation = if interp {
+                Quat::from(object.previous_transform.rotation)
+                    .slerp(object.current_transform.rotation, alpha)
+            } else if alpha <= 0.0 {
+                Quat::from(object.previous_transform.rotation)
+            } else {
+                Quat::from(object.current_transform.rotation)
+            };
+            let scale = if interp {
+                object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, alpha)
+            } else if alpha <= 0.0 {
+                object.previous_transform.scale
+            } else {
+                object.current_transform.scale
+            };
+            let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
+            let bounds_center = resolved.bounds_center;
+            let bounds_extents = resolved.bounds_extents;
+
+            let instance = crate::graphics::passes::gbuffer::GBufferInstanceRaw {
+                model_matrix: model_matrix.to_cols_array_2d(),
+                material_id: mat_idx,
+                visibility: 1,
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
+                bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
+                bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
+            };
+
+            let diff = position - camera_position;
+            let sort_key = diff.length_squared();
+
+            items.push(TransparentItem {
+                sort_key,
+                object_id: object.id,
+                blend_mode,
+                key,
+                instance,
+            });
+        }
+
+        if items.is_empty() {
+            return (None, Arc::new(Vec::new()));
+        }
+
+        match render_data.render_config.transparent_sort_mode {
+            crate::graphics::common::config::TransparentSortMode::None => {}
+            crate::graphics::common::config::TransparentSortMode::BackToFront => {
+                items.sort_by(|a, b| {
+                    b.sort_key
+                        .total_cmp(&a.sort_key)
+                        .then_with(|| a.object_id.cmp(&b.object_id))
+                });
+            }
+            crate::graphics::common::config::TransparentSortMode::FrontToBack => {
+                items.sort_by(|a, b| {
+                    a.sort_key
+                        .total_cmp(&b.sort_key)
+                        .then_with(|| a.object_id.cmp(&b.object_id))
+                });
+            }
+        }
+
+        let mut instance_data: Vec<crate::graphics::passes::gbuffer::GBufferInstanceRaw> =
+            Vec::with_capacity(items.len());
+        let mut draw_batches: Vec<TransparentDrawBatch> = Vec::new();
+
+        let mut group_start: u32 = 0;
+        let mut group_key: Option<MeshLodMaterialKey> = None;
+        let mut group_blend: Option<ForwardBlendMode> = None;
+        let mut group_count: u32 = 0;
+
+        let mut flush_group =
+            |group_key: Option<MeshLodMaterialKey>,
+             group_blend: Option<ForwardBlendMode>,
+             group_start: u32,
+             group_count: u32,
+             draw_batches: &mut Vec<TransparentDrawBatch>| {
+                if group_count == 0 {
+                    return;
+                }
+                let (Some(key), Some(blend_mode)) = (group_key, group_blend) else {
+                    return;
+                };
+                let mesh = if key.mesh_id == FALLBACK_MESH_KEY {
+                    self.fallback_mesh.as_ref()
+                } else {
+                    meshes.get(key.mesh_id)
+                };
+                let Some(mesh) = mesh else {
+                    return;
+                };
+                if let Some(lod) = mesh.lods.get(key.lod) {
+                    draw_batches.push(TransparentDrawBatch {
+                        blend_mode,
+                        batch: crate::graphics::passes::DrawBatch {
+                            mesh_id: key.mesh_id,
+                            lod: key.lod,
+                            index_count: lod.index_count,
+                            instance_range: group_start..(group_start + group_count),
+                            material_id: key.material_id,
+                            vertex: lod.vertex,
+                            index: lod.buffer,
+                            meshlet_descs: lod.meshlets.descs,
+                            meshlet_vertices: lod.meshlets.vertices,
+                            meshlet_indices: lod.meshlets.indices,
+                            meshlet_count: lod.meshlets.count,
+                        },
+                    });
+                }
+            };
+
+        for (idx, item) in items.iter().enumerate() {
+            instance_data.push(item.instance);
+            let item_start = idx as u32;
+            if group_key == Some(item.key) && group_blend == Some(item.blend_mode) {
+                group_count = group_count.saturating_add(1);
+            } else {
+                flush_group(
+                    group_key,
+                    group_blend,
+                    group_start,
+                    group_count,
+                    &mut draw_batches,
+                );
+                group_key = Some(item.key);
+                group_blend = Some(item.blend_mode);
+                group_start = item_start;
+                group_count = 1;
+            }
+        }
+        flush_group(
+            group_key,
+            group_blend,
+            group_start,
+            group_count,
+            &mut draw_batches,
+        );
+
+        if instance_data.is_empty() || draw_batches.is_empty() {
+            return (None, Arc::new(Vec::new()));
+        }
+
+        let instance_bytes = bytemuck::cast_slice(&instance_data);
+        let instance_buffer = {
+            let (buf, reallocated) = self.buffer_cache.transparent_instances.ensure_with_status(
+                &self.device,
+                instance_bytes.len() as u64,
+                wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::STORAGE,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buf, 0, instance_bytes);
+            let buffer = buf.clone();
+            if reallocated {
+                self.note_bundle_resource_change();
+            }
+            buffer
+        };
+
+        (
+            Some(crate::graphics::passes::InstanceBuffer {
+                buffer: instance_buffer,
+                count: instance_data.len() as u32,
+                stride: std::mem::size_of::<crate::graphics::passes::gbuffer::GBufferInstanceRaw>()
+                    as u64,
+            }),
+            Arc::new(draw_batches),
+        )
+    }
+
     fn build_shadow_data(
         &mut self,
         render_data: &RenderData,
@@ -9452,6 +9758,7 @@ impl GraphRenderer {
         let force_lowest =
             matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
         let meshes = &self.meshes;
+        let material_version = self.material_version;
 
         self.shadow_batcher.reset();
         let interp = alpha > 0.0 && alpha < 1.0;
@@ -9462,6 +9769,14 @@ impl GraphRenderer {
 
         for object in &render_data.objects {
             if !object.casts_shadow {
+                continue;
+            }
+            let alpha_mode = self.material_alpha_mode(object.material_id);
+            if matches!(
+                alpha_mode,
+                AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Additive
+            ) && !render_data.render_config.transparent_shadows
+            {
                 continue;
             }
             let mut desired_lod = object.lod_index.saturating_add(lod_bias);
@@ -9520,16 +9835,25 @@ impl GraphRenderer {
             scene_bounds_max = scene_bounds_max.max(world_max);
             has_bounds = true;
 
-            let instance = InstanceRaw {
-                model_matrix: model_matrix.to_cols_array_2d(),
-                skin_offset: object.skin_offset,
-                skin_count: object.skin_count,
-                _pad0: [0; 2],
+            let mat_idx = self.material_index_for(object.material_id, material_version);
+            let batch_material_id = if self.use_material_batches() {
+                mat_idx
+            } else {
+                0
             };
 
-            let key = MeshLodKey {
+            let instance = ShadowInstanceRaw {
+                model_matrix: model_matrix.to_cols_array_2d(),
+                material_id: mat_idx,
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
+                _pad0: 0,
+            };
+
+            let key = MeshLodMaterialKey {
                 mesh_id: resolved.mesh_id,
                 lod: resolved.lod_index,
+                material_id: batch_material_id,
             };
             self.shadow_batcher.push(key, instance);
         }
@@ -9537,7 +9861,7 @@ impl GraphRenderer {
         let batches = self.shadow_batcher.active_batches();
         let total_instances: usize = batches.iter().map(|b| b.instances.len()).sum();
 
-        let mut instance_data: Vec<InstanceRaw> = Vec::with_capacity(total_instances);
+        let mut instance_data: Vec<ShadowInstanceRaw> = Vec::with_capacity(total_instances);
         let mut draw_batches = Vec::with_capacity(batches.len());
 
         for batch in batches {
@@ -9561,7 +9885,7 @@ impl GraphRenderer {
                     lod: batch.key.lod,
                     index_count: lod.index_count,
                     instance_range: offset..(offset + count),
-                    material_id: 0,
+                    material_id: batch.key.material_id,
                     vertex: lod.vertex,
                     index: lod.buffer,
                     meshlet_descs: lod.meshlets.descs,
@@ -9650,7 +9974,7 @@ impl GraphRenderer {
             instance_buffer.map(|buffer| crate::graphics::passes::InstanceBuffer {
                 buffer,
                 count: instance_data.len() as u32,
-                stride: std::mem::size_of::<InstanceRaw>() as u64,
+                stride: std::mem::size_of::<ShadowInstanceRaw>() as u64,
             }),
             Arc::new(draw_batches),
             Some(shadow_uniforms_buffer),
@@ -9961,6 +10285,7 @@ impl GraphRenderer {
         } else {
             self.gpu_mesh_index(obj.mesh_id)
         };
+        let alpha_mode = self.material_alpha_mode(obj.material_id) as u32;
 
         GpuInstanceInput {
             prev_model: prev.to_cols_array_2d(),
@@ -9972,7 +10297,8 @@ impl GraphRenderer {
             casts_shadow: obj.casts_shadow as u32,
             skin_offset: obj.skin_offset,
             skin_count: obj.skin_count,
-            _pad0: [0; 3],
+            alpha_mode,
+            _pad0: [0; 2],
         }
     }
 
@@ -10681,7 +11007,7 @@ impl GraphRenderer {
         if self.gpu_shadow_capacity < self.gpu_total_capacity {
             let capacity = self.gpu_total_capacity.max(1).next_power_of_two();
             self.gpu_shadow_capacity = capacity;
-            let size = (capacity * std::mem::size_of::<InstanceRaw>()) as u64;
+            let size = (capacity * std::mem::size_of::<ShadowInstanceRaw>()) as u64;
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("GpuDriven/ShadowInstances"),
                 size,
@@ -10709,7 +11035,7 @@ impl GraphRenderer {
                 .map(|buffer| crate::graphics::passes::InstanceBuffer {
                     buffer: buffer.clone(),
                     count: instance_count as u32,
-                    stride: std::mem::size_of::<InstanceRaw>() as u64,
+                    stride: std::mem::size_of::<ShadowInstanceRaw>() as u64,
                 });
 
         self.set_gpu_driven_stats(

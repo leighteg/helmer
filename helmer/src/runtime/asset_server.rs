@@ -7,8 +7,9 @@ use crate::graphics::common::renderer::MeshletLodData;
 use crate::graphics::common::{
     meshlets::{build_meshlet_lod, meshlet_lod_size_bytes},
     renderer::{
-        Aabb, AssetStreamKind, AssetStreamingRequest, MeshLodPayload, RenderMessage, Vertex,
-        build_mip_uploads, calc_mip_level_count, mip_level_data_size, render_message_payload_bytes,
+        Aabb, AlphaMode, AssetStreamKind, AssetStreamingRequest, MeshLodPayload, RenderMessage,
+        Vertex, build_mip_uploads, calc_mip_level_count, mip_level_data_size,
+        render_message_payload_bytes,
     },
 };
 use crate::provided::components::Transform;
@@ -381,6 +382,8 @@ pub struct Material {
     pub normal_texture: Option<Handle<Texture>>,
     pub metallic_roughness_texture: Option<Handle<Texture>>,
     pub emission_texture: Option<Handle<Texture>>,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: Option<f32>,
 }
 
 /// Represents a single drawable element in a scene graph, corresponding to a glTF primitive.
@@ -533,6 +536,8 @@ pub(crate) struct IntermediateMaterial {
     normal_texture_index: Option<usize>,
     metallic_roughness_texture_index: Option<usize>,
     emission_texture_index: Option<usize>,
+    alpha_mode: AlphaMode,
+    alpha_cutoff: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -548,6 +553,8 @@ pub struct MaterialGpuData {
     pub normal_texture_id: Option<usize>,
     pub metallic_roughness_texture_id: Option<usize>,
     pub emission_texture_id: Option<usize>,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -562,6 +569,10 @@ pub struct MaterialFile {
     pub normal_texture: Option<String>,
     pub metallic_roughness_texture: Option<String>,
     pub emission_texture: Option<String>,
+    #[serde(default)]
+    pub alpha_mode: AlphaMode,
+    #[serde(default)]
+    pub alpha_cutoff: Option<f32>,
 }
 
 pub(crate) trait BufferSource: Send + Sync {
@@ -3720,6 +3731,8 @@ impl AssetServer {
                         mat.metallic_roughness_texture_index,
                     ),
                     emission_texture_id: resolve_tex(mat.emission_texture_index),
+                    alpha_mode: mat.alpha_mode,
+                    alpha_cutoff: mat.alpha_cutoff,
                 };
                 material_sources.insert(
                     id,
@@ -4016,6 +4029,8 @@ impl AssetServer {
                         mat.metallic_roughness_texture_index,
                     ),
                     emission_texture_id: resolve_tex(mat.emission_texture_index),
+                    alpha_mode: mat.alpha_mode,
+                    alpha_cutoff: mat.alpha_cutoff,
                 };
                 material_sources.insert(
                     id,
@@ -4956,6 +4971,8 @@ impl AssetServer {
             emission_texture_id: data
                 .emission_texture
                 .map(|p| self.load_texture(p, AssetKind::Emission).id),
+            alpha_mode: data.alpha_mode,
+            alpha_cutoff: data.alpha_cutoff,
         }
     }
 }
@@ -6971,6 +6988,8 @@ pub(crate) fn parse_scene_document(
         normal_texture_index: None,
         metallic_roughness_texture_index: None,
         emission_texture_index: None,
+        alpha_mode: AlphaMode::Opaque,
+        alpha_cutoff: None,
     });
     material_lookup.insert(None, 0);
 
@@ -6997,6 +7016,17 @@ pub(crate) fn parse_scene_document(
         let pbr = mat.pbr_metallic_roughness();
         let mut get_tex =
             |tex_opt: Option<GltfTexture>, kind| tex_opt.map(|t| ensure_texture(t, kind));
+        let alpha_mode = match mat.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+            gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+        };
+        let alpha_cutoff = if matches!(alpha_mode, AlphaMode::Mask) {
+            mat.alpha_cutoff()
+        } else {
+            None
+        };
+
         let idx = materials.len();
         materials.push(IntermediateMaterial {
             albedo: pbr.base_color_factor(),
@@ -7021,6 +7051,8 @@ pub(crate) fn parse_scene_document(
                 mat.emissive_texture().map(|i| i.texture()),
                 AssetKind::Emission,
             ),
+            alpha_mode,
+            alpha_cutoff,
         });
         material_lookup.insert(key, idx);
         idx

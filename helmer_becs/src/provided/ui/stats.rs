@@ -1795,6 +1795,42 @@ impl StatsUI {
                                     .prefix("normal strength: "),
                             );
                         });
+                        ui.collapsing("transparency", |ui| {
+                            ui.add(
+                                egui::Slider::new(&mut render_cfg.rt_transparency_max_skip, 1..=64)
+                                    .text("max transparent skips"),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_alpha_cutoff_min)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .prefix("alpha min: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_alpha_cutoff_scale)
+                                    .speed(0.01)
+                                    .range(0.0..=4.0)
+                                    .prefix("alpha cutoff scale: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_alpha_cutoff_bias)
+                                    .speed(0.01)
+                                    .range(-1.0..=1.0)
+                                    .prefix("alpha cutoff bias: "),
+                            );
+                        });
+                        ui.collapsing("skinning", |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_skinning_bounds_pad)
+                                    .speed(0.01)
+                                    .prefix("rt bounds pad: "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut render_cfg.rt_skinning_motion_scale)
+                                    .speed(0.01)
+                                    .prefix("rt motion scale: "),
+                            );
+                        });
                         ui.collapsing("ray bias", |ui| {
                             ui.add(
                                 egui::DragValue::new(&mut render_cfg.rt_shadow_bias)

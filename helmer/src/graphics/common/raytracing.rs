@@ -26,6 +26,12 @@ pub struct RtTriangle {
     pub uv1: [f32; 2],
     pub uv2: [f32; 2],
     pub _pad0: [f32; 2],
+    pub joints0: [u32; 4],
+    pub joints1: [u32; 4],
+    pub joints2: [u32; 4],
+    pub weights0: [f32; 4],
+    pub weights1: [f32; 4],
+    pub weights2: [f32; 4],
 }
 
 #[repr(C)]
@@ -47,7 +53,10 @@ pub struct RtInstance {
     pub inv_model: [[f32; 4]; 4],
     pub blas_index: u32,
     pub material_id: u32,
-    pub _pad0: [u32; 2],
+    pub skin_offset: u32,
+    pub skin_count: u32,
+    pub skinning_pad: f32,
+    pub _pad0: [u32; 3],
 }
 
 #[repr(C)]
@@ -81,6 +90,11 @@ pub struct RtConstants {
     pub sky_multi_scatter_strength: f32,
     pub sky_multi_scatter_power: f32,
     pub texture_array_layers: u32,
+    pub transparency_max_skip: u32,
+    pub alpha_cutoff_min: f32,
+    pub alpha_cutoff_scale: f32,
+    pub alpha_cutoff_bias: f32,
+    pub skinning_bounds_pad: f32,
 }
 
 pub const RT_FLAG_DIRECT_LIGHTING: u32 = 1 << 0;
@@ -129,6 +143,12 @@ pub fn build_blas(vertices: &[Vertex], indices: &[u32], leaf_size: usize) -> Bla
         let n0 = Vec3::from(vertices[i0].normal);
         let n1 = Vec3::from(vertices[i1].normal);
         let n2 = Vec3::from(vertices[i2].normal);
+        let joints0 = vertices[i0].joints;
+        let joints1 = vertices[i1].joints;
+        let joints2 = vertices[i2].joints;
+        let weights0 = vertices[i0].weights;
+        let weights1 = vertices[i1].weights;
+        let weights2 = vertices[i2].weights;
 
         let min = p0.min(p1).min(p2);
         let max = p0.max(p1).max(p2);
@@ -149,6 +169,12 @@ pub fn build_blas(vertices: &[Vertex], indices: &[u32], leaf_size: usize) -> Bla
             uv1: [uv1[0], uv1[1]],
             uv2: [uv2[0], uv2[1]],
             _pad0: [0.0, 0.0],
+            joints0,
+            joints1,
+            joints2,
+            weights0,
+            weights1,
+            weights2,
         });
 
         infos.push(BoundsInfo {

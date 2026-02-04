@@ -5,6 +5,11 @@ const RT_FLAG_DIRECT_LIGHTING: u32 = 1u << 0u;
 const RT_FLAG_SHADOWS: u32 = 1u << 1u;
 const RT_FLAG_USE_TEXTURES: u32 = 1u << 2u;
 const RT_FLAG_SHADE_SMOOTH: u32 = 1u << 3u;
+const ALPHA_MODE_OPAQUE: u32 = 0u;
+const ALPHA_MODE_MASK: u32 = 1u;
+const ALPHA_MODE_BLEND: u32 = 2u;
+const ALPHA_MODE_PREMULTIPLIED: u32 = 3u;
+const ALPHA_MODE_ADDITIVE: u32 = 4u;
 
 struct CameraUniforms {
     view_matrix: mat4x4<f32>,
@@ -78,6 +83,12 @@ struct RtTriangle {
     uv1: vec2<f32>,
     uv2: vec2<f32>,
     _pad0: vec2<f32>,
+    joints0: vec4<u32>,
+    joints1: vec4<u32>,
+    joints2: vec4<u32>,
+    weights0: vec4<f32>,
+    weights1: vec4<f32>,
+    weights2: vec4<f32>,
 }
 
 struct RtBlasDesc {
@@ -95,7 +106,10 @@ struct RtInstance {
     inv_model: mat4x4<f32>,
     blas_index: u32,
     material_id: u32,
-    _pad0: vec2<u32>,
+    skin_offset: u32,
+    skin_count: u32,
+    skinning_pad: f32,
+    _pad0: vec3<f32>,
 }
 
 struct RtConstants {
@@ -127,6 +141,11 @@ struct RtConstants {
     sky_multi_scatter_strength: f32,
     sky_multi_scatter_power: f32,
     texture_array_layers: u32,
+    transparency_max_skip: u32,
+    alpha_cutoff_min: f32,
+    alpha_cutoff_scale: f32,
+    alpha_cutoff_bias: f32,
+    skinning_bounds_pad: f32,
 }
 
 struct RtReflectionParams {
@@ -225,6 +244,7 @@ struct HitInfo {
 @group(0) @binding(10) var<storage, read> materials: array<MaterialData>;
 @group(0) @binding(11) var<uniform> sky: SkyUniforms;
 @group(0) @binding(12) var<uniform> shader_constants: ShaderConstants;
+@group(0) @binding(13) var<storage, read> skin_matrices: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var gbuf_normal: texture_2d<f32>;
 @group(1) @binding(1) var gbuf_mra: texture_2d<f32>;
@@ -265,6 +285,88 @@ fn cosine_sample_hemisphere(r1: f32, r2: f32) -> vec3<f32> {
 fn make_tangent(n: vec3<f32>) -> vec3<f32> {
     let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.999);
     return normalize(cross(up, n));
+}
+
+struct SkinnedVertex {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+struct SkinnedTriangle {
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    p2: vec3<f32>,
+    n0: vec3<f32>,
+    n1: vec3<f32>,
+    n2: vec3<f32>,
+}
+
+fn apply_skinning_rt(
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    joints: vec4<u32>,
+    weights: vec4<f32>,
+    skin_offset: u32,
+    skin_count: u32,
+) -> SkinnedVertex {
+    var out: SkinnedVertex;
+    out.position = position;
+    out.normal = normal;
+    if skin_count == 0u {
+        return out;
+    }
+    let joint0 = min(joints.x, skin_count - 1u);
+    let joint1 = min(joints.y, skin_count - 1u);
+    let joint2 = min(joints.z, skin_count - 1u);
+    let joint3 = min(joints.w, skin_count - 1u);
+    var skinned_pos = vec4<f32>(0.0);
+    var skinned_norm = vec3<f32>(0.0);
+    if weights.x > 0.0 {
+        let m = skin_matrices[skin_offset + joint0];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.x;
+        skinned_norm += (m * vec4<f32>(normal, 0.0)).xyz * weights.x;
+    }
+    if weights.y > 0.0 {
+        let m = skin_matrices[skin_offset + joint1];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.y;
+        skinned_norm += (m * vec4<f32>(normal, 0.0)).xyz * weights.y;
+    }
+    if weights.z > 0.0 {
+        let m = skin_matrices[skin_offset + joint2];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.z;
+        skinned_norm += (m * vec4<f32>(normal, 0.0)).xyz * weights.z;
+    }
+    if weights.w > 0.0 {
+        let m = skin_matrices[skin_offset + joint3];
+        skinned_pos += (m * vec4<f32>(position, 1.0)) * weights.w;
+        skinned_norm += (m * vec4<f32>(normal, 0.0)).xyz * weights.w;
+    }
+    out.position = skinned_pos.xyz;
+    out.normal = skinned_norm;
+    return out;
+}
+
+fn skin_triangle(tri: RtTriangle, inst: RtInstance) -> SkinnedTriangle {
+    var out: SkinnedTriangle;
+    out.p0 = tri.v0.xyz;
+    out.p1 = tri.v1.xyz;
+    out.p2 = tri.v2.xyz;
+    out.n0 = tri.n0.xyz;
+    out.n1 = tri.n1.xyz;
+    out.n2 = tri.n2.xyz;
+    if inst.skin_count == 0u {
+        return out;
+    }
+    let s0 = apply_skinning_rt(out.p0, out.n0, tri.joints0, tri.weights0, inst.skin_offset, inst.skin_count);
+    let s1 = apply_skinning_rt(out.p1, out.n1, tri.joints1, tri.weights1, inst.skin_offset, inst.skin_count);
+    let s2 = apply_skinning_rt(out.p2, out.n2, tri.joints2, tri.weights2, inst.skin_offset, inst.skin_count);
+    out.p0 = s0.position;
+    out.p1 = s1.position;
+    out.p2 = s2.position;
+    out.n0 = s0.normal;
+    out.n1 = s1.normal;
+    out.n2 = s2.normal;
+    return out;
 }
 
 fn max_component(v: vec3<f32>) -> f32 {
@@ -524,100 +626,70 @@ fn intersect_triangle(origin: vec3<f32>, dir: vec3<f32>, v0: vec3<f32>, v1: vec3
     return vec3<f32>(t_hit, u, v);
 }
 
-fn trace_shadow(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> bool {
+fn trace_shadow(
+    origin: vec3<f32>,
+    dir: vec3<f32>,
+    max_t: f32,
+    use_textures: bool,
+    seed: ptr<function, u32>,
+) -> bool {
     if constants.tlas_node_count == 0u {
         return false;
     }
     let bias = max(constants.shadow_bias, EPSILON);
-    let max_dist = max(max_t - bias, 0.0);
-    let inv_dir = 1.0 / dir;
-    var stack: array<u32, MAX_STACK>;
-    var stack_ptr = 0u;
-    stack[stack_ptr] = 0u;
-    stack_ptr = stack_ptr + 1u;
-
+    var remaining = max(max_t - bias, 0.0);
+    var curr_origin = origin;
+    let max_steps = max(1u, constants.transparency_max_skip);
+    var steps = 0u;
     loop {
-        if stack_ptr == 0u {
-            break;
+        if steps >= max_steps || remaining <= 0.0 {
+            return false;
         }
-        stack_ptr = stack_ptr - 1u;
-        let node_index = stack[stack_ptr];
-        if node_index >= constants.tlas_node_count {
-            continue;
+        let hit = trace_primary(curr_origin, dir, remaining);
+        if hit.hit == 0u {
+            return false;
         }
-        let node = tlas_nodes[node_index];
-        let hit = intersect_aabb(origin, inv_dir, node.bounds_min.xyz, node.bounds_max.xyz);
-        if hit.y < max(hit.x, 0.0) || hit.x > max_dist {
-            continue;
+        let mat = materials[hit.material_id];
+        var alpha = mat.albedo.a;
+        if use_textures && mat.albedo_idx >= 0i {
+            let layer_limit = max(1u, constants.texture_array_layers);
+            let layer = select(hit.material_id, 0u, hit.material_id >= layer_limit);
+            let layer_i = i32(layer);
+            let albedo_sample =
+                textureSampleLevel(albedo_textures, pbr_sampler, hit.uv, layer_i, 0.0);
+            alpha = alpha * albedo_sample.a;
         }
-        if node.index_count > 0u {
-            for (var i = 0u; i < node.index_count; i = i + 1u) {
-                let instance_index = tlas_indices[node.first_index + i];
-                if instance_index >= constants.instance_count {
-                    continue;
-                }
-                let inst = instances[instance_index];
-                if inst.blas_index >= constants.blas_desc_count {
-                    continue;
-                }
-                let blas = blas_descs[inst.blas_index];
-                if blas.node_count == 0u {
-                    continue;
-                }
-                let local_origin = (inst.inv_model * vec4(origin, 1.0)).xyz;
-                let local_dir = (inst.inv_model * vec4(dir, 0.0)).xyz;
-                let inv_local_dir = 1.0 / local_dir;
-
-                var blas_stack: array<u32, MAX_STACK>;
-                var blas_ptr = 0u;
-                blas_stack[blas_ptr] = blas.node_offset;
-                blas_ptr = blas_ptr + 1u;
-                loop {
-                    if blas_ptr == 0u {
-                        break;
-                    }
-                    blas_ptr = blas_ptr - 1u;
-                    let blas_index = blas_stack[blas_ptr];
-                    let bnode = blas_nodes[blas_index];
-                    let bhit = intersect_aabb(local_origin, inv_local_dir, bnode.bounds_min.xyz, bnode.bounds_max.xyz);
-                    if bhit.y < max(bhit.x, 0.0) || bhit.x > max_dist {
-                        continue;
-                    }
-                    if bnode.index_count > 0u {
-                        for (var j = 0u; j < bnode.index_count; j = j + 1u) {
-                            let tri_idx = blas_indices[bnode.first_index + j];
-                            if tri_idx < blas.tri_offset || tri_idx >= blas.tri_offset + blas.tri_count {
-                                continue;
-                            }
-                            let tri = blas_triangles[tri_idx];
-                            let res = intersect_triangle(local_origin, local_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz);
-                            if res.x > 0.0 && res.x < max_dist {
-                                return true;
-                            }
-                        }
-                    } else {
-                        if blas_ptr + 2u < MAX_STACK {
-                            blas_stack[blas_ptr] = bnode.left;
-                            blas_ptr = blas_ptr + 1u;
-                            blas_stack[blas_ptr] = bnode.right;
-                            blas_ptr = blas_ptr + 1u;
-                        }
-                    }
-                }
+        alpha = clamp(alpha, 0.0, 1.0);
+        let alpha_mode = mat.alpha_mode;
+        let cutoff =
+            clamp(mat.alpha_cutoff * constants.alpha_cutoff_scale + constants.alpha_cutoff_bias, 0.0, 1.0);
+        let alpha_min = clamp(constants.alpha_cutoff_min, 0.0, 1.0);
+        if alpha_mode == ALPHA_MODE_OPAQUE {
+            return true;
+        }
+        if alpha_mode == ALPHA_MODE_MASK {
+            if alpha >= max(cutoff, alpha_min) {
+                return true;
             }
         } else {
-            if stack_ptr + 2u < MAX_STACK {
-                stack[stack_ptr] = node.left;
-                stack_ptr = stack_ptr + 1u;
-                stack[stack_ptr] = node.right;
-                stack_ptr = stack_ptr + 1u;
+            if alpha > alpha_min {
+                if rand(seed) <= alpha {
+                    return true;
+                }
             }
         }
+        let traveled = length(hit.pos - curr_origin);
+        if traveled >= remaining {
+            return false;
+        }
+        remaining = remaining - traveled;
+        curr_origin = hit.pos + dir * bias;
+        steps = steps + 1u;
     }
     return false;
 }
 
-fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
+fn trace_primary(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32) -> HitInfo {
     if constants.tlas_node_count == 0u {
         return HitInfo(vec3(0.0), vec3(0.0), vec2(0.0), 0u, 0u, 0u, 0u);
     }
@@ -627,7 +699,7 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
     stack[stack_ptr] = 0u;
     stack_ptr = stack_ptr + 1u;
 
-    var best_t = 1.0e30;
+    var best_t = max_dist;
     var best_normal = vec3<f32>(0.0);
     var best_uv = vec2<f32>(0.0);
     var best_material = 0u;
@@ -645,7 +717,14 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
             continue;
         }
         let node = tlas_nodes[node_index];
-        let hit = intersect_aabb(origin, inv_dir, node.bounds_min.xyz, node.bounds_max.xyz);
+        let tlas_pad = max(constants.skinning_bounds_pad, 0.0);
+        let tlas_pad_vec = vec3<f32>(tlas_pad);
+        let hit = intersect_aabb(
+            origin,
+            inv_dir,
+            node.bounds_min.xyz - tlas_pad_vec,
+            node.bounds_max.xyz + tlas_pad_vec,
+        );
         if hit.y < max(hit.x, 0.0) || hit.x > best_t {
             continue;
         }
@@ -666,7 +745,7 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                 let local_origin = (inst.inv_model * vec4(origin, 1.0)).xyz;
                 let local_dir = (inst.inv_model * vec4(dir, 0.0)).xyz;
                 let inv_local_dir = 1.0 / local_dir;
-                let normal_matrix = transpose(inst.inv_model);
+                    let normal_matrix = transpose(inst.inv_model);
 
                 var blas_stack: array<u32, MAX_STACK>;
                 var blas_ptr = 0u;
@@ -680,7 +759,14 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                     blas_ptr = blas_ptr - 1u;
                     let blas_index = blas_stack[blas_ptr];
                     let bnode = blas_nodes[blas_index];
-                    let bhit = intersect_aabb(local_origin, inv_local_dir, bnode.bounds_min.xyz, bnode.bounds_max.xyz);
+                    let skin_pad = select(0.0, max(inst.skinning_pad, constants.skinning_bounds_pad), inst.skin_count > 0u);
+                    let skin_pad_vec = vec3<f32>(max(skin_pad, 0.0));
+                    let bhit = intersect_aabb(
+                        local_origin,
+                        inv_local_dir,
+                        bnode.bounds_min.xyz - skin_pad_vec,
+                        bnode.bounds_max.xyz + skin_pad_vec,
+                    );
                     if bhit.y < max(bhit.x, 0.0) || bhit.x > best_t {
                         continue;
                     }
@@ -691,18 +777,21 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
                                 continue;
                             }
                             let tri = blas_triangles[tri_idx];
-                            let res = intersect_triangle(local_origin, local_dir, tri.v0.xyz, tri.v1.xyz, tri.v2.xyz);
+                            let tri_data = skin_triangle(tri, inst);
+                            let res =
+                                intersect_triangle(local_origin, local_dir, tri_data.p0, tri_data.p1, tri_data.p2);
                             if res.x > 0.0 && res.x < best_t {
                                 best_t = res.x;
                                 let w = 1.0 - res.y - res.z;
                                 let uv = tri.uv0 * w + tri.uv1 * res.y + tri.uv2 * res.z;
-                                let face_local = normalize(cross(tri.v1.xyz - tri.v0.xyz, tri.v2.xyz - tri.v0.xyz));
+                                let face_local =
+                                    normalize(cross(tri_data.p1 - tri_data.p0, tri_data.p2 - tri_data.p0));
                                 let face_world = normalize((normal_matrix * vec4(face_local, 0.0)).xyz);
                                 var normal_world = face_world;
                                 if use_smooth {
-                                    let n0_world = normalize((normal_matrix * vec4(tri.n0.xyz, 0.0)).xyz);
-                                    let n1_world = normalize((normal_matrix * vec4(tri.n1.xyz, 0.0)).xyz);
-                                    let n2_world = normalize((normal_matrix * vec4(tri.n2.xyz, 0.0)).xyz);
+                                    let n0_world = normalize((normal_matrix * vec4(tri_data.n0, 0.0)).xyz);
+                                    let n1_world = normalize((normal_matrix * vec4(tri_data.n1, 0.0)).xyz);
+                                    let n2_world = normalize((normal_matrix * vec4(tri_data.n2, 0.0)).xyz);
                                     let smooth_sum = n0_world * w + n1_world * res.y + n2_world * res.z;
                                     if length(smooth_sum) > 1.0e-5 {
                                         normal_world = normalize(smooth_sum);
@@ -738,7 +827,7 @@ fn trace_primary(origin: vec3<f32>, dir: vec3<f32>) -> HitInfo {
         }
     }
 
-    if best_t < 1.0e29 {
+    if best_t < max_dist {
         let best_hit = origin + dir * best_t;
         return HitInfo(best_hit, best_normal, best_uv, best_material, best_instance, best_tri, 1u);
     }
@@ -787,6 +876,7 @@ fn evaluate_direct_lighting(
     roughness: f32,
     f0: vec3<f32>,
     diffuse_color: vec3<f32>,
+    use_textures: bool,
     seed: ptr<function, u32>,
 ) -> vec3<f32> {
     if constants.light_count == 0u {
@@ -796,7 +886,7 @@ fn evaluate_direct_lighting(
     let sample_count = max(1u, constants.direct_light_samples);
     let inv_samples = 1.0 / f32(sample_count);
     let n_dot_v = max(dot(normal, view_dir), 0.0);
-    let alpha = max(roughness * roughness, 1.0e-4);
+    let alpha_ggx = max(roughness * roughness, 1.0e-4);
     var result = vec3<f32>(0.0);
     var s = 0u;
     loop {
@@ -829,14 +919,15 @@ fn evaluate_direct_lighting(
         if n_dot_l > 0.0 {
             var shadowed = false;
             if use_shadows {
-                shadowed = trace_shadow(pos + normal * constants.shadow_bias, L, max_t);
+                shadowed =
+                    trace_shadow(pos + normal * constants.shadow_bias, L, max_t, use_textures, seed);
             }
             if !shadowed {
                 let H = normalize(L + view_dir);
                 let n_dot_h = max(dot(normal, H), 0.0);
                 let v_dot_h = max(dot(view_dir, H), 0.0);
                 let F = fresnel_schlick(v_dot_h, f0);
-                let D = distribution_ggx(n_dot_h, alpha);
+                let D = distribution_ggx(n_dot_h, alpha_ggx);
                 let G = geometry_smith(n_dot_v, n_dot_l, roughness);
                 let spec = (D * G * F) / max(4.0 * n_dot_v * n_dot_l, EPSILON);
                 let diff = diffuse_color / PI;
@@ -916,7 +1007,7 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let tangent = make_tangent(normal);
     let bitangent = normalize(cross(normal, tangent));
-    let alpha = max(surface_roughness * surface_roughness, 1.0e-4);
+    let alpha_ggx = max(surface_roughness * surface_roughness, 1.0e-4);
 
     var history_valid = false;
     var history_coord = output_coord;
@@ -975,7 +1066,7 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
         if surface_roughness > constants.min_roughness {
             let r1 = rand(&seed);
             let r2 = rand(&seed);
-            let h_local = sample_ggx(r1, r2, alpha);
+            let h_local = sample_ggx(r1, r2, alpha_ggx);
             let H = normalize(tangent * h_local.x + bitangent * h_local.y + normal * h_local.z);
             dir = normalize(reflect(-view_dir, H));
         }
@@ -984,12 +1075,59 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        let origin = world_pos + normal * ray_bias;
-        let hit = trace_primary(origin, dir);
+        var origin = world_pos + normal * ray_bias;
+        var hit = trace_primary(origin, dir, 1.0e30);
         var sample_radiance = vec3<f32>(0.0);
-        if hit.hit == 0u {
-            sample_radiance = sample_environment(dir);
-        } else {
+        let max_skip = max(1u, constants.transparency_max_skip);
+        var skip = 0u;
+        loop {
+            if hit.hit == 0u {
+                sample_radiance = sample_environment(dir);
+                break;
+            }
+
+            let mat = materials[hit.material_id];
+            let layer_limit = max(1u, constants.texture_array_layers);
+            let layer = select(hit.material_id, 0u, hit.material_id >= layer_limit);
+            let layer_i = i32(layer);
+            var albedo = mat.albedo.xyz;
+            var alpha = mat.albedo.a;
+            if use_textures && mat.albedo_idx >= 0i {
+                let albedo_sample =
+                    textureSampleLevel(albedo_textures, pbr_sampler, hit.uv, layer_i, 0.0);
+                albedo = albedo * albedo_sample.rgb;
+                alpha = alpha * albedo_sample.a;
+            }
+            alpha = clamp(alpha, 0.0, 1.0);
+            let alpha_mode = mat.alpha_mode;
+            let cutoff =
+                clamp(mat.alpha_cutoff * constants.alpha_cutoff_scale + constants.alpha_cutoff_bias, 0.0, 1.0);
+            let alpha_min = clamp(constants.alpha_cutoff_min, 0.0, 1.0);
+            if alpha_mode == ALPHA_MODE_MASK && alpha < max(cutoff, alpha_min) {
+                skip = skip + 1u;
+                if skip >= max_skip {
+                    sample_radiance = sample_environment(dir);
+                    break;
+                }
+                origin = hit.pos + dir * ray_bias;
+                hit = trace_primary(origin, dir, 1.0e30);
+                continue;
+            }
+            if alpha_mode == ALPHA_MODE_BLEND
+                || alpha_mode == ALPHA_MODE_PREMULTIPLIED
+                || alpha_mode == ALPHA_MODE_ADDITIVE {
+                if alpha <= alpha_min || rand(&seed) > alpha {
+                    skip = skip + 1u;
+                    if skip >= max_skip {
+                        sample_radiance = sample_environment(dir);
+                        break;
+                    }
+                    origin = hit.pos + dir * ray_bias;
+                    hit = trace_primary(origin, dir, 1.0e30);
+                    continue;
+                }
+            }
+
             let hit_pos = hit.pos;
             let normal_hit = hit.normal;
             var safe_normal = select(
@@ -1001,24 +1139,14 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
                 safe_normal = -safe_normal;
             }
 
-            let material_id = hit.material_id;
-            let mat = materials[material_id];
-            let layer_limit = max(1u, constants.texture_array_layers);
-            let layer = select(material_id, 0u, material_id >= layer_limit);
-            let layer_i = i32(layer);
             let inst = instances[hit.instance_index];
             let tri = blas_triangles[hit.tri_index];
-            var albedo = mat.albedo.xyz;
+            let tri_data = skin_triangle(tri, inst);
             var metallic = mat.metallic;
             var roughness = mat.roughness;
             var ao = mat.ao;
             var emission = mat.emission_color * mat.emission_strength;
             if use_textures {
-                if mat.albedo_idx >= 0i {
-                    let albedo_sample =
-                        textureSampleLevel(albedo_textures, pbr_sampler, hit.uv, layer_i, 0.0);
-                    albedo = albedo * albedo_sample.rgb;
-                }
                 if mat.metallic_roughness_idx >= 0i {
                     let mra_sample = textureSampleLevel(
                         mra_textures,
@@ -1041,9 +1169,9 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
             roughness = clamp(roughness, constants.min_roughness, 1.0);
             var shading_normal = safe_normal;
             if use_textures && mat.normal_idx >= 0i {
-                let p0 = tri.v0.xyz;
-                let p1 = tri.v1.xyz;
-                let p2 = tri.v2.xyz;
+                let p0 = tri_data.p0;
+                let p1 = tri_data.p1;
+                let p2 = tri_data.p2;
                 let uv0 = tri.uv0;
                 let uv1 = tri.uv1;
                 let uv2 = tri.uv2;
@@ -1112,7 +1240,13 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
                     }
                     let NdotL = max(dot(shading_normal, L), 0.0);
                     let shadowed = use_shadows
-                        && trace_shadow(hit_pos + shading_normal * shadow_bias, L, max_t);
+                        && trace_shadow(
+                            hit_pos + shading_normal * shadow_bias,
+                            L,
+                            max_t,
+                            use_textures,
+                            &seed,
+                        );
                     if NdotL > 0.0 && !shadowed {
                         let H = normalize(L + V);
                         let NdotH = max(dot(shading_normal, H), 0.0);
@@ -1130,6 +1264,7 @@ fn rt_reflections(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             sample_radiance = direct + emission;
+            break;
         }
 
         if constants.firefly_clamp > 0.0 {

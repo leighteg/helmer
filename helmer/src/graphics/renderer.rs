@@ -578,6 +578,12 @@ struct RayTracingState {
     min_roughness: f32,
     normal_map_strength: f32,
     throughput_cutoff: f32,
+    transparency_max_skip: u32,
+    alpha_cutoff_scale: f32,
+    alpha_cutoff_bias: f32,
+    alpha_cutoff_min: f32,
+    skinning_bounds_pad: f32,
+    skinning_motion_scale: f32,
     last_surface_size: PhysicalSize<u32>,
     last_rt_extent: PhysicalSize<u32>,
     adaptive_scale: f32,
@@ -639,6 +645,24 @@ impl RayTracingState {
         let min_roughness = defaults.rt_min_roughness;
         let normal_map_strength = defaults.rt_normal_map_strength;
         let throughput_cutoff = defaults.rt_throughput_cutoff;
+        let transparency_max_skip = defaults.rt_transparency_max_skip.max(1);
+        let alpha_cutoff_scale = if defaults.rt_alpha_cutoff_scale.is_finite() {
+            defaults.rt_alpha_cutoff_scale.max(0.0)
+        } else {
+            1.0
+        };
+        let alpha_cutoff_bias = if defaults.rt_alpha_cutoff_bias.is_finite() {
+            defaults.rt_alpha_cutoff_bias
+        } else {
+            0.0
+        };
+        let alpha_cutoff_min = defaults.rt_alpha_cutoff_min.clamp(0.0, 1.0);
+        let skinning_bounds_pad = defaults.rt_skinning_bounds_pad.max(0.0);
+        let skinning_motion_scale = if defaults.rt_skinning_motion_scale.is_finite() {
+            defaults.rt_skinning_motion_scale.max(0.0)
+        } else {
+            1.0
+        };
         let blas_leaf_size = defaults.rt_blas_leaf_size.max(1) as usize;
         let tlas_leaf_size = defaults.rt_tlas_leaf_size.max(1) as usize;
         let adaptive_scale = if defaults.rt_adaptive_scale {
@@ -707,6 +731,12 @@ impl RayTracingState {
             min_roughness,
             normal_map_strength,
             throughput_cutoff,
+            transparency_max_skip,
+            alpha_cutoff_scale,
+            alpha_cutoff_bias,
+            alpha_cutoff_min,
+            skinning_bounds_pad,
+            skinning_motion_scale,
             last_surface_size: surface_size,
             last_rt_extent: surface_size,
             adaptive_scale,
@@ -911,6 +941,12 @@ impl RayTracingState {
             min_roughness: self.min_roughness,
             normal_map_strength: self.normal_map_strength,
             throughput_cutoff: self.throughput_cutoff,
+            transparency_max_skip: self.transparency_max_skip,
+            alpha_cutoff_scale: self.alpha_cutoff_scale,
+            alpha_cutoff_bias: self.alpha_cutoff_bias,
+            alpha_cutoff_min: self.alpha_cutoff_min,
+            skinning_bounds_pad: self.skinning_bounds_pad,
+            skinning_motion_scale: self.skinning_motion_scale,
             last_surface_size: self.last_surface_size,
             last_rt_extent: self.last_rt_extent,
             adaptive_scale: self.adaptive_scale,
@@ -956,6 +992,12 @@ impl RayTracingState {
         self.min_roughness = snapshot.min_roughness;
         self.normal_map_strength = snapshot.normal_map_strength;
         self.throughput_cutoff = snapshot.throughput_cutoff;
+        self.transparency_max_skip = snapshot.transparency_max_skip;
+        self.alpha_cutoff_scale = snapshot.alpha_cutoff_scale;
+        self.alpha_cutoff_bias = snapshot.alpha_cutoff_bias;
+        self.alpha_cutoff_min = snapshot.alpha_cutoff_min;
+        self.skinning_bounds_pad = snapshot.skinning_bounds_pad;
+        self.skinning_motion_scale = snapshot.skinning_motion_scale;
         self.last_surface_size = snapshot.last_surface_size;
         self.last_rt_extent = snapshot.last_rt_extent;
         self.adaptive_scale = snapshot.adaptive_scale;
@@ -1002,6 +1044,12 @@ struct RayTracingSnapshot {
     min_roughness: f32,
     normal_map_strength: f32,
     throughput_cutoff: f32,
+    transparency_max_skip: u32,
+    alpha_cutoff_scale: f32,
+    alpha_cutoff_bias: f32,
+    alpha_cutoff_min: f32,
+    skinning_bounds_pad: f32,
+    skinning_motion_scale: f32,
     last_surface_size: PhysicalSize<u32>,
     last_rt_extent: PhysicalSize<u32>,
     adaptive_scale: f32,
@@ -7611,6 +7659,24 @@ impl GraphRenderer {
         let min_roughness = cfg.rt_min_roughness.clamp(0.0, 1.0);
         let normal_map_strength = cfg.rt_normal_map_strength.max(0.0);
         let throughput_cutoff = cfg.rt_throughput_cutoff.max(0.0);
+        let transparency_max_skip = cfg.rt_transparency_max_skip.max(1);
+        let alpha_cutoff_scale = if cfg.rt_alpha_cutoff_scale.is_finite() {
+            cfg.rt_alpha_cutoff_scale.max(0.0)
+        } else {
+            1.0
+        };
+        let alpha_cutoff_bias = if cfg.rt_alpha_cutoff_bias.is_finite() {
+            cfg.rt_alpha_cutoff_bias
+        } else {
+            0.0
+        };
+        let alpha_cutoff_min = cfg.rt_alpha_cutoff_min.clamp(0.0, 1.0);
+        let skinning_bounds_pad = cfg.rt_skinning_bounds_pad.max(0.0);
+        let skinning_motion_scale = if cfg.rt_skinning_motion_scale.is_finite() {
+            cfg.rt_skinning_motion_scale.max(0.0)
+        } else {
+            1.0
+        };
         let texture_array_layers = globals
             .rt_texture_arrays
             .as_ref()
@@ -7643,6 +7709,12 @@ impl GraphRenderer {
             || self.rt_state.min_roughness.to_bits() != min_roughness.to_bits()
             || self.rt_state.normal_map_strength.to_bits() != normal_map_strength.to_bits()
             || self.rt_state.throughput_cutoff.to_bits() != throughput_cutoff.to_bits()
+            || self.rt_state.transparency_max_skip != transparency_max_skip
+            || self.rt_state.alpha_cutoff_scale.to_bits() != alpha_cutoff_scale.to_bits()
+            || self.rt_state.alpha_cutoff_bias.to_bits() != alpha_cutoff_bias.to_bits()
+            || self.rt_state.alpha_cutoff_min.to_bits() != alpha_cutoff_min.to_bits()
+            || self.rt_state.skinning_bounds_pad.to_bits() != skinning_bounds_pad.to_bits()
+            || self.rt_state.skinning_motion_scale.to_bits() != skinning_motion_scale.to_bits()
             || self.rt_state.camera_pos_epsilon.to_bits() != camera_pos_epsilon.to_bits()
             || self.rt_state.camera_rot_epsilon.to_bits() != camera_rot_epsilon.to_bits()
             || self.rt_state.scene_pos_quantize.to_bits() != scene_pos_quantize.to_bits()
@@ -7672,6 +7744,12 @@ impl GraphRenderer {
         self.rt_state.min_roughness = min_roughness;
         self.rt_state.normal_map_strength = normal_map_strength;
         self.rt_state.throughput_cutoff = throughput_cutoff;
+        self.rt_state.transparency_max_skip = transparency_max_skip;
+        self.rt_state.alpha_cutoff_scale = alpha_cutoff_scale;
+        self.rt_state.alpha_cutoff_bias = alpha_cutoff_bias;
+        self.rt_state.alpha_cutoff_min = alpha_cutoff_min;
+        self.rt_state.skinning_bounds_pad = skinning_bounds_pad;
+        self.rt_state.skinning_motion_scale = skinning_motion_scale;
         self.rt_state.camera_pos_epsilon = camera_pos_epsilon;
         self.rt_state.camera_rot_epsilon = camera_rot_epsilon;
         self.rt_state.scene_pos_quantize = scene_pos_quantize;
@@ -7694,6 +7772,7 @@ impl GraphRenderer {
         let mut instances = Vec::new();
         let mut bounds = Vec::new();
         let mut scene_hash = 0u64;
+        let mut skin_range_cache: HashMap<(u32, u32), (u64, f32)> = HashMap::new();
 
         fn quantize(value: f32, step: f32) -> i64 {
             if !value.is_finite() {
@@ -7737,6 +7816,39 @@ impl GraphRenderer {
             v ^= v >> 31;
             *state ^= v;
         }
+
+        let mut skin_range_info = |offset: u32, count: u32| -> (u64, f32) {
+            if count == 0 {
+                return (0, 0.0);
+            }
+            let key = (offset, count);
+            if let Some(existing) = skin_range_cache.get(&key) {
+                return *existing;
+            }
+            let mut hasher = DefaultHasher::new();
+            let mut max_motion = 0.0f32;
+            let start = offset as usize;
+            let end = start
+                .saturating_add(count as usize)
+                .min(render_data.skin_palette.len());
+            if start < end {
+                for mat in &render_data.skin_palette[start..end] {
+                    let raw = mat.to_cols_array();
+                    for value in raw {
+                        quantize(value, scene_pos_quantize).hash(&mut hasher);
+                    }
+                    let t = mat.w_axis.truncate();
+                    let len = t.length();
+                    if len.is_finite() && len > max_motion {
+                        max_motion = len;
+                    }
+                }
+            }
+            let value = hasher.finish();
+            let info = (value, max_motion);
+            skin_range_cache.insert(key, info);
+            info
+        };
 
         for object in &render_data.objects {
             let mat_idx = self.material_index_for(object.material_id, material_version);
@@ -7794,13 +7906,38 @@ impl GraphRenderer {
             let model = Mat4::from_scale_rotation_translation(scale, rotation, position);
             let inv_model = model.inverse();
 
-            bounds.push(transform_aabb(mesh.bounds, model));
+            let mut skin_pad = 0.0f32;
+            let mut skin_hash = 0u64;
+            if object.skin_count > 0 {
+                let (hash, motion_pad) = skin_range_info(object.skin_offset, object.skin_count);
+                skin_hash = hash;
+                let motion = (motion_pad * self.rt_state.skinning_motion_scale)
+                    .max(0.0)
+                    .min(f32::MAX);
+                let base = self.rt_state.skinning_bounds_pad.max(0.0);
+                let combined = base + motion;
+                if combined.is_finite() {
+                    skin_pad = combined;
+                } else {
+                    skin_pad = base;
+                }
+            }
+            let mut mesh_bounds = mesh.bounds;
+            if skin_pad > 0.0 {
+                let pad = Vec3::splat(skin_pad);
+                mesh_bounds.min -= pad;
+                mesh_bounds.max += pad;
+            }
+            bounds.push(transform_aabb(mesh_bounds, model));
             instances.push(RtInstance {
                 model: model.to_cols_array_2d(),
                 inv_model: inv_model.to_cols_array_2d(),
                 blas_index: rt_blas_index,
                 material_id: mat_idx,
-                _pad0: [0; 2],
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
+                skinning_pad: skin_pad,
+                _pad0: [0; 3],
             });
 
             let mut obj_hasher = DefaultHasher::new();
@@ -7811,6 +7948,11 @@ impl GraphRenderer {
             quantize_vec3(position, scene_pos_quantize).hash(&mut obj_hasher);
             quantize_quat(rotation, scene_rot_quantize).hash(&mut obj_hasher);
             quantize_vec3(scale, scene_scale_quantize).hash(&mut obj_hasher);
+            if object.skin_count > 0 {
+                object.skin_offset.hash(&mut obj_hasher);
+                object.skin_count.hash(&mut obj_hasher);
+                skin_hash.hash(&mut obj_hasher);
+            }
             mix_hash(&mut scene_hash, obj_hasher.finish());
         }
 
@@ -7983,6 +8125,11 @@ impl GraphRenderer {
             sky_multi_scatter_strength: self.rt_state.sky_multi_scatter_strength,
             sky_multi_scatter_power: self.rt_state.sky_multi_scatter_power,
             texture_array_layers,
+            transparency_max_skip: self.rt_state.transparency_max_skip,
+            alpha_cutoff_min: self.rt_state.alpha_cutoff_min,
+            alpha_cutoff_scale: self.rt_state.alpha_cutoff_scale,
+            alpha_cutoff_bias: self.rt_state.alpha_cutoff_bias,
+            skinning_bounds_pad: self.rt_state.skinning_bounds_pad,
         };
 
         let constants_buf = self.rt_state.constants_buffer.ensure(

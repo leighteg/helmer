@@ -360,6 +360,16 @@ impl DdgiProbeUpdatePass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -826,6 +836,10 @@ impl RenderPass for DdgiProbeUpdatePass {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: frame.render_constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: frame.skin_palette_buffer.as_entire_binding(),
                 },
             ],
         });

@@ -233,7 +233,6 @@ pub fn default_layout() -> EditorLayout {
             collapsed: true,
         },
     );
-
     EditorLayout {
         name: "Default".to_string(),
         windows,

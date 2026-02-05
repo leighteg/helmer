@@ -14,10 +14,11 @@ use bevy_ecs::{
 use bevy_reflect::{Reflect, TypeRegistry, TypeRegistryArc};
 use helmer::{
     animation::Animator,
+    audio::AudioBackend,
     graphics::common::renderer::{RenderMessage, RendererStats, StreamingTuning},
     provided::components::{
-        ActiveCamera, Camera, EntityFollower, Light, LookAt, MeshRenderer, PoseOverride,
-        SkinnedMeshRenderer, Spline, SplineFollower, Transform,
+        ActiveCamera, AudioEmitter, AudioListener, Camera, EntityFollower, Light, LookAt,
+        MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, Transform,
     },
     runtime::{
         asset_server::AssetServer,
@@ -30,6 +31,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::provided::ui::inspector::InspectorSelectedEntityResource;
 use crate::systems::animation_system::{SkinningResource, skinning_system};
+use crate::systems::audio_system::audio_system;
 use crate::systems::follow_system::{entity_follow_system, look_at_system};
 use crate::systems::render_system::RenderGraphResource;
 use crate::systems::spline_system::spline_follow_system;
@@ -62,6 +64,8 @@ pub type BevyCamera = BevyWrapper<Camera>;
 pub type BevyActiveCamera = BevyWrapper<ActiveCamera>;
 pub type BevyMeshRenderer = BevyWrapper<MeshRenderer>;
 pub type BevyLight = BevyWrapper<Light>;
+pub type BevyAudioEmitter = BevyWrapper<AudioEmitter>;
+pub type BevyAudioListener = BevyWrapper<AudioListener>;
 
 // Non-Copy components need dedicated wrappers.
 #[derive(Component, Clone, Debug)]
@@ -145,8 +149,12 @@ pub struct DebugGraphHistory {
     pub mesh_bytes: VecDeque<f64>,
     pub texture_bytes: VecDeque<f64>,
     pub material_bytes: VecDeque<f64>,
+    pub audio_bytes: VecDeque<f64>,
     pub fps: VecDeque<f64>,
 }
+
+#[derive(Resource, Clone)]
+pub struct AudioBackendResource(pub Arc<AudioBackend>);
 
 #[derive(Resource, Default, Clone)]
 pub struct ProfilingHistory {
@@ -180,6 +188,10 @@ pub struct ProfilingHistory {
     pub render_pass_ms: HashMap<String, VecDeque<f64>>,
     pub render_pass_last_ms: HashMap<String, f64>,
     pub render_pass_order: Vec<String>,
+    pub audio_mix_ms: VecDeque<f64>,
+    pub audio_callback_ms: VecDeque<f64>,
+    pub audio_emitters: VecDeque<f64>,
+    pub audio_streaming_emitters: VecDeque<f64>,
 }
 
 // resources
@@ -278,6 +290,9 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource(SceneSpawnedChildren::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
+            world.insert_resource::<AudioBackendResource>(AudioBackendResource(Arc::new(
+                AudioBackend::new(),
+            )));
             world.insert_resource::<DraggedFile>(DraggedFile(None));
             world.insert_resource(InspectorSelectedEntityResource::default());
 
@@ -315,6 +330,7 @@ fn helmer_becs_init_impl<F>(
                     sync_transforms_to_physics_system,
                     physics_step_system,
                     sync_physics_to_entities_system,
+                    audio_system,
                 )
                     .chain(),
             );

@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 asset-worker = []
+audio-cpal = []
 
 [dependencies]
 winit = "0.30.12"
@@ -50,6 +51,8 @@ memmap2 = "0.9.9"
 gilrs = "0.11.1"
 num_cpus = "1.17.0"
 egui-winit = "0.33.3"
+cpal = "0.15.3"
+symphonia = { version = "0.5.4", default-features = false, features = ["aac", "flac", "mp3", "ogg", "vorbis", "wav", "pcm"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "28.0.0", features = ["webgl"] }

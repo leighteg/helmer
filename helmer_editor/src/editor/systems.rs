@@ -23,9 +23,10 @@ use helmer_becs::systems::scene_system::{
     SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    BevyAnimator, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
-    BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
+    AudioBackendResource, BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera,
+    BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer,
+    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform,
+    BevyWrapper, DeltaTime, DraggedFile,
 };
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -34,8 +35,8 @@ use crate::editor::{
     EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect,
     activate_play_camera, activate_viewport_camera,
     assets::{
-        AssetBrowserState, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
-        PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
+        AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
+        MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
     },
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -56,18 +57,36 @@ use crate::editor::{
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
     scripting::{ScriptComponent, ScriptRegistry, load_script_asset},
-    set_play_camera,
+    set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
-        EditorUiState, EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
-        draw_assets_window, draw_editor_window, draw_history_window, draw_inspector_window,
-        draw_project_window, draw_scene_window, draw_timeline_window, draw_toolbar,
-        draw_viewport_window,
+        EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility, EditorUiState,
+        EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
+        draw_assets_window, draw_audio_mixer_window, draw_editor_window, draw_history_window,
+        draw_inspector_window, draw_pane_manager_window, draw_project_window, draw_scene_window,
+        draw_timeline_window, draw_toolbar, draw_viewport_window,
     },
     undo_action,
     watch::configure_file_watcher,
 };
 
 pub fn editor_ui_system(world: &mut World) {
+    let project_open = world
+        .get_resource::<EditorProject>()
+        .and_then(|project| project.root.as_ref())
+        .is_some();
+    let auto_hide_project = world
+        .get_resource::<EditorPaneAutoState>()
+        .map(|state| state.project_auto_hide)
+        .unwrap_or(false);
+    if auto_hide_project {
+        if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
+            panes.project = !project_open;
+        }
+    }
+    if let Some(mut auto_state) = world.get_resource_mut::<EditorPaneAutoState>() {
+        auto_state.last_project_open = project_open;
+    }
+
     let editor_windows = world
         .get_resource::<EditorWorkspaceState>()
         .map(|state| {
@@ -78,6 +97,14 @@ pub fn editor_ui_system(world: &mut World) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let pane_visibility = world
+        .get_resource::<EditorPaneVisibility>()
+        .cloned()
+        .unwrap_or_default();
+    let pane_manager_open = world
+        .get_resource::<EditorPaneManagerState>()
+        .map(|state| state.open)
+        .unwrap_or(false);
 
     if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
         workspace.drop_handled = false;
@@ -88,85 +115,159 @@ pub fn editor_ui_system(world: &mut World) {
         .expect("EguiResource missing");
 
     egui_res.inspector_ui = false;
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_toolbar(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Toolbar".to_string(),
-            title: "Toolbar".to_string(),
-        },
-    ));
+    if pane_visibility.toolbar {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_toolbar(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Toolbar".to_string(),
+                title: "Toolbar".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_viewport_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Viewport".to_string(),
-            title: "Viewport".to_string(),
-        },
-    ));
+    if pane_visibility.viewport {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_viewport_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Viewport".to_string(),
+                title: "Viewport".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_project_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Project".to_string(),
-            title: "Project".to_string(),
-        },
-    ));
+    if pane_visibility.project {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_project_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Project".to_string(),
+                title: "Project".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_scene_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Hierarchy".to_string(),
-            title: "Hierarchy".to_string(),
-        },
-    ));
+    if pane_visibility.hierarchy {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_scene_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Hierarchy".to_string(),
+                title: "Hierarchy".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_inspector_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Inspector".to_string(),
-            title: "Inspector".to_string(),
-        },
-    ));
+    if pane_visibility.inspector {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_inspector_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Inspector".to_string(),
+                title: "Inspector".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_history_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "History".to_string(),
-            title: "History".to_string(),
-        },
-    ));
+    if pane_visibility.history {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_history_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "History".to_string(),
+                title: "History".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_timeline_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Timeline".to_string(),
-            title: "Timeline".to_string(),
-        },
-    ));
+    if pane_visibility.audio_mixer {
+        egui_res.close_actions.insert(
+            "Audio Mixer".to_string(),
+            Box::new(|world: &mut World| {
+                if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
+                    panes.audio_mixer = false;
+                }
+            }),
+        );
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_audio_mixer_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Audio Mixer".to_string(),
+                title: "Audio Mixer".to_string(),
+            },
+        ));
+    }
 
-    egui_res.windows.push((
-        Box::new(|ui: &mut Ui, world: &mut World, _| {
-            draw_assets_window(ui, world);
-        }),
-        EguiWindowSpec {
-            id: "Content Browser".to_string(),
-            title: "Content Browser".to_string(),
-        },
-    ));
+    if pane_visibility.timeline {
+        egui_res.close_actions.insert(
+            "Timeline".to_string(),
+            Box::new(|world: &mut World| {
+                if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
+                    panes.timeline = false;
+                }
+            }),
+        );
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_timeline_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Timeline".to_string(),
+                title: "Timeline".to_string(),
+            },
+        ));
+    }
+
+    if pane_visibility.content_browser {
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_assets_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Content Browser".to_string(),
+                title: "Content Browser".to_string(),
+            },
+        ));
+    }
+
+    if pane_manager_open {
+        egui_res.close_actions.insert(
+            "Pane Manager".to_string(),
+            Box::new(|world: &mut World| {
+                if let Some(mut state) = world.get_resource_mut::<EditorPaneManagerState>() {
+                    state.open = false;
+                }
+            }),
+        );
+        egui_res
+            .window_order_overrides
+            .insert("Pane Manager".to_string(), Order::Foreground);
+        if let Some(screen_rect) = egui_res.last_screen_rect {
+            let size = Vec2::new(280.0, 320.0);
+            let rect = Rect::from_center_size(screen_rect.center(), size);
+            egui_res
+                .window_rect_overrides
+                .insert("Pane Manager".to_string(), rect);
+        }
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_pane_manager_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Pane Manager".to_string(),
+                title: "Pane Manager".to_string(),
+            },
+        ));
+    }
 
     for (window_id, title) in editor_windows {
         let window_key = format!("editor_window_{}", window_id);
@@ -1391,6 +1492,23 @@ pub fn editor_shortcut_system(
     }
 }
 
+pub fn pane_manager_toggle_system(
+    mut pane_manager: ResMut<EditorPaneManagerState>,
+    egui_res: Res<EguiResource>,
+) {
+    let toggle = egui_res
+        .ctx
+        .input(|input| input.key_pressed(egui::Key::Tab) && input.modifiers.ctrl);
+    if toggle {
+        pane_manager.open = !pane_manager.open;
+        egui_res.ctx.memory_mut(|mem| {
+            if let Some(id) = mem.focused() {
+                mem.surrender_focus(id);
+            }
+        });
+    }
+}
+
 pub fn scene_dirty_system(
     mut scene_state: ResMut<EditorSceneState>,
     query_core: Query<
@@ -1410,6 +1528,17 @@ pub fn scene_dirty_system(
                 Changed<BevySplineFollower>,
                 Changed<BevyLookAt>,
                 Changed<BevyEntityFollower>,
+            )>,
+        ),
+    >,
+    query_core_extra: Query<
+        (),
+        (
+            bevy_ecs::prelude::With<EditorEntity>,
+            Or<(
+                Changed<BevyAudioEmitter>,
+                Changed<BevyAudioListener>,
+                Changed<EditorAudio>,
                 Changed<Name>,
                 Changed<SceneRoot>,
                 Changed<SceneAssetPath>,
@@ -1429,7 +1558,11 @@ pub fn scene_dirty_system(
         return;
     }
 
-    if !query_core.is_empty() || !query_extra.is_empty() || !pose_child_query.is_empty() {
+    if !query_core.is_empty()
+        || !query_core_extra.is_empty()
+        || !query_extra.is_empty()
+        || !pose_child_query.is_empty()
+    {
         scene_state.dirty = true;
     }
 }
@@ -2326,6 +2459,9 @@ fn handle_toggle_play(world: &mut World) {
 
     match state {
         WorldState::Edit => {
+            if let Some(audio) = world.get_resource::<AudioBackendResource>() {
+                audio.0.clear_emitters();
+            }
             let project = world
                 .get_resource::<EditorProject>()
                 .cloned()
@@ -2344,11 +2480,15 @@ fn handle_toggle_play(world: &mut World) {
                 scene_state.world_state = WorldState::Play;
             }
             activate_play_camera(world);
+            set_viewport_audio_listener_enabled(world, false);
             apply_viewport_graph(world);
 
             set_status(world, "Play mode".to_string());
         }
         WorldState::Play => {
+            if let Some(audio) = world.get_resource::<AudioBackendResource>() {
+                audio.0.clear_emitters();
+            }
             if let Some(mut phys_res) = world.get_resource_mut::<PhysicsResource>() {
                 phys_res.running = false;
             }
@@ -2408,6 +2548,7 @@ fn handle_toggle_play(world: &mut World) {
             }
 
             activate_viewport_camera(world);
+            set_viewport_audio_listener_enabled(world, true);
             apply_viewport_graph(world);
 
             set_status(world, "Edit mode".to_string());

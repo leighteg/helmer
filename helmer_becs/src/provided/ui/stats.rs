@@ -4,7 +4,8 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use egui::{Align2, Color32, ComboBox, Stroke, StrokeKind, TextStyle, pos2, vec2};
+use bevy_ecs::prelude::Entity;
+use egui::{Align2, Color32, ComboBox, DragValue, Stroke, StrokeKind, TextStyle, pos2, vec2};
 use hashbrown::HashSet;
 use helmer::{
     graphics::{
@@ -27,7 +28,7 @@ use helmer::{
 use parking_lot::RwLock;
 
 use crate::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyLodTuning,
+    AudioBackendResource, BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyLodTuning,
     BevyPerformanceMetrics, BevyRenderSender, BevyRenderWorkerTuning, BevyRendererStats,
     BevyRuntimeConfig, BevyRuntimeProfiling, BevyRuntimeTuning, BevySceneTuning,
     BevyStreamingTuning, BevyTransform, DebugGraphHistory, ProfilingHistory,
@@ -169,6 +170,10 @@ fn clear_profiling_history(history: &mut ProfilingHistory) {
     history.render_pass_ms.clear();
     history.render_pass_last_ms.clear();
     history.render_pass_order.clear();
+    history.audio_mix_ms.clear();
+    history.audio_callback_ms.clear();
+    history.audio_emitters.clear();
+    history.audio_streaming_emitters.clear();
 }
 
 fn micros_to_ms(value: u64) -> f64 {
@@ -250,14 +255,19 @@ impl StatsUI {
                     })
                     .unwrap_or((0.0, 0.0, 0.0));
 
-                let (mesh_bytes, tex_bytes, mat_bytes) = {
+                let (mesh_bytes, tex_bytes, mat_bytes, audio_bytes) = {
                     #[cfg(target_arch = "wasm32")]
                     let asset_server = world.get_non_send_resource::<BevyAssetServer>();
                     #[cfg(not(target_arch = "wasm32"))]
                     let asset_server = world.get_resource::<BevyAssetServer>();
                     asset_server
-                        .map(|srv| srv.0.lock().cache_usage_bytes())
-                        .unwrap_or((0, 0, 0))
+                        .map(|srv| {
+                            let srv = srv.0.lock();
+                            let (mesh, tex, mat) = srv.cache_usage_bytes();
+                            let audio = srv.audio_cache_usage_bytes();
+                            (mesh, tex, mat, audio)
+                        })
+                        .unwrap_or((0, 0, 0, 0))
                 };
 
                 let history_samples = world
@@ -287,6 +297,11 @@ impl StatsUI {
                     mat_bytes as f64 / mb_div,
                     history_samples,
                 );
+                push_history(
+                    &mut history.audio_bytes,
+                    audio_bytes as f64 / mb_div,
+                    history_samples,
+                );
 
                 ui.label(format!("FPS: {}  | TPS: {}", fps, tps));
                 if let Some(render_object_count) = render_object_count {
@@ -297,10 +312,11 @@ impl StatsUI {
                     vram_used_mb, vram_soft_mb, vram_hard_mb
                 ));
                 ui.label(format!(
-                    "Asset cache (MiB): meshes {:.1}  textures {:.1}  materials {:.1}",
+                    "Asset cache (MiB): meshes {:.1}  textures {:.1}  materials {:.1}  audio {:.1}",
                     mesh_bytes as f64 / mb_div,
                     tex_bytes as f64 / mb_div,
-                    mat_bytes as f64 / mb_div
+                    mat_bytes as f64 / mb_div,
+                    audio_bytes as f64 / mb_div
                 ));
 
                 draw_history_plot(
@@ -333,6 +349,11 @@ impl StatsUI {
                             &history.material_bytes,
                             Color32::from_rgb(150, 210, 220),
                         ),
+                        (
+                            "audio cache MiB",
+                            &history.audio_bytes,
+                            Color32::from_rgb(160, 200, 120),
+                        ),
                     ],
                 );
             }),
@@ -347,6 +368,9 @@ impl StatsUI {
                 let renderer_stats = world
                     .get_resource::<BevyRendererStats>()
                     .map(|stats| stats.0.clone());
+                let audio_stats = world
+                    .get_resource::<AudioBackendResource>()
+                    .map(|audio| audio.0.stats());
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -659,6 +683,27 @@ impl StatsUI {
                                         .retain(|name, _| seen.contains(name));
                                 }
                             }
+
+                            if let Some(audio) = audio_stats {
+                                let mix_ms = audio.mix_time_us as f64 / 1000.0;
+                                let callback_ms = audio.callback_time_us as f64 / 1000.0;
+                                push_history(&mut history.audio_mix_ms, mix_ms, history_limit);
+                                push_history(
+                                    &mut history.audio_callback_ms,
+                                    callback_ms,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.audio_emitters,
+                                    audio.active_emitters as f64,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.audio_streaming_emitters,
+                                    audio.streaming_emitters as f64,
+                                    history_limit,
+                                );
+                            }
                         }
 
                         ui.separator();
@@ -824,6 +869,57 @@ impl StatsUI {
                                         "render",
                                         &history.render_thread_render_ms,
                                         Color32::from_rgb(220, 90, 90),
+                                    ),
+                                ],
+                            );
+                        });
+
+                        ui.separator();
+                        ui.collapsing("audio", |ui| {
+                            let mix_ms = history.audio_mix_ms.back().copied().unwrap_or(0.0);
+                            let callback_ms =
+                                history.audio_callback_ms.back().copied().unwrap_or(0.0);
+                            let emitters = history.audio_emitters.back().copied().unwrap_or(0.0);
+                            let streaming = history
+                                .audio_streaming_emitters
+                                .back()
+                                .copied()
+                                .unwrap_or(0.0);
+                            ui.label(format!("mix: {:.3} ms", mix_ms));
+                            ui.label(format!("callback: {:.3} ms", callback_ms));
+                            ui.label(format!(
+                                "emitters: {:.0} (streaming {:.0})",
+                                emitters, streaming
+                            ));
+                            if let Some(audio) = audio_stats {
+                                if audio.measured_sample_rate != audio.sample_rate {
+                                    ui.label(format!(
+                                        "output: {} Hz (measured {} Hz), {} ch, buffer {}",
+                                        audio.sample_rate,
+                                        audio.measured_sample_rate,
+                                        audio.channels,
+                                        audio.buffer_frames
+                                    ));
+                                } else {
+                                    ui.label(format!(
+                                        "output: {} Hz, {} ch, buffer {}",
+                                        audio.sample_rate, audio.channels, audio.buffer_frames
+                                    ));
+                                }
+                            }
+                            draw_history_plot(
+                                ui,
+                                140.0,
+                                &[
+                                    (
+                                        "mix ms",
+                                        &history.audio_mix_ms,
+                                        Color32::from_rgb(160, 210, 120),
+                                    ),
+                                    (
+                                        "callback ms",
+                                        &history.audio_callback_ms,
+                                        Color32::from_rgb(220, 160, 90),
                                     ),
                                 ],
                             );
@@ -1039,6 +1135,7 @@ impl StatsUI {
             }),
             window_spec("profiling"),
         ));
+
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
                 ui.heading("runtime tuning");

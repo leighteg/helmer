@@ -10,16 +10,17 @@ use bevy_ecs::query::{With, Without};
 use helmer::{
     animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
     provided::components::{
-        Camera, EntityFollower, Light, LightType, LookAt, MeshRenderer, PoseOverride,
-        SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, Transform,
+        AudioEmitter, AudioListener, Camera, EntityFollower, Light, LightType, LookAt,
+        MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
+        Transform,
     },
     runtime::asset_server::{Handle, Scene},
 };
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::{
-    BevyAnimator, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
-    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform,
-    BevyWrapper,
+    BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
+    BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
+    BevySplineFollower, BevyTransform, BevyWrapper,
     systems::scene_system::{SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator},
 };
 use ron::ser::PrettyConfig;
@@ -28,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::editor::{
     EditorPlayCamera, EditorTimelineState, EditorViewportCamera, Freecam,
     assets::{
-        EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
-        cached_scene_handle,
+        EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind,
+        SceneAssetPath, cached_audio_handle, cached_scene_handle,
     },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
@@ -148,6 +149,10 @@ pub struct SceneComponents {
     pub freecam: bool,
     #[serde(default)]
     pub physics: Option<PhysicsComponentData>,
+    #[serde(default)]
+    pub audio_emitter: Option<AudioEmitterData>,
+    #[serde(default)]
+    pub audio_listener: Option<AudioListenerData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +188,59 @@ impl SceneColliderShape {
             SceneColliderShape::Cuboid => ColliderShape::Cuboid,
             SceneColliderShape::Sphere => ColliderShape::Sphere,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioEmitterData {
+    pub path: Option<String>,
+    #[serde(default)]
+    pub streaming: bool,
+    pub bus: helmer::audio::AudioBus,
+    pub volume: f32,
+    pub pitch: f32,
+    pub looping: bool,
+    pub spatial: bool,
+    pub min_distance: f32,
+    pub max_distance: f32,
+    pub rolloff: f32,
+    #[serde(default)]
+    pub spatial_blend: f32,
+    #[serde(default)]
+    pub playback_state: helmer::audio::AudioPlaybackState,
+    #[serde(default)]
+    pub play_on_spawn: bool,
+}
+
+impl Default for AudioEmitterData {
+    fn default() -> Self {
+        let defaults = helmer::provided::components::AudioEmitter::default();
+        Self {
+            path: None,
+            streaming: false,
+            bus: defaults.bus,
+            volume: defaults.volume,
+            pitch: defaults.pitch,
+            looping: defaults.looping,
+            spatial: defaults.spatial,
+            min_distance: defaults.min_distance,
+            max_distance: defaults.max_distance,
+            rolloff: defaults.rolloff,
+            spatial_blend: defaults.spatial_blend,
+            playback_state: defaults.playback_state,
+            play_on_spawn: defaults.play_on_spawn,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioListenerData {
+    pub enabled: bool,
+}
+
+impl Default for AudioListenerData {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -1460,9 +1518,6 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         Option<&BevyLight>,
         Option<&BevyCamera>,
         Option<&EditorPlayCamera>,
-        Option<&SceneRoot>,
-        Option<&SceneAssetPath>,
-        Option<&ScriptComponent>,
     ), With<EditorEntity>>();
 
     for (
@@ -1476,11 +1531,14 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         light,
         camera,
         active_camera,
-        scene_root,
-        scene_asset,
-        script,
     ) in query.iter(world)
     {
+        let audio_emitter = world.get::<BevyAudioEmitter>(entity);
+        let editor_audio = world.get::<EditorAudio>(entity);
+        let audio_listener = world.get::<BevyAudioListener>(entity);
+        let scene_root = world.get::<SceneRoot>(entity);
+        let scene_asset = world.get::<SceneAssetPath>(entity);
+        let script = world.get::<ScriptComponent>(entity);
         let transform = transform.map(|t| t.0).unwrap_or_default();
         let serialized_transform = SerializedTransform::from(&transform);
 
@@ -1649,6 +1707,31 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 }
             });
 
+        let audio_emitter = audio_emitter.map(|emitter| {
+            let (path, streaming) = editor_audio
+                .map(|audio| (audio.path.clone(), audio.streaming))
+                .unwrap_or((None, false));
+            AudioEmitterData {
+                path: path.map(|path| normalize_path(&path, root)),
+                streaming,
+                bus: emitter.0.bus,
+                volume: emitter.0.volume,
+                pitch: emitter.0.pitch,
+                looping: emitter.0.looping,
+                spatial: emitter.0.spatial,
+                min_distance: emitter.0.min_distance,
+                max_distance: emitter.0.max_distance,
+                rolloff: emitter.0.rolloff,
+                spatial_blend: emitter.0.spatial_blend,
+                playback_state: emitter.0.playback_state,
+                play_on_spawn: emitter.0.play_on_spawn,
+            }
+        });
+
+        let audio_listener = audio_listener.map(|listener| AudioListenerData {
+            enabled: listener.0.enabled,
+        });
+
         let components = SceneComponents {
             mesh,
             skinned,
@@ -1665,6 +1748,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             pose_override,
             freecam,
             physics,
+            audio_emitter,
+            audio_listener,
         };
 
         entities.push(SceneEntityData {
@@ -1826,6 +1911,47 @@ pub fn spawn_scene_from_document(
                 any_play_camera = true;
                 entity.insert(EditorPlayCamera);
             }
+        }
+
+        if let Some(listener) = &entity_data.components.audio_listener {
+            entity.insert(BevyWrapper(AudioListener {
+                enabled: listener.enabled,
+            }));
+        }
+
+        if let Some(audio) = &entity_data.components.audio_emitter {
+            let mut emitter = AudioEmitter {
+                bus: audio.bus,
+                volume: audio.volume,
+                pitch: audio.pitch,
+                looping: audio.looping,
+                spatial: audio.spatial,
+                min_distance: audio.min_distance,
+                max_distance: audio.max_distance,
+                rolloff: audio.rolloff,
+                spatial_blend: audio.spatial_blend,
+                playback_state: audio.playback_state,
+                play_on_spawn: audio.play_on_spawn,
+                clip_id: None,
+            };
+
+            if let Some(path) = audio.path.as_ref() {
+                let resolved = resolve_path(path, root);
+                let handle =
+                    cached_audio_handle(asset_cache, asset_server, &resolved, audio.streaming);
+                emitter.clip_id = Some(handle.id);
+                entity.insert(EditorAudio {
+                    path: Some(path.clone()),
+                    streaming: audio.streaming,
+                });
+            } else {
+                entity.insert(EditorAudio {
+                    path: None,
+                    streaming: audio.streaming,
+                });
+            }
+
+            entity.insert(BevyWrapper(emitter));
         }
 
         if entity_data.components.freecam {

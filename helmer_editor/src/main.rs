@@ -4,11 +4,12 @@ use bevy_ecs::schedule::IntoScheduleConfigs;
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::runtime::asset_server::AssetServer;
 use helmer_becs::systems::render_system::RenderGizmoState;
-use helmer_becs::{egui_integration::EguiResource, helmer_becs_init};
+use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_becs_init};
 
 use helmer_editor::editor::{
-    AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorCommand,
-    EditorCommandQueue, EditorGizmoSettings, EditorGizmoState, EditorMeshOutlineCache,
+    AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
+    EditorCommand, EditorCommandQueue, EditorGizmoSettings, EditorGizmoState,
+    EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
     EditorProject, EditorRenderRefresh, EditorSceneState, EditorSelectionState, EditorSplineState,
     EditorTimelineState, EditorUiState, EditorUndoState, EditorViewportState, EditorWorkspaceState,
     EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
@@ -20,8 +21,9 @@ use helmer_editor::editor::{
     editor_layout_save_system, editor_layout_update_system, editor_physics_state_system,
     editor_render_refresh_system, editor_shortcut_system, editor_ui_system,
     editor_undo_request_system, file_watch_system, freecam_system, gizmo_system, load_layout_state,
-    load_recent_projects, pending_skinned_mesh_system, scene_dirty_system, script_execution_system,
-    script_registry_system, selection_system, timeline_playback_system,
+    load_recent_projects, pane_manager_toggle_system, pending_skinned_mesh_system,
+    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
+    set_viewport_audio_listener_enabled, timeline_playback_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -83,8 +85,18 @@ fn editor_init(
     world.insert_resource(EditorTimelineState::default());
     world.insert_resource(EditorViewportState::default());
     world.insert_resource(RenderGizmoState::default());
+    world.insert_resource(EditorPaneVisibility::default());
+    world.insert_resource(EditorPaneManagerState::default());
+    world.insert_resource(EditorPaneAutoState::default());
+    world.insert_resource(EditorAudioDeviceCache::default());
+
+    if let Some(audio) = world.get_resource::<AudioBackendResource>() {
+        audio.0.set_enabled(true);
+        audio.0.clear_emitters();
+    }
 
     activate_viewport_camera(world);
+    set_viewport_audio_listener_enabled(world, true);
 
     let projects_root = DEFAULT_PROJECTS_ROOT
         .get()
@@ -156,6 +168,8 @@ fn editor_init(
     schedule.add_systems(script_execution_system);
     schedule.add_systems(editor_layout_apply_system.before(editor_ui_system));
     schedule.add_systems(editor_ui_system.before(helmer_becs::egui_integration::egui_system));
+    schedule
+        .add_systems(pane_manager_toggle_system.after(helmer_becs::egui_integration::egui_system));
     schedule
         .add_systems(editor_layout_update_system.after(helmer_becs::egui_integration::egui_system));
     schedule.add_systems(editor_layout_save_system.after(editor_layout_update_system));

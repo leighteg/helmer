@@ -9,18 +9,19 @@ use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Entity, Resource, With, World};
 use egui::{
     Align, Align2, Color32, ComboBox, DragValue, FontId, Id, Layout, Modifiers, Order,
-    PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2,
+    PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2,
 };
 use glam::{EulerRot, Mat3, Quat, Vec3};
 use helmer::animation::{AnimationClip, Pose, Skeleton};
+use helmer::audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
 use helmer::graphics::common::config::SkinningMode;
 use helmer::graphics::{
     common::renderer::GizmoMode,
     render_graphs::{graph_templates, template_for_graph},
 };
 use helmer::provided::components::{
-    EntityFollower, Light, LightType, LookAt, MeshRenderer, PoseOverride, SkinnedMeshRenderer,
-    Spline, SplineFollower, SplineMode,
+    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer,
+    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::EguiResource;
@@ -30,9 +31,10 @@ use helmer_becs::systems::scene_system::{
     SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyEntityFollower, BevyLight,
-    BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer,
-    BevySpline, BevySplineFollower, BevyTransform, BevyWrapper,
+    AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
+    BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
+    BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
+    BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
@@ -41,8 +43,9 @@ use crate::editor::{
     EditorLayoutState, EditorPlayCamera, EditorSplineState, EditorTimelineState, EditorUndoState,
     EditorViewportCamera, EditorViewportState, Freecam, LayoutSaveRequest, UndoEntry,
     assets::{
-        AssetBrowserState, AssetEntry, EditorAssetCache, EditorMesh, EditorSkinnedMesh, MeshSource,
-        PrimitiveKind, SceneAssetPath, cached_scene_handle, is_entry_visible,
+        AssetBrowserState, AssetEntry, EditorAssetCache, EditorAudio, EditorMesh,
+        EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath, cached_audio_handle,
+        cached_scene_handle, is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -75,6 +78,80 @@ pub struct EditorUiState {
     pub open_project_path: String,
     pub status: Option<String>,
     pub recent_projects: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorPaneVisibility {
+    pub toolbar: bool,
+    pub viewport: bool,
+    pub project: bool,
+    pub hierarchy: bool,
+    pub inspector: bool,
+    pub history: bool,
+    pub timeline: bool,
+    pub content_browser: bool,
+    pub audio_mixer: bool,
+}
+
+impl Default for EditorPaneVisibility {
+    fn default() -> Self {
+        Self {
+            toolbar: true,
+            viewport: true,
+            project: true,
+            hierarchy: true,
+            inspector: true,
+            history: true,
+            timeline: false,
+            content_browser: true,
+            audio_mixer: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource, Default)]
+pub struct EditorPaneManagerState {
+    pub open: bool,
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorPaneAutoState {
+    pub project_auto_hide: bool,
+    pub last_project_open: bool,
+}
+
+impl Default for EditorPaneAutoState {
+    fn default() -> Self {
+        Self {
+            project_auto_hide: true,
+            last_project_open: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorAudioDeviceCache {
+    pub hosts: Vec<helmer::audio::AudioHostId>,
+    pub devices: Vec<helmer::audio::AudioOutputDevice>,
+    pub last_host: Option<helmer::audio::AudioHostId>,
+    pub show_system_devices: bool,
+    pub pending_output: Option<helmer::audio::AudioOutputSettings>,
+    pub pending_dirty: bool,
+    pub new_bus_name: String,
+}
+
+impl Default for EditorAudioDeviceCache {
+    fn default() -> Self {
+        Self {
+            hosts: Vec::new(),
+            devices: Vec::new(),
+            last_host: None,
+            show_system_devices: false,
+            pending_output: None,
+            pending_dirty: false,
+            new_bus_name: String::new(),
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone, Resource)]
@@ -621,6 +698,456 @@ pub fn draw_history_window(ui: &mut Ui, world: &mut World) {
                     let _ = ui.selectable_label(is_current, label);
                 }
             });
+    });
+}
+
+fn align_output_buffer_frames_ui(frames: u32) -> u32 {
+    if frames == 0 {
+        return 0;
+    }
+    let alignment = 256u32;
+    ((frames + alignment - 1) / alignment) * alignment
+}
+
+pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
+    bring_window_to_front_if_dragging(ui, world);
+    drag_egui_window_on_middle_click(ui, world, "Audio Mixer");
+
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        let audio = match world
+            .get_resource::<AudioBackendResource>()
+            .map(|backend| backend.0.clone())
+        {
+            Some(audio) => audio,
+            None => {
+                ui.label("Audio backend not available.");
+                return;
+            }
+        };
+
+        ui.heading("Audio Mixer");
+        ui.separator();
+
+        let mut enabled = audio.enabled();
+        if ui.checkbox(&mut enabled, "enabled").changed() {
+            audio.set_enabled(enabled);
+        }
+
+        ui.separator();
+        ui.label("output");
+        {
+            let mut cache = world
+                .get_resource_mut::<EditorAudioDeviceCache>()
+                .expect("EditorAudioDeviceCache missing");
+            let current_output = audio.output_settings();
+            let mut pending_output = if cache.pending_output.is_none() || !cache.pending_dirty {
+                current_output.clone()
+            } else {
+                cache
+                    .pending_output
+                    .clone()
+                    .expect("pending output missing")
+            };
+            let mut pending_dirty = cache.pending_dirty;
+
+            if cache.hosts.is_empty() {
+                cache.hosts = audio.available_output_hosts();
+            }
+
+            let mut host_changed = false;
+            let host_label = pending_output
+                .host_id
+                .map(|host| host.label())
+                .unwrap_or_else(|| "System Default".to_string());
+            ComboBox::from_label("host")
+                .selected_text(host_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(pending_output.host_id.is_none(), "System Default")
+                        .clicked()
+                    {
+                        pending_output.host_id = None;
+                        host_changed = true;
+                    }
+                    for host in cache.hosts.iter().copied() {
+                        let label = host.label();
+                        if ui
+                            .selectable_label(pending_output.host_id == Some(host), &label)
+                            .clicked()
+                        {
+                            pending_output.host_id = Some(host);
+                            host_changed = true;
+                        }
+                    }
+                });
+            if host_changed {
+                pending_output.device_name = None;
+                pending_output.device_index = None;
+                cache.devices.clear();
+                cache.last_host = None;
+                pending_dirty = true;
+            }
+
+            ui.horizontal(|ui| {
+                if ui.button("refresh devices").clicked() {
+                    cache.devices.clear();
+                    cache.last_host = None;
+                }
+                ui.checkbox(&mut cache.show_system_devices, "show system devices");
+            });
+
+            let needs_refresh =
+                cache.devices.is_empty() || cache.last_host != pending_output.host_id;
+            if needs_refresh {
+                cache.devices = audio.available_output_devices(pending_output.host_id);
+                cache.last_host = pending_output.host_id;
+            }
+
+            let mut name_counts: HashMap<String, usize> = HashMap::new();
+            let mut filtered_devices: Vec<helmer::audio::AudioOutputDevice> = Vec::new();
+            for device in cache.devices.iter() {
+                let lower = device.name.to_lowercase();
+                let is_alias = matches!(
+                    lower.as_str(),
+                    "default" | "sysdefault" | "samplerate" | "speexrate" | "jack" | "pulse"
+                );
+                let is_virtual = lower.contains("dmix")
+                    || lower.contains("dsnoop")
+                    || lower.contains("front")
+                    || lower.contains("surround")
+                    || lower.contains("iec958")
+                    || lower.contains("spdif")
+                    || lower.contains("null")
+                    || lower.contains("plug")
+                    || lower.contains("hw:")
+                    || lower.contains("hdmi");
+                if !cache.show_system_devices && (is_alias || is_virtual) {
+                    continue;
+                }
+                *name_counts.entry(device.name.clone()).or_insert(0) += 1;
+                filtered_devices.push(device.clone());
+            }
+
+            let current_device_label = pending_output
+                .device_index
+                .and_then(|index| {
+                    filtered_devices
+                        .iter()
+                        .find(|device| device.index == index)
+                        .map(|device| {
+                            if name_counts.get(&device.name).copied().unwrap_or(0) > 1 {
+                                format!("{} [{}]", device.name, device.index)
+                            } else {
+                                device.name.clone()
+                            }
+                        })
+                })
+                .or_else(|| pending_output.device_name.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            ComboBox::from_label("device")
+                .selected_text(current_device_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            pending_output.device_name.is_none()
+                                && pending_output.device_index.is_none(),
+                            "default",
+                        )
+                        .clicked()
+                    {
+                        pending_output.device_name = None;
+                        pending_output.device_index = None;
+                        pending_dirty = true;
+                    }
+                    for device in filtered_devices.iter() {
+                        let label = if name_counts.get(&device.name).copied().unwrap_or(0) > 1 {
+                            format!("{} [{}]", device.name, device.index)
+                        } else {
+                            device.name.clone()
+                        };
+                        if ui
+                            .selectable_label(
+                                pending_output.device_index == Some(device.index),
+                                &label,
+                            )
+                            .clicked()
+                        {
+                            pending_output.device_name = Some(device.name.clone());
+                            pending_output.device_index = Some(device.index);
+                            pending_dirty = true;
+                        }
+                    }
+                });
+
+            let mut sample_rate = pending_output.sample_rate.max(1);
+            let mut channels = pending_output.channels.max(1);
+            let mut buffer_frames = pending_output.buffer_frames.unwrap_or(0);
+            let sample_rate_response = ui.add(
+                DragValue::new(&mut sample_rate)
+                    .speed(100.0)
+                    .prefix("sample rate: "),
+            );
+            if sample_rate_response.changed() {
+                pending_output.sample_rate = sample_rate;
+                pending_dirty = true;
+            }
+            let channels_response =
+                ui.add(egui::Slider::new(&mut channels, 1..=16).text("channels"));
+            if channels_response.changed() {
+                pending_output.channels = channels;
+                pending_dirty = true;
+            }
+            let buffer_response = ui.add(
+                DragValue::new(&mut buffer_frames)
+                    .speed(256.0)
+                    .prefix("buffer frames: "),
+            );
+            if buffer_response.changed() {
+                let aligned = align_output_buffer_frames_ui(buffer_frames);
+                pending_output.buffer_frames = if aligned == 0 { None } else { Some(aligned) };
+                pending_dirty = true;
+            }
+            if ui.button("apply output").clicked() {
+                match audio.reconfigure(pending_output.clone()) {
+                    Ok(()) => {
+                        pending_dirty = false;
+                        pending_output = audio.output_settings();
+                    }
+                    Err(err) => {
+                        ui.colored_label(Color32::RED, format!("output error: {}", err));
+                    }
+                }
+            }
+            if let Some(err) = audio.last_error() {
+                ui.colored_label(Color32::RED, err);
+            }
+
+            cache.pending_output = Some(pending_output);
+            cache.pending_dirty = pending_dirty;
+        }
+
+        ui.separator();
+        ui.label("spatialization");
+        let mut head_width = audio.head_width();
+        if ui
+            .add(
+                DragValue::new(&mut head_width)
+                    .speed(0.01)
+                    .prefix("head width: "),
+            )
+            .changed()
+        {
+            audio.set_head_width(head_width);
+        }
+        let mut speed = audio.speed_of_sound();
+        if ui
+            .add(
+                DragValue::new(&mut speed)
+                    .speed(1.0)
+                    .prefix("speed of sound: "),
+            )
+            .changed()
+        {
+            audio.set_speed_of_sound(speed);
+        }
+
+        ui.separator();
+        ui.label("streaming");
+        let (stream_buffer, stream_chunk) = audio.streaming_config();
+        let mut stream_buffer = stream_buffer as u32;
+        let mut stream_chunk = stream_chunk as u32;
+        let stream_changed = ui
+            .add(
+                DragValue::new(&mut stream_buffer)
+                    .speed(64.0)
+                    .prefix("stream buffer frames: "),
+            )
+            .changed()
+            || ui
+                .add(
+                    DragValue::new(&mut stream_chunk)
+                        .speed(64.0)
+                        .prefix("stream chunk frames: "),
+                )
+                .changed();
+        if stream_changed {
+            audio.set_streaming_config(stream_buffer as usize, stream_chunk as usize);
+        }
+
+        ui.separator();
+        ui.label("asset budgets");
+        let mb = 1024.0 * 1024.0;
+        #[cfg(target_arch = "wasm32")]
+        let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+        #[cfg(not(target_arch = "wasm32"))]
+        let asset_server = world.get_resource::<BevyAssetServer>();
+        if let Some(asset_server) = asset_server {
+            let mut server = asset_server.0.lock();
+            let mut audio_budget_mb = server.audio_budget_bytes() as f32 / mb as f32;
+            let audio_cache_mb = server.audio_cache_usage_bytes() as f32 / mb as f32;
+            if ui
+                .add(
+                    DragValue::new(&mut audio_budget_mb)
+                        .speed(1.0)
+                        .prefix("audio budget (MiB): "),
+                )
+                .changed()
+            {
+                let budget_bytes = (audio_budget_mb.max(0.0) * mb as f32) as usize;
+                server.set_audio_budget_bytes(budget_bytes);
+            }
+            ui.label(format!("audio cache usage: {:.1} MiB", audio_cache_mb));
+        } else {
+            ui.label("audio asset budgets unavailable");
+        }
+
+        ui.separator();
+        ui.label("buses");
+        {
+            let mut cache = world
+                .get_resource_mut::<EditorAudioDeviceCache>()
+                .expect("EditorAudioDeviceCache missing");
+            ui.horizontal(|ui| {
+                ui.label("new bus:");
+                ui.text_edit_singleline(&mut cache.new_bus_name);
+                if ui.button("Add").clicked() {
+                    let name = cache.new_bus_name.trim().to_string();
+                    if name.is_empty() {
+                        audio.create_custom_bus(None);
+                    } else {
+                        audio.create_custom_bus(Some(name));
+                    }
+                    cache.new_bus_name.clear();
+                }
+            });
+            let buses = audio.bus_list();
+            for bus in buses {
+                let mut volume = audio.bus_volume(bus);
+                let mut remove_requested = false;
+                ui.horizontal(|ui| {
+                    match bus {
+                        AudioBus::Custom(_) => {
+                            let mut name = audio.bus_name(bus);
+                            let font_id = egui::TextStyle::Body.resolve(ui.style());
+                            let galley = ui.painter().layout_no_wrap(
+                                name.clone(),
+                                font_id,
+                                ui.visuals().text_color(),
+                            );
+                            let desired = galley.size().x;
+                            let width = (desired + 16.0).clamp(60.0, 200.0);
+                            if ui
+                                .add(egui::TextEdit::singleline(&mut name).desired_width(width))
+                                .changed()
+                            {
+                                audio.set_bus_name(bus, name);
+                            }
+                            if ui.button("Remove").clicked() {
+                                remove_requested = true;
+                            }
+                        }
+                        _ => {
+                            ui.label(audio.bus_name(bus));
+                        }
+                    }
+                    if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0)).changed() {
+                        audio.set_bus_volume(bus, volume);
+                    }
+                });
+                if remove_requested {
+                    audio.remove_bus(bus);
+                }
+            }
+        }
+
+        ui.separator();
+        ui.label("scenes");
+        let mut scenes: Vec<(u64, String)> = Vec::new();
+        for (entity, _) in world.query::<(Entity, &SceneRoot)>().iter(world) {
+            let name = world
+                .get::<Name>(entity)
+                .map(|n| n.as_str().to_string())
+                .unwrap_or_else(|| format!("Scene {}", entity.to_bits()));
+            scenes.push((entity.to_bits(), name));
+        }
+        scenes.sort_by(|a, b| a.1.cmp(&b.1));
+        if scenes.is_empty() {
+            ui.label("no active scenes");
+        } else {
+            for (scene_id, name) in scenes {
+                let mut volume = audio.scene_volume(scene_id);
+                ui.horizontal(|ui| {
+                    ui.label(name);
+                    if ui.add(egui::Slider::new(&mut volume, 0.0..=2.0)).changed() {
+                        audio.set_scene_volume(scene_id, volume);
+                    }
+                });
+            }
+        }
+    });
+}
+
+pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
+    bring_window_to_front_if_dragging(ui, world);
+
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        ui.heading("Pane Manager");
+        ui.label("Toggle editor panes");
+        ui.separator();
+
+        let mut project_toggled = false;
+        if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
+            ui.horizontal(|ui| {
+                if ui.button("All").clicked() {
+                    panes.toolbar = true;
+                    panes.viewport = true;
+                    panes.project = true;
+                    panes.hierarchy = true;
+                    panes.inspector = true;
+                    panes.history = true;
+                    panes.timeline = true;
+                    panes.content_browser = true;
+                    panes.audio_mixer = true;
+                    project_toggled = true;
+                }
+                if ui.button("None").clicked() {
+                    panes.toolbar = false;
+                    panes.viewport = false;
+                    panes.project = false;
+                    panes.hierarchy = false;
+                    panes.inspector = false;
+                    panes.history = false;
+                    panes.timeline = false;
+                    panes.content_browser = false;
+                    panes.audio_mixer = false;
+                    project_toggled = true;
+                }
+            });
+            ui.separator();
+
+            ui.checkbox(&mut panes.toolbar, "Toolbar");
+            ui.checkbox(&mut panes.viewport, "Viewport");
+            {
+                let before = panes.project;
+                if ui.checkbox(&mut panes.project, "Project").changed() && panes.project != before {
+                    project_toggled = true;
+                }
+            }
+            ui.checkbox(&mut panes.hierarchy, "Hierarchy");
+            ui.checkbox(&mut panes.inspector, "Inspector");
+            ui.checkbox(&mut panes.history, "History");
+            ui.checkbox(&mut panes.timeline, "Timeline");
+            ui.checkbox(&mut panes.content_browser, "Content Browser");
+            ui.checkbox(&mut panes.audio_mixer, "Audio Mixer");
+        } else {
+            ui.label("Pane manager state missing.");
+        }
+        if project_toggled {
+            if let Some(mut auto_state) = world.get_resource_mut::<EditorPaneAutoState>() {
+                auto_state.project_auto_hide = false;
+            }
+        }
     });
 }
 
@@ -2626,6 +3153,257 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                 }
                 end_edit_undo(world, angle_response);
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevyAudioListener>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Audio Listener");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyAudioListener>();
+            push_undo_snapshot(world, "Remove Audio Listener");
+        } else if let Some(listener) = world.get::<BevyAudioListener>(entity).map(|l| l.0) {
+            let mut enabled = listener.enabled;
+            let response = ui.checkbox(&mut enabled, "Enabled");
+            let response = EditResponse::from_response(&response);
+            begin_edit_undo(world, "Audio Listener", response);
+            if response.changed {
+                if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
+                    listener.0.enabled = enabled;
+                }
+            }
+            end_edit_undo(world, response);
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevyAudioEmitter>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Audio Emitter");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyAudioEmitter>();
+            world.entity_mut(entity).remove::<EditorAudio>();
+            push_undo_snapshot(world, "Remove Audio Emitter");
+        } else if let Some(emitter_snapshot) = world.get::<BevyAudioEmitter>(entity).map(|e| e.0) {
+            let mut emitter = emitter_snapshot;
+            let mut editor_audio =
+                world
+                    .get::<EditorAudio>(entity)
+                    .cloned()
+                    .unwrap_or(EditorAudio {
+                        path: None,
+                        streaming: false,
+                    });
+
+            let mut clip_applied = false;
+
+            let clip_label = editor_audio
+                .path
+                .as_deref()
+                .map(|path| format!("Clip: {}", path))
+                .unwrap_or_else(|| "Clip: <none>".to_string());
+
+            let clip_button = ui.button(clip_label);
+            if clip_button.clicked() {
+                if let Some(path) = selected_asset.as_ref().filter(|p| is_audio_file(p)) {
+                    apply_audio_emitter_from_asset(
+                        world,
+                        entity,
+                        &project,
+                        path,
+                        editor_audio.streaming,
+                    );
+                    clip_applied = true;
+                    push_undo_snapshot(world, "Audio Clip");
+                }
+            }
+            if let Some(payload) = clip_button.dnd_release_payload::<AssetDragPayload>() {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_audio_file(path) {
+                        apply_audio_emitter_from_asset(
+                            world,
+                            entity,
+                            &project,
+                            path,
+                            editor_audio.streaming,
+                        );
+                        clip_applied = true;
+                        push_undo_snapshot(world, "Audio Clip");
+                    }
+                }
+            }
+            highlight_drop_target(ui, &clip_button);
+
+            ui.horizontal(|ui| {
+                if ui.button("Clear").clicked() {
+                    editor_audio.path = None;
+                    emitter.clip_id = None;
+                    if let Some(mut audio) = world.get_mut::<EditorAudio>(entity) {
+                        audio.path = None;
+                    } else {
+                        world.entity_mut(entity).insert(EditorAudio {
+                            path: None,
+                            streaming: editor_audio.streaming,
+                        });
+                    }
+                    if let Some(mut emitter_comp) = world.get_mut::<BevyAudioEmitter>(entity) {
+                        emitter_comp.0.clip_id = None;
+                    }
+                    push_undo_snapshot(world, "Clear Audio Clip");
+                }
+                let mut streaming = editor_audio.streaming;
+                if ui.checkbox(&mut streaming, "Streaming").changed() {
+                    editor_audio.streaming = streaming;
+                    if let Some(path) = editor_audio.path.clone() {
+                        let resolved = resolve_asset_path(project.as_ref(), &path);
+                        apply_audio_emitter_from_asset(
+                            world, entity, &project, &resolved, streaming,
+                        );
+                        clip_applied = true;
+                    } else {
+                        world.entity_mut(entity).insert(EditorAudio {
+                            path: None,
+                            streaming,
+                        });
+                    }
+                    push_undo_snapshot(world, "Audio Streaming");
+                }
+            });
+
+            let bus_options: Vec<(String, AudioBus)> = world
+                .get_resource::<AudioBackendResource>()
+                .map(|backend| {
+                    let audio = backend.0.clone();
+                    audio
+                        .bus_list()
+                        .into_iter()
+                        .map(|bus| (audio.bus_name(bus), bus))
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    vec![
+                        ("Master".to_string(), AudioBus::Master),
+                        ("Music".to_string(), AudioBus::Music),
+                        ("SFX".to_string(), AudioBus::Sfx),
+                        ("UI".to_string(), AudioBus::Ui),
+                        ("Ambience".to_string(), AudioBus::Ambience),
+                        ("World".to_string(), AudioBus::World),
+                    ]
+                });
+            let bus_label = bus_options
+                .iter()
+                .find(|(_, bus)| *bus == emitter.bus)
+                .map(|(label, _)| label.as_str())
+                .unwrap_or("Custom");
+            ComboBox::from_id_source(format!("audio_bus_{}", entity.to_bits()))
+                .selected_text(bus_label)
+                .show_ui(ui, |ui| {
+                    for (label, bus) in &bus_options {
+                        if ui.selectable_label(emitter.bus == *bus, label).clicked() {
+                            emitter.bus = *bus;
+                        }
+                    }
+                });
+
+            let mut volume = emitter.volume;
+            let volume_response = edit_float(ui, "Volume", &mut volume, 0.05);
+            begin_edit_undo(world, "Audio", volume_response);
+            if volume_response.changed {
+                emitter.volume = volume;
+            }
+            end_edit_undo(world, volume_response);
+
+            let mut pitch = emitter.pitch;
+            let pitch_response = edit_float(ui, "Pitch", &mut pitch, 0.01);
+            begin_edit_undo(world, "Audio", pitch_response);
+            if pitch_response.changed {
+                emitter.pitch = pitch;
+            }
+            end_edit_undo(world, pitch_response);
+
+            let looping_response = ui.checkbox(&mut emitter.looping, "Looping");
+            if looping_response.changed() {
+                push_undo_snapshot(world, "Audio Looping");
+            }
+
+            let spatial_response = ui.checkbox(&mut emitter.spatial, "Spatialize");
+            if spatial_response.changed() {
+                push_undo_snapshot(world, "Audio Spatial");
+            }
+
+            let mut min_distance = emitter.min_distance;
+            let min_response = edit_float(ui, "Min Distance", &mut min_distance, 0.1);
+            begin_edit_undo(world, "Audio", min_response);
+            if min_response.changed {
+                emitter.min_distance = min_distance.max(0.01);
+            }
+            end_edit_undo(world, min_response);
+
+            let mut max_distance = emitter.max_distance;
+            let max_response = edit_float(ui, "Max Distance", &mut max_distance, 0.5);
+            begin_edit_undo(world, "Audio", max_response);
+            if max_response.changed {
+                emitter.max_distance = max_distance.max(emitter.min_distance + 0.01);
+            }
+            end_edit_undo(world, max_response);
+
+            let mut rolloff = emitter.rolloff;
+            let rolloff_response = edit_float(ui, "Rolloff", &mut rolloff, 0.05);
+            begin_edit_undo(world, "Audio", rolloff_response);
+            if rolloff_response.changed {
+                emitter.rolloff = rolloff.max(0.0);
+            }
+            end_edit_undo(world, rolloff_response);
+
+            let mut spatial_blend = emitter.spatial_blend;
+            let blend_response = edit_float(ui, "Spatial Blend", &mut spatial_blend, 0.05);
+            begin_edit_undo(world, "Audio", blend_response);
+            if blend_response.changed {
+                emitter.spatial_blend = spatial_blend.clamp(0.0, 1.0);
+            }
+            end_edit_undo(world, blend_response);
+
+            ui.horizontal(|ui| {
+                if ui.button("Play").clicked() {
+                    emitter.playback_state = AudioPlaybackState::Playing;
+                    emitter.play_on_spawn = false;
+                    push_undo_snapshot(world, "Audio Play");
+                }
+                if ui.button("Pause").clicked() {
+                    emitter.playback_state = AudioPlaybackState::Paused;
+                    push_undo_snapshot(world, "Audio Pause");
+                }
+                if ui.button("Stop").clicked() {
+                    emitter.playback_state = AudioPlaybackState::Stopped;
+                    push_undo_snapshot(world, "Audio Stop");
+                }
+                ui.checkbox(&mut emitter.play_on_spawn, "Play On Spawn");
+            });
+
+            if clip_applied {
+                if let Some(current) = world.get::<BevyAudioEmitter>(entity) {
+                    emitter.clip_id = current.0.clip_id;
+                }
+            }
+
+            if let Some(mut emitter_comp) = world.get_mut::<BevyAudioEmitter>(entity) {
+                emitter_comp.0 = emitter;
+            } else {
+                world.entity_mut(entity).insert(BevyWrapper(emitter));
             }
         }
         ui.separator();
@@ -6416,6 +7194,8 @@ fn draw_add_component_menu(
     let has_spline_follower = world.get::<BevySplineFollower>(entity).is_some();
     let has_look_at = world.get::<BevyLookAt>(entity).is_some();
     let has_entity_follower = world.get::<BevyEntityFollower>(entity).is_some();
+    let has_audio_emitter = world.get::<BevyAudioEmitter>(entity).is_some();
+    let has_audio_listener = world.get::<BevyAudioListener>(entity).is_some();
     let collider_shape = world.get::<ColliderShape>(entity).copied();
 
     let selected_mesh_source = selected_asset
@@ -6426,6 +7206,10 @@ fn draw_add_component_menu(
         .as_ref()
         .filter(|path| is_material_file(path))
         .and_then(|path| material_path_from_project(project, path));
+    let selected_audio_asset = selected_asset
+        .as_ref()
+        .filter(|path| is_audio_file(path))
+        .cloned();
 
     ui.menu_button("Add Component", |ui| {
         if !has_transform && ui.button("Transform").clicked() {
@@ -6468,6 +7252,46 @@ fn draw_add_component_menu(
                     ui.close_menu();
                 }
             });
+        }
+        if !has_audio_emitter {
+            let audio_button = ui.button("Audio Emitter");
+            if audio_button.clicked() {
+                ensure_transform(world, entity);
+                world
+                    .entity_mut(entity)
+                    .insert(BevyWrapper(AudioEmitter::default()));
+                world.entity_mut(entity).insert(EditorAudio {
+                    path: None,
+                    streaming: false,
+                });
+                if let Some(path) = selected_audio_asset.as_ref() {
+                    apply_audio_emitter_from_asset(world, entity, project, path, false);
+                }
+                push_undo_snapshot(world, "Add Audio Emitter");
+                ui.close_menu();
+            }
+            if let Some(payload) = audio_button.dnd_release_payload::<AssetDragPayload>() {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_audio_file(path) {
+                        ensure_transform(world, entity);
+                        world
+                            .entity_mut(entity)
+                            .insert(BevyWrapper(AudioEmitter::default()));
+                        apply_audio_emitter_from_asset(world, entity, project, path, false);
+                        push_undo_snapshot(world, "Add Audio Emitter");
+                    }
+                }
+                ui.close_menu();
+            }
+            highlight_drop_target(ui, &audio_button);
+        }
+        if !has_audio_listener && ui.button("Audio Listener").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevyWrapper(AudioListener::default()));
+            push_undo_snapshot(world, "Add Audio Listener");
+            ui.close_menu();
         }
         if !has_mesh && ui.button("Mesh Renderer").clicked() {
             ensure_transform(world, entity);
@@ -7142,6 +7966,52 @@ fn apply_mesh_renderer(
     });
 }
 
+fn apply_audio_emitter_from_asset(
+    world: &mut World,
+    entity: Entity,
+    project: &Option<EditorProject>,
+    path: &Path,
+    streaming: bool,
+) {
+    let Some(asset_server) = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))
+    else {
+        set_status(world, "Asset server missing".to_string());
+        return;
+    };
+    let path_str = path.to_string_lossy();
+    let resolved_path = resolve_asset_path(project.as_ref(), path_str.as_ref());
+    let relative_path = project_relative_path(project, path);
+
+    let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+        cached_audio_handle(&mut cache, &asset_server, &resolved_path, streaming)
+    } else {
+        asset_server.0.lock().load_audio(
+            &resolved_path,
+            if streaming {
+                AudioLoadMode::Streaming
+            } else {
+                AudioLoadMode::Static
+            },
+        )
+    };
+
+    let mut emitter = world
+        .get::<BevyAudioEmitter>(entity)
+        .map(|emitter| emitter.0)
+        .unwrap_or_default();
+    emitter.clip_id = Some(handle.id);
+
+    world.entity_mut(entity).insert((
+        BevyWrapper(emitter),
+        EditorAudio {
+            path: Some(relative_path),
+            streaming,
+        },
+    ));
+}
+
 fn apply_skinned_mesh_renderer_from_asset(
     world: &mut World,
     entity: Entity,
@@ -7615,6 +8485,18 @@ fn is_model_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "glb" | "gltf"))
+        .unwrap_or(false)
+}
+
+fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "wav" | "ogg" | "flac" | "mp3"
+            )
+        })
         .unwrap_or(false)
 }
 

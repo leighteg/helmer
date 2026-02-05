@@ -2,6 +2,7 @@ use crate::animation::{
     AnimationChannel, AnimationClip, AnimationLibrary, Interpolation as AnimInterp, Joint,
     Keyframe, Skeleton, Skin,
 };
+use crate::audio::{AudioClip, AudioLoadMode};
 #[cfg(target_arch = "wasm32")]
 use crate::graphics::common::renderer::MeshletLodData;
 use crate::graphics::common::{
@@ -1163,6 +1164,11 @@ enum AssetLoadRequest {
         id: usize,
         path: PathBuf,
     },
+    Audio {
+        id: usize,
+        path: PathBuf,
+        mode: AudioLoadMode,
+    },
     Scene {
         id: usize,
         path: PathBuf,
@@ -1245,6 +1251,10 @@ enum AssetLoadResult {
     Material {
         id: usize,
         data: MaterialFile,
+    },
+    Audio {
+        id: usize,
+        clip: AudioClip,
     },
     Scene {
         id: usize,
@@ -1339,6 +1349,12 @@ struct MaterialSource {
     data: MaterialGpuData,
 }
 
+#[derive(Clone)]
+struct AudioSource {
+    path: PathBuf,
+    mode: AudioLoadMode,
+}
+
 // --- ASSET SERVER ---
 
 pub struct AssetServer {
@@ -1368,15 +1384,19 @@ pub struct AssetServer {
     texture_sources: RwLock<HashMap<usize, TextureSource>>,
     mesh_sources: RwLock<HashMap<usize, MeshSource>>,
     material_sources: RwLock<HashMap<usize, MaterialSource>>,
+    audio_sources: RwLock<HashMap<usize, AudioSource>>,
     mesh_cache: RwLock<HashMap<usize, Arc<Mesh>>>,
     texture_cache: RwLock<HashMap<usize, Arc<CachedTexture>>>,
     material_cache: RwLock<HashMap<usize, Arc<MaterialGpuData>>>,
+    audio_cache: RwLock<HashMap<usize, Arc<AudioClip>>>,
     mesh_meta: RwLock<HashMap<usize, CacheEntryMeta>>,
     texture_meta: RwLock<HashMap<usize, CacheEntryMeta>>,
     material_meta: RwLock<HashMap<usize, CacheEntryMeta>>,
+    audio_meta: RwLock<HashMap<usize, CacheEntryMeta>>,
     mesh_budget: usize,
     texture_budget: usize,
     material_budget: usize,
+    audio_budget: usize,
     scene_buffer_budget: usize,
     asset_streaming_tuning: AssetStreamingTuning,
 
@@ -1716,6 +1736,18 @@ impl AssetServer {
                                     AssetLoadResult::Material { id, data }
                                 })
                             }
+                            AssetLoadRequest::Audio { id, path, mode } => {
+                                match AudioClip::from_path_with_mode(&path, mode) {
+                                    Ok(clip) => Some(AssetLoadResult::Audio { id, clip }),
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to load audio '{}' for handle {}: {}",
+                                            path_str, id, e
+                                        );
+                                        None
+                                    }
+                                }
+                            }
                             AssetLoadRequest::Scene { id, path } => {
                                 if is_gltf_path(&path) {
                                     match parse_scene_from_gltf_path(&path) {
@@ -1925,6 +1957,11 @@ impl AssetServer {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(128)
             * mb;
+        let audio_budget = std::env::var("HELMER_ASSET_BUDGET_AUDIO_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(256)
+            * mb;
         let scene_buffer_budget = std::env::var("HELMER_ASSET_BUDGET_SCENE_MB")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -1972,15 +2009,19 @@ impl AssetServer {
             texture_sources: RwLock::new(HashMap::new()),
             mesh_sources: RwLock::new(HashMap::new()),
             material_sources: RwLock::new(HashMap::new()),
+            audio_sources: RwLock::new(HashMap::new()),
             mesh_cache: RwLock::new(HashMap::new()),
             texture_cache: RwLock::new(HashMap::new()),
             material_cache: RwLock::new(HashMap::new()),
+            audio_cache: RwLock::new(HashMap::new()),
             mesh_meta: RwLock::new(HashMap::new()),
             texture_meta: RwLock::new(HashMap::new()),
             material_meta: RwLock::new(HashMap::new()),
+            audio_meta: RwLock::new(HashMap::new()),
             mesh_budget,
             texture_budget,
             material_budget,
+            audio_budget,
             scene_buffer_budget,
             asset_streaming_tuning: AssetStreamingTuning::default(),
             asset_creation_limit_per_frame: {
@@ -2290,6 +2331,50 @@ impl AssetServer {
         }
     }
 
+    fn record_audio_cache_entry(&self, id: usize, size_bytes: usize) {
+        self.audio_meta.write().insert(
+            id,
+            CacheEntryMeta {
+                last_used: Instant::now(),
+                size_bytes,
+                priority: 0.0,
+                plan_epoch: 0,
+            },
+        );
+    }
+
+    fn touch_audio_cache_entry(&self, id: usize) {
+        if let Some(meta) = self.audio_meta.write().get_mut(&id) {
+            meta.last_used = Instant::now();
+        }
+    }
+
+    fn enforce_audio_cache_budget(&self) {
+        let budget = self.audio_budget;
+        let mut meta = self.audio_meta.write();
+        if budget == 0 {
+            return;
+        }
+        let mut total: usize = meta.values().map(|m| m.size_bytes).sum();
+        if total <= budget {
+            return;
+        }
+        let mut entries: Vec<(Instant, usize, usize)> = meta
+            .iter()
+            .map(|(id, m)| (m.last_used, *id, m.size_bytes))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        for (_last, id, size) in entries {
+            if total <= budget {
+                break;
+            }
+            meta.remove(&id);
+            self.audio_cache.write().remove(&id);
+            total = total.saturating_sub(size);
+        }
+    }
+
     fn enforce_cache_budget(&self, kind: AssetStreamKind) {
         let (meta_map, budget) = self.cache_meta_maps(kind);
         let mut meta = meta_map.write();
@@ -2511,6 +2596,23 @@ impl AssetServer {
         ids
     }
 
+    fn collect_idle_audio_ids(&self, idle: Duration, now: Instant, limit: usize) -> Vec<usize> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut ids = Vec::new();
+        for (id, meta) in self.audio_meta.read().iter() {
+            if ids.len() >= limit {
+                break;
+            }
+            if now.duration_since(meta.last_used) < idle {
+                continue;
+            }
+            ids.push(*id);
+        }
+        ids
+    }
+
     fn evict_idle_cache_entries(&self) {
         let idle_ms = self.cache_idle_ms;
         let limit = self.cache_eviction_limit;
@@ -2582,6 +2684,21 @@ impl AssetServer {
                 cache.remove(id);
                 meta.remove(id);
             }
+            remaining = remaining.saturating_sub(texture_ids.len());
+        }
+
+        if remaining == 0 {
+            return;
+        }
+
+        let audio_ids = self.collect_idle_audio_ids(idle, now, remaining);
+        if !audio_ids.is_empty() {
+            let mut cache = self.audio_cache.write();
+            let mut meta = self.audio_meta.write();
+            for id in audio_ids.iter() {
+                cache.remove(id);
+                meta.remove(id);
+            }
         }
     }
 
@@ -2619,6 +2736,14 @@ impl AssetServer {
 
     pub fn get_mesh(&self, id: usize) -> Option<Arc<Mesh>> {
         self.mesh_cache.read().get(&id).cloned()
+    }
+
+    pub fn get_audio(&self, id: usize) -> Option<Arc<AudioClip>> {
+        let clip = self.audio_cache.read().get(&id).cloned();
+        if clip.is_some() {
+            self.touch_audio_cache_entry(id);
+        }
+        clip
     }
 
     pub fn set_limits(
@@ -2721,6 +2846,15 @@ impl AssetServer {
         (self.mesh_budget, self.texture_budget, self.material_budget)
     }
 
+    pub fn audio_budget_bytes(&self) -> usize {
+        self.audio_budget
+    }
+
+    pub fn set_audio_budget_bytes(&mut self, budget: usize) {
+        self.audio_budget = budget;
+        self.enforce_audio_cache_budget();
+    }
+
     pub fn scene_buffer_budget_bytes(&self) -> usize {
         self.scene_buffer_budget
     }
@@ -2749,6 +2883,10 @@ impl AssetServer {
             .map(|m| m.size_bytes)
             .sum();
         (mesh, tex, mat)
+    }
+
+    pub fn audio_cache_usage_bytes(&self) -> usize {
+        self.audio_meta.read().values().map(|m| m.size_bytes).sum()
     }
 
     fn invalidate_low_res_textures(&self) {
@@ -3045,6 +3183,7 @@ impl AssetServer {
                 request,
                 scene_affinity: None,
             }),
+            AssetLoadRequest::Audio { .. } => None,
             AssetLoadRequest::Scene { id, path } => Some(WorkerRequest::Scene {
                 id: *id,
                 path: path.to_string_lossy().to_string(),
@@ -3225,6 +3364,38 @@ impl AssetServer {
             id,
             _phantom: PhantomData,
         }
+    }
+
+    pub fn load_audio<P: AsRef<Path>>(&self, path: P, mode: AudioLoadMode) -> Handle<AudioClip> {
+        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        let resolved_path = self.resolve_asset_path(path.as_ref());
+        let request = AssetLoadRequest::Audio {
+            id,
+            path: resolved_path.clone(),
+            mode,
+        };
+        if !self.enqueue_worker_request(request) {
+            warn!(
+                "Failed to queue audio request {}; worker thread offline",
+                id
+            );
+        }
+        self.audio_sources.write().insert(
+            id,
+            AudioSource {
+                path: resolved_path,
+                mode,
+            },
+        );
+        Handle::new(id)
+    }
+
+    pub fn load_audio_static<P: AsRef<Path>>(&self, path: P) -> Handle<AudioClip> {
+        self.load_audio(path, AudioLoadMode::Static)
+    }
+
+    pub fn load_audio_streaming<P: AsRef<Path>>(&self, path: P) -> Handle<AudioClip> {
+        self.load_audio(path, AudioLoadMode::Streaming)
     }
 
     pub fn load_scene<P: AsRef<Path>>(&self, path: P) -> Handle<Scene> {
@@ -3470,6 +3641,12 @@ impl AssetServer {
                         warn!("Failed to send material {}; render thread offline", id);
                     }
                 }
+            }
+            AssetLoadResult::Audio { id, clip } => {
+                let size_bytes = clip.size_bytes;
+                self.audio_cache.write().insert(id, Arc::new(clip));
+                self.record_audio_cache_entry(id, size_bytes);
+                self.enforce_audio_cache_budget();
             }
             AssetLoadResult::Scene { id: scene_id, data } => {
                 self.register_scene(scene_id, data);
@@ -4984,6 +5161,7 @@ fn request_path(req: &AssetLoadRequest) -> &Path {
         AssetLoadRequest::Mesh { path, .. } => path,
         AssetLoadRequest::Texture { path, .. } => path,
         AssetLoadRequest::Material { path, .. } => path,
+        AssetLoadRequest::Audio { path, .. } => path,
         AssetLoadRequest::Scene { path, .. } => path,
         #[cfg(not(target_arch = "wasm32"))]
         AssetLoadRequest::SceneBuffers { scene_path, .. } => {

@@ -1,4 +1,5 @@
 use crate::animation::{Pose, Skeleton, Skin};
+use crate::audio::{AudioBus, AudioPlaybackState};
 use crate::graphics::common::renderer::{AlphaMode, Vertex};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use std::sync::Arc;
@@ -223,6 +224,53 @@ impl Default for Camera {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ActiveCamera {}
+
+// --- Audio Components ---
+#[derive(Debug, Clone, Copy)]
+pub struct AudioListener {
+    pub enabled: bool,
+}
+
+impl Default for AudioListener {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AudioEmitter {
+    pub clip_id: Option<usize>,
+    pub bus: AudioBus,
+    pub volume: f32,
+    pub pitch: f32,
+    pub looping: bool,
+    pub spatial: bool,
+    pub min_distance: f32,
+    pub max_distance: f32,
+    pub rolloff: f32,
+    pub spatial_blend: f32,
+    pub playback_state: AudioPlaybackState,
+    pub play_on_spawn: bool,
+}
+
+impl Default for AudioEmitter {
+    fn default() -> Self {
+        Self {
+            clip_id: None,
+            bus: AudioBus::Sfx,
+            volume: 1.0,
+            pitch: 1.0,
+            looping: false,
+            spatial: true,
+            min_distance: 1.0,
+            max_distance: 50.0,
+            rolloff: 1.0,
+            spatial_blend: 1.0,
+            playback_state: AudioPlaybackState::Playing,
+            play_on_spawn: true,
+        }
+    }
+}
 
 // --- Material Asset Component ---
 // This component acts as a descriptor for a material that can be loaded and used by the renderer.

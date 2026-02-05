@@ -1,8 +1,8 @@
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 
-use helmer::provided::components::ActiveCamera;
-use helmer_becs::{BevyActiveCamera, BevyCamera, BevyTransform, BevyWrapper};
+use helmer::provided::components::{ActiveCamera, AudioListener};
+use helmer_becs::{BevyActiveCamera, BevyAudioListener, BevyCamera, BevyTransform, BevyWrapper};
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorViewportCamera;
@@ -63,6 +63,19 @@ pub fn activate_viewport_camera(world: &mut World) -> Entity {
         .entity_mut(entity)
         .insert(BevyWrapper(ActiveCamera {}));
     entity
+}
+
+pub fn set_viewport_audio_listener_enabled(world: &mut World, enabled: bool) {
+    let entity = ensure_viewport_camera(world);
+    if enabled {
+        world
+            .entity_mut(entity)
+            .insert(BevyWrapper(AudioListener { enabled: true }));
+        return;
+    }
+    if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
+        listener.0.enabled = false;
+    }
 }
 
 pub fn set_play_camera(world: &mut World, entity: Entity) {

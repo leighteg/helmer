@@ -6,6 +6,7 @@ use std::{
 
 use bevy_ecs::prelude::{Component, Resource};
 use egui::Pos2;
+use helmer::audio::AudioLoadMode;
 use helmer::runtime::asset_server::{Handle, Material, Mesh, Scene};
 use helmer_becs::BevyAssetServer;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,12 @@ pub struct EditorSkinnedMesh {
 }
 
 #[derive(Component, Debug, Clone)]
+pub struct EditorAudio {
+    pub path: Option<String>,
+    pub streaming: bool,
+}
+
+#[derive(Component, Debug, Clone)]
 pub struct SceneAssetPath {
     pub path: PathBuf,
 }
@@ -50,10 +57,17 @@ pub struct EditorAssetCache {
     pub mesh_handles: HashMap<String, Handle<Mesh>>,
     pub primitive_meshes: HashMap<PrimitiveKind, Handle<Mesh>>,
     pub scene_handles: HashMap<String, Handle<Scene>>,
+    pub audio_handles: HashMap<String, Handle<helmer::audio::AudioClip>>,
 }
 
 pub fn scene_cache_key(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn audio_cache_key(path: &Path, streaming: bool) -> String {
+    let mut key = scene_cache_key(path);
+    key.push_str(if streaming { "|stream" } else { "|static" });
+    key
 }
 
 pub fn cached_scene_handle(
@@ -67,6 +81,26 @@ pub fn cached_scene_handle(
     }
     let handle = asset_server.0.lock().load_scene(path);
     cache.scene_handles.insert(key, handle.clone());
+    handle
+}
+
+pub fn cached_audio_handle(
+    cache: &mut EditorAssetCache,
+    asset_server: &BevyAssetServer,
+    path: &Path,
+    streaming: bool,
+) -> Handle<helmer::audio::AudioClip> {
+    let key = audio_cache_key(path, streaming);
+    if let Some(handle) = cache.audio_handles.get(&key) {
+        return handle.clone();
+    }
+    let mode = if streaming {
+        AudioLoadMode::Streaming
+    } else {
+        AudioLoadMode::Static
+    };
+    let handle = asset_server.0.lock().load_audio(path, mode);
+    cache.audio_handles.insert(key, handle.clone());
     handle
 }
 

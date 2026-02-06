@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -28,6 +28,7 @@ use helmer_becs::{
     BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform,
     BevyWrapper, DeltaTime, DraggedFile,
 };
+use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
@@ -56,7 +57,7 @@ use crate::editor::{
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
-    scripting::{ScriptComponent, ScriptRegistry, load_script_asset},
+    scripting::{ScriptComponent, ScriptRegistry, is_script_path, load_script_asset},
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
         EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility, EditorUiState,
@@ -1861,17 +1862,14 @@ pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res
     let Some(root) = project.root.as_ref() else {
         return;
     };
+    let scripts_root = project.config.as_ref().map(|cfg| cfg.scripts_root(root));
 
     let mut dirty_paths = registry.take_dirty_paths();
     if !dirty_paths.is_empty() {
         let mut updated = 0;
+        let mut removed = 0;
         for path in dirty_paths.drain() {
-            if !path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("lua"))
-                .unwrap_or(false)
-            {
+            if !is_script_path(&path) {
                 continue;
             }
 
@@ -1880,13 +1878,16 @@ pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res
                     .scripts
                     .insert(path.clone(), load_script_asset(&path));
                 updated += 1;
-            } else {
-                registry.scripts.remove(&path);
+            } else if registry.scripts.remove(&path).is_some() {
+                removed += 1;
             }
         }
 
-        if updated > 0 {
-            registry.status = Some(format!("Reloaded {} script(s)", updated));
+        if updated > 0 || removed > 0 {
+            registry.status = Some(format!(
+                "Reloaded {} script(s), removed {}",
+                updated, removed
+            ));
         }
         return;
     }
@@ -1898,49 +1899,75 @@ pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res
 
     registry.last_scan = now;
 
-    let scripts_root = project.config.as_ref().map(|cfg| cfg.scripts_root(root));
-
     let Some(scripts_root) = scripts_root else {
         return;
     };
 
     if !scripts_root.exists() {
+        let stale = registry
+            .scripts
+            .keys()
+            .filter(|path| path.starts_with(&scripts_root))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !stale.is_empty() {
+            for path in stale {
+                registry.scripts.remove(&path);
+            }
+            registry.status = Some("Removed stale script cache entries".to_string());
+        }
         return;
     }
 
+    let mut discovered = HashSet::new();
     let mut updated = 0;
+    let mut removed = 0;
 
-    if let Ok(entries) = fs::read_dir(&scripts_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("lua"))
-                .unwrap_or(false)
-            {
-                continue;
-            }
+    for entry in WalkDir::new(&scripts_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path().to_path_buf();
+        if !is_script_path(&path) {
+            continue;
+        }
 
-            let reload = match registry.scripts.get(&path) {
-                Some(asset) => match fs::metadata(&path).and_then(|meta| meta.modified()) {
-                    Ok(modified) => modified > asset.modified,
-                    Err(_) => false,
-                },
-                None => true,
-            };
+        discovered.insert(path.clone());
 
-            if reload {
-                registry
-                    .scripts
-                    .insert(path.clone(), load_script_asset(&path));
-                updated += 1;
-            }
+        let reload = match registry.scripts.get(&path) {
+            Some(asset) => match fs::metadata(&path).and_then(|meta| meta.modified()) {
+                Ok(modified) => modified > asset.modified,
+                Err(_) => false,
+            },
+            None => true,
+        };
+
+        if reload {
+            registry
+                .scripts
+                .insert(path.clone(), load_script_asset(&path));
+            updated += 1;
         }
     }
 
-    if updated > 0 {
-        registry.status = Some(format!("Updated {} script(s)", updated));
+    let stale = registry
+        .scripts
+        .keys()
+        .filter(|path| path.starts_with(&scripts_root) && !discovered.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    for path in stale {
+        if registry.scripts.remove(&path).is_some() {
+            removed += 1;
+        }
+    }
+
+    if updated > 0 || removed > 0 {
+        registry.status = Some(format!(
+            "Updated {} script(s), removed {}",
+            updated, removed
+        ));
     }
 }
 
@@ -2373,7 +2400,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Folder => directory.join(name),
         AssetCreateKind::Scene => directory.join(format!("{}.hscene.ron", name)),
         AssetCreateKind::Material => directory.join(format!("{}.ron", name)),
-        AssetCreateKind::Script => directory.join(format!("{}.lua", name)),
+        AssetCreateKind::Script => directory.join(format!("{}.luau", name)),
         AssetCreateKind::Animation => directory.join(format!("{}.hanim.ron", name)),
     };
 
@@ -2745,7 +2772,7 @@ fn guess_import_dir(project: &EditorProject, root: &Path, source: &Path) -> Opti
     let target = match ext.as_str() {
         "glb" | "gltf" => config.models_root(root),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => config.textures_root(root),
-        "lua" => config.scripts_root(root),
+        "lua" | "luau" => config.scripts_root(root),
         "ron" => config.materials_root(root),
         _ => config.assets_root(root),
     };

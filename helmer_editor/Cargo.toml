@@ -10,7 +10,7 @@ glam = "0.30.9"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
-mlua = { version = "0.11.5", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.11.5", features = ["luau", "vendored", "send"] }
 notify = "8.2.0"
 rfd = "0.17.2"
 ron = "0.12.0"

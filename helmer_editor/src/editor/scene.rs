@@ -34,7 +34,7 @@ use crate::editor::{
     },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
-    scripting::{ScriptComponent, ScriptEntry},
+    scripting::{ScriptComponent, ScriptEntry, normalize_script_language},
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
         PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation, TimelineTrack,
@@ -1977,9 +1977,13 @@ pub fn spawn_scene_from_document(
                     if path.is_empty() {
                         return None;
                     }
+                    let resolved = resolve_path(path, root);
                     Some(ScriptEntry {
-                        path: Some(resolve_path(path, root)),
-                        language: script.language.clone(),
+                        path: Some(resolved.clone()),
+                        language: normalize_script_language(
+                            &script.language,
+                            Some(resolved.as_path()),
+                        ),
                     })
                 })
                 .collect::<Vec<_>>();

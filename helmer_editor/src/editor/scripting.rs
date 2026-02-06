@@ -36,6 +36,7 @@ use crate::editor::{
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
     set_play_camera,
+    viewport::EditorViewportState,
 };
 
 #[derive(Debug, Clone)]
@@ -48,8 +49,28 @@ impl ScriptEntry {
     pub fn new() -> Self {
         Self {
             path: None,
-            language: "lua".to_string(),
+            language: "luau".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptEditCommand {
+    Run(ScriptInstanceKey),
+    Stop(ScriptInstanceKey),
+    Restart(ScriptInstanceKey),
+    StopAll,
+}
+
+#[derive(Resource, Default)]
+pub struct ScriptEditModeState {
+    pub running_in_edit: HashSet<ScriptInstanceKey>,
+    pub pending_commands: Vec<ScriptEditCommand>,
+}
+
+impl ScriptEditModeState {
+    pub fn queue(&mut self, command: ScriptEditCommand) {
+        self.pending_commands.push(command);
     }
 }
 
@@ -104,6 +125,46 @@ impl ScriptRegistry {
     }
 }
 
+pub fn is_script_path(path: &Path) -> bool {
+    let is_script_ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "lua" | "luau"))
+        .unwrap_or(false);
+    if !is_script_ext {
+        return false;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
+}
+
+pub fn script_language_from_path(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+    {
+        Some(ext) if ext == "lua" => "lua".to_string(),
+        Some(ext) if ext == "luau" => "luau".to_string(),
+        _ => "luau".to_string(),
+    }
+}
+
+pub fn normalize_script_language(language: &str, path: Option<&Path>) -> String {
+    let normalized = language.trim().to_ascii_lowercase();
+    if normalized == "lua" || normalized == "luau" {
+        return normalized;
+    }
+    if let Some(path) = path {
+        return script_language_from_path(path);
+    }
+    "luau".to_string()
+}
+
 pub fn load_script_asset(path: &Path) -> ScriptAsset {
     let modified = fs::metadata(path)
         .and_then(|meta| meta.modified())
@@ -156,12 +217,14 @@ impl Default for ScriptRuntime {
 #[derive(Resource)]
 pub struct ScriptRunState {
     pub last_state: WorldState,
+    pub last_executing: bool,
 }
 
 impl Default for ScriptRunState {
     fn default() -> Self {
         Self {
             last_state: WorldState::Edit,
+            last_executing: false,
         }
     }
 }
@@ -242,6 +305,10 @@ pub fn script_execution_system(world: &mut World) {
         .get_resource::<EditorSceneState>()
         .map(|state| state.world_state)
         .unwrap_or(WorldState::Edit);
+    let execute_scripts_in_edit_mode = world
+        .get_resource::<EditorViewportState>()
+        .map(|state| state.execute_scripts_in_edit_mode)
+        .unwrap_or(false);
     let dt = world
         .get_resource::<DeltaTime>()
         .map(|time| time.0)
@@ -276,6 +343,59 @@ pub fn script_execution_system(world: &mut World) {
         }
         entries
     };
+    let scripts_by_key = scripts
+        .iter()
+        .map(|(key, script, asset)| (*key, (script.clone(), asset.clone())))
+        .collect::<HashMap<_, _>>();
+    let script_keys = scripts_by_key.keys().copied().collect::<HashSet<_>>();
+
+    let mut force_reload = HashSet::new();
+    if let Some(mut edit_mode) = world.get_resource_mut::<ScriptEditModeState>() {
+        let pending = std::mem::take(&mut edit_mode.pending_commands);
+        for command in pending {
+            match command {
+                ScriptEditCommand::Run(key) => {
+                    if script_keys.contains(&key) {
+                        edit_mode.running_in_edit.insert(key);
+                    }
+                }
+                ScriptEditCommand::Stop(key) => {
+                    edit_mode.running_in_edit.remove(&key);
+                }
+                ScriptEditCommand::Restart(key) => {
+                    if script_keys.contains(&key) {
+                        edit_mode.running_in_edit.insert(key);
+                        force_reload.insert(key);
+                    }
+                }
+                ScriptEditCommand::StopAll => {
+                    edit_mode.running_in_edit.clear();
+                }
+            }
+        }
+        edit_mode
+            .running_in_edit
+            .retain(|key| script_keys.contains(key));
+    }
+
+    let desired_active = if current_state == WorldState::Play
+        || (current_state == WorldState::Edit && execute_scripts_in_edit_mode)
+    {
+        script_keys.clone()
+    } else {
+        world
+            .get_resource::<ScriptEditModeState>()
+            .map(|edit_mode| {
+                edit_mode
+                    .running_in_edit
+                    .iter()
+                    .copied()
+                    .filter(|key| script_keys.contains(key))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let is_executing = !desired_active.is_empty();
 
     let input_manager = world
         .get_resource::<BevyInputManager>()
@@ -288,21 +408,30 @@ pub fn script_execution_system(world: &mut World) {
         }
     }
 
-    let last_state = world
+    let (last_state, last_executing) = world
         .get_resource::<ScriptRunState>()
-        .map(|state| state.last_state)
-        .unwrap_or(WorldState::Edit);
+        .map(|state| (state.last_state, state.last_executing))
+        .unwrap_or((WorldState::Edit, false));
+    let lifecycle_changed = last_state != current_state || last_executing != is_executing;
 
     world.resource_scope::<ScriptRuntime, _>(|world, mut runtime| {
+        runtime.errors.clear();
+
         let lua = runtime.lua.clone();
         let lua = match lua.lock() {
             Ok(lua) => lua,
-            Err(_) => return,
+            Err(_) => {
+                if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
+                    run_state.last_state = current_state;
+                    run_state.last_executing = is_executing;
+                }
+                return;
+            }
         };
 
         let world_ptr = world as *mut World as usize;
 
-        if last_state != current_state {
+        if lifecycle_changed {
             if let Some(input_manager) = input_manager.as_ref() {
                 let input_manager = input_manager.read();
                 if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
@@ -311,71 +440,53 @@ pub fn script_execution_system(world: &mut World) {
             } else if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
                 input_state.reset(None);
             }
-
-            match (last_state, current_state) {
-                (WorldState::Edit, WorldState::Play) => {
-                    runtime.instances.clear();
-                    runtime.errors.clear();
-                    for (key, script, asset) in &scripts {
-                        if asset.error.is_some() {
-                            continue;
-                        }
-                        if let Some(instance) = load_script_instance(
-                            &lua,
-                            world_ptr,
-                            key.entity,
-                            key.script_index,
-                            script,
-                            asset,
-                        ) {
-                            runtime.instances.insert(*key, instance);
-                            let _ =
-                                call_script_function0(&lua, &runtime.instances[key], "on_start");
-                        }
-                    }
-                }
-                (WorldState::Play, WorldState::Edit) => {
-                    let drained = runtime.instances.drain().collect::<Vec<_>>();
-                    for (key, instance) in drained {
-                        let _ = call_script_function0(&lua, &instance, "on_stop");
-                        let _ = lua.remove_registry_value(instance.env_key);
-                        despawn_script_owned(world, key.entity, key.script_index);
-                    }
-                    runtime.errors.clear();
-                }
-                _ => {}
-            }
         }
 
-        if current_state != WorldState::Play {
-            if last_state != current_state {
-                if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
-                    run_state.last_state = current_state;
-                }
+        if last_state != current_state {
+            let drained = runtime.instances.drain().collect::<Vec<_>>();
+            for (key, instance) in drained {
+                let _ = call_script_function0(&lua, &instance, "on_stop");
+                let _ = lua.remove_registry_value(instance.env_key);
+                despawn_script_owned(world, key.entity, key.script_index);
             }
-            return;
         }
 
         let mut active_scripts = HashSet::new();
-        for (key, script, asset) in &scripts {
-            active_scripts.insert(*key);
-            if asset.error.is_some() {
+        for key in desired_active.iter().copied() {
+            let Some((script, asset)) = scripts_by_key.get(&key) else {
+                continue;
+            };
+            active_scripts.insert(key);
+
+            if let Some(error) = asset.error.as_ref() {
+                if let Some(old_instance) = runtime.instances.remove(&key) {
+                    let _ = call_script_function0(&lua, &old_instance, "on_stop");
+                    let _ = lua.remove_registry_value(old_instance.env_key);
+                    despawn_script_owned(world, key.entity, key.script_index);
+                }
+                runtime
+                    .errors
+                    .push(format!("{}: {}", script_path_label(script), error));
                 continue;
             }
 
-            let reload = match runtime.instances.get(key) {
-                Some(instance) => script_needs_reload(instance, script, asset),
-                None => true,
+            let reload = if force_reload.contains(&key) {
+                true
+            } else {
+                match runtime.instances.get(&key) {
+                    Some(instance) => script_needs_reload(instance, script, asset),
+                    None => true,
+                }
             };
 
             if reload {
-                if let Some(old_instance) = runtime.instances.remove(key) {
+                if let Some(old_instance) = runtime.instances.remove(&key) {
                     let _ = call_script_function0(&lua, &old_instance, "on_stop");
                     let _ = lua.remove_registry_value(old_instance.env_key);
                     despawn_script_owned(world, key.entity, key.script_index);
                 }
 
-                if let Some(instance) = load_script_instance(
+                match load_script_instance(
                     &lua,
                     world_ptr,
                     key.entity,
@@ -383,12 +494,22 @@ pub fn script_execution_system(world: &mut World) {
                     script,
                     asset,
                 ) {
-                    runtime.instances.insert(*key, instance);
-                    let _ = call_script_function0(&lua, &runtime.instances[key], "on_start");
+                    Ok(instance) => {
+                        runtime.instances.insert(key, instance);
+                        if let Some(instance) = runtime.instances.get(&key) {
+                            if let Err(err) = call_script_function0(&lua, instance, "on_start") {
+                                runtime.errors.push(err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        runtime.errors.push(err);
+                        continue;
+                    }
                 }
             }
 
-            if let Some(instance) = runtime.instances.get(key) {
+            if let Some(instance) = runtime.instances.get(&key) {
                 if let Err(err) = call_script_function1(&lua, instance, "on_update", dt) {
                     runtime.errors.push(err);
                 }
@@ -409,19 +530,35 @@ pub fn script_execution_system(world: &mut World) {
             }
         }
 
-        if last_state != current_state {
-            if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
-                run_state.last_state = current_state;
-            }
+        if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
+            run_state.last_state = current_state;
+            run_state.last_executing = is_executing;
         }
     });
 
-    if let Some(input_manager) = input_manager {
-        let input_manager = input_manager.read();
-        if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
-            input_state.sync_last_state(&input_manager);
+    if is_executing {
+        if let Some(input_manager) = input_manager {
+            let input_manager = input_manager.read();
+            if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+                input_state.sync_last_state(&input_manager);
+            }
+        }
+    } else if lifecycle_changed {
+        if let Some(input_manager) = input_manager {
+            let input_manager = input_manager.read();
+            if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
+                input_state.reset(Some(&input_manager));
+            }
         }
     }
+}
+
+fn script_path_label(script: &ScriptEntry) -> String {
+    script
+        .path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unassigned>".to_string())
 }
 
 fn script_needs_reload(
@@ -446,33 +583,46 @@ fn load_script_instance(
     script_index: usize,
     script: &ScriptEntry,
     asset: &ScriptAsset,
-) -> Option<ScriptInstance> {
-    if asset.error.is_some() {
-        return None;
+) -> Result<ScriptInstance, String> {
+    if let Some(error) = asset.error.as_ref() {
+        return Err(format!("{}: {}", script_path_label(script), error));
     }
 
-    let path = script.path.as_ref()?;
-    let env = lua.create_table().ok()?;
+    let path = script
+        .path
+        .as_ref()
+        .ok_or_else(|| "Script path missing".to_string())?;
+    let env = lua.create_table().map_err(|err| err.to_string())?;
     let _ = env.set("entity_id", entity.to_bits());
-    if register_script_api(lua, &env, world_ptr, entity, script_index).is_err() {
-        return None;
-    }
-    if apply_lua_globals_fallback(lua, &env).is_err() {
-        return None;
-    }
+    register_script_api(lua, &env, world_ptr, entity, script_index).map_err(|err| {
+        format!(
+            "Failed to register script API for {}: {}",
+            path.to_string_lossy(),
+            err
+        )
+    })?;
+    apply_lua_globals_fallback(lua, &env).map_err(|err| {
+        format!(
+            "Failed to apply Lua globals for {}: {}",
+            path.to_string_lossy(),
+            err
+        )
+    })?;
 
-    let env_key = lua.create_registry_value(env.clone()).ok()?;
+    let env_key = lua
+        .create_registry_value(env.clone())
+        .map_err(|err| err.to_string())?;
 
     let chunk = lua
         .load(&asset.source)
         .set_name(path.to_string_lossy().to_string())
         .set_environment(env);
-    if chunk.exec().is_err() {
+    if let Err(err) = chunk.exec() {
         let _ = lua.remove_registry_value(env_key);
-        return None;
+        return Err(format!("{}: {}", path.to_string_lossy(), err));
     }
 
-    Some(ScriptInstance {
+    Ok(ScriptInstance {
         path: path.clone(),
         env_key,
         modified: asset.modified,
@@ -495,7 +645,8 @@ fn call_script_function0(lua: &Lua, instance: &ScriptInstance, name: &str) -> Re
     let Some(func) = func else {
         return Ok(());
     };
-    func.call::<()>(()).map_err(|err| err.to_string())
+    func.call::<()>(())
+        .map_err(|err| format!("{}:{}: {}", instance.path.to_string_lossy(), name, err))
 }
 
 fn call_script_function1(
@@ -511,7 +662,8 @@ fn call_script_function1(
     let Some(func) = func else {
         return Ok(());
     };
-    func.call::<()>((dt,)).map_err(|err| err.to_string())
+    func.call::<()>((dt,))
+        .map_err(|err| format!("{}:{}: {}", instance.path.to_string_lossy(), name, err))
 }
 
 fn register_script_api(
@@ -1500,7 +1652,10 @@ fn build_ecs_table(
                 };
                 let project = world.get_resource::<EditorProject>().cloned();
                 let resolved = resolve_project_path(project.as_ref(), Path::new(&path));
-                let language = language.unwrap_or_else(|| "lua".to_string());
+                let language = normalize_script_language(
+                    &language.unwrap_or_default(),
+                    Some(resolved.as_path()),
+                );
                 if let Some(mut scripts) = world.get_mut::<ScriptComponent>(entity) {
                     if scripts.scripts.is_empty() {
                         scripts.scripts.push(ScriptEntry {
@@ -1756,15 +1911,14 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         })?,
     )?;
 
-    input.set(
-        "gamepad_axis",
-        lua.create_function(|lua, name: String| {
-            let Some(axis) = parse_gamepad_axis_name(&name) else {
-                return Ok(None);
-            };
-            Ok(Some(lua.create_userdata(LuaGamepadAxis(axis))?))
-        })?,
-    )?;
+    let gamepad_axis_handle_fn = lua.create_function(|lua, name: String| {
+        let Some(axis) = parse_gamepad_axis_name(&name) else {
+            return Ok(None);
+        };
+        Ok(Some(lua.create_userdata(LuaGamepadAxis(axis))?))
+    })?;
+    input.set("gamepad_axis_handle", gamepad_axis_handle_fn.clone())?;
+    input.set("gamepad_axis_ref", gamepad_axis_handle_fn)?;
 
     let world_ptr_key = world_ptr;
     input.set(
@@ -2955,6 +3109,8 @@ fn lua_value_to_string(value: Value) -> String {
         Value::Function(_) => "<function>".to_string(),
         Value::UserData(_) => "<userdata>".to_string(),
         Value::LightUserData(_) => "<lightuserdata>".to_string(),
+        Value::Vector(_) => "<vector>".to_string(),
+        Value::Buffer(_) => "<buffer>".to_string(),
         Value::Thread(_) => "<thread>".to_string(),
         Value::Error(err) => err.to_string(),
         Value::Other(_) => "<other>".to_string(),

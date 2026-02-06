@@ -60,7 +60,10 @@ use crate::editor::{
         merge_animation_asset_into_timeline, next_available_scene_path,
         read_animation_asset_document, write_animation_asset_document,
     },
-    scripting::{ScriptComponent, ScriptEntry},
+    scripting::{
+        ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
+        ScriptRegistry, ScriptRuntime, normalize_script_language, script_language_from_path,
+    },
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
         PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineClipExpandRequest, TimelineDragSelect,
@@ -1192,6 +1195,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.gizmos_in_play)
             .unwrap_or(false);
+        let mut execute_scripts_in_edit_mode = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.execute_scripts_in_edit_mode)
+            .unwrap_or(false);
         let mut show_camera_gizmos = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.show_camera_gizmos)
@@ -1240,6 +1247,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             viewport_state.graph_template = graph_template.clone();
             viewport_state.gizmos_in_play = gizmos_in_play;
+            viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
             viewport_state.show_camera_gizmos = show_camera_gizmos;
             viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
             viewport_state.show_point_light_gizmos = show_point_light_gizmos;
@@ -1260,6 +1268,45 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
 
         ui.separator();
 
+        ui.heading("Scripting");
+        ui.checkbox(
+            &mut execute_scripts_in_edit_mode,
+            "Execute Scripts in Edit Mode",
+        );
+        let world_state = world
+            .get_resource::<EditorSceneState>()
+            .map(|state| state.world_state)
+            .unwrap_or(WorldState::Edit);
+        if world_state == WorldState::Edit
+            && !execute_scripts_in_edit_mode
+            && ui.button("Stop All Edit Scripts").clicked()
+        {
+            if let Some(mut edit_state) = world.get_resource_mut::<ScriptEditModeState>() {
+                edit_state.queue(ScriptEditCommand::StopAll);
+            }
+        }
+        if let Some(status) = world
+            .get_resource::<ScriptRegistry>()
+            .and_then(|registry| registry.status.clone())
+        {
+            ui.label(format!("Registry: {}", status));
+        }
+        if let Some(runtime) = world.get_resource::<ScriptRuntime>() {
+            if !runtime.errors.is_empty() {
+                ui.colored_label(
+                    Color32::from_rgb(180, 60, 60),
+                    format!("Script Errors: {}", runtime.errors.len()),
+                );
+                for error in runtime.errors.iter().take(3) {
+                    ui.label(error);
+                }
+                if runtime.errors.len() > 3 {
+                    ui.label(format!("... {} more", runtime.errors.len() - 3));
+                }
+            }
+        }
+        ui.separator();
+
         ui.heading("Gizmos");
         ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
         ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
@@ -1273,6 +1320,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         ui.checkbox(&mut show_spline_points, "Show Spline Points");
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             viewport_state.gizmos_in_play = gizmos_in_play;
+            viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
             viewport_state.show_camera_gizmos = show_camera_gizmos;
             viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
             viewport_state.show_point_light_gizmos = show_point_light_gizmos;
@@ -5120,6 +5168,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let mut scripts_changed = false;
             let mut script_edit_response = EditResponse::default();
 
+            let world_state = world
+                .get_resource::<EditorSceneState>()
+                .map(|state| state.world_state)
+                .unwrap_or(WorldState::Edit);
+            let execute_scripts_in_edit_mode = world
+                .get_resource::<EditorViewportState>()
+                .map(|state| state.execute_scripts_in_edit_mode)
+                .unwrap_or(false);
+
             for (index, script) in scripts.iter_mut().enumerate() {
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -5169,13 +5226,20 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
                 highlight_drop_target(ui, &path_response);
                 script.path = updated_path;
+                let normalized_language =
+                    normalize_script_language(&script.language, script.path.as_deref());
+                if script.language != normalized_language {
+                    script.language = normalized_language;
+                    scripts_changed = true;
+                }
 
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Lua Script", &["lua"])
+                        .add_filter("Lua Script", &["lua", "luau"])
                         .pick_file()
                     {
-                        script.path = Some(path);
+                        script.path = Some(path.clone());
+                        script.language = script_language_from_path(&path);
                         scripts_changed = true;
                     }
                 }
@@ -5183,6 +5247,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if let Some(path) = selected_asset.as_ref() {
                     if is_script_file(path) && ui.button("Use Selected Script").clicked() {
                         script.path = Some(path.clone());
+                        script.language = script_language_from_path(path);
                         scripts_changed = true;
                     }
                 }
@@ -5190,7 +5255,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if ui.button("Create Script Asset").clicked() {
                     if let Some(project) = project.as_ref() {
                         if let Some(path) = create_script_asset(world, project) {
-                            script.path = Some(path);
+                            script.path = Some(path.clone());
+                            script.language = script_language_from_path(&path);
                             scripts_changed = true;
                         }
                     } else {
@@ -5199,6 +5265,82 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
 
                 ui.label(format!("Language: {}", script.language));
+
+                let script_key = ScriptInstanceKey {
+                    entity,
+                    script_index: index,
+                };
+                let runtime_running = world
+                    .get_resource::<ScriptRuntime>()
+                    .map(|runtime| runtime.instances.contains_key(&script_key))
+                    .unwrap_or(false);
+                let manual_running = world
+                    .get_resource::<ScriptEditModeState>()
+                    .map(|state| state.running_in_edit.contains(&script_key))
+                    .unwrap_or(false);
+
+                if world_state == WorldState::Edit {
+                    let can_run = script.path.is_some();
+                    if execute_scripts_in_edit_mode {
+                        ui.horizontal(|ui| {
+                            ui.label(if runtime_running {
+                                "Status: Running (auto)"
+                            } else {
+                                "Status: Auto (idle)"
+                            });
+                            if ui
+                                .add_enabled(can_run, egui::Button::new("Restart"))
+                                .clicked()
+                            {
+                                if let Some(mut state) =
+                                    world.get_resource_mut::<ScriptEditModeState>()
+                                {
+                                    state.queue(ScriptEditCommand::Restart(script_key));
+                                }
+                            }
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            let running = runtime_running || manual_running;
+                            ui.label(if running {
+                                "Status: Running"
+                            } else {
+                                "Status: Stopped"
+                            });
+
+                            if ui.add_enabled(can_run, egui::Button::new("Run")).clicked() {
+                                if let Some(mut state) =
+                                    world.get_resource_mut::<ScriptEditModeState>()
+                                {
+                                    state.queue(ScriptEditCommand::Run(script_key));
+                                }
+                            }
+                            if ui
+                                .add_enabled(can_run, egui::Button::new("Restart"))
+                                .clicked()
+                            {
+                                if let Some(mut state) =
+                                    world.get_resource_mut::<ScriptEditModeState>()
+                                {
+                                    state.queue(ScriptEditCommand::Restart(script_key));
+                                }
+                            }
+                            if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
+                                if let Some(mut state) =
+                                    world.get_resource_mut::<ScriptEditModeState>()
+                                {
+                                    state.queue(ScriptEditCommand::Stop(script_key));
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    ui.label(if runtime_running {
+                        "Status: Running (play mode)"
+                    } else {
+                        "Status: Waiting for Play mode"
+                    });
+                }
             }
 
             for index in remove_indices.into_iter().rev() {
@@ -6052,7 +6194,7 @@ fn asset_tag_for(entry: &AssetEntry) -> &'static str {
                 "[MAT]"
             }
         }
-        "lua" => "[SCRIPT]",
+        "lua" | "luau" => "[SCRIPT]",
         "glb" | "gltf" => "[MODEL]",
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => "[TEX]",
         _ => "[FILE]",
@@ -6095,7 +6237,7 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
                 Color32::from_rgb(120, 90, 60)
             }
         }
-        "lua" => Color32::from_rgb(60, 110, 70),
+        "lua" | "luau" => Color32::from_rgb(60, 110, 70),
         "glb" | "gltf" => Color32::from_rgb(90, 70, 130),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => Color32::from_rgb(120, 80, 80),
         _ => Color32::from_rgb(70, 70, 90),
@@ -8255,7 +8397,7 @@ fn create_script_asset(world: &mut World, project: &EditorProject) -> Option<Pat
         return None;
     }
 
-    let candidate = scripts_root.join("script.lua");
+    let candidate = scripts_root.join("script.luau");
     let path = unique_path(&candidate);
     if let Err(err) = fs::write(&path, default_script_template_full()) {
         set_status(world, format!("Failed to write script: {}", err));
@@ -8519,10 +8661,20 @@ fn is_material_file(path: &Path) -> bool {
 }
 
 fn is_script_file(path: &Path) -> bool {
-    path.extension()
+    let is_script_ext = path
+        .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("lua"))
-        .unwrap_or(false)
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "lua" | "luau"))
+        .unwrap_or(false);
+    if !is_script_ext {
+        return false;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
 }
 
 fn push_command(world: &mut World, command: EditorCommand) {

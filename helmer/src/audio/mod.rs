@@ -620,20 +620,23 @@ struct StreamResampler {
     ratio: f64,
     pos: f64,
     source_offset: u64,
-    prev: f32,
+    prev: Vec<f32>,
     has_prev: bool,
+    channels: usize,
 }
 
 impl StreamResampler {
-    fn new(source_rate: u32, output_rate: u32) -> Self {
+    fn new(source_rate: u32, output_rate: u32, channels: u16) -> Self {
+        let channels = channels.max(1) as usize;
         let mut resampler = Self {
             source_rate: source_rate.max(1),
             output_rate: output_rate.max(1),
             ratio: 1.0,
             pos: 0.0,
             source_offset: 0,
-            prev: 0.0,
+            prev: vec![0.0; channels],
             has_prev: false,
+            channels,
         };
         resampler.recompute_ratio();
         resampler
@@ -642,8 +645,10 @@ impl StreamResampler {
     fn reset(&mut self) {
         self.pos = 0.0;
         self.source_offset = 0;
-        self.prev = 0.0;
         self.has_prev = false;
+        for sample in self.prev.iter_mut() {
+            *sample = 0.0;
+        }
     }
 
     fn set_source_rate(&mut self, source_rate: u32) {
@@ -664,6 +669,16 @@ impl StreamResampler {
         self.recompute_ratio();
     }
 
+    fn set_channels(&mut self, channels: u16) {
+        let channels = channels.max(1) as usize;
+        if self.channels == channels {
+            return;
+        }
+        self.channels = channels;
+        self.prev.resize(channels, 0.0);
+        self.reset();
+    }
+
     fn recompute_ratio(&mut self) {
         self.ratio = self.source_rate as f64 / self.output_rate as f64;
         if !self.ratio.is_finite() || self.ratio <= f64::EPSILON {
@@ -671,15 +686,25 @@ impl StreamResampler {
         }
     }
 
-    fn resample_mono_chunk(&mut self, input: &[f32], output: &mut Vec<f32>) {
+    fn resample_interleaved_chunk(&mut self, input: &[f32], channels: u16, output: &mut Vec<f32>) {
         if input.is_empty() {
             return;
         }
+        let channels = channels.max(1) as usize;
+        if channels != self.channels {
+            self.set_channels(channels as u16);
+        }
+        let frame_count = input.len() / channels;
+        if frame_count == 0 {
+            return;
+        }
         let chunk_start = self.source_offset;
-        let chunk_end = chunk_start + input.len() as u64;
+        let chunk_end = chunk_start + frame_count as u64;
 
         if !self.has_prev {
-            self.prev = input[0];
+            for ch in 0..channels {
+                self.prev[ch] = input[ch];
+            }
             self.has_prev = true;
         }
 
@@ -688,20 +713,34 @@ impl StreamResampler {
         while pos < max_pos {
             let idx = pos.floor() as i64;
             let frac = (pos - idx as f64) as f32;
-            let (a, b) = if idx < chunk_start as i64 {
-                (self.prev, input[0])
+            if idx < chunk_start as i64 {
+                let next_base = 0;
+                for ch in 0..channels {
+                    let a = self.prev[ch];
+                    let b = input[next_base + ch];
+                    output.push(a + (b - a) * frac);
+                }
             } else {
                 let i = (idx as u64 - chunk_start) as usize;
-                let a = input[i];
-                let b = input[i + 1];
-                (a, b)
-            };
-            output.push(a + (b - a) * frac);
+                let base = i * channels;
+                let next_base = base + channels;
+                if next_base + channels > input.len() {
+                    break;
+                }
+                for ch in 0..channels {
+                    let a = input[base + ch];
+                    let b = input[next_base + ch];
+                    output.push(a + (b - a) * frac);
+                }
+            }
             pos += self.ratio;
         }
         self.pos = pos;
         self.source_offset = chunk_end;
-        self.prev = *input.last().unwrap_or(&self.prev);
+        let last_base = (frame_count - 1) * channels;
+        for ch in 0..channels {
+            self.prev[ch] = input[last_base + ch];
+        }
     }
 }
 
@@ -727,7 +766,7 @@ impl AudioStreamState {
         let declared_rate = clip.sample_rate();
         let source_rate = declared_rate.unwrap_or(clip.sample_rate);
         let output_rate = output_rate.max(1);
-        let resampler = StreamResampler::new(source_rate.max(1), output_rate);
+        let resampler = StreamResampler::new(source_rate.max(1), output_rate, source_channels);
         #[cfg(not(target_arch = "wasm32"))]
         let decoder = match &clip.data {
             AudioClipData::Encoded { bytes, .. } => {
@@ -793,6 +832,7 @@ impl AudioStreamState {
                 }
                 if decoder.channels > 0 && self.source_channels != decoder.channels {
                     self.source_channels = decoder.channels;
+                    self.resampler.set_channels(self.source_channels);
                 }
                 if decoder.sample_rate > 0 && self.source_rate != decoder.sample_rate {
                     let candidate = decoder.sample_rate;
@@ -810,14 +850,24 @@ impl AudioStreamState {
                 if frames == 0 {
                     continue;
                 }
-                let mono = mono_from_interleaved(&temp, self.source_channels.max(1));
                 let before = self.buffer.len();
-                self.resampler.resample_mono_chunk(&mono, &mut self.buffer);
-                self.buffer_frames += self.buffer.len().saturating_sub(before);
+                self.resampler.resample_interleaved_chunk(
+                    &temp,
+                    self.source_channels.max(1),
+                    &mut self.buffer,
+                );
+                let channel_count = self.source_channels.max(1) as usize;
+                let added_samples = self.buffer.len().saturating_sub(before);
+                let added_frames = if channel_count > 0 {
+                    added_samples / channel_count
+                } else {
+                    0
+                };
+                self.buffer_frames += added_frames;
 
                 if buffer_limit > 0 && self.buffer_frames > buffer_limit {
                     let drop_frames = self.buffer_frames.saturating_sub(buffer_limit);
-                    let drop_samples = drop_frames;
+                    let drop_samples = drop_frames * self.source_channels.max(1) as usize;
                     if drop_samples > 0 && drop_samples < self.buffer.len() {
                         self.buffer.drain(0..drop_samples);
                         self.buffer_start_frame += drop_frames as u64;
@@ -835,7 +885,12 @@ impl AudioStreamState {
         target_frame < self.buffer_start_frame + self.buffer_frames as u64
     }
 
-    fn sample(&mut self, cursor: f64, chunk_frames: usize, buffer_limit: usize) -> Option<f32> {
+    fn sample_frame(
+        &mut self,
+        cursor: f64,
+        chunk_frames: usize,
+        buffer_limit: usize,
+    ) -> Option<[f32; 2]> {
         if self.failed {
             return None;
         }
@@ -862,9 +917,46 @@ impl AudioStreamState {
         };
 
         let t = (cursor - base as f64) as f32;
-        let a = self.buffer.get(base_idx).copied().unwrap_or(0.0);
-        let b = self.buffer.get(next_idx).copied().unwrap_or(a);
-        Some(a + (b - a) * t)
+        let channels = self.source_channels.max(1) as usize;
+        if channels == 1 {
+            let a = self.buffer.get(base_idx).copied().unwrap_or(0.0);
+            let b = self.buffer.get(next_idx).copied().unwrap_or(a);
+            let sample = a + (b - a) * t;
+            return Some([sample, sample]);
+        }
+
+        let base_sample = base_idx * channels;
+        let next_sample = next_idx * channels;
+        if base_sample + 1 >= self.buffer.len() {
+            return None;
+        }
+        let a_left = self.buffer[base_sample];
+        let a_right = self.buffer[base_sample + 1];
+        let b_left = self.buffer.get(next_sample).copied().unwrap_or(a_left);
+        let b_right = self.buffer.get(next_sample + 1).copied().unwrap_or(a_right);
+        Some([
+            a_left + (b_left - a_left) * t,
+            a_right + (b_right - a_right) * t,
+        ])
+    }
+
+    fn sample_mono(
+        &mut self,
+        cursor: f64,
+        chunk_frames: usize,
+        buffer_limit: usize,
+    ) -> Option<f32> {
+        let frame = self.sample_frame(cursor, chunk_frames, buffer_limit)?;
+        Some((frame[0] + frame[1]) * 0.5)
+    }
+
+    fn sample_stereo(
+        &mut self,
+        cursor: f64,
+        chunk_frames: usize,
+        buffer_limit: usize,
+    ) -> Option<[f32; 2]> {
+        self.sample_frame(cursor, chunk_frames, buffer_limit)
     }
 
     fn sample_rate(&self) -> Option<u32> {
@@ -1262,7 +1354,8 @@ impl AudioEngine {
                 continue;
             }
 
-            let (pan, attenuation, left_delay, right_delay) = if emitter.settings.spatial {
+            let spatial = emitter.settings.spatial;
+            let (pan, attenuation, left_delay, right_delay) = if spatial {
                 spatial_params(
                     listener.position,
                     emitter.position,
@@ -1277,11 +1370,13 @@ impl AudioEngine {
                 (0.0, 1.0, 0, 0)
             };
 
-            emitter.delay.resize(max_itd_samples);
-            emitter.delay.left_delay = left_delay;
-            emitter.delay.right_delay = right_delay;
+            if spatial {
+                emitter.delay.resize(max_itd_samples);
+                emitter.delay.left_delay = left_delay;
+                emitter.delay.right_delay = right_delay;
+            }
 
-            let (left_gain, right_gain) = pan_gains(pan);
+            let (left_gain, right_gain) = if spatial { pan_gains(pan) } else { (1.0, 1.0) };
             let final_left = gain * attenuation * left_gain;
             let final_right = gain * attenuation * right_gain;
 
@@ -1297,7 +1392,7 @@ impl AudioEngine {
             };
             let pitch = emitter.settings.pitch;
             let mut resampled: Option<Arc<Vec<f32>>> = None;
-            if decoded {
+            if decoded && spatial {
                 if let Some(rate) = clip_rate_hint {
                     if rate != engine_rate_u32 {
                         if let Some(frames) = resample_clip_mono_cached(
@@ -1351,94 +1446,181 @@ impl AudioEngine {
             let mut frame_index = 0usize;
             while frame_index < frames {
                 let cursor = emitter.resampler.cursor();
-                let mut sample = if decoded {
-                    if let Some(frames) = resampled.as_deref() {
-                        sample_from_mono(frames, cursor)
-                    } else {
-                        sample_from_clip(&emitter.clip, cursor)
-                    }
-                } else {
-                    None
-                };
-
-                if sample.is_none() && !decoded {
-                    if emitter.stream.is_none() {
-                        let cache_key = clip_cache_key(&emitter.clip);
-                        if let Some(cache) = stream_caches.get_mut(&cache_key) {
-                            sample = cache.sample(
-                                cursor,
-                                streaming_chunk_frames,
-                                streaming_buffer_frames,
-                            );
-                            if let Some(rate) = cache.sample_rate() {
-                                emitter.stream_sample_rate = Some(rate);
-                            }
+                if spatial {
+                    let mut sample = if decoded {
+                        if let Some(frames) = resampled.as_deref() {
+                            sample_from_mono(frames, cursor)
                         } else {
-                            let mut cache =
-                                AudioStreamState::new(emitter.clip.clone(), engine_rate_u32);
-                            sample = cache.sample(
-                                cursor,
-                                streaming_chunk_frames,
-                                streaming_buffer_frames,
-                            );
-                            if let Some(rate) = cache.sample_rate() {
-                                emitter.stream_sample_rate = Some(rate);
-                            }
-                            stream_caches.insert(cache_key, cache);
+                            sample_from_clip(&emitter.clip, cursor)
                         }
-                        if sample.is_some() {
-                            stream_cache_used.insert(cache_key);
-                        }
-                    }
+                    } else {
+                        None
+                    };
 
-                    if sample.is_none() {
+                    if sample.is_none() && !decoded {
                         if emitter.stream.is_none() {
-                            emitter.stream =
-                                Some(AudioStreamState::new(emitter.clip.clone(), engine_rate_u32));
-                        }
-                        if let Some(stream) = emitter.stream.as_mut() {
-                            sample = stream.sample(
-                                cursor,
-                                streaming_chunk_frames,
-                                streaming_buffer_frames,
-                            );
-                            if let Some(rate) = stream.sample_rate() {
-                                emitter.stream_sample_rate = Some(rate);
+                            let cache_key = clip_cache_key(&emitter.clip);
+                            if let Some(cache) = stream_caches.get_mut(&cache_key) {
+                                sample = cache.sample_mono(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = cache.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
+                            } else {
+                                let mut cache =
+                                    AudioStreamState::new(emitter.clip.clone(), engine_rate_u32);
+                                sample = cache.sample_mono(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = cache.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
+                                stream_caches.insert(cache_key, cache);
+                            }
+                            if sample.is_some() {
+                                stream_cache_used.insert(cache_key);
                             }
                         }
-                    }
-                }
 
-                let sample = match sample {
-                    Some(sample) => sample,
-                    None => {
-                        if emitter.settings.looping {
-                            if !emitter.clip.is_decoded() && emitter.stream.is_none() {
+                        if sample.is_none() {
+                            if emitter.stream.is_none() {
                                 emitter.stream = Some(AudioStreamState::new(
                                     emitter.clip.clone(),
                                     engine_rate_u32,
                                 ));
                             }
                             if let Some(stream) = emitter.stream.as_mut() {
-                                stream.reset();
+                                sample = stream.sample_mono(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = stream.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
                             }
-                            emitter.resampler.reset();
-                            continue;
                         }
-                        emitter.settings.playback_state = AudioPlaybackState::Stopped;
-                        finished.push(*id);
-                        ended.push(*id);
-                        break;
                     }
-                };
 
-                let (delay_left, delay_right) = emitter.delay.write(sample);
-                let out_left = delay_left * final_left;
-                let out_right = delay_right * final_right;
+                    let sample = match sample {
+                        Some(sample) => sample,
+                        None => {
+                            if emitter.settings.looping {
+                                if !emitter.clip.is_decoded() && emitter.stream.is_none() {
+                                    emitter.stream = Some(AudioStreamState::new(
+                                        emitter.clip.clone(),
+                                        engine_rate_u32,
+                                    ));
+                                }
+                                if let Some(stream) = emitter.stream.as_mut() {
+                                    stream.reset();
+                                }
+                                emitter.resampler.reset();
+                                continue;
+                            }
+                            emitter.settings.playback_state = AudioPlaybackState::Stopped;
+                            finished.push(*id);
+                            ended.push(*id);
+                            break;
+                        }
+                    };
 
-                let target = &mut scratch[frame_index];
-                target[0] += out_left;
-                target[1] += out_right;
+                    let (delay_left, delay_right) = emitter.delay.write(sample);
+                    let out_left = delay_left * final_left;
+                    let out_right = delay_right * final_right;
+
+                    let target = &mut scratch[frame_index];
+                    target[0] += out_left;
+                    target[1] += out_right;
+                } else {
+                    let mut frame = if decoded {
+                        sample_stereo_from_clip(&emitter.clip, cursor)
+                    } else {
+                        None
+                    };
+
+                    if frame.is_none() && !decoded {
+                        if emitter.stream.is_none() {
+                            let cache_key = clip_cache_key(&emitter.clip);
+                            if let Some(cache) = stream_caches.get_mut(&cache_key) {
+                                frame = cache.sample_stereo(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = cache.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
+                            } else {
+                                let mut cache =
+                                    AudioStreamState::new(emitter.clip.clone(), engine_rate_u32);
+                                frame = cache.sample_stereo(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = cache.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
+                                stream_caches.insert(cache_key, cache);
+                            }
+                            if frame.is_some() {
+                                stream_cache_used.insert(cache_key);
+                            }
+                        }
+
+                        if frame.is_none() {
+                            if emitter.stream.is_none() {
+                                emitter.stream = Some(AudioStreamState::new(
+                                    emitter.clip.clone(),
+                                    engine_rate_u32,
+                                ));
+                            }
+                            if let Some(stream) = emitter.stream.as_mut() {
+                                frame = stream.sample_stereo(
+                                    cursor,
+                                    streaming_chunk_frames,
+                                    streaming_buffer_frames,
+                                );
+                                if let Some(rate) = stream.sample_rate() {
+                                    emitter.stream_sample_rate = Some(rate);
+                                }
+                            }
+                        }
+                    }
+
+                    let frame = match frame {
+                        Some(frame) => frame,
+                        None => {
+                            if emitter.settings.looping {
+                                if !emitter.clip.is_decoded() && emitter.stream.is_none() {
+                                    emitter.stream = Some(AudioStreamState::new(
+                                        emitter.clip.clone(),
+                                        engine_rate_u32,
+                                    ));
+                                }
+                                if let Some(stream) = emitter.stream.as_mut() {
+                                    stream.reset();
+                                }
+                                emitter.resampler.reset();
+                                continue;
+                            }
+                            emitter.settings.playback_state = AudioPlaybackState::Stopped;
+                            finished.push(*id);
+                            ended.push(*id);
+                            break;
+                        }
+                    };
+
+                    let target = &mut scratch[frame_index];
+                    target[0] += frame[0] * final_left;
+                    target[1] += frame[1] * final_right;
+                }
 
                 emitter.resampler.advance();
                 frame_index += 1;
@@ -1745,6 +1927,50 @@ fn sample_from_clip(clip: &AudioClip, cursor: f64) -> Option<f32> {
     }
     sample /= channels as f32;
     Some(sample)
+}
+
+fn sample_stereo_from_clip(clip: &AudioClip, cursor: f64) -> Option<[f32; 2]> {
+    let AudioClipData::Pcm {
+        channels, frames, ..
+    } = &clip.data
+    else {
+        return None;
+    };
+    let channels = *channels as usize;
+    if channels == 0 {
+        return None;
+    }
+    let frame_count = frames.len() / channels;
+    if frame_count == 0 {
+        return None;
+    }
+    let base = cursor.floor() as usize;
+    if base >= frame_count {
+        return None;
+    }
+    let next = (base + 1).min(frame_count - 1);
+    let t = (cursor - base as f64) as f32;
+
+    if channels == 1 {
+        let a = frames[base];
+        let b = frames[next];
+        let sample = a + (b - a) * t;
+        return Some([sample, sample]);
+    }
+
+    let base_idx = base * channels;
+    let next_idx = next * channels;
+    if base_idx + 1 >= frames.len() || next_idx + 1 >= frames.len() {
+        return None;
+    }
+    let a_left = frames[base_idx];
+    let b_left = frames[next_idx];
+    let a_right = frames[base_idx + 1];
+    let b_right = frames[next_idx + 1];
+    Some([
+        a_left + (b_left - a_left) * t,
+        a_right + (b_right - a_right) * t,
+    ])
 }
 
 fn sample_from_mono(frames: &[f32], cursor: f64) -> Option<f32> {

@@ -3345,6 +3345,13 @@ fn resolve_project_path(project: Option<&EditorProject>, path: &Path) -> PathBuf
     path.to_path_buf()
 }
 
+fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
+    if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+        let current = transform.0;
+        transform.0 = current;
+    }
+}
+
 fn apply_mesh_renderer(
     world: &mut World,
     entity: Entity,
@@ -3397,6 +3404,7 @@ fn apply_mesh_renderer(
                 material_path,
             },
         ));
+        mark_entity_render_dirty(world, entity);
         applied = true;
     });
 

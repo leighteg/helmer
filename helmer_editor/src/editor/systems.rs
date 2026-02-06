@@ -60,11 +60,12 @@ use crate::editor::{
     scripting::{ScriptComponent, ScriptRegistry, is_script_path, load_script_asset},
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
-        EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility, EditorUiState,
-        EditorWorkspaceState, InspectorPinnedEntityResource, close_editor_window,
-        draw_assets_window, draw_audio_mixer_window, draw_editor_window, draw_history_window,
-        draw_inspector_window, draw_pane_manager_window, draw_project_window, draw_scene_window,
-        draw_timeline_window, draw_toolbar, draw_viewport_window,
+        AssetDragState, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
+        EditorUiState, EditorWorkspaceState, EntityDragState, InspectorPinnedEntityResource,
+        MiddleDragUiState, close_editor_window, draw_assets_window, draw_audio_mixer_window,
+        draw_editor_window, draw_history_window, draw_inspector_window, draw_pane_manager_window,
+        draw_project_window, draw_scene_window, draw_timeline_window, draw_toolbar,
+        draw_viewport_window,
     },
     undo_action,
     watch::configure_file_watcher,
@@ -571,6 +572,7 @@ pub fn editor_layout_update_system(world: &mut World) {
         window_rects,
         window_collapsed,
         pointer_down,
+        pointer_pressed,
         pointer_released,
         pointer_pos,
         grab_radius,
@@ -584,13 +586,15 @@ pub fn editor_layout_update_system(world: &mut World) {
         };
         let window_rects = egui_res.window_rects.clone();
         let window_collapsed = egui_res.window_collapsed.clone();
-        let (pointer_down, pointer_released, pointer_pos) = egui_res.ctx.input(|input| {
-            (
-                input.pointer.any_down(),
-                input.pointer.any_released(),
-                input.pointer.interact_pos(),
-            )
-        });
+        let (pointer_down, pointer_pressed, pointer_released, pointer_pos) =
+            egui_res.ctx.input(|input| {
+                (
+                    input.pointer.button_down(egui::PointerButton::Primary),
+                    input.pointer.button_pressed(egui::PointerButton::Primary),
+                    input.pointer.button_released(egui::PointerButton::Primary),
+                    input.pointer.interact_pos(),
+                )
+            });
         let top_layer_id = pointer_pos.and_then(|pos| egui_res.ctx.layer_id_at(pos));
         let style = egui_res.ctx.style();
         let grab_radius = style
@@ -605,12 +609,29 @@ pub fn editor_layout_update_system(world: &mut World) {
             window_rects,
             window_collapsed,
             pointer_down,
+            pointer_pressed,
             pointer_released,
             pointer_pos,
             grab_radius,
             top_layer_id,
         )
     };
+    let gizmo_drag_active = world
+        .get_resource::<EditorGizmoState>()
+        .map(|state| state.is_drag_active())
+        .unwrap_or(false);
+    let asset_drag_active = world
+        .get_resource::<AssetDragState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
+    let entity_drag_active = world
+        .get_resource::<EntityDragState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
+    let middle_drag_active = world
+        .get_resource::<MiddleDragUiState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
 
     let mut state = world
         .get_resource_mut::<EditorLayoutState>()
@@ -707,7 +728,11 @@ pub fn editor_layout_update_system(world: &mut World) {
     };
 
     let layout_rects = layout_rects_for_screen(&layout, screen_rect, pixels_per_point);
-    let external_drag_active = ctx.dragged_id().is_some();
+    let external_drag_active = ctx.dragged_id().is_some()
+        || gizmo_drag_active
+        || asset_drag_active
+        || entity_drag_active
+        || middle_drag_active;
 
     if state.layout_dragging_window.is_none() && external_drag_active {
         state.last_screen_rect = Some(screen_rect);
@@ -745,8 +770,13 @@ pub fn editor_layout_update_system(world: &mut World) {
             }
         })
     });
+    let pointer_blocked_by_non_layout = top_layer_id.is_some() && preferred_window_id.is_none();
 
-    if pointer_down && state.layout_dragging_window.is_none() && allow_layout_edit {
+    if pointer_pressed
+        && state.layout_dragging_window.is_none()
+        && allow_layout_edit
+        && !pointer_blocked_by_non_layout
+    {
         if let Some(pos) = pointer_pos {
             if let Some((id, mode, edges)) = pick_layout_drag_target(
                 &ctx,

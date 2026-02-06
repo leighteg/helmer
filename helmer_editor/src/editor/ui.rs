@@ -3658,12 +3658,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
                     renderer.0.casts_shadow = casts_shadow;
                 }
+                mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Mesh");
             }
             if ui.checkbox(&mut visible, "Visible").changed() {
                 if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
                     renderer.0.visible = visible;
                 }
+                mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Mesh");
             }
 
@@ -3835,6 +3837,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             }
 
             if skinned_changed {
+                mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Skinned Mesh");
             }
         }
@@ -8051,6 +8054,13 @@ fn resolve_asset_path(project: Option<&EditorProject>, path: &str) -> PathBuf {
     candidate.to_path_buf()
 }
 
+fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
+    if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+        let current = transform.0;
+        transform.0 = current;
+    }
+}
+
 fn apply_mesh_renderer(
     world: &mut World,
     entity: Entity,
@@ -8105,6 +8115,7 @@ fn apply_mesh_renderer(
                 material_path,
             },
         ));
+        mark_entity_render_dirty(world, entity);
     });
 }
 
@@ -8301,6 +8312,7 @@ fn apply_skinned_mesh_renderer_from_scene_node(
     world
         .entity_mut(entity)
         .insert(BevySkinnedMeshRenderer(skinned));
+    mark_entity_render_dirty(world, entity);
 
     if world.get::<BevyAnimator>(entity).is_none() {
         if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {

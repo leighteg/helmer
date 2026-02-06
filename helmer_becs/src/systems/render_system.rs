@@ -753,15 +753,17 @@ impl RenderWorkerCore {
                                 let entry_mut = entry.get_mut();
                                 entry_mut.cell_key = cell_key;
                                 entry_mut.cell_index = new_index;
+                                let was_cull_dirty = entry_mut.cull_dirty;
                                 entry_mut.update(update.transform, update.mesh);
-                                if !entry_mut.cull_dirty {
+                                if !was_cull_dirty {
                                     entry_mut.cull_dirty = true;
                                     dirty_objects.push(update.entity);
                                 }
                             } else {
                                 let entry_mut = entry.get_mut();
+                                let was_cull_dirty = entry_mut.cull_dirty;
                                 entry_mut.update(update.transform, update.mesh);
-                                if !entry_mut.cull_dirty {
+                                if !was_cull_dirty {
                                     entry_mut.cull_dirty = true;
                                     dirty_objects.push(update.entity);
                                 }

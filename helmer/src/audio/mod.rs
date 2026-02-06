@@ -47,6 +47,7 @@ const DEFAULT_HEAD_WIDTH: f32 = 0.18;
 const DEFAULT_STREAM_BUFFER_FRAMES: usize = 8_192;
 const DEFAULT_STREAM_CHUNK_FRAMES: usize = 2_048;
 const OUTPUT_BUFFER_ALIGNMENT: u32 = 256;
+const MAX_UNCOMPRESSED_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
 fn align_output_buffer_frames(frames: u32) -> u32 {
     if frames == 0 {
@@ -148,7 +149,16 @@ impl AudioClip {
     ) -> Result<Self, String> {
         let format = detect_format(&name, bytes);
         let header_info = probe_audio_header_info(&name, bytes);
-        if load_mode == AudioLoadMode::Static {
+        let force_static_pcm = load_mode == AudioLoadMode::Streaming
+            && matches!(format, AudioFormat::Wav | AudioFormat::Aiff)
+            && bytes.len() <= MAX_UNCOMPRESSED_STREAM_BYTES;
+        let resolved_mode = if force_static_pcm {
+            AudioLoadMode::Static
+        } else {
+            load_mode
+        };
+
+        if resolved_mode == AudioLoadMode::Static {
             if format == AudioFormat::Wav {
                 if let Ok(pcm) = parse_wav(bytes) {
                     let frame_count = pcm.frames.len() / pcm.channels as usize;
@@ -169,7 +179,7 @@ impl AudioClip {
                         size_bytes,
                         channels: pcm.channels,
                         sample_rate: pcm.sample_rate,
-                        load_mode,
+                        load_mode: resolved_mode,
                     });
                 }
             }
@@ -193,7 +203,7 @@ impl AudioClip {
                         size_bytes,
                         channels: pcm.channels,
                         sample_rate: pcm.sample_rate,
-                        load_mode,
+                        load_mode: resolved_mode,
                     });
                 }
             }
@@ -224,7 +234,7 @@ impl AudioClip {
                     size_bytes,
                     channels: pcm.channels,
                     sample_rate: pcm.sample_rate,
-                    load_mode,
+                    load_mode: resolved_mode,
                 });
             }
         }
@@ -242,7 +252,7 @@ impl AudioClip {
             size_bytes: bytes.len(),
             channels,
             sample_rate,
-            load_mode,
+            load_mode: resolved_mode,
         })
     }
 
@@ -1355,6 +1365,9 @@ impl AudioEngine {
             }
 
             let spatial = emitter.settings.spatial;
+            let spatial_blend = emitter.settings.spatial_blend.clamp(0.0, 1.0);
+            let spatial_active = spatial && spatial_blend > 0.0;
+            let stereo_active = !spatial || spatial_blend < 1.0;
             let (pan, attenuation, left_delay, right_delay) = if spatial {
                 spatial_params(
                     listener.position,
@@ -1363,22 +1376,25 @@ impl AudioEngine {
                     emitter.settings.min_distance,
                     emitter.settings.max_distance,
                     emitter.settings.rolloff,
-                    emitter.settings.spatial_blend,
+                    1.0,
                     max_itd_samples,
                 )
             } else {
                 (0.0, 1.0, 0, 0)
             };
 
-            if spatial {
+            if spatial_active {
+                let scaled_left_delay = ((left_delay as f32) * spatial_blend).round() as usize;
+                let scaled_right_delay = ((right_delay as f32) * spatial_blend).round() as usize;
                 emitter.delay.resize(max_itd_samples);
-                emitter.delay.left_delay = left_delay;
-                emitter.delay.right_delay = right_delay;
+                emitter.delay.left_delay = scaled_left_delay;
+                emitter.delay.right_delay = scaled_right_delay;
             }
 
             let (left_gain, right_gain) = if spatial { pan_gains(pan) } else { (1.0, 1.0) };
-            let final_left = gain * attenuation * left_gain;
-            let final_right = gain * attenuation * right_gain;
+            let spatial_left = gain * attenuation * left_gain;
+            let spatial_right = gain * attenuation * right_gain;
+            let stereo_gain = gain * attenuation;
 
             let clip_rate_hint = clip_pcm_rate(&emitter.clip);
             let decoded = emitter.clip.is_decoded();
@@ -1392,7 +1408,7 @@ impl AudioEngine {
             };
             let pitch = emitter.settings.pitch;
             let mut resampled: Option<Arc<Vec<f32>>> = None;
-            if decoded && spatial {
+            if decoded && spatial_active && !stereo_active {
                 if let Some(rate) = clip_rate_hint {
                     if rate != engine_rate_u32 {
                         if let Some(frames) = resample_clip_mono_cached(
@@ -1446,109 +1462,21 @@ impl AudioEngine {
             let mut frame_index = 0usize;
             while frame_index < frames {
                 let cursor = emitter.resampler.cursor();
-                if spatial {
-                    let mut sample = if decoded {
-                        if let Some(frames) = resampled.as_deref() {
-                            sample_from_mono(frames, cursor)
-                        } else {
-                            sample_from_clip(&emitter.clip, cursor)
-                        }
-                    } else {
-                        None
-                    };
+                let mut stereo_frame: Option<[f32; 2]> = None;
+                let mut mono_sample: Option<f32> = None;
 
-                    if sample.is_none() && !decoded {
-                        if emitter.stream.is_none() {
-                            let cache_key = clip_cache_key(&emitter.clip);
-                            if let Some(cache) = stream_caches.get_mut(&cache_key) {
-                                sample = cache.sample_mono(
-                                    cursor,
-                                    streaming_chunk_frames,
-                                    streaming_buffer_frames,
-                                );
-                                if let Some(rate) = cache.sample_rate() {
-                                    emitter.stream_sample_rate = Some(rate);
-                                }
-                            } else {
-                                let mut cache =
-                                    AudioStreamState::new(emitter.clip.clone(), engine_rate_u32);
-                                sample = cache.sample_mono(
-                                    cursor,
-                                    streaming_chunk_frames,
-                                    streaming_buffer_frames,
-                                );
-                                if let Some(rate) = cache.sample_rate() {
-                                    emitter.stream_sample_rate = Some(rate);
-                                }
-                                stream_caches.insert(cache_key, cache);
-                            }
-                            if sample.is_some() {
-                                stream_cache_used.insert(cache_key);
-                            }
-                        }
-
-                        if sample.is_none() {
-                            if emitter.stream.is_none() {
-                                emitter.stream = Some(AudioStreamState::new(
-                                    emitter.clip.clone(),
-                                    engine_rate_u32,
-                                ));
-                            }
-                            if let Some(stream) = emitter.stream.as_mut() {
-                                sample = stream.sample_mono(
-                                    cursor,
-                                    streaming_chunk_frames,
-                                    streaming_buffer_frames,
-                                );
-                                if let Some(rate) = stream.sample_rate() {
-                                    emitter.stream_sample_rate = Some(rate);
-                                }
-                            }
-                        }
-                    }
-
-                    let sample = match sample {
-                        Some(sample) => sample,
-                        None => {
-                            if emitter.settings.looping {
-                                if !emitter.clip.is_decoded() && emitter.stream.is_none() {
-                                    emitter.stream = Some(AudioStreamState::new(
-                                        emitter.clip.clone(),
-                                        engine_rate_u32,
-                                    ));
-                                }
-                                if let Some(stream) = emitter.stream.as_mut() {
-                                    stream.reset();
-                                }
-                                emitter.resampler.reset();
-                                continue;
-                            }
-                            emitter.settings.playback_state = AudioPlaybackState::Stopped;
-                            finished.push(*id);
-                            ended.push(*id);
-                            break;
-                        }
-                    };
-
-                    let (delay_left, delay_right) = emitter.delay.write(sample);
-                    let out_left = delay_left * final_left;
-                    let out_right = delay_right * final_right;
-
-                    let target = &mut scratch[frame_index];
-                    target[0] += out_left;
-                    target[1] += out_right;
-                } else {
-                    let mut frame = if decoded {
+                if stereo_active {
+                    stereo_frame = if decoded {
                         sample_stereo_from_clip(&emitter.clip, cursor)
                     } else {
                         None
                     };
 
-                    if frame.is_none() && !decoded {
+                    if stereo_frame.is_none() && !decoded {
                         if emitter.stream.is_none() {
                             let cache_key = clip_cache_key(&emitter.clip);
                             if let Some(cache) = stream_caches.get_mut(&cache_key) {
-                                frame = cache.sample_stereo(
+                                stereo_frame = cache.sample_stereo(
                                     cursor,
                                     streaming_chunk_frames,
                                     streaming_buffer_frames,
@@ -1559,7 +1487,7 @@ impl AudioEngine {
                             } else {
                                 let mut cache =
                                     AudioStreamState::new(emitter.clip.clone(), engine_rate_u32);
-                                frame = cache.sample_stereo(
+                                stereo_frame = cache.sample_stereo(
                                     cursor,
                                     streaming_chunk_frames,
                                     streaming_buffer_frames,
@@ -1569,12 +1497,12 @@ impl AudioEngine {
                                 }
                                 stream_caches.insert(cache_key, cache);
                             }
-                            if frame.is_some() {
+                            if stereo_frame.is_some() {
                                 stream_cache_used.insert(cache_key);
                             }
                         }
 
-                        if frame.is_none() {
+                        if stereo_frame.is_none() {
                             if emitter.stream.is_none() {
                                 emitter.stream = Some(AudioStreamState::new(
                                     emitter.clip.clone(),
@@ -1582,7 +1510,7 @@ impl AudioEngine {
                                 ));
                             }
                             if let Some(stream) = emitter.stream.as_mut() {
-                                frame = stream.sample_stereo(
+                                stereo_frame = stream.sample_stereo(
                                     cursor,
                                     streaming_chunk_frames,
                                     streaming_buffer_frames,
@@ -1593,33 +1521,123 @@ impl AudioEngine {
                             }
                         }
                     }
+                }
 
-                    let frame = match frame {
-                        Some(frame) => frame,
-                        None => {
-                            if emitter.settings.looping {
-                                if !emitter.clip.is_decoded() && emitter.stream.is_none() {
+                if spatial_active {
+                    if let Some(frame) = stereo_frame {
+                        mono_sample = Some((frame[0] + frame[1]) * 0.5);
+                    } else {
+                        mono_sample = if decoded {
+                            if let Some(frames) = resampled.as_deref() {
+                                sample_from_mono(frames, cursor)
+                            } else {
+                                sample_from_clip(&emitter.clip, cursor)
+                            }
+                        } else {
+                            None
+                        };
+
+                        if mono_sample.is_none() && !decoded {
+                            if emitter.stream.is_none() {
+                                let cache_key = clip_cache_key(&emitter.clip);
+                                if let Some(cache) = stream_caches.get_mut(&cache_key) {
+                                    mono_sample = cache.sample_mono(
+                                        cursor,
+                                        streaming_chunk_frames,
+                                        streaming_buffer_frames,
+                                    );
+                                    if let Some(rate) = cache.sample_rate() {
+                                        emitter.stream_sample_rate = Some(rate);
+                                    }
+                                } else {
+                                    let mut cache = AudioStreamState::new(
+                                        emitter.clip.clone(),
+                                        engine_rate_u32,
+                                    );
+                                    mono_sample = cache.sample_mono(
+                                        cursor,
+                                        streaming_chunk_frames,
+                                        streaming_buffer_frames,
+                                    );
+                                    if let Some(rate) = cache.sample_rate() {
+                                        emitter.stream_sample_rate = Some(rate);
+                                    }
+                                    stream_caches.insert(cache_key, cache);
+                                }
+                                if mono_sample.is_some() {
+                                    stream_cache_used.insert(cache_key);
+                                }
+                            }
+
+                            if mono_sample.is_none() {
+                                if emitter.stream.is_none() {
                                     emitter.stream = Some(AudioStreamState::new(
                                         emitter.clip.clone(),
                                         engine_rate_u32,
                                     ));
                                 }
                                 if let Some(stream) = emitter.stream.as_mut() {
-                                    stream.reset();
+                                    mono_sample = stream.sample_mono(
+                                        cursor,
+                                        streaming_chunk_frames,
+                                        streaming_buffer_frames,
+                                    );
+                                    if let Some(rate) = stream.sample_rate() {
+                                        emitter.stream_sample_rate = Some(rate);
+                                    }
                                 }
-                                emitter.resampler.reset();
-                                continue;
                             }
-                            emitter.settings.playback_state = AudioPlaybackState::Stopped;
-                            finished.push(*id);
-                            ended.push(*id);
-                            break;
                         }
-                    };
+                    }
+                }
 
-                    let target = &mut scratch[frame_index];
-                    target[0] += frame[0] * final_left;
-                    target[1] += frame[1] * final_right;
+                if (stereo_active && stereo_frame.is_none())
+                    || (spatial_active && mono_sample.is_none())
+                {
+                    if emitter.settings.looping {
+                        if !emitter.clip.is_decoded() && emitter.stream.is_none() {
+                            emitter.stream =
+                                Some(AudioStreamState::new(emitter.clip.clone(), engine_rate_u32));
+                        }
+                        if let Some(stream) = emitter.stream.as_mut() {
+                            stream.reset();
+                        }
+                        emitter.resampler.reset();
+                        continue;
+                    }
+                    emitter.settings.playback_state = AudioPlaybackState::Stopped;
+                    finished.push(*id);
+                    ended.push(*id);
+                    break;
+                }
+
+                let target = &mut scratch[frame_index];
+                match (stereo_active, spatial_active) {
+                    (true, true) => {
+                        let frame = stereo_frame.unwrap_or([0.0, 0.0]);
+                        let mono = mono_sample.unwrap_or(0.0);
+                        let (delay_left, delay_right) = emitter.delay.write(mono);
+                        let spatial_left_sample = delay_left * spatial_left;
+                        let spatial_right_sample = delay_right * spatial_right;
+                        let stereo_left_sample = frame[0] * stereo_gain;
+                        let stereo_right_sample = frame[1] * stereo_gain;
+                        let inv = 1.0 - spatial_blend;
+                        target[0] += stereo_left_sample * inv + spatial_left_sample * spatial_blend;
+                        target[1] +=
+                            stereo_right_sample * inv + spatial_right_sample * spatial_blend;
+                    }
+                    (false, true) => {
+                        let mono = mono_sample.unwrap_or(0.0);
+                        let (delay_left, delay_right) = emitter.delay.write(mono);
+                        target[0] += delay_left * spatial_left;
+                        target[1] += delay_right * spatial_right;
+                    }
+                    (true, false) => {
+                        let frame = stereo_frame.unwrap_or([0.0, 0.0]);
+                        target[0] += frame[0] * stereo_gain;
+                        target[1] += frame[1] * stereo_gain;
+                    }
+                    (false, false) => {}
                 }
 
                 emitter.resampler.advance();

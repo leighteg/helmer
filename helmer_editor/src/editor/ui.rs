@@ -8494,7 +8494,7 @@ fn is_audio_file(path: &Path) -> bool {
         .map(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "wav" | "ogg" | "flac" | "mp3"
+                "wav" | "ogg" | "flac" | "mp3" | "aiff" | "aif" | "aifc"
             )
         })
         .unwrap_or(false)

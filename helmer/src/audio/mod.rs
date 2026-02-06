@@ -104,6 +104,7 @@ pub enum AudioLoadMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioFormat {
     Wav,
+    Aiff,
     Ogg,
     Flac,
     Mp3,
@@ -150,6 +151,30 @@ impl AudioClip {
         if load_mode == AudioLoadMode::Static {
             if format == AudioFormat::Wav {
                 if let Ok(pcm) = parse_wav(bytes) {
+                    let frame_count = pcm.frames.len() / pcm.channels as usize;
+                    let duration_seconds = if pcm.sample_rate > 0 {
+                        Some(frame_count as f32 / pcm.sample_rate as f32)
+                    } else {
+                        None
+                    };
+                    let size_bytes = pcm.frames.len() * std::mem::size_of::<f32>();
+                    return Ok(AudioClip {
+                        name,
+                        data: AudioClipData::Pcm {
+                            channels: pcm.channels,
+                            sample_rate: pcm.sample_rate,
+                            frames: Arc::new(pcm.frames),
+                        },
+                        duration_seconds,
+                        size_bytes,
+                        channels: pcm.channels,
+                        sample_rate: pcm.sample_rate,
+                        load_mode,
+                    });
+                }
+            }
+            if format == AudioFormat::Aiff {
+                if let Ok(pcm) = parse_aiff(bytes) {
                     let frame_count = pcm.frames.len() / pcm.channels as usize;
                     let duration_seconds = if pcm.sample_rate > 0 {
                         Some(frame_count as f32 / pcm.sample_rate as f32)
@@ -1859,6 +1884,15 @@ fn detect_format(name: &str, bytes: &[u8]) -> AudioFormat {
     if lower.ends_with(".wav") || bytes.starts_with(b"RIFF") {
         return AudioFormat::Wav;
     }
+    if lower.ends_with(".aiff")
+        || lower.ends_with(".aif")
+        || lower.ends_with(".aifc")
+        || (bytes.len() >= 12
+            && bytes.starts_with(b"FORM")
+            && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC"))
+    {
+        return AudioFormat::Aiff;
+    }
     if lower.ends_with(".ogg") || bytes.starts_with(b"OggS") {
         return AudioFormat::Ogg;
     }
@@ -1875,6 +1909,7 @@ fn probe_audio_header_info(name: &str, bytes: &[u8]) -> Option<(u16, u32, Option
     let format = detect_format(name, bytes);
     match format {
         AudioFormat::Wav => parse_wav_info(bytes),
+        AudioFormat::Aiff => parse_aiff_info(bytes),
         AudioFormat::Ogg => parse_ogg_info(bytes),
         AudioFormat::Flac => parse_flac_info(bytes),
         AudioFormat::Mp3 => parse_mp3_info(bytes),
@@ -1886,6 +1921,9 @@ fn probe_audio_info(name: &str, bytes: &[u8]) -> Option<(u16, u32, Option<f32>)>
     let format = detect_format(name, bytes);
     if format == AudioFormat::Wav {
         return parse_wav_info(bytes);
+    }
+    if format == AudioFormat::Aiff {
+        return parse_aiff_info(bytes);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2024,6 +2062,106 @@ fn parse_wav_info(bytes: &[u8]) -> Option<(u16, u32, Option<f32>)> {
     };
 
     Some((channels, sample_rate, duration_seconds))
+}
+
+struct AiffComm {
+    channels: u16,
+    frames: u32,
+    sample_size: u16,
+    sample_rate: u32,
+    compression: Option<[u8; 4]>,
+}
+
+fn parse_ieee_extended(bytes: &[u8; 10]) -> Option<f64> {
+    let sign = (bytes[0] & 0x80) != 0;
+    let exponent = (((bytes[0] & 0x7F) as u16) << 8) | bytes[1] as u16;
+    let hi = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+    let lo = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
+
+    if exponent == 0 && hi == 0 && lo == 0 {
+        return Some(0.0);
+    }
+    if exponent == 0x7FFF {
+        return None;
+    }
+
+    let mantissa = ((hi as u64) << 32) | lo as u64;
+    let fraction = mantissa as f64 / (1u64 << 63) as f64;
+    let exp = exponent as i32 - 16383;
+    let mut value = fraction * 2f64.powi(exp);
+    if sign {
+        value = -value;
+    }
+    Some(value)
+}
+
+fn parse_aiff_comm(chunk: &[u8], is_aifc: bool) -> Option<AiffComm> {
+    if chunk.len() < 18 {
+        return None;
+    }
+    let channels = u16::from_be_bytes(chunk[0..2].try_into().ok()?);
+    let frames = u32::from_be_bytes(chunk[2..6].try_into().ok()?);
+    let sample_size = u16::from_be_bytes(chunk[6..8].try_into().ok()?);
+    let mut rate_bytes = [0u8; 10];
+    rate_bytes.copy_from_slice(&chunk[8..18]);
+    let sample_rate = parse_ieee_extended(&rate_bytes)
+        .map(|value| value.round() as u32)
+        .unwrap_or(0);
+    let compression = if is_aifc && chunk.len() >= 22 {
+        Some([chunk[18], chunk[19], chunk[20], chunk[21]])
+    } else {
+        None
+    };
+    Some(AiffComm {
+        channels,
+        frames,
+        sample_size,
+        sample_rate,
+        compression,
+    })
+}
+
+fn parse_aiff_info(bytes: &[u8]) -> Option<(u16, u32, Option<f32>)> {
+    if bytes.len() < 12 || !bytes.starts_with(b"FORM") {
+        return None;
+    }
+    let form = &bytes[8..12];
+    let is_aifc = match form {
+        b"AIFF" => false,
+        b"AIFC" => true,
+        _ => return None,
+    };
+
+    let mut offset = 12;
+    let mut comm: Option<AiffComm> = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_be_bytes(bytes[offset + 4..offset + 8].try_into().ok()?) as usize;
+        offset += 8;
+        if offset + size > bytes.len() {
+            return None;
+        }
+        let chunk = &bytes[offset..offset + size];
+        if id == b"COMM" {
+            comm = parse_aiff_comm(chunk, is_aifc);
+            break;
+        }
+        offset += size;
+        if size % 2 == 1 {
+            offset += 1;
+        }
+    }
+
+    let comm = comm?;
+    if comm.channels == 0 || comm.sample_rate == 0 {
+        return None;
+    }
+    let duration_seconds = if comm.frames > 0 {
+        Some(comm.frames as f32 / comm.sample_rate as f32)
+    } else {
+        None
+    };
+    Some((comm.channels, comm.sample_rate, duration_seconds))
 }
 
 fn parse_ogg_info(bytes: &[u8]) -> Option<(u16, u32, Option<f32>)> {
@@ -2220,6 +2358,199 @@ fn parse_wav(bytes: &[u8]) -> Result<PcmData, String> {
     Ok(PcmData {
         channels,
         sample_rate,
+        frames,
+    })
+}
+
+enum AiffEndian {
+    Big,
+    Little,
+}
+
+fn decode_aiff_samples(
+    data: &[u8],
+    bits_per_sample: u16,
+    endian: AiffEndian,
+    float_mode: bool,
+) -> Result<Vec<f32>, String> {
+    if bits_per_sample == 0 || bits_per_sample % 8 != 0 {
+        return Err("Unsupported AIFF sample size".to_string());
+    }
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    if bytes_per_sample == 0 {
+        return Err("Unsupported AIFF sample size".to_string());
+    }
+
+    let mut out: Vec<f32> = Vec::with_capacity(data.len() / bytes_per_sample);
+    if float_mode {
+        match bits_per_sample {
+            32 => {
+                for chunk in data.chunks_exact(4) {
+                    let sample = match endian {
+                        AiffEndian::Big => {
+                            f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                        }
+                        AiffEndian::Little => {
+                            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                        }
+                    };
+                    out.push(sample);
+                }
+                return Ok(out);
+            }
+            64 => {
+                for chunk in data.chunks_exact(8) {
+                    let sample = match endian {
+                        AiffEndian::Big => f64::from_be_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ]),
+                        AiffEndian::Little => f64::from_le_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ]),
+                    };
+                    out.push(sample as f32);
+                }
+                return Ok(out);
+            }
+            _ => {
+                return Err("Unsupported AIFF float sample size".to_string());
+            }
+        }
+    }
+
+    match bits_per_sample {
+        8 => {
+            for &b in data.iter() {
+                let sample = (b as i8) as f32 / 128.0;
+                out.push(sample);
+            }
+        }
+        16 => {
+            for chunk in data.chunks_exact(2) {
+                let sample = match endian {
+                    AiffEndian::Big => i16::from_be_bytes([chunk[0], chunk[1]]),
+                    AiffEndian::Little => i16::from_le_bytes([chunk[0], chunk[1]]),
+                };
+                out.push(sample as f32 / 32768.0);
+            }
+        }
+        24 => {
+            for chunk in data.chunks_exact(3) {
+                let value = match endian {
+                    AiffEndian::Big => {
+                        ((chunk[0] as i32) << 24)
+                            | ((chunk[1] as i32) << 16)
+                            | ((chunk[2] as i32) << 8)
+                    }
+                    AiffEndian::Little => {
+                        ((chunk[2] as i32) << 24)
+                            | ((chunk[1] as i32) << 16)
+                            | ((chunk[0] as i32) << 8)
+                    }
+                };
+                out.push((value >> 8) as f32 / 8_388_608.0);
+            }
+        }
+        32 => {
+            for chunk in data.chunks_exact(4) {
+                let sample = match endian {
+                    AiffEndian::Big => i32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                    AiffEndian::Little => {
+                        i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                    }
+                };
+                out.push(sample as f32 / 2_147_483_648.0);
+            }
+        }
+        _ => return Err("Unsupported AIFF sample size".to_string()),
+    }
+
+    Ok(out)
+}
+
+fn parse_aiff(bytes: &[u8]) -> Result<PcmData, String> {
+    if bytes.len() < 12 || !bytes.starts_with(b"FORM") {
+        return Err("Invalid AIFF header".to_string());
+    }
+    let form = &bytes[8..12];
+    let is_aifc = match form {
+        b"AIFF" => false,
+        b"AIFC" => true,
+        _ => return Err("Invalid AIFF form type".to_string()),
+    };
+
+    let mut offset = 12;
+    let mut comm: Option<AiffComm> = None;
+    let mut ssnd: Option<&[u8]> = None;
+    while offset + 8 <= bytes.len() {
+        let id = &bytes[offset..offset + 4];
+        let size = u32::from_be_bytes(
+            bytes[offset + 4..offset + 8]
+                .try_into()
+                .map_err(|_| "Invalid AIFF chunk size")?,
+        ) as usize;
+        offset += 8;
+        if offset + size > bytes.len() {
+            return Err("AIFF chunk size out of bounds".to_string());
+        }
+        let chunk = &bytes[offset..offset + size];
+        match id {
+            b"COMM" => {
+                comm = parse_aiff_comm(chunk, is_aifc);
+            }
+            b"SSND" => {
+                ssnd = Some(chunk);
+            }
+            _ => {}
+        }
+        offset += size;
+        if size % 2 == 1 {
+            offset += 1;
+        }
+    }
+
+    let Some(comm) = comm else {
+        return Err("Missing AIFF COMM chunk".to_string());
+    };
+    let Some(ssnd) = ssnd else {
+        return Err("Missing AIFF SSND chunk".to_string());
+    };
+    if comm.channels == 0 || comm.sample_rate == 0 {
+        return Err("Invalid AIFF channel count or sample rate".to_string());
+    }
+    if ssnd.len() < 8 {
+        return Err("AIFF SSND chunk too small".to_string());
+    }
+
+    let offset = u32::from_be_bytes(ssnd[0..4].try_into().unwrap()) as usize;
+    let data = &ssnd[8..];
+    if offset > data.len() {
+        return Err("AIFF SSND offset out of bounds".to_string());
+    }
+    let sample_data = &data[offset..];
+
+    let (endian, float_mode) = match comm.compression {
+        None => (AiffEndian::Big, false),
+        Some(tag) => match &tag {
+            b"NONE" | b"twos" | b"TWOS" => (AiffEndian::Big, false),
+            b"sowt" | b"SOWT" => (AiffEndian::Little, false),
+            b"fl32" | b"FL32" => (AiffEndian::Big, true),
+            b"fl64" | b"FL64" => (AiffEndian::Big, true),
+            _ => {
+                return Err(format!(
+                    "Unsupported AIFF compression: {:?}",
+                    std::str::from_utf8(&tag).unwrap_or("unknown")
+                ));
+            }
+        },
+    };
+
+    let frames = decode_aiff_samples(sample_data, comm.sample_size, endian, float_mode)?;
+    Ok(PcmData {
+        channels: comm.channels,
+        sample_rate: comm.sample_rate,
         frames,
     })
 }

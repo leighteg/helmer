@@ -10,8 +10,8 @@ use crate::{
     graphics::common::renderer::{Aabb, AssetStreamKind, MeshletDesc, MeshletLodData, Vertex},
     runtime::asset_server::{
         AssetKind, AssetStreamingTuning, IntermediateMaterial, MeshPayload, MeshPrimitiveDesc,
-        StreamedBuffer, TextureRequest, WebAssetIo, build_mesh_payload, decode_ktx2,
-        decode_texture_asset_web, estimate_primitive_bounds, generate_low_res_from_parts,
+        StreamedBuffer, TextureRequest, WebAssetIo, build_mesh_payload, decode_texture_asset_web,
+        decode_texture_file_bytes, estimate_primitive_bounds, generate_low_res_from_parts,
         is_gltf_path, load_gltf_streaming_web, load_scene_buffers_web, parse_glb,
         parse_mesh_document, parse_ron_material, parse_scene_document, process_primitive,
     },
@@ -410,7 +410,7 @@ async fn process_request(request: WorkerRequest) -> WorkerResponse {
             let io = WORKER_STATE.with(|state| state.borrow().io.clone());
             let path_buf = PathBuf::from(&path);
             match io.read_path(&path_buf).await {
-                Ok(bytes) => match decode_ktx2(&bytes, kind) {
+                Ok(bytes) => match decode_texture_file_bytes(kind, &bytes, &path_buf) {
                     Ok((data, format, dimensions)) => {
                         match WorkerTextureFormat::from_wgpu(format) {
                             Some(worker_format) => WorkerResponse::Texture {

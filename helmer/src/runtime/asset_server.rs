@@ -169,6 +169,150 @@ impl<T> Clone for Handle<T> {
 
 impl<T> Copy for Handle<T> {}
 
+fn strip_uri_query_and_fragment(uri: &str) -> &str {
+    let no_fragment = uri.split_once('#').map_or(uri, |(path, _)| path);
+    no_fragment
+        .split_once('?')
+        .map_or(no_fragment, |(path, _)| path)
+}
+
+fn percent_decode_lossy(input: &str) -> Vec<u8> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = bytes[i + 1];
+            let lo = bytes[i + 2];
+            let hi = (hi as char).to_digit(16);
+            let lo = (lo as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                decoded.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+
+    decoded
+}
+
+fn normalize_local_uri_reference(uri: &str) -> String {
+    let cleaned = strip_uri_query_and_fragment(uri);
+    String::from_utf8_lossy(&percent_decode_lossy(cleaned)).into_owned()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn path_looks_like_url(path: &Path) -> bool {
+    let as_str = path.to_string_lossy();
+    as_str.contains("://") || as_str.starts_with("blob:")
+}
+
+fn uri_is_remote(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://") || uri.starts_with("blob:")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn normalize_uri_for_external_read(uri: &str, base_path: Option<&Path>) -> String {
+    let treat_as_url = uri_is_remote(uri) || base_path.map(path_looks_like_url).unwrap_or(false);
+    if treat_as_url {
+        uri.to_string()
+    } else {
+        normalize_local_uri_reference(uri)
+    }
+}
+
+fn extension_hint_from_uri(uri: &str) -> Option<String> {
+    let cleaned = strip_uri_query_and_fragment(uri);
+    let file_name = cleaned.rsplit('/').next().unwrap_or(cleaned);
+    let ext = file_name.rsplit('.').next()?;
+    if ext.is_empty() || ext.len() == file_name.len() {
+        return None;
+    }
+    Some(ext.trim_start_matches('.').to_ascii_lowercase())
+}
+
+fn extension_hint_from_path(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.trim_start_matches('.').to_ascii_lowercase())
+}
+
+fn normalize_mime_hint(mime_hint: &str) -> String {
+    mime_hint
+        .split(';')
+        .next()
+        .unwrap_or(mime_hint)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn image_format_from_extension(ext_hint: &str) -> Option<image::ImageFormat> {
+    match ext_hint
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" | "apng" => Some(image::ImageFormat::Png),
+        "jpg" | "jpeg" | "jpe" => Some(image::ImageFormat::Jpeg),
+        "webp" => Some(image::ImageFormat::WebP),
+        "gif" => Some(image::ImageFormat::Gif),
+        "bmp" => Some(image::ImageFormat::Bmp),
+        "tga" => Some(image::ImageFormat::Tga),
+        "tif" | "tiff" => Some(image::ImageFormat::Tiff),
+        "hdr" => Some(image::ImageFormat::Hdr),
+        "exr" => Some(image::ImageFormat::OpenExr),
+        "dds" => Some(image::ImageFormat::Dds),
+        "pnm" | "pbm" | "pgm" | "ppm" | "pam" => Some(image::ImageFormat::Pnm),
+        "ico" => Some(image::ImageFormat::Ico),
+        "ff" | "farbfeld" => Some(image::ImageFormat::Farbfeld),
+        "avif" => Some(image::ImageFormat::Avif),
+        "qoi" => Some(image::ImageFormat::Qoi),
+        _ => None,
+    }
+}
+
+fn image_format_from_mime(mime_hint: &str) -> Option<image::ImageFormat> {
+    match normalize_mime_hint(mime_hint).as_str() {
+        "image/png" => Some(image::ImageFormat::Png),
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => Some(image::ImageFormat::Jpeg),
+        "image/webp" => Some(image::ImageFormat::WebP),
+        "image/gif" => Some(image::ImageFormat::Gif),
+        "image/bmp" | "image/x-ms-bmp" => Some(image::ImageFormat::Bmp),
+        "image/tga" | "image/x-tga" | "image/x-targa" => Some(image::ImageFormat::Tga),
+        "image/tiff" => Some(image::ImageFormat::Tiff),
+        "image/vnd.radiance" | "image/hdr" => Some(image::ImageFormat::Hdr),
+        "image/exr" | "image/x-exr" => Some(image::ImageFormat::OpenExr),
+        "image/dds" | "image/x-dds" => Some(image::ImageFormat::Dds),
+        "image/x-portable-anymap" => Some(image::ImageFormat::Pnm),
+        "image/vnd.microsoft.icon" | "image/x-icon" => Some(image::ImageFormat::Ico),
+        "image/avif" => Some(image::ImageFormat::Avif),
+        "image/x-qoi" => Some(image::ImageFormat::Qoi),
+        _ => None,
+    }
+}
+
+fn texture_image_format_hint(
+    mime_hint: Option<&str>,
+    ext_hint: Option<&str>,
+) -> Option<image::ImageFormat> {
+    mime_hint
+        .and_then(image_format_from_mime)
+        .or_else(|| ext_hint.and_then(image_format_from_extension))
+}
+
+pub(crate) fn decode_texture_file_bytes(
+    kind: AssetKind,
+    bytes: &[u8],
+    path: &Path,
+) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
+    let ext_hint = extension_hint_from_path(path);
+    decode_texture_bytes(kind, bytes, None, ext_hint.as_deref())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_image_bytes_from_source<'a, B: BufferSource>(
     source: &'a gltf::image::Source<'a>,
@@ -202,7 +346,7 @@ fn read_image_bytes_from_source<'a, B: BufferSource>(
                 if mime_hint.is_none() {
                     mime_hint = uri_mime;
                 }
-                let ext_hint = uri.rsplit('.').next().map(|s| s.to_string());
+                let ext_hint = extension_hint_from_uri(uri);
                 return Ok(Some((Cow::Owned(bytes), mime_hint, ext_hint)));
             }
 
@@ -216,13 +360,19 @@ fn read_image_bytes_from_source<'a, B: BufferSource>(
                     return Ok(None);
                 }
             };
-            let img_path = base.join(uri);
+            if uri_is_remote(uri) {
+                warn!(
+                    "Skipping remote image URI '{}' on native target; only local file URIs are supported",
+                    uri
+                );
+                return Ok(None);
+            }
+            let image_uri = normalize_local_uri_reference(uri);
+            let img_path = base.join(&image_uri);
             match std::fs::read(&img_path) {
                 Ok(bytes) => {
-                    let ext_hint = img_path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|s| s.to_string());
+                    let ext_hint = extension_hint_from_uri(uri)
+                        .or_else(|| extension_hint_from_path(&img_path));
                     Ok(Some((Cow::Owned(bytes), mime_hint, ext_hint)))
                 }
                 Err(e) => Err(format!(
@@ -241,17 +391,25 @@ fn decode_texture_bytes(
     mime_hint: Option<&str>,
     ext_hint: Option<&str>,
 ) -> Result<(Vec<u8>, wgpu::TextureFormat, (u32, u32)), String> {
-    let hint = mime_hint
-        .map(|m| m.to_ascii_lowercase())
-        .or_else(|| ext_hint.map(|e| e.to_ascii_lowercase()));
+    let normalized_mime = mime_hint.map(normalize_mime_hint);
+    let normalized_ext = ext_hint.map(|ext| ext.trim_start_matches('.').to_ascii_lowercase());
 
-    let looks_like_ktx2 =
-        matches!(hint.as_deref(), Some("image/ktx2") | Some("ktx2")) || is_ktx2_bytes(bytes);
+    let looks_like_ktx2 = matches!(normalized_mime.as_deref(), Some("image/ktx2"))
+        || matches!(normalized_ext.as_deref(), Some("ktx2"))
+        || is_ktx2_bytes(bytes);
     if looks_like_ktx2 {
         return decode_ktx2(bytes, kind);
     }
 
-    let decoded = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let decoded = if let Some(format_hint) =
+        texture_image_format_hint(normalized_mime.as_deref(), normalized_ext.as_deref())
+    {
+        image::load_from_memory_with_format(bytes, format_hint)
+            .or_else(|_| image::load_from_memory(bytes))
+    } else {
+        image::load_from_memory(bytes)
+    }
+    .map_err(|e| e.to_string())?;
     let mut rgba = decoded.to_rgba8();
     let mut dimensions = rgba.dimensions();
 
@@ -341,13 +499,13 @@ fn decode_data_uri(uri: &str) -> Result<Option<(Vec<u8>, Option<String>)>, Strin
         (meta, false)
     };
 
-    if !is_base64 {
-        return Err("Only base64-encoded data URIs are supported".to_string());
-    }
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(data_part)
-        .map_err(|e| format!("Failed to decode data URI: {}", e))?;
+    let decoded = if is_base64 {
+        base64::engine::general_purpose::STANDARD
+            .decode(data_part)
+            .map_err(|e| format!("Failed to decode data URI: {}", e))?
+    } else {
+        percent_decode_lossy(data_part)
+    };
     let mime_hint = if meta.is_empty() {
         None
     } else {
@@ -1722,7 +1880,7 @@ impl AssetServer {
                             AssetLoadRequest::Texture { id, path, kind } => load_and_parse(
                                 id,
                                 &path,
-                                |bytes| decode_ktx2(bytes, kind),
+                                |bytes| decode_texture_file_bytes(kind, bytes, &path),
                                 |id, data| AssetLoadResult::Texture {
                                     id,
                                     scene_id: None,
@@ -5231,7 +5389,14 @@ fn load_gltf_streaming(path: &Path) -> Result<(gltf::Document, Vec<StreamedBuffe
                             path.display()
                         )
                     })?;
-                    let buf_path = base.join(uri);
+                    if uri_is_remote(uri) {
+                        return Err(format!(
+                            "Remote buffer URI '{}' is not supported on native target",
+                            uri
+                        ));
+                    }
+                    let buffer_uri = normalize_local_uri_reference(uri);
+                    let buf_path = base.join(&buffer_uri);
                     let file = File::open(&buf_path).map_err(|e| {
                         format!("Failed to open buffer '{}': {}", buf_path.display(), e)
                     })?;
@@ -5293,7 +5458,14 @@ fn load_scene_buffers(
                             uri
                         )
                     })?;
-                    let buf_path = base.join(uri);
+                    if uri_is_remote(uri) {
+                        return Err(format!(
+                            "Remote buffer URI '{}' is not supported on native target",
+                            uri
+                        ));
+                    }
+                    let buffer_uri = normalize_local_uri_reference(uri);
+                    let buf_path = base.join(&buffer_uri);
                     let file = File::open(&buf_path).map_err(|e| {
                         format!("Failed to open buffer '{}': {}", buf_path.display(), e)
                     })?;
@@ -5371,7 +5543,8 @@ pub(crate) async fn load_gltf_streaming_web(
                 if let Some((data, _)) = decode_data_uri(uri)? {
                     StreamedBuffer::owned(data)
                 } else {
-                    let bytes = io.read_uri(base_dir, uri).await?;
+                    let resolved_uri = normalize_uri_for_external_read(uri, base_dir);
+                    let bytes = io.read_uri(base_dir, &resolved_uri).await?;
                     StreamedBuffer::owned(bytes)
                 }
             }
@@ -5421,7 +5594,8 @@ pub(crate) async fn load_scene_buffers_web(
                 if let Some((data, _)) = decode_data_uri(uri)? {
                     StreamedBuffer::owned(data)
                 } else {
-                    let bytes = io.read_uri(base_dir, uri).await?;
+                    let resolved_uri = normalize_uri_for_external_read(uri, base_dir);
+                    let bytes = io.read_uri(base_dir, &resolved_uri).await?;
                     StreamedBuffer::owned(bytes)
                 }
             }
@@ -5474,7 +5648,7 @@ async fn read_image_bytes_from_source_web<'a, B: BufferSource>(
                 if mime_hint.is_none() {
                     mime_hint = uri_mime;
                 }
-                let ext_hint = uri.rsplit('.').next().map(|s| s.to_string());
+                let ext_hint = extension_hint_from_uri(uri);
                 return Ok(Some((Cow::Owned(bytes), mime_hint, ext_hint)));
             }
 
@@ -5488,9 +5662,11 @@ async fn read_image_bytes_from_source_web<'a, B: BufferSource>(
                     return Ok(None);
                 }
             };
-            match io.read_uri(Some(base), uri).await {
+            let resolved_uri = normalize_uri_for_external_read(uri, Some(base));
+            match io.read_uri(Some(base), &resolved_uri).await {
                 Ok(bytes) => {
-                    let ext_hint = uri.rsplit('.').next().map(|s| s.to_string());
+                    let ext_hint = extension_hint_from_uri(uri)
+                        .or_else(|| extension_hint_from_path(Path::new(&resolved_uri)));
                     Ok(Some((Cow::Owned(bytes), mime_hint, ext_hint)))
                 }
                 Err(e) => Err(format!(
@@ -7546,7 +7722,7 @@ async fn handle_request_web(request: AssetLoadRequest, io: WebAssetIo) -> Option
                 id,
                 &path,
                 &io,
-                |bytes| decode_ktx2(bytes, kind),
+                |bytes| decode_texture_file_bytes(kind, bytes, &path),
                 |id, data| AssetLoadResult::Texture {
                     id,
                     scene_id: None,

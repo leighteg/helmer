@@ -1095,10 +1095,6 @@ pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
     bring_window_to_front_if_dragging(ui, world);
 
     with_middle_drag_blocked(ui, world, |ui, world| {
-        ui.heading("Pane Manager");
-        ui.label("Toggle editor panes");
-        ui.separator();
-
         let mut project_toggled = false;
         if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
             ui.horizontal(|ui| {
@@ -1123,6 +1119,18 @@ pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
                     panes.history = false;
                     panes.timeline = false;
                     panes.content_browser = false;
+                    panes.audio_mixer = false;
+                    project_toggled = true;
+                }
+                if ui.button("Default").clicked() {
+                    panes.toolbar = true;
+                    panes.viewport = true;
+                    panes.project = false;
+                    panes.hierarchy = true;
+                    panes.inspector = true;
+                    panes.history = false;
+                    panes.timeline = false;
+                    panes.content_browser = true;
                     panes.audio_mixer = false;
                     project_toggled = true;
                 }

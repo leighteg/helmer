@@ -1098,6 +1098,18 @@ pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
         let mut project_toggled = false;
         if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
             ui.horizontal(|ui| {
+                if ui.button("Default").clicked() {
+                    panes.toolbar = true;
+                    panes.viewport = true;
+                    panes.project = false;
+                    panes.hierarchy = true;
+                    panes.inspector = true;
+                    panes.history = false;
+                    panes.timeline = false;
+                    panes.content_browser = true;
+                    panes.audio_mixer = false;
+                    project_toggled = true;
+                }
                 if ui.button("All").clicked() {
                     panes.toolbar = true;
                     panes.viewport = true;
@@ -1119,18 +1131,6 @@ pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
                     panes.history = false;
                     panes.timeline = false;
                     panes.content_browser = false;
-                    panes.audio_mixer = false;
-                    project_toggled = true;
-                }
-                if ui.button("Default").clicked() {
-                    panes.toolbar = true;
-                    panes.viewport = true;
-                    panes.project = false;
-                    panes.hierarchy = true;
-                    panes.inspector = true;
-                    panes.history = false;
-                    panes.timeline = false;
-                    panes.content_browser = true;
                     panes.audio_mixer = false;
                     project_toggled = true;
                 }

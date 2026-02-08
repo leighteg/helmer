@@ -28,7 +28,7 @@ use helmer_becs::egui_integration::EguiResource;
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::scene_system::{
-    SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
+    EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
@@ -2517,53 +2517,53 @@ pub fn draw_hierarchy_window(ui: &mut Ui, world: &mut World) {
     draw_scene_window(ui, world);
 }
 
-struct HierarchyEntry {
-    entity: Entity,
-    label: String,
-    is_scene_root: bool,
+#[derive(Default)]
+struct HierarchyData {
+    labels: HashMap<Entity, String>,
+    children: HashMap<Entity, Vec<Entity>>,
+    roots: Vec<Entity>,
 }
 
-fn collect_hierarchy_entries(world: &mut World) -> Vec<HierarchyEntry> {
-    let mut entries: Vec<HierarchyEntry> = Vec::new();
+fn collect_hierarchy_entries(world: &mut World) -> HierarchyData {
+    let mut rows: Vec<(Entity, String, Option<Entity>)> = Vec::new();
     let mut query = world.query::<(
         Entity,
         Option<&Name>,
-        Option<&BevyCamera>,
-        Option<&BevyLight>,
-        Option<&BevyMeshRenderer>,
-        Option<&BevySkinnedMeshRenderer>,
-        Option<&EditorSkinnedMesh>,
-        Option<&EditorPlayCamera>,
         Option<&SceneRoot>,
+        Option<&SceneChild>,
         Option<&SceneAssetPath>,
-        Option<&EditorMesh>,
-        Option<&ScriptComponent>,
-        Option<&DynamicComponents>,
+        Option<&EditorEntity>,
+        Option<&EntityParent>,
+        Option<&EditorPlayCamera>,
     )>();
 
     for (
         entity,
         name,
-        camera,
-        light,
-        mesh,
-        skinned,
-        editor_skinned,
-        active_camera,
         scene_root,
+        scene_child,
         scene_asset,
-        editor_mesh,
-        script,
-        dynamic,
+        editor_entity,
+        relation,
+        active_camera,
     ) in query.iter(world)
     {
-        if world.get::<EditorEntity>(entity).is_none() {
+        if editor_entity.is_none() && scene_child.is_none() {
             continue;
         }
 
         let mut label = name
             .map(|name| name.to_string())
             .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
+
+        let camera = world.get::<BevyCamera>(entity);
+        let light = world.get::<BevyLight>(entity);
+        let mesh = world.get::<BevyMeshRenderer>(entity);
+        let skinned = world.get::<BevySkinnedMeshRenderer>(entity);
+        let editor_skinned = world.get::<EditorSkinnedMesh>(entity);
+        let editor_mesh = world.get::<EditorMesh>(entity);
+        let script = world.get::<ScriptComponent>(entity);
+        let dynamic = world.get::<DynamicComponents>(entity);
 
         let mut tags = Vec::new();
         if camera.is_some() {
@@ -2598,6 +2598,9 @@ fn collect_hierarchy_entries(world: &mut World) -> Vec<HierarchyEntry> {
             }
             tags.push("Scene");
         }
+        if scene_child.is_some() {
+            tags.push("Scene Child");
+        }
         if script.is_some() {
             tags.push("Script");
         }
@@ -2611,316 +2614,394 @@ fn collect_hierarchy_entries(world: &mut World) -> Vec<HierarchyEntry> {
             label.push(']');
         }
 
-        entries.push(HierarchyEntry {
-            entity,
-            label,
-            is_scene_root: scene_root.is_some(),
-        });
+        rows.push((entity, label, relation.map(|relation| relation.parent)));
     }
 
-    entries.sort_by_key(|entry| entry.entity.to_bits());
-    entries
-}
+    rows.sort_by_key(|(entity, _, _)| entity.to_bits());
+    let included: HashSet<Entity> = rows.iter().map(|(entity, _, _)| *entity).collect();
+    let mut data = HierarchyData::default();
 
-fn build_scene_child_label(world: &World, entity: Entity) -> String {
-    let mut label = world
-        .get::<Name>(entity)
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
-
-    let mut tags = Vec::new();
-    if world.get::<BevySkinnedMeshRenderer>(entity).is_some() {
-        tags.push("Skinned");
-    } else if world.get::<BevyMeshRenderer>(entity).is_some() {
-        tags.push("Mesh");
-    }
-    if world.get::<BevyLight>(entity).is_some() {
-        tags.push("Light");
-    }
-    if world.get::<BevyCamera>(entity).is_some() {
-        tags.push("Camera");
-    }
-
-    if !tags.is_empty() {
-        label.push_str(" [");
-        label.push_str(&tags.join(", "));
-        label.push(']');
-    }
-
-    label
-}
-
-fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, entries: &[HierarchyEntry]) {
-    let selection = world
-        .get_resource::<InspectorSelectedEntityResource>()
-        .and_then(|selection| selection.0);
-
-    if let Some(selected) = selection {
-        let parent_root = world
-            .get::<SceneChild>(selected)
-            .map(|child| child.scene_root);
-        if let Some(root) = parent_root {
-            world.resource_scope::<HierarchyUiState, _>(|_world, mut ui_state| {
-                ui_state.expanded_entities.insert(root);
-            });
+    for (entity, label, parent) in rows {
+        data.labels.insert(entity, label);
+        let valid_parent = parent.filter(|parent| *parent != entity && included.contains(parent));
+        if let Some(parent) = valid_parent {
+            data.children.entry(parent).or_default().push(entity);
+        } else {
+            data.roots.push(entity);
         }
     }
 
-    let scene_children_map = world
-        .get_resource::<SceneSpawnedChildren>()
-        .map(|state| state.spawned_scenes.clone())
-        .unwrap_or_default();
+    for children in data.children.values_mut() {
+        children.sort_by_key(|entity| entity.to_bits());
+    }
+    data.roots.sort_by_key(|entity| entity.to_bits());
+    data
+}
 
-    const INDENT: f32 = 14.0;
-    const TOGGLE_WIDTH: f32 = 14.0;
+fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, data: &HierarchyData) {
+    let selection = world
+        .get_resource::<InspectorSelectedEntityResource>()
+        .and_then(|selection| selection.0);
+    if let Some(selected) = selection {
+        expand_hierarchy_ancestors(world, selected);
+    }
 
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
     egui::ScrollArea::vertical()
         .id_salt("hierarchy_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                for entry in entries.iter() {
-                    let entity = entry.entity;
-                    let is_selected = selection == Some(entity);
-                    let is_editor_entity = world.get::<EditorEntity>(entity).is_some();
-                    let is_scene_child = world.get::<SceneChild>(entity).is_some();
-                    let can_drag_entity = is_editor_entity || is_scene_child;
-                    let is_renaming = is_editor_entity
-                        && world
-                            .get_resource::<HierarchyUiState>()
-                            .map(|state| state.rename_entity == Some(entity))
-                            .unwrap_or(false);
-                    let child_entities = if entry.is_scene_root {
-                        scene_children_map.get(&entity).cloned().unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    let can_expand = entry.is_scene_root;
-                    let mut expanded = if can_expand {
-                        world
-                            .get_resource::<HierarchyUiState>()
-                            .map(|state| state.expanded_entities.contains(&entity))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
+            let mut visited = HashSet::new();
+            let mut drop_handled = false;
+            for root in data.roots.iter().copied() {
+                draw_hierarchy_row(
+                    ui,
+                    world,
+                    data,
+                    root,
+                    0,
+                    selection,
+                    &mut visited,
+                    &mut drop_handled,
+                );
+            }
 
-                    ui.horizontal(|ui| {
-                        if can_expand {
-                            let toggle_label = if expanded { "v" } else { ">" };
-                            let toggle_response = ui.add_sized(
-                                Vec2::new(TOGGLE_WIDTH, 0.0),
-                                egui::Button::new(toggle_label).frame(false),
-                            );
-                            if toggle_response.clicked() {
-                                expanded = !expanded;
-                                world.resource_scope::<HierarchyUiState, _>(
-                                    |_world, mut ui_state| {
-                                        if expanded {
-                                            ui_state.expanded_entities.insert(entity);
-                                        } else {
-                                            ui_state.expanded_entities.remove(&entity);
-                                        }
-                                    },
-                                );
-                            }
-                        } else {
-                            ui.add_space(TOGGLE_WIDTH);
-                        }
+            let drop_rect = ui.max_rect();
+            let drop_response = ui.interact(
+                drop_rect,
+                Id::new("hierarchy_background_drop"),
+                Sense::hover(),
+            );
+            if !drop_handled {
+                if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+                    reparent_entity_in_hierarchy(world, payload.entity, None);
+                }
+            }
+            highlight_drop_target(ui, &drop_response);
+        });
+}
 
-                        if is_renaming {
-                            world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
-                                let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
-                                if ui_state.rename_request_focus {
-                                    response.request_focus();
-                                    ui_state.rename_request_focus = false;
-                                }
-                                let commit = response.lost_focus()
-                                    || (response.has_focus()
-                                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
-                                if commit {
-                                    apply_entity_name(world, entity, ui_state.rename_buffer.trim());
-                                    ui_state.rename_entity = None;
-                                }
-                            });
-                        } else {
-                            let response = ui.add_sized(
-                                Vec2::new(ui.available_width(), 0.0),
-                                egui::Button::new(&entry.label)
-                                    .wrap()
-                                    .selected(is_selected)
-                                    .sense(Sense::click_and_drag()),
-                            );
+fn draw_hierarchy_row(
+    ui: &mut Ui,
+    world: &mut World,
+    data: &HierarchyData,
+    entity: Entity,
+    depth: usize,
+    selection: Option<Entity>,
+    visited: &mut HashSet<Entity>,
+    drop_handled: &mut bool,
+) {
+    if !visited.insert(entity) {
+        return;
+    }
 
-                            if can_drag_entity {
-                                let drag_started = response.drag_started_by(PointerButton::Primary);
-                                let drag_stopped = response.drag_stopped_by(PointerButton::Primary);
-                                if drag_started || drag_stopped {
-                                    if let Some(mut drag_state) =
-                                        world.get_resource_mut::<EntityDragState>()
-                                    {
-                                        if drag_started {
-                                            drag_state.start_drag(entity);
-                                        }
-                                        if drag_stopped {
-                                            drag_state.stop_drag();
-                                        }
-                                    }
-                                }
-                                response.dnd_set_drag_payload(EntityDragPayload { entity });
-                            }
+    const INDENT: f32 = 14.0;
+    const TOGGLE_WIDTH: f32 = 14.0;
 
-                            let is_dragging = world
-                                .get_resource::<EntityDragState>()
-                                .map(|state| state.active && state.entity == Some(entity))
-                                .unwrap_or(false);
-                            if is_dragging {
-                                let stroke = Stroke::new(
-                                    ui.visuals().selection.stroke.width.max(1.5),
-                                    ui.visuals().selection.stroke.color,
-                                );
-                                let rounding = ui.visuals().widgets.active.rounding();
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    rounding,
-                                    stroke,
-                                    StrokeKind::Inside,
-                                );
-                            }
+    let label = data
+        .labels
+        .get(&entity)
+        .cloned()
+        .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
+    let children = data.children.get(&entity).cloned().unwrap_or_default();
+    let can_expand = !children.is_empty();
+    let is_selected = selection == Some(entity);
+    let mut expanded = if can_expand {
+        world
+            .get_resource::<HierarchyUiState>()
+            .map(|state| state.expanded_entities.contains(&entity))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let is_renaming = world
+        .get_resource::<HierarchyUiState>()
+        .map(|state| state.rename_entity == Some(entity))
+        .unwrap_or(false);
 
-                            if response.clicked() {
-                                set_selection(world, Some(entity));
-                            }
-
-                            if response.double_clicked() {
-                                focus_entity_in_view(world, entity);
-                            }
-
-                            if is_editor_entity {
-                                response.context_menu(|ui| {
-                                    if ui.button("Rename").clicked() {
-                                        begin_rename(world, entity);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Delete").clicked() {
-                                        push_command(world, EditorCommand::DeleteEntity { entity });
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Set Game Camera").clicked() {
-                                        push_command(
-                                            world,
-                                            EditorCommand::SetActiveCamera { entity },
-                                        );
-                                        ui.close_menu();
-                                    }
-                                });
-                            } else if world.get::<SceneChild>(entity).is_some() {
-                                response.context_menu(|ui| {
-                                    if ui.button("Focus").clicked() {
-                                        focus_entity_in_view(world, entity);
-                                        ui.close_menu();
-                                    }
-                                    if let Some(child) = world.get::<SceneChild>(entity) {
-                                        if ui.button("Select Root").clicked() {
-                                            set_selection(world, Some(child.scene_root));
-                                            ui.close_menu();
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
-
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * INDENT);
+        if can_expand {
+            let toggle_label = if expanded { "v" } else { ">" };
+            let toggle_response = ui.add_sized(
+                Vec2::new(TOGGLE_WIDTH, 0.0),
+                egui::Button::new(toggle_label).frame(false),
+            );
+            if toggle_response.clicked() {
+                expanded = !expanded;
+                world.resource_scope::<HierarchyUiState, _>(|_world, mut ui_state| {
                     if expanded {
-                        if child_entities.is_empty() {
-                            ui.horizontal(|ui| {
-                                ui.add_space(INDENT + TOGGLE_WIDTH);
-                                ui.label(RichText::new("No scene nodes yet").small());
-                            });
-                        } else {
-                            for child_entity in child_entities.iter().copied() {
-                                let child_label = build_scene_child_label(world, child_entity);
-                                let child_selected = selection == Some(child_entity);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(INDENT);
-                                    ui.add_space(TOGGLE_WIDTH);
+                        ui_state.expanded_entities.insert(entity);
+                    } else {
+                        ui_state.expanded_entities.remove(&entity);
+                    }
+                });
+            }
+        } else {
+            ui.add_space(TOGGLE_WIDTH);
+        }
 
-                                    let response = ui.add_sized(
-                                        Vec2::new(ui.available_width(), 0.0),
-                                        egui::Button::new(&child_label)
-                                            .wrap()
-                                            .selected(child_selected)
-                                            .sense(Sense::click_and_drag()),
-                                    );
+        if is_renaming {
+            world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
+                let response = ui.text_edit_singleline(&mut ui_state.rename_buffer);
+                if ui_state.rename_request_focus {
+                    response.request_focus();
+                    ui_state.rename_request_focus = false;
+                }
+                let commit = response.lost_focus()
+                    || (response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                if commit {
+                    apply_entity_name(world, entity, ui_state.rename_buffer.trim());
+                    ui_state.rename_entity = None;
+                }
+            });
+        } else {
+            let response = ui.add_sized(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Button::new(label)
+                    .wrap()
+                    .selected(is_selected)
+                    .sense(Sense::click_and_drag()),
+            );
 
-                                    let drag_started =
-                                        response.drag_started_by(PointerButton::Primary);
-                                    let drag_stopped =
-                                        response.drag_stopped_by(PointerButton::Primary);
-                                    if drag_started || drag_stopped {
-                                        if let Some(mut drag_state) =
-                                            world.get_resource_mut::<EntityDragState>()
-                                        {
-                                            if drag_started {
-                                                drag_state.start_drag(child_entity);
-                                            }
-                                            if drag_stopped {
-                                                drag_state.stop_drag();
-                                            }
-                                        }
-                                    }
-                                    response.dnd_set_drag_payload(EntityDragPayload {
-                                        entity: child_entity,
-                                    });
+            let drag_started = response.drag_started_by(PointerButton::Primary);
+            let drag_stopped = response.drag_stopped_by(PointerButton::Primary);
+            if drag_started || drag_stopped {
+                if let Some(mut drag_state) = world.get_resource_mut::<EntityDragState>() {
+                    if drag_started {
+                        drag_state.start_drag(entity);
+                    }
+                    if drag_stopped {
+                        drag_state.stop_drag();
+                    }
+                }
+            }
+            response.dnd_set_drag_payload(EntityDragPayload { entity });
 
-                                    let is_dragging = world
-                                        .get_resource::<EntityDragState>()
-                                        .map(|state| {
-                                            state.active && state.entity == Some(child_entity)
-                                        })
-                                        .unwrap_or(false);
-                                    if is_dragging {
-                                        let stroke = Stroke::new(
-                                            ui.visuals().selection.stroke.width.max(1.5),
-                                            ui.visuals().selection.stroke.color,
-                                        );
-                                        let rounding = ui.visuals().widgets.active.rounding();
-                                        ui.painter().rect_stroke(
-                                            response.rect,
-                                            rounding,
-                                            stroke,
-                                            StrokeKind::Inside,
-                                        );
-                                    }
+            if response.clicked() {
+                set_selection(world, Some(entity));
+            }
+            if response.double_clicked() {
+                focus_entity_in_view(world, entity);
+            }
 
-                                    if response.clicked() {
-                                        set_selection(world, Some(child_entity));
-                                    }
-
-                                    if response.double_clicked() {
-                                        focus_entity_in_view(world, child_entity);
-                                    }
-
-                                    response.context_menu(|ui| {
-                                        if ui.button("Focus").clicked() {
-                                            focus_entity_in_view(world, child_entity);
-                                            ui.close_menu();
-                                        }
-                                        if let Some(child) = world.get::<SceneChild>(child_entity) {
-                                            if ui.button("Select Root").clicked() {
-                                                set_selection(world, Some(child.scene_root));
-                                                ui.close_menu();
-                                            }
-                                        }
-                                    });
-                                });
-                            }
-                        }
+            response.context_menu(|ui| {
+                if ui.button("Rename").clicked() {
+                    begin_rename(world, entity);
+                    ui.close_menu();
+                }
+                if ui.button("Delete").clicked() {
+                    push_command(world, EditorCommand::DeleteEntity { entity });
+                    ui.close_menu();
+                }
+                if ui.button("Focus").clicked() {
+                    focus_entity_in_view(world, entity);
+                    ui.close_menu();
+                }
+                if world.get::<BevyCamera>(entity).is_some()
+                    && ui.button("Set Game Camera").clicked()
+                {
+                    push_command(world, EditorCommand::SetActiveCamera { entity });
+                    ui.close_menu();
+                }
+                if let Some(scene_child) = world.get::<SceneChild>(entity) {
+                    if ui.button("Select Scene Root").clicked() {
+                        set_selection(world, Some(scene_child.scene_root));
+                        ui.close_menu();
                     }
                 }
             });
+
+            if let Some(payload) = response.dnd_release_payload::<EntityDragPayload>() {
+                *drop_handled = true;
+                if payload.entity != entity {
+                    reparent_entity_in_hierarchy(world, payload.entity, Some(entity));
+                }
+            }
+            highlight_drop_target(ui, &response);
+
+            let is_dragging = world
+                .get_resource::<EntityDragState>()
+                .map(|state| state.active && state.entity == Some(entity))
+                .unwrap_or(false);
+            if is_dragging {
+                let stroke = Stroke::new(
+                    ui.visuals().selection.stroke.width.max(1.5),
+                    ui.visuals().selection.stroke.color,
+                );
+                let rounding = ui.visuals().widgets.active.rounding();
+                ui.painter()
+                    .rect_stroke(response.rect, rounding, stroke, StrokeKind::Inside);
+            }
+        }
+    });
+
+    if expanded {
+        for child in children {
+            draw_hierarchy_row(
+                ui,
+                world,
+                data,
+                child,
+                depth + 1,
+                selection,
+                visited,
+                drop_handled,
+            );
+        }
+    }
+}
+
+fn expand_hierarchy_ancestors(world: &mut World, entity: Entity) {
+    let mut ancestors = Vec::new();
+    let mut current = entity;
+    let mut visited = HashSet::new();
+    while let Some(parent) = world
+        .get::<EntityParent>(current)
+        .map(|relation| relation.parent)
+    {
+        if !visited.insert(parent) {
+            break;
+        }
+        ancestors.push(parent);
+        current = parent;
+    }
+    if ancestors.is_empty() {
+        return;
+    }
+    world.resource_scope::<HierarchyUiState, _>(|_world, mut ui_state| {
+        for ancestor in ancestors {
+            ui_state.expanded_entities.insert(ancestor);
+        }
+    });
+}
+
+fn remove_scene_child_mapping(world: &mut World, scene_root: Entity, child_entity: Entity) {
+    if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+        if let Some(children) = spawned.spawned_scenes.get_mut(&scene_root) {
+            children.retain(|entity| *entity != child_entity);
+        }
+    }
+}
+
+fn ensure_scene_child_mapping(world: &mut World, scene_root: Entity, child_entity: Entity) {
+    if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+        let children = spawned.spawned_scenes.entry(scene_root).or_default();
+        if !children.contains(&child_entity) {
+            children.push(child_entity);
+        }
+    }
+}
+
+fn is_descendant_of(world: &World, candidate: Entity, ancestor: Entity) -> bool {
+    let mut current = Some(candidate);
+    let mut visited = HashSet::new();
+    while let Some(entity) = current {
+        if !visited.insert(entity) {
+            return false;
+        }
+        if entity == ancestor {
+            return true;
+        }
+        current = world
+            .get::<EntityParent>(entity)
+            .map(|relation| relation.parent);
+    }
+    false
+}
+
+fn reparent_entity_in_hierarchy(
+    world: &mut World,
+    child: Entity,
+    new_parent: Option<Entity>,
+) -> bool {
+    if world.get_entity(child).is_err() {
+        return false;
+    }
+
+    if let Some(parent) = new_parent {
+        if parent == child {
+            set_status(world, "Cannot parent an entity to itself".to_string());
+            return false;
+        }
+        if world.get_entity(parent).is_err() {
+            return false;
+        }
+        if is_descendant_of(world, parent, child) {
+            set_status(
+                world,
+                "Cannot parent an entity to one of its descendants".to_string(),
+            );
+            return false;
+        }
+    }
+
+    let current_parent = world
+        .get::<EntityParent>(child)
+        .map(|relation| relation.parent);
+    if current_parent == new_parent {
+        return false;
+    }
+
+    let previous_scene_child = world.get::<SceneChild>(child).copied();
+    let child_transform = world
+        .get::<BevyTransform>(child)
+        .map(|transform| transform.0)
+        .unwrap_or_default();
+
+    if let Some(parent) = new_parent {
+        let parent_matrix = world
+            .get::<BevyTransform>(parent)
+            .map(|transform| transform.0.to_matrix())
+            .unwrap_or(glam::Mat4::IDENTITY);
+        world.entity_mut(child).insert(EntityParent {
+            parent,
+            local_transform: parent_matrix.inverse() * child_transform.to_matrix(),
+            last_written: child_transform,
         });
+    } else {
+        world.entity_mut(child).remove::<EntityParent>();
+    }
+
+    if let Some(scene_child) = previous_scene_child {
+        let keep_scene_link = new_parent
+            .and_then(|parent| {
+                if world.get::<SceneRoot>(parent).is_some() {
+                    Some(parent)
+                } else {
+                    world
+                        .get::<SceneChild>(parent)
+                        .map(|child| child.scene_root)
+                }
+            })
+            .map(|scene_root| scene_root == scene_child.scene_root)
+            .unwrap_or(false);
+        if keep_scene_link {
+            ensure_scene_child_mapping(world, scene_child.scene_root, child);
+        } else {
+            remove_scene_child_mapping(world, scene_child.scene_root, child);
+            let mut entity = world.entity_mut(child);
+            entity.remove::<SceneChild>();
+            entity.insert(EditorEntity);
+        }
+    }
+
+    if let Some(parent) = new_parent {
+        world.resource_scope::<HierarchyUiState, _>(|_world, mut ui_state| {
+            ui_state.expanded_entities.insert(parent);
+        });
+    }
+
+    push_undo_snapshot(
+        world,
+        if new_parent.is_some() {
+            "Reparent Entity"
+        } else {
+            "Unparent Entity"
+        },
+    );
+    true
 }
 
 fn draw_inspector_header(ui: &mut Ui, world: &mut World, entity: Entity) {

@@ -21,7 +21,10 @@ use helmer_becs::{
     BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
     BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
     BevySplineFollower, BevyTransform, BevyWrapper,
-    systems::scene_system::{SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator},
+    systems::scene_system::{
+        EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, SpawnedScene,
+        build_default_animator,
+    },
 };
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
@@ -116,11 +119,50 @@ pub struct PendingSceneChildPoseOverrides {
     pub entries: Vec<SceneChildPoseOverrideData>,
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct PendingSceneChildRenderer {
+    pub kind: SceneChildRendererKind,
+    pub casts_shadow: bool,
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneEntityData {
     pub name: Option<String>,
     pub transform: SerializedTransform,
+    #[serde(default)]
+    pub relation: Option<SceneEntityRelationData>,
+    #[serde(default)]
+    pub scene_child: Option<SceneChildLinkData>,
+    #[serde(default)]
+    pub scene_child_renderer: Option<SceneChildRendererData>,
     pub components: SceneComponents,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneEntityRelationData {
+    pub parent: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneChildLinkData {
+    pub scene_root: usize,
+    pub scene_node_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneChildRendererKind {
+    Auto,
+    Mesh,
+    Skinned,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneChildRendererData {
+    pub kind: SceneChildRendererKind,
+    pub casts_shadow: bool,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1507,7 +1549,9 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
     let mut entities = Vec::new();
     let mut entity_order = Vec::new();
     let mut saved_entities = HashSet::new();
-    let mut query = world.query_filtered::<(
+    let mut pending_relations: Vec<Option<Entity>> = Vec::new();
+    let mut pending_scene_children: Vec<Option<(Entity, usize)>> = Vec::new();
+    let mut query = world.query::<(
         Entity,
         Option<&Name>,
         Option<&BevyTransform>,
@@ -1518,7 +1562,10 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         Option<&BevyLight>,
         Option<&BevyCamera>,
         Option<&EditorPlayCamera>,
-    ), With<EditorEntity>>();
+        Option<&EditorEntity>,
+        Option<&SceneChild>,
+        Option<&EntityParent>,
+    )>();
 
     for (
         entity,
@@ -1531,8 +1578,15 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         light,
         camera,
         active_camera,
+        editor_entity,
+        scene_child_meta,
+        parent_relation,
     ) in query.iter(world)
     {
+        if editor_entity.is_none() && scene_child_meta.is_none() {
+            continue;
+        }
+
         let audio_emitter = world.get::<BevyAudioEmitter>(entity);
         let editor_audio = world.get::<EditorAudio>(entity);
         let audio_listener = world.get::<BevyAudioListener>(entity);
@@ -1571,6 +1625,30 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 visible,
             })
         });
+        let scene_child_renderer =
+            if scene_child_meta.is_some() && mesh.is_none() && skinned.is_none() {
+                if let Some(renderer) = skinned_renderer {
+                    Some(SceneChildRendererData {
+                        kind: SceneChildRendererKind::Skinned,
+                        casts_shadow: renderer.0.casts_shadow,
+                        visible: renderer.0.visible,
+                    })
+                } else if let Some(renderer) = mesh_renderer {
+                    Some(SceneChildRendererData {
+                        kind: SceneChildRendererKind::Mesh,
+                        casts_shadow: renderer.0.casts_shadow,
+                        visible: renderer.0.visible,
+                    })
+                } else {
+                    Some(SceneChildRendererData {
+                        kind: SceneChildRendererKind::None,
+                        casts_shadow: true,
+                        visible: true,
+                    })
+                }
+            } else {
+                None
+            };
 
         let light = light.map(|light| LightComponentData {
             kind: match light.0.light_type {
@@ -1755,10 +1833,41 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         entities.push(SceneEntityData {
             name: name.map(|name| name.to_string()),
             transform: serialized_transform,
+            relation: None,
+            scene_child: None,
+            scene_child_renderer,
             components,
         });
+        pending_relations.push(parent_relation.map(|relation| relation.parent));
+        pending_scene_children
+            .push(scene_child_meta.map(|child| (child.scene_root, child.scene_node_index)));
         entity_order.push(entity);
         saved_entities.insert(entity.to_bits());
+    }
+
+    let mut entity_index_map: HashMap<Entity, usize> = HashMap::new();
+    for (index, entity) in entity_order.iter().copied().enumerate() {
+        entity_index_map.insert(entity, index);
+    }
+
+    for (index, entity_data) in entities.iter_mut().enumerate() {
+        if let Some(parent_entity) = pending_relations.get(index).copied().flatten() {
+            if let Some(parent_index) = entity_index_map.get(&parent_entity).copied() {
+                entity_data.relation = Some(SceneEntityRelationData {
+                    parent: parent_index,
+                });
+            }
+        }
+        if let Some((scene_root_entity, scene_node_index)) =
+            pending_scene_children.get(index).copied().flatten()
+        {
+            if let Some(scene_root_index) = entity_index_map.get(&scene_root_entity).copied() {
+                entity_data.scene_child = Some(SceneChildLinkData {
+                    scene_root: scene_root_index,
+                    scene_node_index,
+                });
+            }
+        }
     }
 
     let mut scene_child_animations: Vec<SceneChildAnimationData> = Vec::new();
@@ -1865,6 +1974,9 @@ pub fn spawn_scene_from_document(
     let mut pending_followers: Vec<(Entity, SplineFollowerData)> = Vec::new();
     let mut pending_look_ats: Vec<(Entity, LookAtData)> = Vec::new();
     let mut pending_entity_followers: Vec<(Entity, EntityFollowerData)> = Vec::new();
+    let mut pending_parent_relations: Vec<(Entity, usize)> = Vec::new();
+    let mut pending_scene_children: Vec<(Entity, SceneChildLinkData)> = Vec::new();
+    let mut pending_scene_child_renderers: Vec<(Entity, SceneChildRendererData)> = Vec::new();
 
     for entity_data in &document.entities {
         let transform = entity_data.transform.to_transform();
@@ -2064,6 +2176,16 @@ pub fn spawn_scene_from_document(
         let entity_id = entity.id();
         drop(entity);
 
+        if let Some(relation) = entity_data.relation.as_ref() {
+            pending_parent_relations.push((entity_id, relation.parent));
+        }
+        if let Some(scene_child) = entity_data.scene_child.as_ref() {
+            pending_scene_children.push((entity_id, scene_child.clone()));
+        }
+        if let Some(scene_child_renderer) = entity_data.scene_child_renderer {
+            pending_scene_child_renderers.push((entity_id, scene_child_renderer));
+        }
+
         if let Some(skinned) = skinned_data {
             let path = resolve_path(&skinned.scene_path, root);
             let (scene_handle, scene) = {
@@ -2192,6 +2314,94 @@ pub fn spawn_scene_from_document(
         }
 
         created.push(entity_id);
+    }
+
+    let mut restored_scene_children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut restored_scene_links: HashMap<Entity, SceneChild> = HashMap::new();
+    for (entity, scene_child) in pending_scene_children {
+        let Some(scene_root) = created.get(scene_child.scene_root).copied() else {
+            continue;
+        };
+        let scene_child_link = SceneChild {
+            scene_root,
+            scene_node_index: scene_child.scene_node_index,
+        };
+        world.entity_mut(entity).insert(scene_child_link);
+        restored_scene_links.insert(entity, scene_child_link);
+        restored_scene_children
+            .entry(scene_root)
+            .or_default()
+            .push(entity);
+    }
+
+    if !restored_scene_links.is_empty() {
+        let mut pending_renderer_map: HashMap<Entity, SceneChildRendererData> =
+            pending_scene_child_renderers.into_iter().collect();
+        for (entity, _) in restored_scene_links.iter() {
+            let explicit = pending_renderer_map.remove(entity);
+            let has_runtime_renderer = world.get::<BevyMeshRenderer>(*entity).is_some()
+                || world.get::<BevySkinnedMeshRenderer>(*entity).is_some()
+                || world.get::<PendingSkinnedMeshAsset>(*entity).is_some();
+            let has_authored_renderer = world.get::<EditorMesh>(*entity).is_some()
+                || world.get::<EditorSkinnedMesh>(*entity).is_some();
+
+            let renderer_data = if let Some(explicit) = explicit {
+                explicit
+            } else if !has_runtime_renderer && !has_authored_renderer {
+                SceneChildRendererData {
+                    kind: SceneChildRendererKind::Auto,
+                    casts_shadow: true,
+                    visible: true,
+                }
+            } else {
+                continue;
+            };
+
+            world.entity_mut(*entity).insert(PendingSceneChildRenderer {
+                kind: renderer_data.kind,
+                casts_shadow: renderer_data.casts_shadow,
+                visible: renderer_data.visible,
+            });
+        }
+    }
+
+    if !restored_scene_children.is_empty() {
+        if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+            for (scene_root, children) in restored_scene_children.iter() {
+                spawned.spawned_scenes.insert(*scene_root, children.clone());
+            }
+        } else {
+            let mut spawned = SceneSpawnedChildren::default();
+            for (scene_root, children) in restored_scene_children.iter() {
+                spawned.spawned_scenes.insert(*scene_root, children.clone());
+            }
+            world.insert_resource(spawned);
+        }
+        for scene_root in restored_scene_children.keys().copied() {
+            world.entity_mut(scene_root).insert(SpawnedScene);
+        }
+    }
+
+    for (entity, parent_index) in pending_parent_relations {
+        let Some(parent_entity) = created.get(parent_index).copied() else {
+            continue;
+        };
+        if entity == parent_entity {
+            continue;
+        }
+        let child_transform = world
+            .get::<BevyTransform>(entity)
+            .map(|transform| transform.0)
+            .unwrap_or_default();
+        let parent_matrix = world
+            .get::<BevyTransform>(parent_entity)
+            .map(|transform| transform.0.to_matrix())
+            .unwrap_or(glam::Mat4::IDENTITY);
+        world.entity_mut(entity).insert(EntityParent {
+            parent: parent_entity,
+            local_transform: parent_matrix.inverse() * child_transform.to_matrix(),
+            last_written: child_transform,
+        });
     }
 
     if !pending_followers.is_empty()

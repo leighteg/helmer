@@ -553,6 +553,7 @@ pub struct SceneNode {
     pub transform: glam::Mat4,
     pub skin_index: Option<usize>,
     pub node_index: usize,
+    pub parent_node_index: Option<usize>,
 }
 
 /// The final representation of a scene, stored in the AssetServer.
@@ -673,6 +674,7 @@ pub(crate) struct GltfNodeDesc {
     pub(crate) transform: glam::Mat4,
     pub(crate) node_index: usize,
     pub(crate) skin_index: Option<usize>,
+    pub(crate) parent_node_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -4108,6 +4110,7 @@ impl AssetServer {
                     transform: node.transform,
                     skin_index: node.skin_index,
                     node_index: node.node_index,
+                    parent_node_index: node.parent_node_index,
                 })
             })
             .collect();
@@ -4422,6 +4425,7 @@ impl AssetServer {
                     transform: Mat4::from_cols_array(&node.transform),
                     skin_index: None,
                     node_index,
+                    parent_node_index: None,
                 })
             })
             .collect();
@@ -7414,6 +7418,7 @@ pub(crate) fn parse_scene_document(
 
     fn process_node_desc(
         node: &gltf::Node,
+        parent_node_index: Option<usize>,
         parent_transform: &Mat4,
         mesh_primitives: &mut Vec<MeshPrimitiveDesc>,
         nodes: &mut Vec<GltfNodeDesc>,
@@ -7435,11 +7440,19 @@ pub(crate) fn parse_scene_document(
                     transform,
                     node_index: node.index(),
                     skin_index: node.skin().map(|skin| skin.index()),
+                    parent_node_index,
                 });
             }
         }
         for child in node.children() {
-            process_node_desc(&child, &transform, mesh_primitives, nodes, ensure_material);
+            process_node_desc(
+                &child,
+                Some(node.index()),
+                &transform,
+                mesh_primitives,
+                nodes,
+                ensure_material,
+            );
         }
     }
 
@@ -7447,6 +7460,7 @@ pub(crate) fn parse_scene_document(
         for node in scene.nodes() {
             process_node_desc(
                 &node,
+                None,
                 &Mat4::IDENTITY,
                 &mut mesh_primitives,
                 &mut nodes,

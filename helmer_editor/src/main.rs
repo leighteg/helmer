@@ -22,8 +22,8 @@ use helmer_editor::editor::{
     editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
     editor_shortcut_system, editor_ui_system, editor_undo_request_system, file_watch_system,
     freecam_system, gizmo_system, load_layout_state, load_recent_projects,
-    pane_manager_toggle_system, pending_skinned_mesh_system, scene_dirty_system,
-    script_execution_system, script_registry_system, selection_system,
+    pane_manager_toggle_system, pending_scene_child_renderer_system, pending_skinned_mesh_system,
+    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
     set_viewport_audio_listener_enabled, timeline_playback_system,
 };
 
@@ -159,6 +159,13 @@ fn editor_init(
     schedule.add_systems(
         apply_scene_child_pose_overrides_system
             .after(helmer_becs::systems::scene_system::scene_spawning_system),
+    );
+    schedule.add_systems(
+        pending_scene_child_renderer_system
+            .after(helmer_becs::systems::scene_system::scene_spawning_system)
+            .before(pending_skinned_mesh_system)
+            .before(helmer_becs::systems::animation_system::skinning_system)
+            .before(helmer_becs::systems::render_system::render_data_system),
     );
     schedule.add_systems(
         pending_skinned_mesh_system

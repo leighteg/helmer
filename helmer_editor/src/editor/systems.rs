@@ -20,7 +20,7 @@ use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::{RenderGraphResource, RenderSyncRequest};
 use helmer_becs::systems::scene_system::{
-    SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
+    EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
     AudioBackendResource, BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera,
@@ -51,8 +51,9 @@ use crate::editor::{
     push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
         AnimationClipData, EditorEntity, EditorRenderRefresh, EditorSceneState,
-        PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PendingSkinnedMeshAsset,
-        WorldState, apply_animation_data_to_timeline, apply_custom_clips_to_animator,
+        PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PendingSceneChildRenderer,
+        PendingSkinnedMeshAsset, SceneChildRendererKind, WorldState,
+        apply_animation_data_to_timeline, apply_custom_clips_to_animator,
         next_available_scene_path, normalize_path, pose_from_serialized, read_scene_document,
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
@@ -1397,20 +1398,38 @@ pub fn editor_command_system(world: &mut World) {
                 handle_create_asset(world, &directory, &name, kind);
             }
             EditorCommand::DeleteEntity { entity } => {
-                let existed = world.get_entity(entity).is_ok();
-                if existed {
-                    world.despawn(entity);
+                let to_delete = collect_entity_subtree(world, entity);
+                let existed = !to_delete.is_empty();
+                let removed: HashSet<Entity> = to_delete.iter().copied().collect();
+                for target in to_delete {
+                    if world.get_entity(target).is_ok() {
+                        world.despawn(target);
+                    }
                 }
+
+                if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+                    for removed_entity in removed.iter().copied() {
+                        spawned.spawned_scenes.remove(&removed_entity);
+                    }
+                    spawned.spawned_scenes.retain(|root_entity, children| {
+                        if removed.contains(root_entity) {
+                            return false;
+                        }
+                        children.retain(|child| !removed.contains(child));
+                        true
+                    });
+                }
+
                 if let Some(mut selection) = world.get_resource_mut::<
                     helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource,
                 >() {
-                    if selection.0 == Some(entity) {
+                    if selection.0.is_some_and(|selected| removed.contains(&selected)) {
                         selection.0 = None;
                     }
                 }
                 if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>()
                 {
-                    if pinned.0 == Some(entity) {
+                    if pinned.0.is_some_and(|selected| removed.contains(&selected)) {
                         pinned.0 = None;
                     }
                 }
@@ -1447,6 +1466,40 @@ pub fn editor_command_system(world: &mut World) {
             }
         }
     }
+}
+
+fn collect_entity_subtree(world: &mut World, root: Entity) -> Vec<Entity> {
+    if world.get_entity(root).is_err() {
+        return Vec::new();
+    }
+
+    let mut children_by_parent: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut relation_query = world.query::<(Entity, &EntityParent)>();
+    for (entity, relation) in relation_query.iter(world) {
+        children_by_parent
+            .entry(relation.parent)
+            .or_default()
+            .push(entity);
+    }
+
+    let mut ordered = Vec::new();
+    let mut visited: HashSet<Entity> = HashSet::new();
+    let mut stack = vec![root];
+
+    while let Some(entity) = stack.pop() {
+        if !visited.insert(entity) {
+            continue;
+        }
+        ordered.push(entity);
+        if let Some(children) = children_by_parent.get(&entity) {
+            for child in children.iter().copied() {
+                stack.push(child);
+            }
+        }
+    }
+
+    ordered.reverse();
+    ordered
 }
 
 pub fn asset_scan_system(mut state: ResMut<AssetBrowserState>) {
@@ -1545,7 +1598,7 @@ pub fn scene_dirty_system(
     query_core: Query<
         (),
         (
-            bevy_ecs::prelude::With<EditorEntity>,
+            Or<(With<EditorEntity>, With<SceneChild>)>,
             Or<(
                 Changed<BevyTransform>,
                 Changed<BevyMeshRenderer>,
@@ -1559,13 +1612,14 @@ pub fn scene_dirty_system(
                 Changed<BevySplineFollower>,
                 Changed<BevyLookAt>,
                 Changed<BevyEntityFollower>,
+                Changed<EntityParent>,
             )>,
         ),
     >,
     query_core_extra: Query<
         (),
         (
-            bevy_ecs::prelude::With<EditorEntity>,
+            Or<(With<EditorEntity>, With<SceneChild>)>,
             Or<(
                 Changed<BevyAudioEmitter>,
                 Changed<BevyAudioListener>,
@@ -1573,13 +1627,14 @@ pub fn scene_dirty_system(
                 Changed<Name>,
                 Changed<SceneRoot>,
                 Changed<SceneAssetPath>,
+                Changed<SceneChild>,
             )>,
         ),
     >,
     query_extra: Query<
         (),
         (
-            bevy_ecs::prelude::With<EditorEntity>,
+            Or<(With<EditorEntity>, With<SceneChild>)>,
             Or<(Changed<ScriptComponent>, Changed<DynamicComponents>)>,
         ),
     >,
@@ -1602,9 +1657,8 @@ pub fn apply_scene_child_animations_system(
     mut pending: ResMut<PendingSceneChildAnimations>,
     mut timeline: ResMut<EditorTimelineState>,
     project: Res<EditorProject>,
-    scene_children: Res<SceneSpawnedChildren>,
     scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
-    child_query: Query<&SceneChild>,
+    child_query: Query<(Entity, &SceneChild)>,
     mut animator_query: Query<&mut BevyAnimator>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     name_query: Query<&Name>,
@@ -1619,6 +1673,12 @@ pub fn apply_scene_child_animations_system(
         let normalized = normalize_path(path.path.to_string_lossy().as_ref(), root);
         root_map.insert(normalized, entity);
     }
+    let mut child_map: HashMap<(Entity, usize), Entity> = HashMap::new();
+    for (entity, child) in child_query.iter() {
+        child_map
+            .entry((child.scene_root, child.scene_node_index))
+            .or_insert(entity);
+    }
 
     let mut remaining = Vec::new();
     for entry in pending.entries.drain(..) {
@@ -1626,22 +1686,10 @@ pub fn apply_scene_child_animations_system(
             remaining.push(entry);
             continue;
         };
-        let Some(children) = scene_children.spawned_scenes.get(&root_entity) else {
-            remaining.push(entry);
-            continue;
-        };
-
-        let mut target_entity = None;
-        for &child_entity in children {
-            if let Ok(child) = child_query.get(child_entity) {
-                if child.scene_node_index == entry.scene_node_index {
-                    target_entity = Some(child_entity);
-                    break;
-                }
-            }
-        }
-
-        let Some(child_entity) = target_entity else {
+        let Some(child_entity) = child_map
+            .get(&(root_entity, entry.scene_node_index))
+            .copied()
+        else {
             remaining.push(entry);
             continue;
         };
@@ -1681,9 +1729,8 @@ pub fn apply_scene_child_pose_overrides_system(
     mut commands: bevy_ecs::prelude::Commands,
     mut pending: ResMut<PendingSceneChildPoseOverrides>,
     project: Res<EditorProject>,
-    scene_children: Res<SceneSpawnedChildren>,
     scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
-    child_query: Query<&SceneChild>,
+    child_query: Query<(Entity, &SceneChild)>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     mut pose_query: Query<&mut BevyPoseOverride>,
 ) {
@@ -1697,6 +1744,12 @@ pub fn apply_scene_child_pose_overrides_system(
         let normalized = normalize_path(path.path.to_string_lossy().as_ref(), root);
         root_map.insert(normalized, entity);
     }
+    let mut child_map: HashMap<(Entity, usize), Entity> = HashMap::new();
+    for (entity, child) in child_query.iter() {
+        child_map
+            .entry((child.scene_root, child.scene_node_index))
+            .or_insert(entity);
+    }
 
     let mut remaining = Vec::new();
     for entry in pending.entries.drain(..) {
@@ -1704,22 +1757,10 @@ pub fn apply_scene_child_pose_overrides_system(
             remaining.push(entry);
             continue;
         };
-        let Some(children) = scene_children.spawned_scenes.get(&root_entity) else {
-            remaining.push(entry);
-            continue;
-        };
-
-        let mut target_entity = None;
-        for &child_entity in children {
-            if let Ok(child) = child_query.get(child_entity) {
-                if child.scene_node_index == entry.scene_node_index {
-                    target_entity = Some(child_entity);
-                    break;
-                }
-            }
-        }
-
-        let Some(child_entity) = target_entity else {
+        let Some(child_entity) = child_map
+            .get(&(root_entity, entry.scene_node_index))
+            .copied()
+        else {
             remaining.push(entry);
             continue;
         };
@@ -1747,6 +1788,143 @@ pub fn apply_scene_child_pose_overrides_system(
     }
 
     pending.entries = remaining;
+}
+
+pub fn pending_scene_child_renderer_system(world: &mut World) {
+    let world_state = world
+        .get_resource::<EditorSceneState>()
+        .map(|state| state.world_state);
+    if world_state != Some(WorldState::Edit) {
+        return;
+    }
+
+    let asset_server = {
+        let Some(asset_server) = world.get_resource::<helmer_becs::BevyAssetServer>() else {
+            return;
+        };
+        asset_server.0.clone()
+    };
+
+    let mut pending_entries = Vec::new();
+    {
+        let mut query = world.query::<(Entity, &PendingSceneChildRenderer, &SceneChild)>();
+        for (entity, pending, scene_child) in query.iter(world) {
+            pending_entries.push((entity, *pending, *scene_child));
+        }
+    }
+
+    if pending_entries.is_empty() {
+        return;
+    }
+
+    for (entity, pending, scene_child) in pending_entries {
+        let scene_handle = {
+            let Some(scene_root) = world.get::<SceneRoot>(scene_child.scene_root) else {
+                world
+                    .entity_mut(entity)
+                    .remove::<PendingSceneChildRenderer>();
+                continue;
+            };
+            scene_root.0.clone()
+        };
+
+        let scene = {
+            let asset_server = asset_server.lock();
+            asset_server.request_scene_assets(&scene_handle, Some(0), 1.0);
+            asset_server.get_scene(&scene_handle)
+        };
+        let Some(scene) = scene else {
+            continue;
+        };
+        let Some(node) = scene.nodes.get(scene_child.scene_node_index) else {
+            world
+                .entity_mut(entity)
+                .remove::<PendingSceneChildRenderer>();
+            continue;
+        };
+
+        let mesh_id = node.mesh.id;
+        let material_id = node.material.id;
+        let skin_index = node.skin_index;
+        let mut kind = pending.kind;
+        if kind == SceneChildRendererKind::Auto {
+            kind = if skin_index.is_some() {
+                SceneChildRendererKind::Skinned
+            } else {
+                SceneChildRendererKind::Mesh
+            };
+        }
+
+        match kind {
+            SceneChildRendererKind::Auto => {}
+            SceneChildRendererKind::None => {
+                let mut entity_mut = world.entity_mut(entity);
+                entity_mut.remove::<BevyMeshRenderer>();
+                entity_mut.remove::<BevySkinnedMeshRenderer>();
+                entity_mut.remove::<PendingSkinnedMeshAsset>();
+                entity_mut.remove::<BevyAnimator>();
+                entity_mut.remove::<BevyPoseOverride>();
+                entity_mut.remove::<PendingSceneChildRenderer>();
+            }
+            SceneChildRendererKind::Mesh => {
+                let mesh_renderer =
+                    MeshRenderer::new(mesh_id, material_id, pending.casts_shadow, pending.visible);
+                let mut entity_mut = world.entity_mut(entity);
+                entity_mut.remove::<BevySkinnedMeshRenderer>();
+                entity_mut.remove::<PendingSkinnedMeshAsset>();
+                entity_mut.remove::<BevyAnimator>();
+                entity_mut.remove::<BevyPoseOverride>();
+                entity_mut.insert(BevyWrapper(mesh_renderer));
+                entity_mut.remove::<PendingSceneChildRenderer>();
+            }
+            SceneChildRendererKind::Skinned => {
+                let Some(skin_index) = skin_index else {
+                    let mesh_renderer = MeshRenderer::new(
+                        mesh_id,
+                        material_id,
+                        pending.casts_shadow,
+                        pending.visible,
+                    );
+                    let mut entity_mut = world.entity_mut(entity);
+                    entity_mut.remove::<BevySkinnedMeshRenderer>();
+                    entity_mut.remove::<PendingSkinnedMeshAsset>();
+                    entity_mut.remove::<BevyAnimator>();
+                    entity_mut.remove::<BevyPoseOverride>();
+                    entity_mut.insert(BevyWrapper(mesh_renderer));
+                    entity_mut.remove::<PendingSceneChildRenderer>();
+                    continue;
+                };
+                let Some(skin) = scene.skins.read().get(skin_index).cloned() else {
+                    continue;
+                };
+                let anim_lib = scene.animations.read().get(skin_index).cloned();
+                let skinned = SkinnedMeshRenderer::new(
+                    mesh_id,
+                    material_id,
+                    skin,
+                    pending.casts_shadow,
+                    pending.visible,
+                );
+
+                let has_animator = world.get::<BevyAnimator>(entity).is_some();
+                {
+                    let mut entity_mut = world.entity_mut(entity);
+                    entity_mut.remove::<BevyMeshRenderer>();
+                    entity_mut.remove::<PendingSkinnedMeshAsset>();
+                    entity_mut.insert(BevySkinnedMeshRenderer(skinned));
+                    entity_mut.remove::<PendingSceneChildRenderer>();
+                }
+
+                if !has_animator {
+                    if let Some(anim_lib) = anim_lib {
+                        world
+                            .entity_mut(entity)
+                            .insert(BevyAnimator(build_default_animator(anim_lib)));
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn pending_skinned_mesh_system(world: &mut World) {

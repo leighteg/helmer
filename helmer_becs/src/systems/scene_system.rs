@@ -32,12 +32,17 @@ pub struct SceneSpawnedChildren {
 #[derive(Component)]
 pub struct SceneRoot(pub Handle<Scene>);
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy, Debug)]
 pub struct SceneChild {
     pub scene_root: Entity,
+    pub scene_node_index: usize,
+}
+
+#[derive(Component, Clone, Copy, Debug)]
+pub struct EntityParent {
+    pub parent: Entity,
     pub local_transform: Mat4,   // Transform in parent's local space
     pub last_written: Transform, // Last world transform written to BevyTransform
-    pub scene_node_index: usize,
 }
 
 #[derive(Component)]
@@ -71,8 +76,12 @@ struct RootMatrices {
 
 #[derive(Default)]
 pub struct SceneChildUpdateCache {
-    changed_roots: HashSet<Entity>,
+    changed_entities: HashSet<Entity>,
+    enqueued_entities: HashSet<Entity>,
     root_matrices: HashMap<Entity, RootMatrices>,
+    parent_to_children: HashMap<Entity, Vec<Entity>>,
+    entity_to_parent: HashMap<Entity, Entity>,
+    stack: Vec<(Entity, Mat4)>,
 }
 
 pub fn build_default_animator(library: Arc<AnimationLibrary>) -> Animator {
@@ -165,11 +174,41 @@ pub fn scene_spawning_system(
                 .unwrap_or(Mat4::IDENTITY);
 
             let mut spawned_children = Vec::with_capacity(scene.nodes.len());
+            let mut node_parent_map: HashMap<usize, Option<usize>> =
+                HashMap::with_capacity(scene.nodes.len());
+            let mut node_entity_map: HashMap<usize, Entity> =
+                HashMap::with_capacity(scene.nodes.len());
+            let mut node_world_map: HashMap<usize, Mat4> =
+                HashMap::with_capacity(scene.nodes.len());
+
+            for node in scene.nodes.iter() {
+                node_parent_map
+                    .entry(node.node_index)
+                    .or_insert(node.parent_node_index);
+            }
 
             for (scene_node_index, node) in scene.nodes.iter().enumerate() {
                 // Compute initial world transform
                 let world_matrix = parent_matrix * node.transform;
                 let world_transform = Transform::from_matrix(world_matrix);
+                let mut parent_entity = root_entity;
+                let mut parent_world_matrix = parent_matrix;
+
+                let mut ancestor = node.parent_node_index;
+                while let Some(ancestor_node_index) = ancestor {
+                    if let Some(mapped_parent) = node_entity_map.get(&ancestor_node_index).copied()
+                    {
+                        parent_entity = mapped_parent;
+                        parent_world_matrix = node_world_map
+                            .get(&ancestor_node_index)
+                            .copied()
+                            .unwrap_or(parent_matrix);
+                        break;
+                    }
+                    ancestor = node_parent_map.get(&ancestor_node_index).copied().flatten();
+                }
+
+                let local_transform = parent_world_matrix.inverse() * world_matrix;
 
                 let skin = node
                     .skin_index
@@ -181,10 +220,13 @@ pub fn scene_spawning_system(
                     let mut commands = commands.spawn((
                         BevyWrapper(world_transform),
                         BevySkinnedMeshRenderer(skinned),
+                        EntityParent {
+                            parent: parent_entity,
+                            local_transform,
+                            last_written: world_transform,
+                        },
                         SceneChild {
                             scene_root: root_entity,
-                            local_transform: node.transform,
-                            last_written: world_transform,
                             scene_node_index,
                         },
                         Name::new(format!(
@@ -209,10 +251,13 @@ pub fn scene_spawning_system(
                             true,
                             true,
                         )),
+                        EntityParent {
+                            parent: parent_entity,
+                            local_transform,
+                            last_written: world_transform,
+                        },
                         SceneChild {
                             scene_root: root_entity,
-                            local_transform: node.transform,
-                            last_written: world_transform,
                             scene_node_index,
                         },
                         Name::new(format!(
@@ -229,6 +274,12 @@ pub fn scene_spawning_system(
 
                 let child_entity = entity_commands.id();
                 spawned_children.push(child_entity);
+                node_entity_map
+                    .entry(node.node_index)
+                    .or_insert(child_entity);
+                node_world_map
+                    .entry(node.node_index)
+                    .or_insert(world_matrix);
             }
 
             let child_count = spawned_children.len();
@@ -252,6 +303,7 @@ pub fn scene_spawning_system(
                 }
                 false
             } else {
+                children.retain(|child| commands.get_entity(*child).is_ok());
                 true
             }
         });
@@ -317,20 +369,20 @@ pub fn apply_scene_commands_system(world: &mut World) {
     world.flush();
 }
 
-/// An ECS system that finds entities with a `SceneChild` component
-/// and makes it's transform local to the corresponding scene root entity.
+/// Synchronize entity transforms for hierarchical relations.
+///
+/// `EntityParent` stores each child's local transform and the last world-space transform that was
+/// authored by this system. External edits to a child update local space. External edits to a
+/// parent are propagated recursively down the subtree
 pub fn update_scene_child_transforms(
-    scene_children: Res<SceneSpawnedChildren>,
     scene_tuning: Res<crate::BevySceneTuning>,
     mut cache: Local<SceneChildUpdateCache>,
-    changed_roots: Query<(Entity, &BevyTransform), (With<SceneRoot>, Changed<BevyTransform>)>,
-    root_query: Query<&BevyTransform, With<SceneRoot>>,
-    mut child_queries: ParamSet<(
-        Query<(&mut SceneChild, &mut BevyTransform), Without<SceneRoot>>,
-        Query<
-            (Entity, &mut SceneChild, &BevyTransform),
-            (Without<SceneRoot>, Changed<BevyTransform>),
-        >,
+    mut queries: ParamSet<(
+        Query<Entity, Changed<BevyTransform>>,
+        Query<&BevyTransform>,
+        Query<(Entity, &EntityParent)>,
+        Query<(&mut EntityParent, &mut BevyTransform)>,
+        Query<(Entity, &EntityParent, &BevyTransform), Changed<BevyTransform>>,
     )>,
     profiling_res: Option<Res<BevyRuntimeProfiling>>,
 ) {
@@ -344,74 +396,160 @@ pub fn update_scene_child_transforms(
     });
 
     let epsilon = scene_tuning.0.transform_epsilon.max(0.0);
-    cache.changed_roots.clear();
+    cache.changed_entities.clear();
+    cache.enqueued_entities.clear();
     cache.root_matrices.clear();
+    cache.parent_to_children.clear();
+    cache.entity_to_parent.clear();
+    cache.stack.clear();
 
-    for (root_entity, root_transform) in changed_roots.iter() {
-        let parent = root_transform.0.to_matrix();
-        let inverse = parent.inverse();
-        cache.changed_roots.insert(root_entity);
-        cache
-            .root_matrices
-            .insert(root_entity, RootMatrices { parent, inverse });
+    {
+        let changed_transforms = queries.p0();
+        for entity in changed_transforms.iter() {
+            cache.changed_entities.insert(entity);
+        }
     }
 
-    if !cache.changed_roots.is_empty() {
-        let mut child_query = child_queries.p0();
-        for (root_entity, root_matrices) in cache.root_matrices.iter() {
-            let Some(children) = scene_children.spawned_scenes.get(root_entity) else {
+    {
+        let parent_snapshot = queries.p2();
+        for (entity, parent) in parent_snapshot.iter() {
+            cache
+                .parent_to_children
+                .entry(parent.parent)
+                .or_default()
+                .push(entity);
+            cache.entity_to_parent.insert(entity, parent.parent);
+        }
+    }
+
+    let mut changed_child_updates: Vec<(Entity, Entity, Transform)> = Vec::new();
+    {
+        let changed_children = queries.p4();
+        for (entity, relation, child_transform) in changed_children.iter() {
+            if !cache.changed_entities.contains(&entity) {
+                continue;
+            }
+
+            let current_transform = child_transform.0;
+            if transform_approx_eq(&current_transform, &relation.last_written, epsilon) {
+                continue;
+            }
+
+            changed_child_updates.push((entity, relation.parent, current_transform));
+        }
+    }
+
+    for (_, parent_entity, _) in changed_child_updates.iter().copied() {
+        if cache.root_matrices.contains_key(&parent_entity) {
+            continue;
+        }
+        let parent = {
+            let transform_query = queries.p1();
+            let Ok(parent_transform) = transform_query.get(parent_entity) else {
                 continue;
             };
-            for &child_entity in children {
-                let Ok((mut child, mut child_transform)) = child_query.get_mut(child_entity) else {
+            parent_transform.0.to_matrix()
+        };
+        let inverse = parent.inverse();
+        cache
+            .root_matrices
+            .insert(parent_entity, RootMatrices { parent, inverse });
+    }
+
+    if !changed_child_updates.is_empty() {
+        let mut relation_query = queries.p3();
+        for (entity, parent_entity, current_transform) in changed_child_updates {
+            let Some(parent_matrices) = cache.root_matrices.get(&parent_entity).copied() else {
+                continue;
+            };
+            let Ok((mut relation, _)) = relation_query.get_mut(entity) else {
+                continue;
+            };
+            relation.local_transform = parent_matrices.inverse * current_transform.to_matrix();
+            relation.last_written = current_transform;
+        }
+    }
+
+    let changed_entities: Vec<Entity> = cache.changed_entities.iter().copied().collect();
+    for entity in changed_entities {
+        if !cache.parent_to_children.contains_key(&entity) {
+            continue;
+        }
+        let mut ancestor = cache.entity_to_parent.get(&entity).copied();
+        let mut has_changed_ancestor = false;
+        let mut visited_ancestors = HashSet::new();
+        while let Some(parent_entity) = ancestor {
+            if !visited_ancestors.insert(parent_entity) {
+                break;
+            }
+            if cache.changed_entities.contains(&parent_entity) {
+                has_changed_ancestor = true;
+                break;
+            }
+            ancestor = cache.entity_to_parent.get(&parent_entity).copied();
+        }
+        if has_changed_ancestor {
+            continue;
+        }
+
+        let parent_matrices = if let Some(existing) = cache.root_matrices.get(&entity) {
+            *existing
+        } else {
+            let parent = {
+                let transform_query = queries.p1();
+                let Ok(parent_transform) = transform_query.get(entity) else {
+                    continue;
+                };
+                parent_transform.0.to_matrix()
+            };
+            let inverse = parent.inverse();
+            let matrices = RootMatrices { parent, inverse };
+            cache.root_matrices.insert(entity, matrices);
+            matrices
+        };
+
+        if cache.enqueued_entities.insert(entity) {
+            cache.stack.push((entity, parent_matrices.parent));
+        }
+    }
+
+    {
+        let mut relation_query = queries.p3();
+        while let Some((parent_entity, parent_matrix)) = cache.stack.pop() {
+            let parent_inverse = parent_matrix.inverse();
+            let Some(children) = cache.parent_to_children.get(&parent_entity).cloned() else {
+                continue;
+            };
+
+            for child_entity in children {
+                let Ok((mut relation, mut child_transform)) = relation_query.get_mut(child_entity)
+                else {
                     continue;
                 };
 
                 let current_transform = child_transform.0;
-                if !transform_approx_eq(&current_transform, &child.last_written, epsilon) {
-                    let current_world = current_transform.to_matrix();
-                    child.local_transform = root_matrices.inverse * current_world;
+                if !transform_approx_eq(&current_transform, &relation.last_written, epsilon) {
+                    relation.local_transform = parent_inverse * current_transform.to_matrix();
                 }
 
                 let world_transform =
-                    Transform::from_matrix(root_matrices.parent * child.local_transform);
+                    Transform::from_matrix(parent_matrix * relation.local_transform);
                 if !transform_approx_eq(&world_transform, &current_transform, epsilon) {
                     child_transform.0 = world_transform;
                 }
-                if !transform_approx_eq(&world_transform, &child.last_written, epsilon) {
-                    child.last_written = world_transform;
+                if !transform_approx_eq(&world_transform, &relation.last_written, epsilon) {
+                    relation.last_written = world_transform;
+                }
+
+                if cache.parent_to_children.contains_key(&child_entity)
+                    && cache.enqueued_entities.insert(child_entity)
+                {
+                    cache
+                        .stack
+                        .push((child_entity, world_transform.to_matrix()));
                 }
             }
         }
-    }
-
-    let mut external_query = child_queries.p1();
-    for (_entity, mut child, child_transform) in external_query.iter_mut() {
-        if cache.changed_roots.contains(&child.scene_root) {
-            continue;
-        }
-
-        let current_transform = child_transform.0;
-        if transform_approx_eq(&current_transform, &child.last_written, epsilon) {
-            continue;
-        }
-
-        let root_matrices = if let Some(root_matrices) = cache.root_matrices.get(&child.scene_root)
-        {
-            *root_matrices
-        } else {
-            let Ok(root_transform) = root_query.get(child.scene_root) else {
-                continue;
-            };
-            let parent = root_transform.0.to_matrix();
-            let inverse = parent.inverse();
-            let root_matrices = RootMatrices { parent, inverse };
-            cache.root_matrices.insert(child.scene_root, root_matrices);
-            root_matrices
-        };
-
-        child.local_transform = root_matrices.inverse * current_transform.to_matrix();
-        child.last_written = current_transform;
     }
 
     if let (Some(profiling), Some(start)) = (profiling.as_ref(), profiling_start) {

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::{CString, c_char, c_void},
     ptr, slice,
 };
@@ -147,15 +148,47 @@ pub const INPUT_FUNCTIONS: &[&str] = &[
 ];
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vec2 {
+    pub const ZERO: Self = Self { x: 0.0, y: 0.0 };
+
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
     pub z: f32,
 }
 
+impl Vec3 {
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+    };
+
+    pub fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+}
+
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,
@@ -163,8 +196,21 @@ pub struct Quat {
     pub w: f32,
 }
 
+impl Quat {
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
+
+    pub fn from_xyzw(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+}
+
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,
@@ -219,6 +265,1137 @@ impl TransformPatch {
             ..Self::default()
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EcsComponentName {
+    #[serde(rename = "name")]
+    Name,
+    #[serde(rename = "transform")]
+    Transform,
+    #[serde(rename = "camera")]
+    Camera,
+    #[serde(rename = "light")]
+    Light,
+    #[serde(rename = "mesh")]
+    Mesh,
+    #[serde(rename = "mesh_renderer")]
+    MeshRenderer,
+    #[serde(rename = "spline")]
+    Spline,
+    #[serde(rename = "spline_follower")]
+    SplineFollower,
+    #[serde(rename = "look_at")]
+    LookAt,
+    #[serde(rename = "entity_follower")]
+    EntityFollower,
+    #[serde(rename = "animator")]
+    Animator,
+    #[serde(rename = "scene")]
+    Scene,
+    #[serde(rename = "audio")]
+    Audio,
+    #[serde(rename = "audio_emitter")]
+    AudioEmitter,
+    #[serde(rename = "audio_listener")]
+    AudioListener,
+    #[serde(rename = "script")]
+    Script,
+    #[serde(rename = "dynamic")]
+    Dynamic,
+    #[serde(rename = "physics")]
+    Physics,
+    #[serde(rename = "collider_shape")]
+    ColliderShape,
+    #[serde(rename = "dynamic_rigid_body")]
+    DynamicRigidBody,
+    #[serde(rename = "kinematic_rigid_body")]
+    KinematicRigidBody,
+    #[serde(rename = "fixed_collider")]
+    FixedCollider,
+    #[serde(rename = "collider_properties")]
+    ColliderProperties,
+    #[serde(rename = "collider_inheritance")]
+    ColliderInheritance,
+    #[serde(rename = "rigid_body_properties")]
+    RigidBodyProperties,
+    #[serde(rename = "rigid_body_inheritance")]
+    RigidBodyInheritance,
+    #[serde(rename = "physics_joint")]
+    PhysicsJoint,
+    #[serde(rename = "character_controller")]
+    CharacterController,
+    #[serde(rename = "character_controller_input")]
+    CharacterControllerInput,
+    #[serde(rename = "character_controller_output")]
+    CharacterControllerOutput,
+    #[serde(rename = "physics_ray_cast")]
+    PhysicsRayCast,
+    #[serde(rename = "physics_ray_cast_hit")]
+    PhysicsRayCastHit,
+    #[serde(rename = "physics_point_projection")]
+    PhysicsPointProjection,
+    #[serde(rename = "physics_point_projection_hit")]
+    PhysicsPointProjectionHit,
+    #[serde(rename = "physics_shape_cast")]
+    PhysicsShapeCast,
+    #[serde(rename = "physics_shape_cast_hit")]
+    PhysicsShapeCastHit,
+    #[serde(rename = "physics_world_defaults")]
+    PhysicsWorldDefaults,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplineMode {
+    #[serde(rename = "linear")]
+    Linear,
+    #[serde(rename = "catmullrom")]
+    CatmullRom,
+    #[serde(rename = "bezier")]
+    Bezier,
+}
+
+impl Default for SplineMode {
+    fn default() -> Self {
+        Self::Linear
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SplineData {
+    pub points: Vec<Vec3>,
+    pub closed: bool,
+    pub tension: f32,
+    pub mode: SplineMode,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SplinePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<Vec3>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tension: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SplineMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LightKind {
+    Directional,
+    Point,
+    Spot,
+}
+
+impl Default for LightKind {
+    fn default() -> Self {
+        Self::Point
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LightData {
+    #[serde(rename = "type")]
+    pub light_type: LightKind,
+    pub color: Vec3,
+    pub intensity: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LightPatch {
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub light_type: Option<LightKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intensity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CameraData {
+    pub fov_y_rad: f32,
+    pub aspect_ratio: f32,
+    pub near_plane: f32,
+    pub far_plane: f32,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CameraPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov_y_rad: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_plane: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub far_plane: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshPrimitive {
+    #[serde(rename = "Cube")]
+    Cube,
+    #[serde(rename = "UV Sphere")]
+    UvSphere,
+    #[serde(rename = "Plane")]
+    Plane,
+}
+
+impl Default for MeshPrimitive {
+    fn default() -> Self {
+        Self::Cube
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MeshSource {
+    Primitive(MeshPrimitive),
+    AssetPath(String),
+}
+
+impl Default for MeshSource {
+    fn default() -> Self {
+        Self::Primitive(MeshPrimitive::Cube)
+    }
+}
+
+impl MeshSource {
+    pub fn asset(path: impl Into<String>) -> Self {
+        Self::AssetPath(path.into())
+    }
+
+    pub fn cube() -> Self {
+        Self::Primitive(MeshPrimitive::Cube)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshRendererData {
+    pub source: MeshSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    pub casts_shadow: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshRendererPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MeshSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub casts_shadow: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+}
+
+impl MeshRendererPatch {
+    pub fn cube() -> Self {
+        Self {
+            source: Some(MeshSource::cube()),
+            material: None,
+            casts_shadow: Some(true),
+            visible: Some(true),
+        }
+    }
+
+    pub fn with_source(mut self, source: MeshSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    pub fn with_material(mut self, material: impl Into<String>) -> Self {
+        self.material = Some(material.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScriptData {
+    pub path: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NamedAudioBus {
+    Master,
+    Music,
+    Sfx,
+    Ui,
+    Ambience,
+    World,
+}
+
+impl Default for NamedAudioBus {
+    fn default() -> Self {
+        Self::Master
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AudioBus {
+    Named(NamedAudioBus),
+    Custom(i64),
+}
+
+impl Default for AudioBus {
+    fn default() -> Self {
+        Self::Named(NamedAudioBus::Master)
+    }
+}
+
+impl AudioBus {
+    pub const MASTER: Self = Self::Named(NamedAudioBus::Master);
+    pub const MUSIC: Self = Self::Named(NamedAudioBus::Music);
+    pub const SFX: Self = Self::Named(NamedAudioBus::Sfx);
+    pub const UI: Self = Self::Named(NamedAudioBus::Ui);
+    pub const AMBIENCE: Self = Self::Named(NamedAudioBus::Ambience);
+    pub const WORLD: Self = Self::Named(NamedAudioBus::World);
+
+    pub fn custom(id: i64) -> Self {
+        Self::Custom(id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioPlaybackState {
+    Playing,
+    Paused,
+    Stopped,
+}
+
+impl Default for AudioPlaybackState {
+    fn default() -> Self {
+        Self::Playing
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AudioPlaybackStateValue {
+    State(AudioPlaybackState),
+    Index(i64),
+    Name(String),
+}
+
+impl Default for AudioPlaybackStateValue {
+    fn default() -> Self {
+        Self::State(AudioPlaybackState::Playing)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioEmitterData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub streaming: bool,
+    pub bus: AudioBus,
+    pub volume: f32,
+    pub pitch: f32,
+    pub looping: bool,
+    pub spatial: bool,
+    pub min_distance: f32,
+    pub max_distance: f32,
+    pub rolloff: f32,
+    pub spatial_blend: f32,
+    pub playback_state: AudioPlaybackStateValue,
+    pub play_on_spawn: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioEmitterPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<AudioBus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub looping: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_distance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolloff: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_blend: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_state: Option<AudioPlaybackStateValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_on_spawn: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioListenerData {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioListenerPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioStreamingConfig {
+    pub buffer_frames: u32,
+    pub chunk_frames: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DynamicFieldValue {
+    Bool(bool),
+    Number(f64),
+    Text(String),
+    Vec3(Vec3),
+}
+
+pub type DynamicFields = BTreeMap<String, DynamicFieldValue>;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DynamicComponentData {
+    pub name: String,
+    pub fields: DynamicFields,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct InputModifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    #[serde(rename = "super")]
+    pub super_key: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicsCombineRule {
+    Average,
+    Min,
+    Multiply,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KinematicMode {
+    PositionBased,
+    VelocityBased,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicsJointKind {
+    Fixed,
+    Spherical,
+    Revolute,
+    Prismatic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshColliderKind {
+    TriMesh,
+    ConvexHull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MeshColliderLodPreset {
+    Lod0,
+    Lod1,
+    Lod2,
+    Lowest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MeshColliderLod {
+    Preset(MeshColliderLodPreset),
+    Specific(u8),
+}
+
+impl Default for MeshColliderLod {
+    fn default() -> Self {
+        Self::Preset(MeshColliderLodPreset::Lod0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicsShapeCastStatus {
+    NoHit,
+    Converged,
+    OutOfIterations,
+    Failed,
+    PenetratingOrWithinTargetDist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PhysicsBodyKindData {
+    Dynamic { mass: f32 },
+    Kinematic { mode: KinematicMode },
+    Fixed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PhysicsBodyKindValue {
+    Data(PhysicsBodyKindData),
+    Name(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ColliderShapeData {
+    Cuboid,
+    Sphere,
+    CapsuleY,
+    CylinderY,
+    ConeY,
+    RoundCuboid {
+        border_radius: f32,
+    },
+    Mesh {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mesh_id: Option<u64>,
+        lod: MeshColliderLod,
+        kind: MeshColliderKind,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ColliderShapePatch {
+    #[default]
+    Cuboid,
+    Sphere,
+    CapsuleY,
+    CylinderY,
+    ConeY,
+    RoundCuboid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        border_radius: Option<f32>,
+    },
+    Mesh {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mesh_id: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lod: Option<MeshColliderLod>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<MeshColliderKind>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ColliderShapeValue {
+    Shape(ColliderShapePatch),
+    Name(String),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsQueryFilterData {
+    pub flags: u32,
+    pub groups_memberships: u32,
+    pub groups_filter: u32,
+    pub use_groups: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_fixed_flag: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_kinematic_flag: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_dynamic_flag: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_sensors_flag: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_solids_flag: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsQueryFilterPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_memberships: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_filter: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_groups: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ColliderPropertiesData {
+    pub friction: f32,
+    pub restitution: f32,
+    pub density: f32,
+    pub is_sensor: bool,
+    pub enabled: bool,
+    pub collision_memberships: u32,
+    pub collision_filter: u32,
+    pub solver_memberships: u32,
+    pub solver_filter: u32,
+    pub friction_combine_rule: PhysicsCombineRule,
+    pub restitution_combine_rule: PhysicsCombineRule,
+    pub translation_offset: Vec3,
+    pub rotation_offset: Quat,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColliderPropertiesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_sensor: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_memberships: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_filter: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_memberships: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_filter: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_combine_rule: Option<PhysicsCombineRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution_combine_rule: Option<PhysicsCombineRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_offset: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_offset: Option<Quat>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColliderInheritanceData {
+    pub friction: bool,
+    pub restitution: bool,
+    pub density: bool,
+    pub is_sensor: bool,
+    pub enabled: bool,
+    pub collision_memberships: bool,
+    pub collision_filter: bool,
+    pub solver_memberships: bool,
+    pub solver_filter: bool,
+    pub friction_combine_rule: bool,
+    pub restitution_combine_rule: bool,
+    pub translation_offset: bool,
+    pub rotation_offset: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ColliderInheritancePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_sensor: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_memberships: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collision_filter: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_memberships: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solver_filter: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friction_combine_rule: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restitution_combine_rule: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_offset: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_offset: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RigidBodyPropertiesData {
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    pub ccd_enabled: bool,
+    pub can_sleep: bool,
+    pub sleeping: bool,
+    pub dominance_group: i16,
+    pub lock_translation_x: bool,
+    pub lock_translation_y: bool,
+    pub lock_translation_z: bool,
+    pub lock_rotation_x: bool,
+    pub lock_rotation_y: bool,
+    pub lock_rotation_z: bool,
+    pub linear_velocity: Vec3,
+    pub angular_velocity: Vec3,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RigidBodyPropertiesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_damping: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular_damping: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccd_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_sleep: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleeping: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dominance_group: Option<i16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_z: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_z: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_velocity: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular_velocity: Option<Vec3>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct RigidBodyInheritanceData {
+    pub linear_damping: bool,
+    pub angular_damping: bool,
+    pub gravity_scale: bool,
+    pub ccd_enabled: bool,
+    pub can_sleep: bool,
+    pub sleeping: bool,
+    pub dominance_group: bool,
+    pub lock_translation_x: bool,
+    pub lock_translation_y: bool,
+    pub lock_translation_z: bool,
+    pub lock_rotation_x: bool,
+    pub lock_rotation_y: bool,
+    pub lock_rotation_z: bool,
+    pub linear_velocity: bool,
+    pub angular_velocity: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RigidBodyInheritancePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_damping: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular_damping: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity_scale: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccd_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_sleep: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleeping: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dominance_group: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_translation_z: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_rotation_z: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_velocity: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular_velocity: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsJointLimitsData {
+    pub min: f32,
+    pub max: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsJointMotorData {
+    pub enabled: bool,
+    pub target_position: f32,
+    pub target_velocity: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub max_force: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsJointMotorPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_position: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_velocity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stiffness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_force: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsJointData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EntityId>,
+    pub kind: PhysicsJointKind,
+    pub contacts_enabled: bool,
+    pub local_anchor1: Vec3,
+    pub local_anchor2: Vec3,
+    pub local_axis1: Vec3,
+    pub local_axis2: Vec3,
+    pub limit_enabled: bool,
+    pub limits: PhysicsJointLimitsData,
+    pub motor: PhysicsJointMotorData,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsJointPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PhysicsJointKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_anchor1: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_anchor2: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_axis1: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_axis2: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<PhysicsJointLimitsData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motor: Option<PhysicsJointMotorPatch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CharacterControllerData {
+    pub up: Vec3,
+    pub offset: f32,
+    pub slide: bool,
+    pub autostep_max_height: f32,
+    pub autostep_min_width: f32,
+    pub autostep_include_dynamic_bodies: bool,
+    pub max_slope_climb_angle: f32,
+    pub min_slope_slide_angle: f32,
+    pub snap_to_ground: f32,
+    pub normal_nudge_factor: f32,
+    pub apply_impulses_to_dynamic_bodies: bool,
+    pub character_mass: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CharacterControllerPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostep_max_height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostep_min_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostep_include_dynamic_bodies: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_slope_climb_angle: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_slope_slide_angle: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snap_to_ground: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_nudge_factor: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apply_impulses_to_dynamic_bodies: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_mass: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct CharacterControllerInputData {
+    pub desired_translation: Vec3,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CharacterControllerInputPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_translation: Option<Vec3>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct CharacterControllerOutputData {
+    pub effective_translation: Vec3,
+    pub grounded: bool,
+    pub sliding_down_slope: bool,
+    pub collision_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsRayCastData {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub max_toi: f32,
+    pub solid: bool,
+    pub filter: PhysicsQueryFilterData,
+    pub exclude_self: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsRayCastPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_toi: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<PhysicsQueryFilterPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_self: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsRayCastHitData {
+    pub has_hit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_entity: Option<EntityId>,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub toi: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsPointProjectionData {
+    pub point: Vec3,
+    pub solid: bool,
+    pub filter: PhysicsQueryFilterData,
+    pub exclude_self: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsPointProjectionPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<PhysicsQueryFilterPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_self: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsPointProjectionHitData {
+    pub has_hit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_entity: Option<EntityId>,
+    pub projected_point: Vec3,
+    pub is_inside: bool,
+    pub distance: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsShapeCastData {
+    pub shape: ColliderShapeData,
+    pub scale: Vec3,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub velocity: Vec3,
+    pub max_time_of_impact: f32,
+    pub target_distance: f32,
+    pub stop_at_penetration: bool,
+    pub compute_impact_geometry_on_penetration: bool,
+    pub filter: PhysicsQueryFilterData,
+    pub exclude_self: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsShapeCastPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ColliderShapeValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<Quat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub velocity: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time_of_impact: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_distance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_at_penetration: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_impact_geometry_on_penetration: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<PhysicsQueryFilterPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_self: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsShapeCastHitData {
+    pub has_hit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_entity: Option<EntityId>,
+    pub toi: f32,
+    pub witness1: Vec3,
+    pub witness2: Vec3,
+    pub normal1: Vec3,
+    pub normal2: Vec3,
+    pub status: PhysicsShapeCastStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsWorldDefaultsData {
+    pub gravity: Vec3,
+    pub collider_properties: ColliderPropertiesData,
+    pub rigid_body_properties: RigidBodyPropertiesData,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsWorldDefaultsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gravity: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_properties: Option<ColliderPropertiesPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigid_body_properties: Option<RigidBodyPropertiesPatch>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsVelocityData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular: Option<Vec3>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsVelocityPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angular: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_up: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_shape: Option<ColliderShapeData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_kind: Option<PhysicsBodyKindData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_properties: Option<ColliderPropertiesData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_inheritance: Option<ColliderInheritanceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigid_body_properties: Option<RigidBodyPropertiesData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigid_body_inheritance: Option<RigidBodyInheritanceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joint: Option<PhysicsJointData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_controller: Option<CharacterControllerData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_input: Option<CharacterControllerInputData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_output: Option<CharacterControllerOutputData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ray_cast: Option<PhysicsRayCastData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ray_cast_hit: Option<PhysicsRayCastHitData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_projection: Option<PhysicsPointProjectionData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_projection_hit: Option<PhysicsPointProjectionHitData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_cast: Option<PhysicsShapeCastData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_cast_hit: Option<PhysicsShapeCastHitData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_defaults: Option<PhysicsWorldDefaultsData>,
+    pub has_handle: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PhysicsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_shape: Option<ColliderShapeValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_kind: Option<PhysicsBodyKindValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_properties: Option<ColliderPropertiesPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_inheritance: Option<ColliderInheritancePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigid_body_properties: Option<RigidBodyPropertiesPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigid_body_inheritance: Option<RigidBodyInheritancePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joint: Option<PhysicsJointPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_controller: Option<CharacterControllerPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_input: Option<CharacterControllerInputPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ray_cast: Option<PhysicsRayCastPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point_projection: Option<PhysicsPointProjectionPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_cast: Option<PhysicsShapeCastPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_defaults: Option<PhysicsWorldDefaultsPatch>,
 }
 
 #[repr(C)]
@@ -424,7 +1601,149 @@ impl Host {
         self.call_api("input", function_name, args)
     }
 
+    pub fn list_entities(&self) -> Result<Vec<EntityId>, String> {
+        self.ecs_call("list_entities", ())
+    }
+
+    pub fn find_entity_by_name(&self, name: &str) -> Result<Option<EntityId>, String> {
+        self.ecs_call("find_entity_by_name", (name,))
+    }
+
+    pub fn get_entity_name(&self, entity_id: EntityId) -> Result<Option<String>, String> {
+        self.ecs_call("get_entity_name", (entity_id,))
+    }
+
+    pub fn set_entity_name(&self, entity_id: EntityId, name: &str) -> Result<bool, String> {
+        self.ecs_call("set_entity_name", (entity_id, name))
+    }
+
+    pub fn has_component(
+        &self,
+        entity_id: EntityId,
+        component: EcsComponentName,
+    ) -> Result<bool, String> {
+        self.ecs_call("has_component", (entity_id, component))
+    }
+
+    pub fn add_component(
+        &self,
+        entity_id: EntityId,
+        component: EcsComponentName,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_component", (entity_id, component))
+    }
+
+    pub fn remove_component(
+        &self,
+        entity_id: EntityId,
+        component: EcsComponentName,
+    ) -> Result<bool, String> {
+        self.ecs_call("remove_component", (entity_id, component))
+    }
+
+    pub fn get_spline(&self, entity_id: EntityId) -> Result<Option<SplineData>, String> {
+        self.ecs_call("get_spline", (entity_id,))
+    }
+
+    pub fn set_spline(&self, entity_id: EntityId, patch: &SplinePatch) -> Result<bool, String> {
+        self.ecs_call("set_spline", (entity_id, patch))
+    }
+
+    pub fn add_spline_point(&self, entity_id: EntityId, point: Vec3) -> Result<bool, String> {
+        self.ecs_call("add_spline_point", (entity_id, point))
+    }
+
+    pub fn set_spline_point(
+        &self,
+        entity_id: EntityId,
+        index: usize,
+        point: Vec3,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_spline_point", (entity_id, index, point))
+    }
+
+    pub fn remove_spline_point(&self, entity_id: EntityId, index: usize) -> Result<bool, String> {
+        self.ecs_call("remove_spline_point", (entity_id, index))
+    }
+
+    pub fn sample_spline(&self, entity_id: EntityId, t: f32) -> Result<Option<Vec3>, String> {
+        self.ecs_call("sample_spline", (entity_id, t))
+    }
+
+    pub fn spline_length(
+        &self,
+        entity_id: EntityId,
+        samples: Option<usize>,
+    ) -> Result<Option<f32>, String> {
+        self.ecs_call("spline_length", (entity_id, samples))
+    }
+
+    pub fn follow_spline(
+        &self,
+        entity_id: EntityId,
+        spline_id: Option<EntityId>,
+        speed: Option<f32>,
+        looped: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("follow_spline", (entity_id, spline_id, speed, looped))
+    }
+
+    pub fn set_animator_enabled(&self, entity_id: EntityId, enabled: bool) -> Result<bool, String> {
+        self.ecs_call("set_animator_enabled", (entity_id, enabled))
+    }
+
+    pub fn set_animator_time_scale(
+        &self,
+        entity_id: EntityId,
+        time_scale: f32,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_animator_time_scale", (entity_id, time_scale))
+    }
+
+    pub fn set_animator_param_float(
+        &self,
+        entity_id: EntityId,
+        name: &str,
+        value: f32,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_animator_param_float", (entity_id, name, value))
+    }
+
+    pub fn set_animator_param_bool(
+        &self,
+        entity_id: EntityId,
+        name: &str,
+        value: bool,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_animator_param_bool", (entity_id, name, value))
+    }
+
+    pub fn trigger_animator(&self, entity_id: EntityId, name: &str) -> Result<bool, String> {
+        self.ecs_call("trigger_animator", (entity_id, name))
+    }
+
+    pub fn get_animator_clips(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<Option<Vec<String>>, String> {
+        self.ecs_call("get_animator_clips", (entity_id, layer_index))
+    }
+
+    pub fn play_anim_clip(
+        &self,
+        entity_id: EntityId,
+        clip_name: &str,
+        layer_index: Option<usize>,
+    ) -> Result<bool, String> {
+        self.ecs_call("play_anim_clip", (entity_id, clip_name, layer_index))
+    }
+
     pub fn get_light(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_light", (entity_id,))
+    }
+
+    pub fn get_light_data(&self, entity_id: EntityId) -> Result<Option<LightData>, String> {
         self.ecs_call("get_light", (entity_id,))
     }
 
@@ -432,11 +1751,27 @@ impl Host {
         self.ecs_call("set_light", (entity_id, patch))
     }
 
+    pub fn set_light_data(&self, entity_id: EntityId, patch: &LightPatch) -> Result<bool, String> {
+        self.ecs_call("set_light", (entity_id, patch))
+    }
+
     pub fn get_camera(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
         self.ecs_call("get_camera", (entity_id,))
     }
 
+    pub fn get_camera_data(&self, entity_id: EntityId) -> Result<Option<CameraData>, String> {
+        self.ecs_call("get_camera", (entity_id,))
+    }
+
     pub fn set_camera<S: Serialize>(&self, entity_id: EntityId, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_camera", (entity_id, patch))
+    }
+
+    pub fn set_camera_data(
+        &self,
+        entity_id: EntityId,
+        patch: &CameraPatch,
+    ) -> Result<bool, String> {
         self.ecs_call("set_camera", (entity_id, patch))
     }
 
@@ -448,6 +1783,13 @@ impl Host {
         self.ecs_call("get_mesh_renderer", (entity_id,))
     }
 
+    pub fn get_mesh_renderer_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<MeshRendererData>, String> {
+        self.ecs_call("get_mesh_renderer", (entity_id,))
+    }
+
     pub fn set_mesh_renderer<S: Serialize>(
         &self,
         entity_id: EntityId,
@@ -456,7 +1798,51 @@ impl Host {
         self.ecs_call("set_mesh_renderer", (entity_id, patch))
     }
 
+    pub fn set_mesh_renderer_data(
+        &self,
+        entity_id: EntityId,
+        patch: &MeshRendererPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_mesh_renderer", (entity_id, patch))
+    }
+
+    pub fn get_scene_asset(&self, entity_id: EntityId) -> Result<Option<String>, String> {
+        self.ecs_call("get_scene_asset", (entity_id,))
+    }
+
+    pub fn set_scene_asset(&self, entity_id: EntityId, path: &str) -> Result<bool, String> {
+        self.ecs_call("set_scene_asset", (entity_id, path))
+    }
+
+    pub fn open_scene(&self, path: &str) -> Result<bool, String> {
+        self.ecs_call("open_scene", (path,))
+    }
+
+    pub fn switch_scene(&self, path: &str) -> Result<bool, String> {
+        self.ecs_call("switch_scene", (path,))
+    }
+
+    pub fn get_script_data(&self, entity_id: EntityId) -> Result<Option<ScriptData>, String> {
+        self.ecs_call("get_script", (entity_id,))
+    }
+
+    pub fn set_script_data(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+        language: Option<&str>,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_script", (entity_id, path, language))
+    }
+
     pub fn list_dynamic_components(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("list_dynamic_components", (entity_id,))
+    }
+
+    pub fn list_dynamic_components_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec<DynamicComponentData>>, String> {
         self.ecs_call("list_dynamic_components", (entity_id,))
     }
 
@@ -468,11 +1854,28 @@ impl Host {
         self.ecs_call("get_dynamic_component", (entity_id, component_name))
     }
 
+    pub fn get_dynamic_component_data(
+        &self,
+        entity_id: EntityId,
+        component_name: &str,
+    ) -> Result<Option<DynamicFields>, String> {
+        self.ecs_call("get_dynamic_component", (entity_id, component_name))
+    }
+
     pub fn set_dynamic_component<S: Serialize>(
         &self,
         entity_id: EntityId,
         component_name: &str,
         fields: S,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_dynamic_component", (entity_id, component_name, fields))
+    }
+
+    pub fn set_dynamic_component_data(
+        &self,
+        entity_id: EntityId,
+        component_name: &str,
+        fields: &DynamicFields,
     ) -> Result<bool, String> {
         self.ecs_call("set_dynamic_component", (entity_id, component_name, fields))
     }
@@ -486,12 +1889,34 @@ impl Host {
         self.ecs_call("get_dynamic_field", (entity_id, component_name, field_name))
     }
 
+    pub fn get_dynamic_field_data(
+        &self,
+        entity_id: EntityId,
+        component_name: &str,
+        field_name: &str,
+    ) -> Result<Option<DynamicFieldValue>, String> {
+        self.ecs_call("get_dynamic_field", (entity_id, component_name, field_name))
+    }
+
     pub fn set_dynamic_field<S: Serialize>(
         &self,
         entity_id: EntityId,
         component_name: &str,
         field_name: &str,
         value: S,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_dynamic_field",
+            (entity_id, component_name, field_name, value),
+        )
+    }
+
+    pub fn set_dynamic_field_data(
+        &self,
+        entity_id: EntityId,
+        component_name: &str,
+        field_name: &str,
+        value: DynamicFieldValue,
     ) -> Result<bool, String> {
         self.ecs_call(
             "set_dynamic_field",
@@ -523,7 +1948,19 @@ impl Host {
         self.ecs_call("get_physics", (entity_id,))
     }
 
+    pub fn get_physics_data(&self, entity_id: EntityId) -> Result<Option<PhysicsData>, String> {
+        self.ecs_call("get_physics", (entity_id,))
+    }
+
     pub fn set_physics<S: Serialize>(&self, entity_id: EntityId, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_physics", (entity_id, patch))
+    }
+
+    pub fn set_physics_data(
+        &self,
+        entity_id: EntityId,
+        patch: &PhysicsPatch,
+    ) -> Result<bool, String> {
         self.ecs_call("set_physics", (entity_id, patch))
     }
 
@@ -535,6 +1972,13 @@ impl Host {
         self.ecs_call("get_physics_world_defaults", (entity_id,))
     }
 
+    pub fn get_physics_world_defaults_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<PhysicsWorldDefaultsData>, String> {
+        self.ecs_call("get_physics_world_defaults", (entity_id,))
+    }
+
     pub fn set_physics_world_defaults<S: Serialize>(
         &self,
         entity_id: EntityId,
@@ -543,7 +1987,50 @@ impl Host {
         self.ecs_call("set_physics_world_defaults", (entity_id, patch))
     }
 
+    pub fn set_physics_world_defaults_data(
+        &self,
+        entity_id: EntityId,
+        patch: &PhysicsWorldDefaultsPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_physics_world_defaults", (entity_id, patch))
+    }
+
+    pub fn get_character_controller_output(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<CharacterControllerOutputData>, String> {
+        self.ecs_call("get_character_controller_output", (entity_id,))
+    }
+
+    pub fn get_physics_ray_cast_hit(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<PhysicsRayCastHitData>, String> {
+        self.ecs_call("get_physics_ray_cast_hit", (entity_id,))
+    }
+
+    pub fn get_physics_point_projection_hit(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<PhysicsPointProjectionHitData>, String> {
+        self.ecs_call("get_physics_point_projection_hit", (entity_id,))
+    }
+
+    pub fn get_physics_shape_cast_hit(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<PhysicsShapeCastHitData>, String> {
+        self.ecs_call("get_physics_shape_cast_hit", (entity_id,))
+    }
+
     pub fn get_physics_velocity(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_physics_velocity", (entity_id,))
+    }
+
+    pub fn get_physics_velocity_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<PhysicsVelocityData>, String> {
         self.ecs_call("get_physics_velocity", (entity_id,))
     }
 
@@ -553,6 +2040,135 @@ impl Host {
         patch: S,
     ) -> Result<bool, String> {
         self.ecs_call("set_physics_velocity", (entity_id, patch))
+    }
+
+    pub fn set_physics_velocity_data(
+        &self,
+        entity_id: EntityId,
+        patch: &PhysicsVelocityPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_physics_velocity", (entity_id, patch))
+    }
+
+    pub fn add_force(
+        &self,
+        entity_id: EntityId,
+        force: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_force", (entity_id, force, wake_up))
+    }
+
+    pub fn add_torque(
+        &self,
+        entity_id: EntityId,
+        torque: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_torque", (entity_id, torque, wake_up))
+    }
+
+    pub fn add_force_at_point(
+        &self,
+        entity_id: EntityId,
+        force: Vec3,
+        point: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_force_at_point", (entity_id, force, point, wake_up))
+    }
+
+    pub fn add_persistent_force(
+        &self,
+        entity_id: EntityId,
+        force: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_persistent_force", (entity_id, force, wake_up))
+    }
+
+    pub fn set_persistent_force(
+        &self,
+        entity_id: EntityId,
+        force: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_persistent_force", (entity_id, force, wake_up))
+    }
+
+    pub fn add_persistent_torque(
+        &self,
+        entity_id: EntityId,
+        torque: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("add_persistent_torque", (entity_id, torque, wake_up))
+    }
+
+    pub fn set_persistent_torque(
+        &self,
+        entity_id: EntityId,
+        torque: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_persistent_torque", (entity_id, torque, wake_up))
+    }
+
+    pub fn add_persistent_force_at_point(
+        &self,
+        entity_id: EntityId,
+        force: Vec3,
+        point: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "add_persistent_force_at_point",
+            (entity_id, force, point, wake_up),
+        )
+    }
+
+    pub fn clear_persistent_forces(&self, entity_id: EntityId) -> Result<bool, String> {
+        self.ecs_call("clear_persistent_forces", (entity_id,))
+    }
+
+    pub fn apply_impulse(
+        &self,
+        entity_id: EntityId,
+        impulse: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("apply_impulse", (entity_id, impulse, wake_up))
+    }
+
+    pub fn apply_angular_impulse(
+        &self,
+        entity_id: EntityId,
+        impulse: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("apply_angular_impulse", (entity_id, impulse, wake_up))
+    }
+
+    pub fn apply_torque_impulse(
+        &self,
+        entity_id: EntityId,
+        impulse: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call("apply_torque_impulse", (entity_id, impulse, wake_up))
+    }
+
+    pub fn apply_impulse_at_point(
+        &self,
+        entity_id: EntityId,
+        impulse: Vec3,
+        point: Vec3,
+        wake_up: Option<bool>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "apply_impulse_at_point",
+            (entity_id, impulse, point, wake_up),
+        )
     }
 
     pub fn set_physics_running(&self, running: bool) -> Result<bool, String> {
@@ -567,11 +2183,26 @@ impl Host {
         self.ecs_call("set_physics_gravity", (value,))
     }
 
+    pub fn set_physics_gravity_vec3(&self, value: Vec3) -> Result<bool, String> {
+        self.ecs_call("set_physics_gravity", (value,))
+    }
+
     pub fn get_physics_gravity(&self) -> Result<Option<Value>, String> {
         self.ecs_call("get_physics_gravity", ())
     }
 
+    pub fn get_physics_gravity_vec3(&self) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_physics_gravity", ())
+    }
+
     pub fn get_audio_emitter(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_audio_emitter", (entity_id,))
+    }
+
+    pub fn get_audio_emitter_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<AudioEmitterData>, String> {
         self.ecs_call("get_audio_emitter", (entity_id,))
     }
 
@@ -583,7 +2214,22 @@ impl Host {
         self.ecs_call("set_audio_emitter", (entity_id, patch))
     }
 
+    pub fn set_audio_emitter_data(
+        &self,
+        entity_id: EntityId,
+        patch: &AudioEmitterPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_audio_emitter", (entity_id, patch))
+    }
+
     pub fn get_audio_listener(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_audio_listener", (entity_id,))
+    }
+
+    pub fn get_audio_listener_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<AudioListenerData>, String> {
         self.ecs_call("get_audio_listener", (entity_id,))
     }
 
@@ -591,6 +2237,14 @@ impl Host {
         &self,
         entity_id: EntityId,
         patch: S,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_audio_listener", (entity_id, patch))
+    }
+
+    pub fn set_audio_listener_data(
+        &self,
+        entity_id: EntityId,
+        patch: &AudioListenerPatch,
     ) -> Result<bool, String> {
         self.ecs_call("set_audio_listener", (entity_id, patch))
     }
@@ -607,20 +2261,216 @@ impl Host {
         self.ecs_call_value("list_audio_buses", ())
     }
 
+    pub fn list_audio_buses_typed(&self) -> Result<Vec<AudioBus>, String> {
+        self.ecs_call("list_audio_buses", ())
+    }
+
     pub fn create_audio_bus(&self, name: Option<&str>) -> Result<Option<i64>, String> {
         self.ecs_call("create_audio_bus", (name,))
     }
 
-    pub fn remove_audio_bus(&self, bus: i64) -> Result<bool, String> {
+    pub fn create_audio_bus_typed(&self, name: Option<&str>) -> Result<Option<AudioBus>, String> {
+        self.ecs_call("create_audio_bus", (name,))
+    }
+
+    pub fn remove_audio_bus<B: Serialize>(&self, bus: B) -> Result<bool, String> {
         self.ecs_call("remove_audio_bus", (bus,))
     }
 
-    pub fn set_audio_bus_volume(&self, bus: i64, volume: f32) -> Result<bool, String> {
+    pub fn get_audio_bus_name<B: Serialize>(&self, bus: B) -> Result<Option<String>, String> {
+        self.ecs_call("get_audio_bus_name", (bus,))
+    }
+
+    pub fn set_audio_bus_name<B: Serialize>(&self, bus: B, name: &str) -> Result<bool, String> {
+        self.ecs_call("set_audio_bus_name", (bus, name))
+    }
+
+    pub fn set_audio_bus_volume<B: Serialize>(&self, bus: B, volume: f32) -> Result<bool, String> {
         self.ecs_call("set_audio_bus_volume", (bus, volume))
     }
 
-    pub fn get_audio_bus_volume(&self, bus: i64) -> Result<Option<f32>, String> {
+    pub fn get_audio_bus_volume<B: Serialize>(&self, bus: B) -> Result<Option<f32>, String> {
         self.ecs_call("get_audio_bus_volume", (bus,))
+    }
+
+    pub fn set_audio_scene_volume(&self, scene_id: u64, volume: f32) -> Result<bool, String> {
+        self.ecs_call("set_audio_scene_volume", (scene_id, volume))
+    }
+
+    pub fn get_audio_scene_volume(&self, scene_id: u64) -> Result<Option<f32>, String> {
+        self.ecs_call("get_audio_scene_volume", (scene_id,))
+    }
+
+    pub fn clear_audio_emitters(&self) -> Result<bool, String> {
+        self.ecs_call("clear_audio_emitters", ())
+    }
+
+    pub fn set_audio_head_width(&self, width: f32) -> Result<bool, String> {
+        self.ecs_call("set_audio_head_width", (width,))
+    }
+
+    pub fn get_audio_head_width(&self) -> Result<Option<f32>, String> {
+        self.ecs_call("get_audio_head_width", ())
+    }
+
+    pub fn set_audio_speed_of_sound(&self, speed: f32) -> Result<bool, String> {
+        self.ecs_call("set_audio_speed_of_sound", (speed,))
+    }
+
+    pub fn get_audio_speed_of_sound(&self) -> Result<Option<f32>, String> {
+        self.ecs_call("get_audio_speed_of_sound", ())
+    }
+
+    pub fn set_audio_streaming_config(
+        &self,
+        buffer_frames: u32,
+        chunk_frames: u32,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_audio_streaming_config", (buffer_frames, chunk_frames))
+    }
+
+    pub fn get_audio_streaming_config(&self) -> Result<Option<AudioStreamingConfig>, String> {
+        self.ecs_call("get_audio_streaming_config", ())
+    }
+
+    pub fn input_keys(&self) -> Result<Value, String> {
+        self.input_call_value("keys", ())
+    }
+
+    pub fn input_mouse_buttons(&self) -> Result<Value, String> {
+        self.input_call_value("mouse_buttons", ())
+    }
+
+    pub fn input_gamepad_buttons(&self) -> Result<Value, String> {
+        self.input_call_value("gamepad_buttons", ())
+    }
+
+    pub fn input_gamepad_axes(&self) -> Result<Value, String> {
+        self.input_call_value("gamepad_axes", ())
+    }
+
+    pub fn input_key_handle(&self, name: &str) -> Result<Option<String>, String> {
+        self.input_call("key", (name,))
+    }
+
+    pub fn input_mouse_button_handle(&self, name: &str) -> Result<Option<String>, String> {
+        self.input_call("mouse_button", (name,))
+    }
+
+    pub fn input_gamepad_button_handle(&self, name: &str) -> Result<Option<String>, String> {
+        self.input_call("gamepad_button", (name,))
+    }
+
+    pub fn input_gamepad_axis_handle(&self, name: &str) -> Result<Option<String>, String> {
+        self.input_call("gamepad_axis_handle", (name,))
+    }
+
+    pub fn input_gamepad_axis_ref(&self, name: &str) -> Result<Option<String>, String> {
+        self.input_call("gamepad_axis_ref", (name,))
+    }
+
+    pub fn input_key_down<K: Serialize>(&self, key: K) -> Result<bool, String> {
+        self.input_call("key_down", (key,))
+    }
+
+    pub fn input_key_pressed<K: Serialize>(&self, key: K) -> Result<bool, String> {
+        self.input_call("key_pressed", (key,))
+    }
+
+    pub fn input_key_released<K: Serialize>(&self, key: K) -> Result<bool, String> {
+        self.input_call("key_released", (key,))
+    }
+
+    pub fn input_mouse_down<B: Serialize>(&self, button: B) -> Result<bool, String> {
+        self.input_call("mouse_down", (button,))
+    }
+
+    pub fn input_mouse_pressed<B: Serialize>(&self, button: B) -> Result<bool, String> {
+        self.input_call("mouse_pressed", (button,))
+    }
+
+    pub fn input_mouse_released<B: Serialize>(&self, button: B) -> Result<bool, String> {
+        self.input_call("mouse_released", (button,))
+    }
+
+    pub fn input_cursor(&self) -> Result<Option<Vec2>, String> {
+        self.input_call("cursor", ())
+    }
+
+    pub fn input_cursor_delta(&self) -> Result<Option<Vec2>, String> {
+        self.input_call("cursor_delta", ())
+    }
+
+    pub fn input_wheel(&self) -> Result<Option<Vec2>, String> {
+        self.input_call("wheel", ())
+    }
+
+    pub fn input_window_size(&self) -> Result<Option<Vec2>, String> {
+        self.input_call("window_size", ())
+    }
+
+    pub fn input_scale_factor(&self) -> Result<Option<f64>, String> {
+        self.input_call("scale_factor", ())
+    }
+
+    pub fn input_modifiers(&self) -> Result<Option<InputModifiers>, String> {
+        self.input_call("modifiers", ())
+    }
+
+    pub fn input_wants_keyboard(&self) -> Result<bool, String> {
+        self.input_call("wants_keyboard", ())
+    }
+
+    pub fn input_wants_pointer(&self) -> Result<bool, String> {
+        self.input_call("wants_pointer", ())
+    }
+
+    pub fn input_gamepad_ids(&self) -> Result<Vec<u64>, String> {
+        self.input_call("gamepad_ids", ())
+    }
+
+    pub fn input_gamepad_count(&self) -> Result<u32, String> {
+        self.input_call("gamepad_count", ())
+    }
+
+    pub fn input_gamepad_axis<A: Serialize>(
+        &self,
+        axis: A,
+        gamepad_id: Option<u64>,
+    ) -> Result<f32, String> {
+        self.input_call("gamepad_axis", (axis, gamepad_id))
+    }
+
+    pub fn input_gamepad_button_down<B: Serialize>(
+        &self,
+        button: B,
+        gamepad_id: Option<u64>,
+    ) -> Result<bool, String> {
+        self.input_call("gamepad_button_down", (button, gamepad_id))
+    }
+
+    pub fn input_gamepad_button_pressed<B: Serialize>(
+        &self,
+        button: B,
+        gamepad_id: Option<u64>,
+    ) -> Result<bool, String> {
+        self.input_call("gamepad_button_pressed", (button, gamepad_id))
+    }
+
+    pub fn input_gamepad_button_released<B: Serialize>(
+        &self,
+        button: B,
+        gamepad_id: Option<u64>,
+    ) -> Result<bool, String> {
+        self.input_call("gamepad_button_released", (button, gamepad_id))
+    }
+
+    pub fn input_gamepad_trigger<S: Serialize>(
+        &self,
+        side: S,
+        gamepad_id: Option<u64>,
+    ) -> Result<f32, String> {
+        self.input_call("gamepad_trigger", (side, gamepad_id))
     }
 
     pub fn invoke_json_raw(
@@ -679,6 +2529,14 @@ fn normalize_call_args(args: Value) -> Value {
 fn to_c_string(value: &str) -> CString {
     let sanitized = value.replace('\0', " ");
     CString::new(sanitized).unwrap_or_else(|_| CString::new("").expect("CString::new failed"))
+}
+
+pub fn encode_state<T: Serialize>(value: &T) -> Option<Vec<u8>> {
+    serde_json::to_vec(value).ok()
+}
+
+pub fn decode_state<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    serde_json::from_slice(bytes).ok()
 }
 
 pub trait Script: Default + Send + 'static {

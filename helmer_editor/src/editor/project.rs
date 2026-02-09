@@ -1337,7 +1337,10 @@ pub fn rust_script_manifest_template(crate_name: &str, sdk_path: &Path) -> Strin
 }
 
 pub fn default_rust_script_template_full() -> &'static str {
-    r#"use helmer_script_sdk::{Host, Script, TransformPatch, Vec3, export_script, json};
+    r#"use helmer_script_sdk::{
+    Host, MeshRendererPatch, Script, TransformPatch, Vec3, decode_state, encode_state,
+    export_script,
+};
 
 #[derive(Default)]
 struct OrbitScript {
@@ -1359,14 +1362,7 @@ impl Script for OrbitScript {
 
         let mover = host.spawn_entity(Some("Orbiting Cube"));
         self.mover = Some(mover);
-        let _ = host.set_mesh_renderer(
-            mover,
-            json!({
-                "source": "Cube",
-                "casts_shadow": true,
-                "visible": true
-            }),
-        );
+        let _ = host.set_mesh_renderer_data(mover, &MeshRendererPatch::cube());
         let _ = host.set_transform(
             mover,
             &TransformPatch::with_position(Vec3 {
@@ -1399,31 +1395,20 @@ impl Script for OrbitScript {
     }
 
     fn save_state(&self) -> Option<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(29);
-        bytes.extend_from_slice(&self.t.to_le_bytes());
-        bytes.extend_from_slice(&self.speed.to_le_bytes());
-        bytes.push(self.mover.is_some() as u8);
-        bytes.extend_from_slice(&self.mover.unwrap_or(0).to_le_bytes());
-        bytes.extend_from_slice(&self.origin.x.to_le_bytes());
-        bytes.extend_from_slice(&self.origin.y.to_le_bytes());
-        bytes.extend_from_slice(&self.origin.z.to_le_bytes());
-        Some(bytes)
+        encode_state(&(self.mover, self.t, self.speed, self.origin))
     }
 
     fn load_state(&mut self, state: &[u8]) -> bool {
-        const EXPECTED_LEN: usize = 29;
-        if state.len() != EXPECTED_LEN {
+        let Some((mover, t, speed, origin)) =
+            decode_state::<(Option<u64>, f32, f32, Vec3)>(state)
+        else {
             return false;
-        }
+        };
 
-        self.t = f32::from_le_bytes(state[0..4].try_into().unwrap_or([0; 4]));
-        self.speed = f32::from_le_bytes(state[4..8].try_into().unwrap_or([0; 4]));
-        let has_mover = state[8] != 0;
-        let mover = u64::from_le_bytes(state[9..17].try_into().unwrap_or([0; 8]));
-        self.mover = if has_mover { Some(mover) } else { None };
-        self.origin.x = f32::from_le_bytes(state[17..21].try_into().unwrap_or([0; 4]));
-        self.origin.y = f32::from_le_bytes(state[21..25].try_into().unwrap_or([0; 4]));
-        self.origin.z = f32::from_le_bytes(state[25..29].try_into().unwrap_or([0; 4]));
+        self.mover = mover;
+        self.t = t;
+        self.speed = speed;
+        self.origin = origin;
         true
     }
 }

@@ -1756,12 +1756,26 @@ unsafe fn rust_invoke_json(
         }
     };
 
-    let function: Function = api_table
+    let args = rust_json_args_to_lua_multivalue(&lua, &args_json)?;
+    let value: Value = api_table
         .get(function_name.as_str())
         .map_err(|err| err.to_string())?;
-    let args = rust_json_args_to_lua_multivalue(&lua, &args_json)?;
-    let result: MultiValue = function.call(args).map_err(|err| err.to_string())?;
-    rust_lua_multivalue_to_json(result)
+
+    match value {
+        Value::Function(function) => {
+            let result: MultiValue = function.call(args).map_err(|err| err.to_string())?;
+            rust_lua_multivalue_to_json(result)
+        }
+        value => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "Table field '{}.{}' is not callable",
+                    table_name, function_name
+                ));
+            }
+            rust_lua_value_to_json(value)
+        }
+    }
 }
 
 fn rust_json_args_to_lua_multivalue(lua: &Lua, args_json: &str) -> Result<MultiValue, String> {

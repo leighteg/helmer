@@ -866,6 +866,8 @@ type HelmerEcs = {
 
     get_scene_asset: (id: EntityId) -> string?,
     set_scene_asset: (id: EntityId, path: string) -> boolean,
+    open_scene: (path: string) -> boolean,
+    switch_scene: (path: string) -> boolean,
 
     get_script: (id: EntityId) -> ScriptData?,
     set_script: (id: EntityId, path: string, language: string?) -> boolean,
@@ -1082,6 +1084,8 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_mesh_renderer(id, {source?, material?, casts_shadow?, visible?}) -> bool
 --   ecs.get_scene_asset(id) -> path|nil
 --   ecs.set_scene_asset(id, path) -> bool
+--   ecs.open_scene(path) -> bool
+--   ecs.switch_scene(path) -> bool
 --   ecs.get_script(id) -> {path, language}|nil
 --   ecs.set_script(id, path, language?) -> bool
 --   ecs.list_dynamic_components(id) -> [{name, fields={...}}, ...]|nil

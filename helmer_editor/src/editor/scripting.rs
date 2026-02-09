@@ -43,6 +43,7 @@ use crate::editor::{
         EditorAssetCache, EditorAudio, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
         cached_audio_handle, cached_scene_handle,
     },
+    commands::{EditorCommand, EditorCommandQueue},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
@@ -1884,6 +1885,52 @@ fn build_ecs_table(
             world
                 .entity_mut(entity)
                 .insert(SceneAssetPath { path: resolved });
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_open_scene = world_ptr;
+    ecs.set(
+        "open_scene",
+        lua.create_function(move |_, path: String| {
+            let world = unsafe { &mut *(world_ptr_open_scene as *mut World) };
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Ok(false);
+            }
+
+            let resolved = {
+                let project = world.get_resource::<EditorProject>();
+                resolve_project_path(project, Path::new(trimmed))
+            };
+
+            let Some(mut queue) = world.get_resource_mut::<EditorCommandQueue>() else {
+                return Ok(false);
+            };
+            queue.push(EditorCommand::OpenScene { path: resolved });
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_switch_scene = world_ptr;
+    ecs.set(
+        "switch_scene",
+        lua.create_function(move |_, path: String| {
+            let world = unsafe { &mut *(world_ptr_switch_scene as *mut World) };
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Ok(false);
+            }
+
+            let resolved = {
+                let project = world.get_resource::<EditorProject>();
+                resolve_project_path(project, Path::new(trimmed))
+            };
+
+            let Some(mut queue) = world.get_resource_mut::<EditorCommandQueue>() else {
+                return Ok(false);
+            };
+            queue.push(EditorCommand::OpenScene { path: resolved });
             Ok(true)
         })?,
     )?;

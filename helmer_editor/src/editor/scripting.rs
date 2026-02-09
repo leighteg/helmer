@@ -23,11 +23,11 @@ use helmer::runtime::input_manager::InputManager;
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
     ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
-    KinematicRigidBody, MeshColliderKind, MeshColliderLod, PhysicsCombineRule, PhysicsHandle,
-    PhysicsJoint, PhysicsJointKind, PhysicsPointProjection, PhysicsPointProjectionHit,
-    PhysicsQueryFilter, PhysicsRayCast, PhysicsRayCastHit, PhysicsShapeCast, PhysicsShapeCastHit,
-    PhysicsShapeCastStatus, PhysicsWorldDefaults, RigidBodyProperties,
-    RigidBodyPropertyInheritance,
+    KinematicRigidBody, MeshColliderKind, MeshColliderLod, PersistentPointForce,
+    PhysicsCombineRule, PhysicsHandle, PhysicsJoint, PhysicsJointKind, PhysicsPointProjection,
+    PhysicsPointProjectionHit, PhysicsQueryFilter, PhysicsRayCast, PhysicsRayCastHit,
+    PhysicsShapeCast, PhysicsShapeCastHit, PhysicsShapeCastStatus, PhysicsWorldDefaults,
+    RigidBodyForces, RigidBodyImpulseQueue, RigidBodyProperties, RigidBodyPropertyInheritance,
 };
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::systems::scene_system::SceneRoot;
@@ -2777,6 +2777,98 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_add_force = world_ptr;
+    ecs.set(
+        "add_force",
+        lua.create_function(
+            move |_, (entity_id, force, wake_up): (u64, Table, Option<bool>)| {
+                let world = unsafe { &mut *(world_ptr_add_force as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(force) = table_to_vec3(&force) else {
+                    return Ok(false);
+                };
+                Ok(add_persistent_force(
+                    world,
+                    entity,
+                    force,
+                    wake_up.unwrap_or(true),
+                ))
+            },
+        )?,
+    )?;
+
+    let world_ptr_add_torque = world_ptr;
+    ecs.set(
+        "add_torque",
+        lua.create_function(
+            move |_, (entity_id, torque, wake_up): (u64, Table, Option<bool>)| {
+                let world = unsafe { &mut *(world_ptr_add_torque as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(torque) = table_to_vec3(&torque) else {
+                    return Ok(false);
+                };
+                Ok(add_persistent_torque(
+                    world,
+                    entity,
+                    torque,
+                    wake_up.unwrap_or(true),
+                ))
+            },
+        )?,
+    )?;
+
+    let world_ptr_add_force_at_point = world_ptr;
+    ecs.set(
+        "add_force_at_point",
+        lua.create_function(
+            move |_, (entity_id, force, point, wake_up): (u64, Table, Table, Option<bool>)| {
+                let world = unsafe { &mut *(world_ptr_add_force_at_point as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(force) = table_to_vec3(&force) else {
+                    return Ok(false);
+                };
+                let Some(point) = table_to_vec3(&point) else {
+                    return Ok(false);
+                };
+                Ok(add_persistent_force_at_point(
+                    world,
+                    entity,
+                    force,
+                    point,
+                    wake_up.unwrap_or(true),
+                ))
+            },
+        )?,
+    )?;
+
+    let world_ptr_apply_impulse = world_ptr;
+    ecs.set(
+        "apply_impulse",
+        lua.create_function(
+            move |_, (entity_id, impulse, wake_up): (u64, Table, Option<bool>)| {
+                let world = unsafe { &mut *(world_ptr_apply_impulse as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(impulse) = table_to_vec3(&impulse) else {
+                    return Ok(false);
+                };
+                Ok(queue_physics_impulse(
+                    world,
+                    entity,
+                    impulse,
+                    wake_up.unwrap_or(true),
+                ))
+            },
+        )?,
+    )?;
+
     let world_ptr_set_phys_running = world_ptr;
     ecs.set(
         "set_physics_running",
@@ -2906,6 +2998,8 @@ fn remove_all_physics_components(world: &mut World, entity: Entity) {
     world.entity_mut(entity).remove::<PhysicsShapeCast>();
     world.entity_mut(entity).remove::<PhysicsShapeCastHit>();
     world.entity_mut(entity).remove::<PhysicsWorldDefaults>();
+    world.entity_mut(entity).remove::<RigidBodyForces>();
+    world.entity_mut(entity).remove::<RigidBodyImpulseQueue>();
     world.entity_mut(entity).remove::<PhysicsHandle>();
 }
 
@@ -4455,6 +4549,84 @@ fn set_physics_velocity(world: &mut World, entity: Entity, data: &Table) -> bool
         world.entity_mut(entity).insert(props);
     }
 
+    true
+}
+
+#[inline]
+fn is_valid_non_zero_vec3(value: Vec3) -> bool {
+    value.is_finite() && value.length_squared() > 1.0e-12
+}
+
+fn add_persistent_force(world: &mut World, entity: Entity, force: Vec3, wake_up: bool) -> bool {
+    if !is_valid_non_zero_vec3(force) || !has_physics_component(world, entity) {
+        return false;
+    }
+    let mut forces = world
+        .get::<RigidBodyForces>(entity)
+        .cloned()
+        .unwrap_or_default();
+    forces.force += force;
+    forces.force_wake_up |= wake_up;
+    world.entity_mut(entity).insert(forces);
+    true
+}
+
+fn add_persistent_torque(world: &mut World, entity: Entity, torque: Vec3, wake_up: bool) -> bool {
+    if !is_valid_non_zero_vec3(torque) || !has_physics_component(world, entity) {
+        return false;
+    }
+    let mut forces = world
+        .get::<RigidBodyForces>(entity)
+        .cloned()
+        .unwrap_or_default();
+    forces.torque += torque;
+    forces.torque_wake_up |= wake_up;
+    world.entity_mut(entity).insert(forces);
+    true
+}
+
+fn add_persistent_force_at_point(
+    world: &mut World,
+    entity: Entity,
+    force: Vec3,
+    point: Vec3,
+    wake_up: bool,
+) -> bool {
+    if !is_valid_non_zero_vec3(force) || !point.is_finite() || !has_physics_component(world, entity)
+    {
+        return false;
+    }
+
+    const MAX_PERSISTENT_POINT_FORCES: usize = 1024;
+
+    let mut forces = world
+        .get::<RigidBodyForces>(entity)
+        .cloned()
+        .unwrap_or_default();
+    if forces.point_forces.len() + 1 > MAX_PERSISTENT_POINT_FORCES {
+        let overflow = forces.point_forces.len() + 1 - MAX_PERSISTENT_POINT_FORCES;
+        forces.point_forces.drain(0..overflow);
+    }
+    forces.point_forces.push(PersistentPointForce {
+        force,
+        point,
+        wake_up,
+    });
+    world.entity_mut(entity).insert(forces);
+    true
+}
+
+fn queue_physics_impulse(world: &mut World, entity: Entity, impulse: Vec3, wake_up: bool) -> bool {
+    if !is_valid_non_zero_vec3(impulse) || !has_physics_component(world, entity) {
+        return false;
+    }
+    let mut queue = world
+        .get::<RigidBodyImpulseQueue>(entity)
+        .copied()
+        .unwrap_or_default();
+    queue.impulse += impulse;
+    queue.wake_up |= wake_up;
+    world.entity_mut(entity).insert(queue);
     true
 }
 

@@ -254,6 +254,49 @@ impl Default for RigidBodyProperties {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PersistentPointForce {
+    pub force: Vec3,
+    pub point: Vec3,
+    pub wake_up: bool,
+}
+
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct RigidBodyForces {
+    pub force: Vec3,
+    pub force_wake_up: bool,
+    pub torque: Vec3,
+    pub torque_wake_up: bool,
+    pub point_forces: Vec<PersistentPointForce>,
+}
+
+impl Default for RigidBodyForces {
+    fn default() -> Self {
+        Self {
+            force: Vec3::ZERO,
+            force_wake_up: false,
+            torque: Vec3::ZERO,
+            torque_wake_up: false,
+            point_forces: Vec::new(),
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct RigidBodyImpulseQueue {
+    pub impulse: Vec3,
+    pub wake_up: bool,
+}
+
+impl Default for RigidBodyImpulseQueue {
+    fn default() -> Self {
+        Self {
+            impulse: Vec3::ZERO,
+            wake_up: false,
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RigidBodyPropertyInheritance {
     pub linear_damping: bool,

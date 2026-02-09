@@ -29,7 +29,8 @@ use crate::{
             PhysicsCombineRule, PhysicsHandle, PhysicsJoint, PhysicsJointKind,
             PhysicsPointProjection, PhysicsPointProjectionHit, PhysicsQueryFilter, PhysicsRayCast,
             PhysicsRayCastHit, PhysicsShapeCast, PhysicsShapeCastHit, PhysicsShapeCastStatus,
-            PhysicsWorldDefaults, RigidBodyProperties, RigidBodyPropertyInheritance,
+            PhysicsWorldDefaults, RigidBodyForces, RigidBodyImpulseQueue, RigidBodyProperties,
+            RigidBodyPropertyInheritance,
         },
         physics_resource::PhysicsResource,
     },
@@ -1005,6 +1006,71 @@ pub fn sync_transforms_to_physics_system(
                 rigid_body.set_position(iso, true);
             }
         }
+    }
+}
+
+pub fn apply_persistent_forces_system(
+    mut phys: ResMut<PhysicsResource>,
+    query: Query<(&PhysicsHandle, &RigidBodyForces)>,
+) {
+    if !phys.running {
+        return;
+    }
+
+    for (handle, forces) in query.iter() {
+        if forces.force == Vec3::ZERO
+            && forces.torque == Vec3::ZERO
+            && forces.point_forces.is_empty()
+        {
+            continue;
+        }
+
+        let Some(rigid_body) = phys.rigid_body_set.get_mut(handle.rigid_body) else {
+            continue;
+        };
+
+        if forces.force != Vec3::ZERO {
+            rigid_body.add_force(to_vector(forces.force), forces.force_wake_up);
+        }
+        if forces.torque != Vec3::ZERO {
+            rigid_body.add_torque(to_vector(forces.torque), forces.torque_wake_up);
+        }
+        for point_force in forces.point_forces.iter() {
+            if point_force.force == Vec3::ZERO {
+                continue;
+            }
+            rigid_body.add_force_at_point(
+                to_vector(point_force.force),
+                to_vector(point_force.point),
+                point_force.wake_up,
+            );
+        }
+    }
+}
+
+pub fn apply_queued_impulses_system(
+    mut phys: ResMut<PhysicsResource>,
+    mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyImpulseQueue)>,
+) {
+    if !phys.running {
+        return;
+    }
+
+    for (handle, mut queue) in query.iter_mut() {
+        if queue.impulse == Vec3::ZERO {
+            continue;
+        }
+
+        let Some(handle) = handle else {
+            continue;
+        };
+        let Some(rigid_body) = phys.rigid_body_set.get_mut(handle.rigid_body) else {
+            continue;
+        };
+
+        rigid_body.apply_impulse(to_vector(queue.impulse), queue.wake_up);
+        queue.impulse = Vec3::ZERO;
+        queue.wake_up = false;
     }
 }
 

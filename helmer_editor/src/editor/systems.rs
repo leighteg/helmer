@@ -46,7 +46,9 @@ use crate::editor::{
     layout_window_ids, mark_undo_clean,
     project::{
         EditorProject, create_project, default_animation_template, default_material_template,
-        default_scene_template, default_script_template_full, load_project, save_recent_projects,
+        default_rust_script_template_full, default_scene_template, default_script_template_full,
+        load_project, rust_script_manifest_template, rust_script_sdk_dependency_path,
+        sanitize_rust_crate_name, save_recent_projects,
     },
     push_undo_snapshot, redo_action, reset_undo_history, save_layouts,
     scene::{
@@ -58,7 +60,10 @@ use crate::editor::{
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
-    scripting::{ScriptComponent, ScriptRegistry, is_script_path, load_script_asset},
+    scripting::{
+        ScriptComponent, ScriptRegistry, ScriptRuntime, is_script_path, load_script_asset,
+        script_registry_key_for_path,
+    },
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
         AssetDragState, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
@@ -2081,12 +2086,16 @@ pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res
                 continue;
             }
 
-            if path.exists() {
+            let Some(script_key) = script_registry_key_for_path(&path) else {
+                continue;
+            };
+
+            if script_key.exists() {
                 registry
                     .scripts
-                    .insert(path.clone(), load_script_asset(&path));
+                    .insert(script_key.clone(), load_script_asset(&script_key));
                 updated += 1;
-            } else if registry.scripts.remove(&path).is_some() {
+            } else if registry.scripts.remove(&script_key).is_some() {
                 removed += 1;
             }
         }
@@ -2141,20 +2150,25 @@ pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res
             continue;
         }
 
-        discovered.insert(path.clone());
+        let Some(script_key) = script_registry_key_for_path(&path) else {
+            continue;
+        };
+        if !discovered.insert(script_key.clone()) {
+            continue;
+        }
 
-        let reload = match registry.scripts.get(&path) {
-            Some(asset) => match fs::metadata(&path).and_then(|meta| meta.modified()) {
-                Ok(modified) => modified > asset.modified,
-                Err(_) => false,
-            },
+        let next_asset = load_script_asset(&script_key);
+        let reload = match registry.scripts.get(&script_key) {
+            Some(existing) => {
+                next_asset.modified > existing.modified
+                    || next_asset.error != existing.error
+                    || next_asset.language != existing.language
+            }
             None => true,
         };
 
         if reload {
-            registry
-                .scripts
-                .insert(path.clone(), load_script_asset(&path));
+            registry.scripts.insert(script_key.clone(), next_asset);
             updated += 1;
         }
     }
@@ -2267,6 +2281,9 @@ fn handle_close_project(world: &mut World) {
         registry.scripts.clear();
         registry.dirty_paths.clear();
         registry.status = None;
+    }
+    if let Some(mut runtime) = world.get_resource_mut::<ScriptRuntime>() {
+        runtime.clear_all();
     }
 
     handle_new_scene(world);
@@ -2609,6 +2626,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Scene => directory.join(format!("{}.hscene.ron", name)),
         AssetCreateKind::Material => directory.join(format!("{}.ron", name)),
         AssetCreateKind::Script => directory.join(format!("{}.luau", name)),
+        AssetCreateKind::RustScript => directory.join(name),
         AssetCreateKind::Animation => directory.join(format!("{}.hanim.ron", name)),
     };
 
@@ -2625,6 +2643,22 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Script => {
             fs::write(&target_path, default_script_template_full()).map_err(|err| err.to_string())
         }
+        AssetCreateKind::RustScript => (|| -> Result<(), String> {
+            let crate_name = sanitize_rust_crate_name(name);
+            let src_dir = target_path.join("src");
+            fs::create_dir_all(&src_dir).map_err(|err| err.to_string())?;
+            let project_root = world
+                .get_resource::<EditorProject>()
+                .and_then(|project| project.root.clone());
+            let sdk_path = rust_script_sdk_dependency_path(project_root.as_deref(), &target_path)?;
+            fs::write(
+                target_path.join("Cargo.toml"),
+                rust_script_manifest_template(&crate_name, &sdk_path),
+            )
+            .map_err(|err| err.to_string())?;
+            fs::write(src_dir.join("lib.rs"), default_rust_script_template_full())
+                .map_err(|err| err.to_string())
+        })(),
         AssetCreateKind::Animation => {
             fs::write(&target_path, default_animation_template()).map_err(|err| err.to_string())
         }
@@ -2976,11 +3010,17 @@ fn guess_import_dir(project: &EditorProject, root: &Path, source: &Path) -> Opti
         .extension()
         .and_then(|ext| ext.to_str())?
         .to_ascii_lowercase();
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
 
     let target = match ext.as_str() {
         "glb" | "gltf" => config.models_root(root),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => config.textures_root(root),
-        "lua" | "luau" => config.scripts_root(root),
+        "lua" | "luau" | "rs" => config.scripts_root(root),
+        "toml" if file_name == "cargo.toml" => config.scripts_root(root),
         "ron" => config.materials_root(root),
         _ => config.assets_root(root),
     };

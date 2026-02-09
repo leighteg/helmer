@@ -1,8 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::{CStr, c_char, c_void},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    process::Command,
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, Sender, channel},
+    },
+    thread,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -10,7 +16,16 @@ use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use bevy_ecs::query::With;
 use glam::{DVec2, Quat, Vec2, Vec3};
-use mlua::{Function, Lua, RegistryKey, Table, UserData, Value, Variadic};
+use helmer_script_sdk::{
+    EntityId as RustScriptEntityId, Quat as RustScriptQuat, SCRIPT_API_ABI_VERSION,
+    SCRIPT_PLUGIN_ABI_VERSION, ScriptApi as RustScriptApi, ScriptBytes as RustScriptBytes,
+    ScriptBytesView as RustScriptBytesView, ScriptPlugin as RustScriptPluginApi,
+    Transform as RustScriptTransform, TransformPatch as RustScriptTransformPatch,
+    Vec3 as RustScriptVec3,
+};
+use libloading::{Library, Symbol};
+use mlua::{Function, Lua, MultiValue, RegistryKey, Table, UserData, Value, Variadic};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use helmer::audio::{AudioBus, AudioPlaybackState};
@@ -51,6 +66,8 @@ use crate::editor::{
     set_play_camera,
     viewport::EditorViewportState,
 };
+
+const RUST_SCRIPT_PLUGIN_SYMBOL: &[u8] = b"helmer_get_script_plugin\0";
 
 #[derive(Debug, Clone)]
 pub struct ScriptEntry {
@@ -100,6 +117,7 @@ pub struct ScriptSpawned {
 
 #[derive(Debug, Clone)]
 pub struct ScriptAsset {
+    pub language: String,
     pub source: String,
     pub modified: SystemTime,
     pub error: Option<String>,
@@ -139,6 +157,13 @@ impl ScriptRegistry {
 }
 
 pub fn is_script_path(path: &Path) -> bool {
+    if is_lua_script_path(path) {
+        return true;
+    }
+    is_rust_script_path(path)
+}
+
+pub fn is_lua_script_path(path: &Path) -> bool {
     let is_script_ext = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -155,21 +180,76 @@ pub fn is_script_path(path: &Path) -> bool {
     !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
 }
 
-pub fn script_language_from_path(path: &Path) -> String {
-    match path
+pub fn is_rust_script_path(path: &Path) -> bool {
+    resolve_rust_script_manifest(path).is_some()
+}
+
+pub fn resolve_rust_script_manifest(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        let manifest = path.join("Cargo.toml");
+        if manifest.exists() {
+            return Some(manifest);
+        }
+        return None;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase());
+
+    if file_name.as_deref() == Some("cargo.toml") {
+        return Some(path.to_path_buf());
+    }
+
+    if path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
+        .map(|ext| ext.eq_ignore_ascii_case("rs"))
+        .unwrap_or(false)
     {
-        Some(ext) if ext == "lua" => "lua".to_string(),
-        Some(ext) if ext == "luau" => "luau".to_string(),
-        _ => "luau".to_string(),
+        let mut current = path.parent();
+        while let Some(dir) = current {
+            let manifest = dir.join("Cargo.toml");
+            if manifest.exists() {
+                return Some(manifest);
+            }
+            current = dir.parent();
+        }
     }
+
+    None
+}
+
+pub fn script_registry_key_for_path(path: &Path) -> Option<PathBuf> {
+    if is_lua_script_path(path) {
+        return Some(path.to_path_buf());
+    }
+    resolve_rust_script_manifest(path)
+}
+
+pub fn script_language_from_path(path: &Path) -> String {
+    if is_lua_script_path(path) {
+        return match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+        {
+            Some(ext) if ext == "lua" => "lua".to_string(),
+            _ => "luau".to_string(),
+        };
+    }
+
+    if resolve_rust_script_manifest(path).is_some() {
+        return "rust".to_string();
+    }
+
+    "luau".to_string()
 }
 
 pub fn normalize_script_language(language: &str, path: Option<&Path>) -> String {
     let normalized = language.trim().to_ascii_lowercase();
-    if normalized == "lua" || normalized == "luau" {
+    if normalized == "lua" || normalized == "luau" || normalized == "rust" {
         return normalized;
     }
     if let Some(path) = path {
@@ -178,22 +258,86 @@ pub fn normalize_script_language(language: &str, path: Option<&Path>) -> String 
     "luau".to_string()
 }
 
-pub fn load_script_asset(path: &Path) -> ScriptAsset {
-    let modified = fs::metadata(path)
+fn rust_script_modified_time(manifest_path: &Path) -> SystemTime {
+    let mut latest = fs::metadata(manifest_path)
         .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
+        .unwrap_or_else(|_| SystemTime::UNIX_EPOCH);
 
-    match fs::read_to_string(path) {
-        Ok(source) => ScriptAsset {
-            source,
-            modified,
-            error: None,
-        },
-        Err(err) => ScriptAsset {
-            source: String::new(),
-            modified,
-            error: Some(err.to_string()),
-        },
+    let Some(root) = manifest_path.parent() else {
+        return latest;
+    };
+
+    let src_root = root.join("src");
+    if src_root.exists() {
+        for entry in walkdir::WalkDir::new(&src_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            if let Ok(modified) = fs::metadata(entry.path()).and_then(|meta| meta.modified()) {
+                if modified > latest {
+                    latest = modified;
+                }
+            }
+        }
+    }
+
+    let build_rs = root.join("build.rs");
+    if let Ok(modified) = fs::metadata(&build_rs).and_then(|meta| meta.modified()) {
+        if modified > latest {
+            latest = modified;
+        }
+    }
+
+    latest
+}
+
+pub fn load_script_asset(path: &Path) -> ScriptAsset {
+    let language = script_language_from_path(path);
+    if language == "rust" {
+        let Some(manifest_path) = resolve_rust_script_manifest(path) else {
+            return ScriptAsset {
+                language,
+                source: String::new(),
+                modified: SystemTime::now(),
+                error: Some("Rust script manifest not found".to_string()),
+            };
+        };
+
+        let modified = rust_script_modified_time(&manifest_path);
+        match fs::read_to_string(&manifest_path) {
+            Ok(source) => ScriptAsset {
+                language,
+                source,
+                modified,
+                error: None,
+            },
+            Err(err) => ScriptAsset {
+                language,
+                source: String::new(),
+                modified,
+                error: Some(err.to_string()),
+            },
+        }
+    } else {
+        let modified = fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or_else(|_| SystemTime::now());
+
+        match fs::read_to_string(path) {
+            Ok(source) => ScriptAsset {
+                language,
+                source,
+                modified,
+                error: None,
+            },
+            Err(err) => ScriptAsset {
+                language,
+                source: String::new(),
+                modified,
+                error: Some(err.to_string()),
+            },
+        }
     }
 }
 
@@ -210,20 +354,125 @@ pub struct ScriptInstanceKey {
     pub script_index: usize,
 }
 
+#[derive(Debug)]
+struct RustBuildResult {
+    manifest_path: PathBuf,
+    source_modified: SystemTime,
+    artifact_path: Option<PathBuf>,
+    output: String,
+    error: Option<String>,
+}
+
+#[allow(dead_code)]
+pub struct RustLoadedPlugin {
+    manifest_path: PathBuf,
+    source_library_path: PathBuf,
+    loaded_library_path: PathBuf,
+    version_id: u64,
+    source_modified: SystemTime,
+    plugin_ptr: *const RustScriptPluginApi,
+    library: Arc<Mutex<Library>>,
+}
+
+// SAFETY: Rust script plugins are only accessed from the main ECS thread
+unsafe impl Send for RustLoadedPlugin {}
+// SAFETY: Rust script plugins are only accessed from the main ECS thread
+unsafe impl Sync for RustLoadedPlugin {}
+
+pub struct RustScriptHostContext {
+    world_ptr: usize,
+    owner: Entity,
+    script_index: usize,
+}
+
+// SAFETY: Script host context is only mutated on the main ECS thread
+unsafe impl Send for RustScriptHostContext {}
+// SAFETY: Script host context is only mutated on the main ECS thread
+unsafe impl Sync for RustScriptHostContext {}
+
+#[allow(dead_code)]
+pub struct RustScriptInstance {
+    manifest_path: PathBuf,
+    plugin_version_id: u64,
+    plugin_instance_ptr: *mut c_void,
+    plugin: Arc<RustLoadedPlugin>,
+    host_context: Box<RustScriptHostContext>,
+    host_api: Box<RustScriptApi>,
+}
+
+// SAFETY: Script instances are only created, updated, and destroyed on the main ECS thread
+unsafe impl Send for RustScriptInstance {}
+// SAFETY: Script instances are only created, updated, and destroyed on the main ECS thread
+unsafe impl Sync for RustScriptInstance {}
+
 #[derive(Resource)]
 pub struct ScriptRuntime {
     pub lua: Arc<Mutex<Lua>>,
     pub instances: HashMap<ScriptInstanceKey, ScriptInstance>,
+    pub rust_instances: HashMap<ScriptInstanceKey, RustScriptInstance>,
+    rust_plugins: HashMap<PathBuf, Arc<RustLoadedPlugin>>,
+    rust_inflight_builds: HashSet<PathBuf>,
+    rust_build_sender: Sender<RustBuildResult>,
+    rust_build_receiver: Arc<Mutex<Receiver<RustBuildResult>>>,
+    rust_build_errors: HashMap<PathBuf, String>,
+    pub rust_status: Option<String>,
+    next_rust_plugin_version: u64,
     pub errors: Vec<String>,
 }
 
 impl Default for ScriptRuntime {
     fn default() -> Self {
+        let (rust_build_sender, rust_build_receiver) = channel();
         Self {
             lua: Arc::new(Mutex::new(Lua::new())),
             instances: HashMap::new(),
+            rust_instances: HashMap::new(),
+            rust_plugins: HashMap::new(),
+            rust_inflight_builds: HashSet::new(),
+            rust_build_sender,
+            rust_build_receiver: Arc::new(Mutex::new(rust_build_receiver)),
+            rust_build_errors: HashMap::new(),
+            rust_status: None,
+            next_rust_plugin_version: 1,
             errors: Vec::new(),
         }
+    }
+}
+
+impl ScriptRuntime {
+    pub fn clear_all(&mut self) {
+        self.instances.clear();
+        self.rust_instances.clear();
+        self.rust_plugins.clear();
+        self.rust_inflight_builds.clear();
+        self.rust_build_errors.clear();
+        self.rust_status = None;
+        self.errors.clear();
+    }
+
+    pub fn contains_instance(&self, key: ScriptInstanceKey) -> bool {
+        self.instances.contains_key(&key) || self.rust_instances.contains_key(&key)
+    }
+
+    fn request_rust_build(&mut self, manifest_path: &Path) {
+        if self.rust_inflight_builds.contains(manifest_path) {
+            return;
+        }
+
+        self.rust_inflight_builds
+            .insert(manifest_path.to_path_buf());
+        let sender = self.rust_build_sender.clone();
+        let manifest = manifest_path.to_path_buf();
+        thread::spawn(move || {
+            let _ = sender.send(build_rust_script_library(&manifest));
+        });
+    }
+
+    fn take_rust_build_results(&self) -> Vec<RustBuildResult> {
+        let Ok(receiver) = self.rust_build_receiver.lock() else {
+            return Vec::new();
+        };
+        receiver.try_iter().collect::<Vec<_>>()
     }
 }
 
@@ -340,16 +589,25 @@ pub fn script_execution_system(world: &mut World) {
                 let Some(path) = script.path.as_ref() else {
                     continue;
                 };
+
+                let language = normalize_script_language(&script.language, Some(path));
+                let runtime_path = if language == "rust" {
+                    resolve_rust_script_manifest(path).unwrap_or_else(|| path.clone())
+                } else {
+                    path.clone()
+                };
+
                 let asset = script_assets
-                    .get(path)
+                    .get(&runtime_path)
                     .cloned()
-                    .unwrap_or_else(|| load_script_asset(path));
+                    .unwrap_or_else(|| load_script_asset(&runtime_path));
                 entries.push((
                     ScriptInstanceKey {
                         entity,
                         script_index,
                     },
                     script.clone(),
+                    runtime_path,
                     asset,
                 ));
             }
@@ -358,7 +616,9 @@ pub fn script_execution_system(world: &mut World) {
     };
     let scripts_by_key = scripts
         .iter()
-        .map(|(key, script, asset)| (*key, (script.clone(), asset.clone())))
+        .map(|(key, script, runtime_path, asset)| {
+            (*key, (script.clone(), runtime_path.clone(), asset.clone()))
+        })
         .collect::<HashMap<_, _>>();
     let script_keys = scripts_by_key.keys().copied().collect::<HashSet<_>>();
 
@@ -430,6 +690,66 @@ pub fn script_execution_system(world: &mut World) {
     world.resource_scope::<ScriptRuntime, _>(|world, mut runtime| {
         runtime.errors.clear();
 
+        let completed_builds = runtime.take_rust_build_results();
+        for result in completed_builds {
+            runtime.rust_inflight_builds.remove(&result.manifest_path);
+
+            if let Some(error) = result.error {
+                let mut message = error;
+                if !result.output.trim().is_empty() {
+                    message.push('\n');
+                    message.push_str(&truncate_diagnostic(&result.output));
+                }
+                runtime
+                    .rust_build_errors
+                    .insert(result.manifest_path.clone(), message);
+                runtime.rust_status = Some(format!(
+                    "Rust build failed: {}",
+                    result.manifest_path.to_string_lossy()
+                ));
+                continue;
+            }
+
+            let Some(artifact_path) = result.artifact_path.clone() else {
+                let message = format!(
+                    "No build artifact produced for {}",
+                    result.manifest_path.to_string_lossy()
+                );
+                runtime
+                    .rust_build_errors
+                    .insert(result.manifest_path.clone(), message.clone());
+                runtime.rust_status = Some(message);
+                continue;
+            };
+
+            let version_id = runtime.next_rust_plugin_version;
+            runtime.next_rust_plugin_version = runtime.next_rust_plugin_version.saturating_add(1);
+            match load_rust_plugin(
+                &result.manifest_path,
+                &artifact_path,
+                result.source_modified,
+                version_id,
+            ) {
+                Ok(plugin) => {
+                    runtime
+                        .rust_plugins
+                        .insert(result.manifest_path.clone(), Arc::new(plugin));
+                    runtime.rust_build_errors.remove(&result.manifest_path);
+                    runtime.rust_status = Some(format!(
+                        "Rust script loaded: {}",
+                        result.manifest_path.to_string_lossy()
+                    ));
+                }
+                Err(err) => {
+                    let message = format!("Failed to load Rust script plugin: {}", err);
+                    runtime
+                        .rust_build_errors
+                        .insert(result.manifest_path.clone(), message.clone());
+                    runtime.rust_status = Some(message);
+                }
+            }
+        }
+
         let lua = runtime.lua.clone();
         let lua = match lua.lock() {
             Ok(lua) => lua,
@@ -462,11 +782,16 @@ pub fn script_execution_system(world: &mut World) {
                 let _ = lua.remove_registry_value(instance.env_key);
                 despawn_script_owned(world, key.entity, key.script_index);
             }
+
+            let drained_rust = runtime.rust_instances.drain().collect::<Vec<_>>();
+            for (key, instance) in drained_rust {
+                stop_rust_script_instance(world, key, instance);
+            }
         }
 
         let mut active_scripts = HashSet::new();
         for key in desired_active.iter().copied() {
-            let Some((script, asset)) = scripts_by_key.get(&key) else {
+            let Some((script, runtime_path, asset)) = scripts_by_key.get(&key) else {
                 continue;
             };
             active_scripts.insert(key);
@@ -477,17 +802,117 @@ pub fn script_execution_system(world: &mut World) {
                     let _ = lua.remove_registry_value(old_instance.env_key);
                     despawn_script_owned(world, key.entity, key.script_index);
                 }
+                if let Some(old_instance) = runtime.rust_instances.remove(&key) {
+                    stop_rust_script_instance(world, key, old_instance);
+                }
                 runtime
                     .errors
                     .push(format!("{}: {}", script_path_label(script), error));
                 continue;
             }
 
+            let language = asset.language.as_str();
+            if language == "rust" {
+                if let Some(old_instance) = runtime.instances.remove(&key) {
+                    let _ = call_script_function0(&lua, &old_instance, "on_stop");
+                    let _ = lua.remove_registry_value(old_instance.env_key);
+                    despawn_script_owned(world, key.entity, key.script_index);
+                }
+
+                let manifest_path = runtime_path.clone();
+                let build_needed = runtime
+                    .rust_plugins
+                    .get(&manifest_path)
+                    .map(|plugin| asset.modified > plugin.source_modified)
+                    .unwrap_or(true);
+                if build_needed {
+                    runtime.request_rust_build(&manifest_path);
+                }
+
+                let plugin = runtime.rust_plugins.get(&manifest_path).cloned();
+                let Some(plugin) = plugin else {
+                    if let Some(error) = runtime.rust_build_errors.get(&manifest_path).cloned() {
+                        runtime
+                            .errors
+                            .push(format!("{}: {}", script_path_label(script), error));
+                    }
+                    continue;
+                };
+
+                let reload = if force_reload.contains(&key) {
+                    true
+                } else {
+                    match runtime.rust_instances.get(&key) {
+                        Some(instance) => {
+                            instance.manifest_path != manifest_path
+                                || instance.plugin_version_id != plugin.version_id
+                        }
+                        None => true,
+                    }
+                };
+
+                if reload {
+                    let mut carry_state: Option<Vec<u8>> = None;
+                    if let Some(mut old_instance) = runtime.rust_instances.remove(&key) {
+                        let plugin_changed = old_instance.plugin_version_id != plugin.version_id;
+                        let same_script = old_instance.manifest_path == manifest_path;
+                        if plugin_changed && same_script && !force_reload.contains(&key) {
+                            match take_rust_script_state(&mut old_instance) {
+                                Ok(state) => carry_state = state,
+                                Err(err) => runtime.errors.push(err),
+                            }
+                        }
+                        stop_rust_script_instance(world, key, old_instance);
+                    }
+                    match create_rust_script_instance(
+                        world_ptr,
+                        key.entity,
+                        key.script_index,
+                        &manifest_path,
+                        plugin,
+                    ) {
+                        Ok(mut instance) => {
+                            if let Err(err) = call_rust_script_start(&mut instance) {
+                                runtime.errors.push(err);
+                            }
+                            if let Some(state) = carry_state.as_deref() {
+                                match call_rust_script_load_state(&mut instance, state) {
+                                    Ok(true) => {}
+                                    Ok(false) => runtime.errors.push(format!(
+                                        "Rust script rejected carried state: {}",
+                                        manifest_path.to_string_lossy()
+                                    )),
+                                    Err(err) => runtime.errors.push(err),
+                                }
+                            }
+                            runtime.rust_instances.insert(key, instance);
+                        }
+                        Err(err) => {
+                            runtime.errors.push(err);
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(instance) = runtime.rust_instances.get_mut(&key) {
+                    instance.host_context.world_ptr = world_ptr;
+                    if let Err(err) = call_rust_script_update(instance, dt) {
+                        runtime.errors.push(err);
+                    }
+                }
+
+                continue;
+            }
+
+            if let Some(old_instance) = runtime.rust_instances.remove(&key) {
+                stop_rust_script_instance(world, key, old_instance);
+            }
+
             let reload = if force_reload.contains(&key) {
                 true
             } else {
                 match runtime.instances.get(&key) {
-                    Some(instance) => script_needs_reload(instance, script, asset),
+                    Some(instance) => script_needs_reload(instance, runtime_path, asset),
                     None => true,
                 }
             };
@@ -504,7 +929,7 @@ pub fn script_execution_system(world: &mut World) {
                     world_ptr,
                     key.entity,
                     key.script_index,
-                    script,
+                    runtime_path,
                     asset,
                 ) {
                     Ok(instance) => {
@@ -543,6 +968,18 @@ pub fn script_execution_system(world: &mut World) {
             }
         }
 
+        let inactive_rust = runtime
+            .rust_instances
+            .keys()
+            .copied()
+            .filter(|key| !active_scripts.contains(key))
+            .collect::<Vec<_>>();
+        for key in inactive_rust {
+            if let Some(instance) = runtime.rust_instances.remove(&key) {
+                stop_rust_script_instance(world, key, instance);
+            }
+        }
+
         if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
             run_state.last_state = current_state;
             run_state.last_executing = is_executing;
@@ -576,13 +1013,10 @@ fn script_path_label(script: &ScriptEntry) -> String {
 
 fn script_needs_reload(
     instance: &ScriptInstance,
-    script: &ScriptEntry,
+    runtime_path: &Path,
     asset: &ScriptAsset,
 ) -> bool {
-    let Some(path) = script.path.as_ref() else {
-        return true;
-    };
-    if instance.path != *path {
+    if instance.path != runtime_path {
         return true;
     }
 
@@ -594,30 +1028,26 @@ fn load_script_instance(
     world_ptr: usize,
     entity: Entity,
     script_index: usize,
-    script: &ScriptEntry,
+    runtime_path: &Path,
     asset: &ScriptAsset,
 ) -> Result<ScriptInstance, String> {
     if let Some(error) = asset.error.as_ref() {
-        return Err(format!("{}: {}", script_path_label(script), error));
+        return Err(format!("{}: {}", runtime_path.to_string_lossy(), error));
     }
 
-    let path = script
-        .path
-        .as_ref()
-        .ok_or_else(|| "Script path missing".to_string())?;
     let env = lua.create_table().map_err(|err| err.to_string())?;
     let _ = env.set("entity_id", entity.to_bits());
     register_script_api(lua, &env, world_ptr, entity, script_index).map_err(|err| {
         format!(
             "Failed to register script API for {}: {}",
-            path.to_string_lossy(),
+            runtime_path.to_string_lossy(),
             err
         )
     })?;
     apply_lua_globals_fallback(lua, &env).map_err(|err| {
         format!(
             "Failed to apply Lua globals for {}: {}",
-            path.to_string_lossy(),
+            runtime_path.to_string_lossy(),
             err
         )
     })?;
@@ -628,18 +1058,884 @@ fn load_script_instance(
 
     let chunk = lua
         .load(&asset.source)
-        .set_name(path.to_string_lossy().to_string())
+        .set_name(runtime_path.to_string_lossy().to_string())
         .set_environment(env);
     if let Err(err) = chunk.exec() {
         let _ = lua.remove_registry_value(env_key);
-        return Err(format!("{}: {}", path.to_string_lossy(), err));
+        return Err(format!("{}: {}", runtime_path.to_string_lossy(), err));
     }
 
     Ok(ScriptInstance {
-        path: path.clone(),
+        path: runtime_path.to_path_buf(),
         env_key,
         modified: asset.modified,
     })
+}
+
+fn build_rust_script_library(manifest_path: &Path) -> RustBuildResult {
+    let source_modified = rust_script_modified_time(manifest_path);
+    let mut output = String::new();
+
+    let target_library_path = match rust_target_library_path(manifest_path) {
+        Ok(path) => path,
+        Err(err) => {
+            return RustBuildResult {
+                manifest_path: manifest_path.to_path_buf(),
+                source_modified,
+                artifact_path: None,
+                output,
+                error: Some(err),
+            };
+        }
+    };
+
+    let Some(root) = manifest_path.parent() else {
+        return RustBuildResult {
+            manifest_path: manifest_path.to_path_buf(),
+            source_modified,
+            artifact_path: None,
+            output,
+            error: Some("Rust script manifest has no parent directory".to_string()),
+        };
+    };
+
+    let build_output = Command::new("cargo")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .output();
+
+    match build_output {
+        Ok(command_output) => {
+            let stdout = String::from_utf8_lossy(&command_output.stdout);
+            let stderr = String::from_utf8_lossy(&command_output.stderr);
+            output = format!("{}\n{}", stdout, stderr);
+
+            if !command_output.status.success() {
+                return RustBuildResult {
+                    manifest_path: manifest_path.to_path_buf(),
+                    source_modified,
+                    artifact_path: None,
+                    output: output.clone(),
+                    error: Some(format!(
+                        "cargo build failed for {}",
+                        manifest_path.to_string_lossy()
+                    )),
+                };
+            }
+
+            if !target_library_path.exists() {
+                return RustBuildResult {
+                    manifest_path: manifest_path.to_path_buf(),
+                    source_modified,
+                    artifact_path: None,
+                    output: output.clone(),
+                    error: Some(format!(
+                        "Expected build artifact missing: {}",
+                        target_library_path.to_string_lossy()
+                    )),
+                };
+            }
+
+            RustBuildResult {
+                manifest_path: manifest_path.to_path_buf(),
+                source_modified,
+                artifact_path: Some(target_library_path),
+                output,
+                error: None,
+            }
+        }
+        Err(err) => RustBuildResult {
+            manifest_path: manifest_path.to_path_buf(),
+            source_modified,
+            artifact_path: None,
+            output,
+            error: Some(format!(
+                "Failed to run cargo build for {}: {}",
+                manifest_path.to_string_lossy(),
+                err
+            )),
+        },
+    }
+}
+
+fn rust_target_library_path(manifest_path: &Path) -> Result<PathBuf, String> {
+    let (_, lib_name) = rust_manifest_names(manifest_path)?;
+    let Some(root) = manifest_path.parent() else {
+        return Err("Rust script manifest has no parent directory".to_string());
+    };
+
+    let file_name = format!(
+        "{}{}.{}",
+        rust_dynamic_library_prefix(),
+        lib_name,
+        rust_dynamic_library_extension()
+    );
+    Ok(root.join("target").join("debug").join(file_name))
+}
+
+fn rust_manifest_names(manifest_path: &Path) -> Result<(String, String), String> {
+    let manifest = fs::read_to_string(manifest_path).map_err(|err| {
+        format!(
+            "Failed to read Rust script manifest {}: {}",
+            manifest_path.to_string_lossy(),
+            err
+        )
+    })?;
+
+    let mut section = String::new();
+    let mut package_name: Option<String> = None;
+    let mut lib_name: Option<String> = None;
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_ascii_lowercase();
+            continue;
+        }
+
+        let Some((key, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+
+        let raw_value = raw_value.split('#').next().unwrap_or("").trim();
+        let Some(value) = parse_manifest_string_literal(raw_value) else {
+            continue;
+        };
+
+        if section == "package" && package_name.is_none() {
+            package_name = Some(value);
+        } else if section == "lib" && lib_name.is_none() {
+            lib_name = Some(value);
+        }
+    }
+
+    let package_name = package_name.ok_or_else(|| {
+        format!(
+            "Rust script manifest missing [package].name: {}",
+            manifest_path.to_string_lossy()
+        )
+    })?;
+    let lib_name = lib_name
+        .unwrap_or_else(|| package_name.replace('-', "_"))
+        .replace('-', "_");
+    Ok((package_name, lib_name))
+}
+
+fn parse_manifest_string_literal(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    let quote = chars.next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = chars.as_str();
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn rust_dynamic_library_prefix() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        ""
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "lib"
+    }
+}
+
+fn rust_dynamic_library_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "dll"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "dylib"
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        "so"
+    }
+}
+
+fn load_rust_plugin(
+    manifest_path: &Path,
+    source_library_path: &Path,
+    source_modified: SystemTime,
+    version_id: u64,
+) -> Result<RustLoadedPlugin, String> {
+    let temp_root = std::env::temp_dir().join("helmer_editor_rust_plugins");
+    fs::create_dir_all(&temp_root).map_err(|err| err.to_string())?;
+
+    let artifact_name = source_library_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("script");
+    let sanitized = sanitize_file_name(&manifest_path.to_string_lossy());
+    let load_path = temp_root.join(format!("{}_v{}_{}", sanitized, version_id, artifact_name));
+    fs::copy(source_library_path, &load_path).map_err(|err| {
+        format!(
+            "Failed to copy Rust plugin artifact {} -> {}: {}",
+            source_library_path.to_string_lossy(),
+            load_path.to_string_lossy(),
+            err
+        )
+    })?;
+
+    let library = unsafe { Library::new(&load_path) }
+        .map_err(|err| format!("Library load failed: {}", err))?;
+    let get_plugin: Symbol<unsafe extern "C" fn() -> *const RustScriptPluginApi> = unsafe {
+        library
+            .get(RUST_SCRIPT_PLUGIN_SYMBOL)
+            .map_err(|err| format!("Missing plugin symbol: {}", err))?
+    };
+    let plugin_ptr = unsafe { get_plugin() };
+    if plugin_ptr.is_null() {
+        return Err("Rust plugin returned null vtable pointer".to_string());
+    }
+
+    let plugin = unsafe { &*plugin_ptr };
+    if plugin.abi_version != SCRIPT_PLUGIN_ABI_VERSION {
+        return Err(format!(
+            "Rust plugin ABI mismatch: expected {}, got {}",
+            SCRIPT_PLUGIN_ABI_VERSION, plugin.abi_version
+        ));
+    }
+
+    Ok(RustLoadedPlugin {
+        manifest_path: manifest_path.to_path_buf(),
+        source_library_path: source_library_path.to_path_buf(),
+        loaded_library_path: load_path,
+        version_id,
+        source_modified,
+        plugin_ptr,
+        library: Arc::new(Mutex::new(library)),
+    })
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "script".to_string()
+    } else {
+        output
+    }
+}
+
+fn truncate_diagnostic(value: &str) -> String {
+    const MAX_LINES: usize = 16;
+    const MAX_CHARS: usize = 2048;
+
+    let mut out = String::new();
+    for (index, line) in value.lines().enumerate() {
+        if index >= MAX_LINES || out.len() >= MAX_CHARS {
+            out.push_str("\n...");
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn create_rust_script_instance(
+    world_ptr: usize,
+    owner: Entity,
+    script_index: usize,
+    manifest_path: &Path,
+    plugin: Arc<RustLoadedPlugin>,
+) -> Result<RustScriptInstance, String> {
+    let mut host_context = Box::new(RustScriptHostContext {
+        world_ptr,
+        owner,
+        script_index,
+    });
+    let host_api = Box::new(RustScriptApi {
+        abi_version: SCRIPT_API_ABI_VERSION,
+        user_data: (&mut *host_context as *mut RustScriptHostContext).cast::<c_void>(),
+        log: rust_api_log,
+        spawn_entity: rust_api_spawn_entity,
+        entity_exists: rust_api_entity_exists,
+        delete_entity: rust_api_delete_entity,
+        get_transform: rust_api_get_transform,
+        set_transform: rust_api_set_transform,
+        invoke_json: rust_api_invoke_json,
+        free_bytes: rust_api_free_bytes,
+    });
+
+    let plugin_api = rust_plugin_api(&plugin)?;
+    let plugin_instance_ptr = unsafe { (plugin_api.create)(&*host_api, owner.to_bits()) };
+    if plugin_instance_ptr.is_null() {
+        return Err(format!(
+            "Rust script plugin failed to create instance for {}",
+            manifest_path.to_string_lossy()
+        ));
+    }
+
+    Ok(RustScriptInstance {
+        manifest_path: manifest_path.to_path_buf(),
+        plugin_version_id: plugin.version_id,
+        plugin_instance_ptr,
+        plugin,
+        host_context,
+        host_api,
+    })
+}
+
+fn rust_plugin_api(plugin: &RustLoadedPlugin) -> Result<&RustScriptPluginApi, String> {
+    if plugin.plugin_ptr.is_null() {
+        return Err("Rust script plugin table pointer is null".to_string());
+    }
+    Ok(unsafe { &*plugin.plugin_ptr })
+}
+
+fn call_rust_script_start(instance: &mut RustScriptInstance) -> Result<(), String> {
+    if instance.plugin_instance_ptr.is_null() {
+        return Err("Rust script instance pointer is null".to_string());
+    }
+    let plugin_api = rust_plugin_api(&instance.plugin)?;
+    unsafe { (plugin_api.on_start)(instance.plugin_instance_ptr) };
+    Ok(())
+}
+
+fn call_rust_script_update(instance: &mut RustScriptInstance, dt: f32) -> Result<(), String> {
+    if instance.plugin_instance_ptr.is_null() {
+        return Err("Rust script instance pointer is null".to_string());
+    }
+    let plugin_api = rust_plugin_api(&instance.plugin)?;
+    unsafe { (plugin_api.on_update)(instance.plugin_instance_ptr, dt) };
+    Ok(())
+}
+
+fn call_rust_script_stop(instance: &mut RustScriptInstance) -> Result<(), String> {
+    if instance.plugin_instance_ptr.is_null() {
+        return Ok(());
+    }
+    let plugin_api = rust_plugin_api(&instance.plugin)?;
+    unsafe { (plugin_api.on_stop)(instance.plugin_instance_ptr) };
+    Ok(())
+}
+
+fn take_rust_script_state(instance: &mut RustScriptInstance) -> Result<Option<Vec<u8>>, String> {
+    if instance.plugin_instance_ptr.is_null() {
+        return Ok(None);
+    }
+    let plugin_api = rust_plugin_api(&instance.plugin)?;
+    let mut state_bytes = RustScriptBytes::default();
+    let saved = unsafe { (plugin_api.save_state)(instance.plugin_instance_ptr, &mut state_bytes) };
+    if saved == 0 {
+        return Ok(None);
+    }
+    if state_bytes.ptr.is_null() && state_bytes.len > 0 {
+        return Err("Rust script save_state returned invalid state buffer".to_string());
+    }
+
+    let payload = if state_bytes.ptr.is_null() || state_bytes.len == 0 {
+        Vec::new()
+    } else {
+        unsafe {
+            std::slice::from_raw_parts(state_bytes.ptr as *const u8, state_bytes.len).to_vec()
+        }
+    };
+
+    unsafe { (plugin_api.free_state)(state_bytes) };
+    Ok(Some(payload))
+}
+
+fn call_rust_script_load_state(
+    instance: &mut RustScriptInstance,
+    state: &[u8],
+) -> Result<bool, String> {
+    if instance.plugin_instance_ptr.is_null() {
+        return Err("Rust script instance pointer is null".to_string());
+    }
+    let plugin_api = rust_plugin_api(&instance.plugin)?;
+    let state_view = RustScriptBytesView {
+        ptr: state.as_ptr(),
+        len: state.len(),
+    };
+    let loaded = unsafe { (plugin_api.load_state)(instance.plugin_instance_ptr, state_view) };
+    Ok(loaded != 0)
+}
+
+fn stop_rust_script_instance(
+    world: &mut World,
+    key: ScriptInstanceKey,
+    mut instance: RustScriptInstance,
+) {
+    instance.host_context.world_ptr = world as *mut World as usize;
+    let _ = call_rust_script_stop(&mut instance);
+    if !instance.plugin_instance_ptr.is_null() {
+        if let Ok(plugin_api) = rust_plugin_api(&instance.plugin) {
+            unsafe { (plugin_api.destroy)(instance.plugin_instance_ptr) };
+        }
+        instance.plugin_instance_ptr = std::ptr::null_mut();
+    }
+    despawn_script_owned(world, key.entity, key.script_index);
+}
+
+unsafe fn rust_context_from_user_data<'a>(
+    user_data: *mut c_void,
+) -> Option<&'a mut RustScriptHostContext> {
+    if user_data.is_null() {
+        return None;
+    }
+    Some(unsafe { &mut *(user_data as *mut RustScriptHostContext) })
+}
+
+unsafe fn rust_world_from_context<'a>(context: &RustScriptHostContext) -> Option<&'a mut World> {
+    if context.world_ptr == 0 {
+        return None;
+    }
+    Some(unsafe { &mut *(context.world_ptr as *mut World) })
+}
+
+unsafe extern "C" fn rust_api_log(user_data: *mut c_void, message: *const c_char) {
+    if message.is_null() {
+        return;
+    }
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return;
+    };
+    let text = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .to_string();
+    tracing::info!(
+        "[rust-script {}:{}] {}",
+        context.owner.index(),
+        context.script_index,
+        text
+    );
+}
+
+unsafe extern "C" fn rust_api_spawn_entity(
+    user_data: *mut c_void,
+    name: *const c_char,
+) -> RustScriptEntityId {
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return 0;
+    };
+    let Some(world) = (unsafe { rust_world_from_context(context) }) else {
+        return 0;
+    };
+
+    let mut entity = world.spawn((
+        EditorEntity,
+        BevyTransform::default(),
+        ScriptSpawned {
+            owner: context.owner,
+            script_index: context.script_index,
+        },
+    ));
+    if !name.is_null() {
+        let value = unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if !value.is_empty() {
+            entity.insert(Name::new(value));
+        }
+    }
+    entity.id().to_bits()
+}
+
+unsafe extern "C" fn rust_api_entity_exists(
+    user_data: *mut c_void,
+    entity_id: RustScriptEntityId,
+) -> u8 {
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return 0;
+    };
+    let Some(world) = (unsafe { rust_world_from_context(context) }) else {
+        return 0;
+    };
+    if lookup_editor_entity(world, entity_id).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+unsafe extern "C" fn rust_api_delete_entity(
+    user_data: *mut c_void,
+    entity_id: RustScriptEntityId,
+) -> u8 {
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return 0;
+    };
+    let Some(world) = (unsafe { rust_world_from_context(context) }) else {
+        return 0;
+    };
+    let Some(entity) = lookup_editor_entity(world, entity_id) else {
+        return 0;
+    };
+    if world.despawn(entity) { 1 } else { 0 }
+}
+
+unsafe extern "C" fn rust_api_get_transform(
+    user_data: *mut c_void,
+    entity_id: RustScriptEntityId,
+    out_transform: *mut RustScriptTransform,
+) -> u8 {
+    if out_transform.is_null() {
+        return 0;
+    }
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return 0;
+    };
+    let Some(world) = (unsafe { rust_world_from_context(context) }) else {
+        return 0;
+    };
+    let Some(entity) = lookup_editor_entity(world, entity_id) else {
+        return 0;
+    };
+    let Some(transform) = world.get::<BevyTransform>(entity) else {
+        return 0;
+    };
+
+    unsafe {
+        *out_transform = RustScriptTransform {
+            position: rust_vec3_from_glam(transform.0.position),
+            rotation: rust_quat_from_glam(transform.0.rotation),
+            scale: rust_vec3_from_glam(transform.0.scale),
+        };
+    }
+    1
+}
+
+unsafe extern "C" fn rust_api_set_transform(
+    user_data: *mut c_void,
+    entity_id: RustScriptEntityId,
+    patch: *const RustScriptTransformPatch,
+) -> u8 {
+    if patch.is_null() {
+        return 0;
+    }
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return 0;
+    };
+    let Some(world) = (unsafe { rust_world_from_context(context) }) else {
+        return 0;
+    };
+    let Some(entity) = lookup_editor_entity(world, entity_id) else {
+        return 0;
+    };
+    ensure_transform(world, entity);
+    let Some(mut transform) = world.get_mut::<BevyTransform>(entity) else {
+        return 0;
+    };
+
+    let patch = unsafe { &*patch };
+    if patch.has_position != 0 {
+        transform.0.position = glam_vec3_from_rust(patch.position);
+    }
+    if patch.has_rotation != 0 {
+        transform.0.rotation = glam_quat_from_rust(patch.rotation);
+    }
+    if patch.has_scale != 0 {
+        transform.0.scale = glam_vec3_from_rust(patch.scale);
+    }
+    1
+}
+
+unsafe extern "C" fn rust_api_invoke_json(
+    user_data: *mut c_void,
+    table_name: *const c_char,
+    function_name: *const c_char,
+    args_json: *const c_char,
+    out_result: *mut RustScriptBytes,
+) -> u8 {
+    if out_result.is_null() {
+        return 0;
+    }
+
+    let response =
+        match unsafe { rust_invoke_json(user_data, table_name, function_name, args_json) } {
+            Ok(result) => serde_json::json!({
+                "ok": true,
+                "result": result
+            }),
+            Err(error) => serde_json::json!({
+                "ok": false,
+                "error": error
+            }),
+        };
+
+    let payload = serde_json::to_vec(&response)
+        .unwrap_or_else(|_| b"{\"ok\":false,\"error\":\"response serialization failed\"}".to_vec());
+    unsafe {
+        *out_result = rust_script_bytes_from_vec(payload);
+    }
+    1
+}
+
+unsafe extern "C" fn rust_api_free_bytes(_user_data: *mut c_void, value: RustScriptBytes) {
+    if value.ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Vec::from_raw_parts(value.ptr, value.len, value.cap);
+    }
+}
+
+fn rust_script_bytes_from_vec(mut value: Vec<u8>) -> RustScriptBytes {
+    let out = RustScriptBytes {
+        ptr: value.as_mut_ptr(),
+        len: value.len(),
+        cap: value.capacity(),
+    };
+    std::mem::forget(value);
+    out
+}
+
+unsafe fn rust_invoke_json(
+    user_data: *mut c_void,
+    table_name: *const c_char,
+    function_name: *const c_char,
+    args_json: *const c_char,
+) -> Result<JsonValue, String> {
+    if table_name.is_null() || function_name.is_null() {
+        return Err("Missing table/function for JSON bridge call".to_string());
+    }
+
+    let Some(context) = (unsafe { rust_context_from_user_data(user_data) }) else {
+        return Err("Missing script host context".to_string());
+    };
+
+    let table_name = unsafe { CStr::from_ptr(table_name) }
+        .to_string_lossy()
+        .trim()
+        .to_ascii_lowercase();
+    let function_name = unsafe { CStr::from_ptr(function_name) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
+    if function_name.is_empty() {
+        return Err("Function name cannot be empty".to_string());
+    }
+
+    let args_json = if args_json.is_null() {
+        "[]".to_string()
+    } else {
+        unsafe { CStr::from_ptr(args_json) }
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let lua = Lua::new();
+    let api_table = match table_name.as_str() {
+        "ecs" => build_ecs_table(&lua, context.world_ptr, context.owner, context.script_index)
+            .map_err(|err| err.to_string())?,
+        "input" => build_input_table(&lua, context.world_ptr).map_err(|err| err.to_string())?,
+        _ => {
+            return Err(format!(
+                "Unknown script API table '{}', expected 'ecs' or 'input'",
+                table_name
+            ));
+        }
+    };
+
+    let function: Function = api_table
+        .get(function_name.as_str())
+        .map_err(|err| err.to_string())?;
+    let args = rust_json_args_to_lua_multivalue(&lua, &args_json)?;
+    let result: MultiValue = function.call(args).map_err(|err| err.to_string())?;
+    rust_lua_multivalue_to_json(result)
+}
+
+fn rust_json_args_to_lua_multivalue(lua: &Lua, args_json: &str) -> Result<MultiValue, String> {
+    let parsed = if args_json.trim().is_empty() {
+        JsonValue::Array(Vec::new())
+    } else {
+        serde_json::from_str::<JsonValue>(args_json).map_err(|err| err.to_string())?
+    };
+
+    let mut out = MultiValue::new();
+    match parsed {
+        JsonValue::Array(values) => {
+            for value in values {
+                out.push_back(rust_json_to_lua_value(lua, value)?);
+            }
+        }
+        JsonValue::Null => {}
+        value => out.push_back(rust_json_to_lua_value(lua, value)?),
+    }
+    Ok(out)
+}
+
+fn rust_json_to_lua_value(lua: &Lua, value: JsonValue) -> Result<Value, String> {
+    match value {
+        JsonValue::Null => Ok(Value::Nil),
+        JsonValue::Bool(value) => Ok(Value::Boolean(value)),
+        JsonValue::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Integer(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Number(value))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        JsonValue::String(value) => lua
+            .create_string(&value)
+            .map(Value::String)
+            .map_err(|err| err.to_string()),
+        JsonValue::Array(values) => {
+            let table = lua.create_table().map_err(|err| err.to_string())?;
+            for (index, value) in values.into_iter().enumerate() {
+                table
+                    .set(index + 1, rust_json_to_lua_value(lua, value)?)
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(Value::Table(table))
+        }
+        JsonValue::Object(values) => {
+            let table = lua.create_table().map_err(|err| err.to_string())?;
+            for (key, value) in values {
+                table
+                    .set(key, rust_json_to_lua_value(lua, value)?)
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
+
+fn rust_lua_multivalue_to_json(values: MultiValue) -> Result<JsonValue, String> {
+    let values = values.into_vec();
+    if values.is_empty() {
+        return Ok(JsonValue::Null);
+    }
+    if values.len() == 1 {
+        return rust_lua_value_to_json(values.into_iter().next().expect("len checked above"));
+    }
+
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        result.push(rust_lua_value_to_json(value)?);
+    }
+    Ok(JsonValue::Array(result))
+}
+
+fn rust_lua_value_to_json(value: Value) -> Result<JsonValue, String> {
+    match value {
+        Value::Nil => Ok(JsonValue::Null),
+        Value::Boolean(value) => Ok(JsonValue::Bool(value)),
+        Value::Integer(value) => Ok(JsonValue::Number(JsonNumber::from(value))),
+        Value::Number(value) => Ok(JsonNumber::from_f64(value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)),
+        Value::String(value) => Ok(JsonValue::String(value.to_string_lossy().to_string())),
+        Value::UserData(userdata) => {
+            if let Ok(key) = userdata.borrow::<LuaKey>() {
+                return Ok(JsonValue::String(format!("{:?}", *key)));
+            }
+            if let Ok(button) = userdata.borrow::<LuaMouseButton>() {
+                return Ok(JsonValue::String(format!("{:?}", button.0)));
+            }
+            if let Ok(button) = userdata.borrow::<LuaGamepadButton>() {
+                return Ok(JsonValue::String(format!("{:?}", button.0)));
+            }
+            if let Ok(axis) = userdata.borrow::<LuaGamepadAxis>() {
+                return Ok(JsonValue::String(format!("{:?}", axis.0)));
+            }
+            Ok(JsonValue::Null)
+        }
+        Value::Table(table) => rust_lua_table_to_json(table),
+        Value::Error(error) => Ok(JsonValue::String(error.to_string())),
+        _ => Ok(JsonValue::Null),
+    }
+}
+
+fn rust_lua_table_to_json(table: Table) -> Result<JsonValue, String> {
+    let mut entries = Vec::new();
+    let mut array_like = true;
+    let mut array_count = 0usize;
+    let mut max_index = 0usize;
+
+    for pair in table.pairs::<Value, Value>() {
+        let (key, value) = pair.map_err(|err| err.to_string())?;
+        match &key {
+            Value::Integer(index) if *index > 0 => {
+                array_count += 1;
+                max_index = max_index.max(*index as usize);
+            }
+            _ => array_like = false,
+        }
+        entries.push((key, value));
+    }
+
+    if array_like && max_index == array_count {
+        let mut output = vec![JsonValue::Null; max_index];
+        for (key, value) in entries {
+            if let Value::Integer(index) = key {
+                let index = (index as usize).saturating_sub(1);
+                if index < output.len() {
+                    output[index] = rust_lua_value_to_json(value)?;
+                }
+            }
+        }
+        return Ok(JsonValue::Array(output));
+    }
+
+    let mut output = JsonMap::new();
+    for (key, value) in entries {
+        let key = match key {
+            Value::String(value) => value.to_string_lossy().to_string(),
+            Value::Integer(value) => value.to_string(),
+            Value::Number(value) => value.to_string(),
+            Value::Boolean(value) => value.to_string(),
+            _ => continue,
+        };
+        output.insert(key, rust_lua_value_to_json(value)?);
+    }
+    Ok(JsonValue::Object(output))
+}
+
+fn rust_vec3_from_glam(value: Vec3) -> RustScriptVec3 {
+    RustScriptVec3 {
+        x: value.x,
+        y: value.y,
+        z: value.z,
+    }
+}
+
+fn rust_quat_from_glam(value: Quat) -> RustScriptQuat {
+    RustScriptQuat {
+        x: value.x,
+        y: value.y,
+        z: value.z,
+        w: value.w,
+    }
+}
+
+fn glam_vec3_from_rust(value: RustScriptVec3) -> Vec3 {
+    Vec3::new(value.x, value.y, value.z)
+}
+
+fn glam_quat_from_rust(value: RustScriptQuat) -> Quat {
+    Quat::from_xyzw(value.x, value.y, value.z, value.w)
 }
 
 fn apply_lua_globals_fallback(lua: &Lua, env: &Table) -> mlua::Result<()> {

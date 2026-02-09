@@ -10,6 +10,7 @@ pub enum AssetCreateKind {
     Scene,
     Material,
     Script,
+    RustScript,
     Animation,
 }
 

@@ -60,7 +60,11 @@ use crate::editor::{
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue, DynamicValueKind},
     end_material_undo_group, end_undo_group, enforce_undo_cap,
     gizmos::{EditorGizmoSettings, EditorGizmoState},
-    project::{EditorProject, ProjectConfig, default_script_template_full, save_project_config},
+    project::{
+        EditorProject, ProjectConfig, default_rust_script_template_full,
+        default_script_template_full, rust_script_manifest_template,
+        rust_script_sdk_dependency_path, sanitize_rust_crate_name, save_project_config,
+    },
     push_undo_snapshot, save_layouts,
     scene::{
         EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, WorldState,
@@ -70,7 +74,8 @@ use crate::editor::{
     },
     scripting::{
         ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
-        ScriptRegistry, ScriptRuntime, normalize_script_language, script_language_from_path,
+        ScriptRegistry, ScriptRuntime, is_script_path, normalize_script_language,
+        script_language_from_path,
     },
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
@@ -1308,6 +1313,9 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             ui.label(format!("Registry: {}", status));
         }
         if let Some(runtime) = world.get_resource::<ScriptRuntime>() {
+            if let Some(status) = runtime.rust_status.as_ref() {
+                ui.label(format!("Rust: {}", status));
+            }
             if !runtime.errors.is_empty() {
                 ui.colored_label(
                     Color32::from_rgb(180, 60, 60),
@@ -6815,12 +6823,19 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Lua Script", &["lua", "luau"])
+                        .add_filter("Script", &["lua", "luau", "rs", "toml"])
                         .pick_file()
                     {
-                        script.path = Some(path.clone());
-                        script.language = script_language_from_path(&path);
-                        scripts_changed = true;
+                        if is_script_file(&path) {
+                            script.path = Some(path.clone());
+                            script.language = script_language_from_path(&path);
+                            scripts_changed = true;
+                        } else {
+                            set_status(
+                                world,
+                                "Selected file is not a supported script".to_string(),
+                            );
+                        }
                     }
                 }
 
@@ -6832,17 +6847,30 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                 }
 
-                if ui.button("Create Script Asset").clicked() {
-                    if let Some(project) = project.as_ref() {
-                        if let Some(path) = create_script_asset(world, project) {
-                            script.path = Some(path.clone());
-                            script.language = script_language_from_path(&path);
-                            scripts_changed = true;
+                ui.horizontal(|ui| {
+                    if ui.button("Create Lua Script").clicked() {
+                        if let Some(project) = project.as_ref() {
+                            if let Some(path) = create_script_asset(world, project) {
+                                script.path = Some(path.clone());
+                                script.language = script_language_from_path(&path);
+                                scripts_changed = true;
+                            }
+                        } else {
+                            set_status(world, "Open a project before creating scripts".to_string());
                         }
-                    } else {
-                        set_status(world, "Open a project before creating scripts".to_string());
                     }
-                }
+                    if ui.button("Create Rust Script").clicked() {
+                        if let Some(project) = project.as_ref() {
+                            if let Some(path) = create_rust_script_asset(world, project) {
+                                script.path = Some(path.clone());
+                                script.language = script_language_from_path(&path);
+                                scripts_changed = true;
+                            }
+                        } else {
+                            set_status(world, "Open a project before creating scripts".to_string());
+                        }
+                    }
+                });
 
                 ui.label(format!("Language: {}", script.language));
 
@@ -6852,7 +6880,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 };
                 let runtime_running = world
                     .get_resource::<ScriptRuntime>()
-                    .map(|runtime| runtime.instances.contains_key(&script_key))
+                    .map(|runtime| runtime.contains_instance(script_key))
                     .unwrap_or(false);
                 let manual_running = world
                     .get_resource::<ScriptEditModeState>()
@@ -7753,6 +7781,14 @@ fn asset_tag_for(entry: &AssetEntry) -> &'static str {
         return "[DIR]";
     }
 
+    if is_script_file(&entry.path) {
+        return if script_language_from_path(&entry.path) == "rust" {
+            "[RSCRIPT]"
+        } else {
+            "[SCRIPT]"
+        };
+    }
+
     let Some(ext) = entry.path.extension().and_then(|ext| ext.to_str()) else {
         return "[FILE]";
     };
@@ -7774,7 +7810,6 @@ fn asset_tag_for(entry: &AssetEntry) -> &'static str {
                 "[MAT]"
             }
         }
-        "lua" | "luau" => "[SCRIPT]",
         "glb" | "gltf" => "[MODEL]",
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => "[TEX]",
         _ => "[FILE]",
@@ -7788,6 +7823,7 @@ fn asset_thumbnail_tag(entry: &AssetEntry) -> &'static str {
         "[MAT]" => "MAT",
         "[ANIM]" => "ANIM",
         "[SCRIPT]" => "LUA",
+        "[RSCRIPT]" => "RUST",
         "[MODEL]" => "MOD",
         "[TEX]" => "TEX",
         "[CFG]" => "CFG",
@@ -7804,6 +7840,14 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
         return Color32::from_rgb(80, 80, 80);
     };
 
+    if is_script_file(&entry.path) {
+        return if script_language_from_path(&entry.path) == "rust" {
+            Color32::from_rgb(165, 92, 48)
+        } else {
+            Color32::from_rgb(60, 110, 70)
+        };
+    }
+
     match ext.to_ascii_lowercase().as_str() {
         "ron" => {
             let name = entry
@@ -7817,7 +7861,6 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
                 Color32::from_rgb(120, 90, 60)
             }
         }
-        "lua" | "luau" => Color32::from_rgb(60, 110, 70),
         "glb" | "gltf" => Color32::from_rgb(90, 70, 130),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => Color32::from_rgb(120, 80, 80),
         _ => Color32::from_rgb(70, 70, 90),
@@ -7954,6 +7997,17 @@ fn asset_create_menu(world: &mut World, ui: &mut Ui, path: &Path) {
                 directory: path.to_path_buf(),
                 name: "new_script".to_string(),
                 kind: AssetCreateKind::Script,
+            },
+        );
+        ui.close_menu();
+    }
+    if ui.button("New Rust Script").clicked() {
+        push_command(
+            world,
+            EditorCommand::CreateAsset {
+                directory: path.to_path_buf(),
+                name: "new_rust_script".to_string(),
+                kind: AssetCreateKind::RustScript,
             },
         );
         ui.close_menu();
@@ -10496,6 +10550,62 @@ fn create_script_asset(world: &mut World, project: &EditorProject) -> Option<Pat
     Some(path)
 }
 
+fn create_rust_script_asset(world: &mut World, project: &EditorProject) -> Option<PathBuf> {
+    let root = project.root.as_ref()?;
+    let config = project.config.as_ref()?;
+    let scripts_root = config.scripts_root(root);
+
+    if let Err(err) = fs::create_dir_all(&scripts_root) {
+        set_status(world, format!("Failed to create scripts dir: {}", err));
+        return None;
+    }
+
+    let crate_dir = unique_path(&scripts_root.join("rust_script"));
+    let src_dir = crate_dir.join("src");
+    if let Err(err) = fs::create_dir_all(&src_dir) {
+        set_status(world, format!("Failed to create Rust script dir: {}", err));
+        return None;
+    }
+
+    let crate_name = crate_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_rust_crate_name)
+        .unwrap_or_else(|| "rust_script".to_string());
+    let sdk_path = match rust_script_sdk_dependency_path(Some(root.as_path()), &crate_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            set_status(world, format!("Failed to prepare Rust script SDK: {}", err));
+            return None;
+        }
+    };
+    let manifest_path = crate_dir.join("Cargo.toml");
+    if let Err(err) = fs::write(
+        &manifest_path,
+        rust_script_manifest_template(&crate_name, &sdk_path),
+    ) {
+        set_status(
+            world,
+            format!("Failed to write Rust script manifest: {}", err),
+        );
+        return None;
+    }
+
+    if let Err(err) = fs::write(src_dir.join("lib.rs"), default_rust_script_template_full()) {
+        set_status(
+            world,
+            format!("Failed to write Rust script source: {}", err),
+        );
+        return None;
+    }
+
+    if let Some(mut assets) = world.get_resource_mut::<AssetBrowserState>() {
+        assets.refresh_requested = true;
+    }
+
+    Some(manifest_path)
+}
+
 fn unique_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -10746,20 +10856,7 @@ fn is_material_file(path: &Path) -> bool {
 }
 
 fn is_script_file(path: &Path) -> bool {
-    let is_script_ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "lua" | "luau"))
-        .unwrap_or(false);
-    if !is_script_ext {
-        return false;
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase())
-        .unwrap_or_default();
-    !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
+    is_script_path(path)
 }
 
 fn push_command(world: &mut World, command: EditorCommand) {

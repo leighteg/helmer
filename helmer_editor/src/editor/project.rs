@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::ErrorKind,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use bevy_ecs::prelude::Resource;
@@ -1201,6 +1201,234 @@ function on_update(dt: number)
     local z = origin.z + math.sin(t) * radius
     ecs.set_transform(mover, { position = { x = x, y = y, z = z } })
 end
+"#
+}
+
+pub fn sanitize_rust_crate_name(name: &str) -> String {
+    let mut value = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            value.push(ch.to_ascii_lowercase());
+        } else {
+            value.push('_');
+        }
+    }
+    while value.starts_with('_') {
+        value.remove(0);
+    }
+    while value.ends_with('_') {
+        value.pop();
+    }
+    if value.is_empty() {
+        "helmer_script".to_string()
+    } else if value.chars().next().unwrap_or('a').is_ascii_digit() {
+        format!("script_{}", value)
+    } else {
+        value
+    }
+}
+
+pub fn rust_script_sdk_dependency_path(
+    project_root: Option<&Path>,
+    crate_dir: &Path,
+) -> Result<PathBuf, String> {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../helmer_script_sdk");
+    let source_root = source_root.canonicalize().unwrap_or(source_root);
+
+    let sdk_root = match project_root {
+        Some(root) => root.join(".helmer").join("helmer_script_sdk"),
+        None => crate_dir.join(".helmer").join("helmer_script_sdk"),
+    };
+
+    sync_project_rust_sdk(&source_root, &sdk_root)?;
+
+    let crate_dir = crate_dir
+        .canonicalize()
+        .unwrap_or_else(|_| crate_dir.to_path_buf());
+    let sdk_root = sdk_root.canonicalize().unwrap_or(sdk_root);
+
+    Ok(relative_path_from(&crate_dir, &sdk_root)
+        .unwrap_or_else(|| PathBuf::from("./.helmer/helmer_script_sdk")))
+}
+
+fn sync_project_rust_sdk(source_root: &Path, target_root: &Path) -> Result<(), String> {
+    let source_manifest = source_root.join("Cargo.toml");
+    let source_lib = source_root.join("src").join("lib.rs");
+    if !source_manifest.exists() || !source_lib.exists() {
+        return Err(format!(
+            "helmer_script_sdk source is missing at {}",
+            source_root.to_string_lossy()
+        ));
+    }
+
+    let target_src = target_root.join("src");
+    fs::create_dir_all(&target_src).map_err(|err| err.to_string())?;
+    copy_if_changed(&source_manifest, &target_root.join("Cargo.toml"))?;
+    copy_if_changed(&source_lib, &target_src.join("lib.rs"))?;
+    Ok(())
+}
+
+fn copy_if_changed(source: &Path, target: &Path) -> Result<(), String> {
+    let source_bytes = fs::read(source).map_err(|err| err.to_string())?;
+    let should_write = match fs::read(target) {
+        Ok(existing) => existing != source_bytes,
+        Err(_) => true,
+    };
+    if should_write {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(target, source_bytes).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn relative_path_from(base: &Path, target: &Path) -> Option<PathBuf> {
+    let base_components = base.components().collect::<Vec<_>>();
+    let target_components = target.components().collect::<Vec<_>>();
+
+    if let (Some(Component::Prefix(base_prefix)), Some(Component::Prefix(target_prefix))) =
+        (base_components.first(), target_components.first())
+    {
+        if base_prefix != target_prefix {
+            return None;
+        }
+    }
+
+    let mut shared = 0usize;
+    while shared < base_components.len()
+        && shared < target_components.len()
+        && base_components[shared] == target_components[shared]
+    {
+        shared += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for component in &base_components[shared..] {
+        if matches!(
+            component,
+            Component::Normal(_) | Component::CurDir | Component::ParentDir
+        ) {
+            relative.push("..");
+        }
+    }
+
+    for component in &target_components[shared..] {
+        match component {
+            Component::CurDir => {}
+            _ => relative.push(component.as_os_str()),
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+
+    Some(relative)
+}
+
+pub fn rust_script_manifest_template(crate_name: &str, sdk_path: &Path) -> String {
+    let crate_name = sanitize_rust_crate_name(crate_name);
+    let sdk_path = sdk_path.to_string_lossy().replace('\\', "/");
+    format!(
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nhelmer_script_sdk = {{ path = \"{}\" }}\n",
+        crate_name, sdk_path
+    )
+}
+
+pub fn default_rust_script_template_full() -> &'static str {
+    r#"use helmer_script_sdk::{Host, Script, TransformPatch, Vec3, export_script, json};
+
+#[derive(Default)]
+struct OrbitScript {
+    mover: Option<u64>,
+    t: f32,
+    speed: f32,
+    origin: Vec3,
+}
+
+impl Script for OrbitScript {
+    fn on_start(&mut self, host: &Host) {
+        if self.speed == 0.0 {
+            self.speed = 10.0;
+        }
+
+        if let Some(owner) = host.get_transform(host.entity_id()) {
+            self.origin = owner.position;
+        }
+
+        let mover = host.spawn_entity(Some("Orbiting Cube"));
+        self.mover = Some(mover);
+        let _ = host.set_mesh_renderer(
+            mover,
+            json!({
+                "source": "Cube",
+                "casts_shadow": true,
+                "visible": true
+            }),
+        );
+        let _ = host.set_transform(
+            mover,
+            &TransformPatch::with_position(Vec3 {
+                x: self.origin.x,
+                y: self.origin.y,
+                z: self.origin.z,
+            }),
+        );
+    }
+
+    fn on_update(&mut self, host: &Host, dt: f32) {
+        let Some(mover) = self.mover else {
+            return;
+        };
+
+        if let Some(owner) = host.get_transform(host.entity_id()) {
+            self.origin = owner.position;
+        }
+
+        self.t += dt * self.speed;
+        let radius = 2.0_f32;
+        let x = self.origin.x + self.t.cos() * radius;
+        let y = self.origin.y + (self.t * 0.5).cos() * radius;
+        let z = self.origin.z + self.t.sin() * radius;
+
+        let _ = host.set_transform(
+            mover,
+            &TransformPatch::with_position(Vec3 { x, y, z }),
+        );
+    }
+
+    fn save_state(&self) -> Option<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(29);
+        bytes.extend_from_slice(&self.t.to_le_bytes());
+        bytes.extend_from_slice(&self.speed.to_le_bytes());
+        bytes.push(self.mover.is_some() as u8);
+        bytes.extend_from_slice(&self.mover.unwrap_or(0).to_le_bytes());
+        bytes.extend_from_slice(&self.origin.x.to_le_bytes());
+        bytes.extend_from_slice(&self.origin.y.to_le_bytes());
+        bytes.extend_from_slice(&self.origin.z.to_le_bytes());
+        Some(bytes)
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> bool {
+        const EXPECTED_LEN: usize = 29;
+        if state.len() != EXPECTED_LEN {
+            return false;
+        }
+
+        self.t = f32::from_le_bytes(state[0..4].try_into().unwrap_or([0; 4]));
+        self.speed = f32::from_le_bytes(state[4..8].try_into().unwrap_or([0; 4]));
+        let has_mover = state[8] != 0;
+        let mover = u64::from_le_bytes(state[9..17].try_into().unwrap_or([0; 8]));
+        self.mover = if has_mover { Some(mover) } else { None };
+        self.origin.x = f32::from_le_bytes(state[17..21].try_into().unwrap_or([0; 4]));
+        self.origin.y = f32::from_le_bytes(state[21..25].try_into().unwrap_or([0; 4]));
+        self.origin.z = f32::from_le_bytes(state[25..29].try_into().unwrap_or([0; 4]));
+        true
+    }
+}
+
+export_script!(OrbitScript);
 "#
 }
 

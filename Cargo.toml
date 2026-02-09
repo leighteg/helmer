@@ -2,6 +2,7 @@
 members = [
     "helmer",
     "helmer_editor",
+    "helmer_script_sdk",
     "test_game", "helmer_becs", "helmer_ecs", "becs_bench", "helmer_view", "xtask",
 ]
 default-members = ["helmer"]

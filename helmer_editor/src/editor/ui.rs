@@ -1328,6 +1328,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.render_resolution)
             .unwrap_or_default();
+        let previous_render_resolution = render_resolution;
         let templates = graph_templates();
         let mut graph_template = world
             .get_resource::<EditorViewportState>()
@@ -2018,6 +2019,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             }
         });
         ui.separator();
+        let resolution_preset_changed = render_resolution != previous_render_resolution;
 
         if let Some((editor_texture_id, gameplay_texture_id, preview_texture_id)) =
             ensure_viewport_texture_ids(ui, world)
@@ -2228,6 +2230,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 runtime.gameplay_texture_id = Some(gameplay_texture_id);
                 runtime.preview_texture_id = Some(preview_texture_id);
                 runtime.main_target_size = Some(main_target_size);
+                runtime.main_resize_immediate = resolution_preset_changed;
                 runtime.main_rect_pixels =
                     viewport_rect_pixels_from_ui_rect(scene_rect, pixels_per_point);
                 runtime.preview_rect_pixels = preview_rect_pixels;

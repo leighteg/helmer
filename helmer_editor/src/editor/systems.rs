@@ -2747,6 +2747,7 @@ fn viewport_request_for_entity(
     viewport_rect: ViewportRectPixels,
     target_size_override: Option<[u32; 2]>,
     temporal_history: bool,
+    immediate_resize: bool,
 ) -> Option<RenderViewportRequest> {
     let transform = world.get::<BevyTransform>(entity)?.0;
     let mut camera = world.get::<BevyCamera>(entity)?.0;
@@ -2762,6 +2763,7 @@ fn viewport_request_for_entity(
         egui_texture_id: texture_id,
         target_size,
         temporal_history,
+        immediate_resize,
     })
 }
 
@@ -2869,6 +2871,7 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                 main_rect,
                 Some(main_target_size),
                 true,
+                runtime.main_resize_immediate,
             ) {
                 requests.push(request);
             }
@@ -2890,6 +2893,7 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                     texture_id,
                     preview_rect,
                     None,
+                    false,
                     false,
                 ) {
                     requests.push(request);

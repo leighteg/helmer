@@ -1295,6 +1295,11 @@ struct OffscreenViewportTarget {
     view: wgpu::TextureView,
 }
 
+struct PendingResize {
+    size: PhysicalSize<u32>,
+    since: Instant,
+}
+
 struct RenderSceneState {
     data: RenderData,
     object_indices: HashMap<usize, usize>,
@@ -1625,6 +1630,8 @@ pub struct GraphRenderer {
     offscreen_viewports: HashMap<u64, OffscreenViewportTarget>,
     offscreen_viewport_prev_cameras: HashMap<u64, Transform>,
     offscreen_viewport_prev_view_proj: HashMap<u64, Mat4>,
+    offscreen_viewport_pending_resizes: HashMap<u64, PendingResize>,
+    pending_graph_surface_resize: Option<PendingResize>,
 
     surface_size: PhysicalSize<u32>,
     prev_view_proj: Mat4,
@@ -2637,6 +2644,8 @@ impl GraphRenderer {
             offscreen_viewports: HashMap::new(),
             offscreen_viewport_prev_cameras: HashMap::new(),
             offscreen_viewport_prev_view_proj: HashMap::new(),
+            offscreen_viewport_pending_resizes: HashMap::new(),
+            pending_graph_surface_resize: None,
 
             surface_size: size,
             prev_view_proj: Mat4::IDENTITY,
@@ -2849,10 +2858,17 @@ impl GraphRenderer {
         }
 
         let main_render_config = scene.data.render_config;
-        let graph_surface_size = Self::desired_graph_surface_size(
-            self.surface_size,
-            &scene.data.viewports,
-            scene.data.render_main_scene_to_swapchain,
+        let (desired_graph_surface_size, allow_graph_resize_debounce) =
+            Self::desired_graph_surface_size(
+                self.surface_size,
+                &scene.data.viewports,
+                scene.data.render_main_scene_to_swapchain,
+            );
+        let viewport_resize_debounce_ms = main_render_config.viewport_resize_debounce_ms;
+        let graph_surface_size = self.debounced_graph_surface_size(
+            desired_graph_surface_size,
+            viewport_resize_debounce_ms,
+            allow_graph_resize_debounce,
         );
         let graph_sig = RenderGraphConfigSignature::from_render_config(&main_render_config);
         let tracing_active_for_config = |config: &RenderConfig| {
@@ -2905,8 +2921,13 @@ impl GraphRenderer {
             active_offscreen_ids.insert(viewport.id);
             let target_width = viewport.target_size[0].max(1);
             let target_height = viewport.target_size[1].max(1);
-            let target_view =
-                self.ensure_offscreen_viewport_target(viewport.id, target_width, target_height);
+            let target_view = self.ensure_offscreen_viewport_target(
+                viewport.id,
+                target_width,
+                target_height,
+                viewport_resize_debounce_ms,
+                !viewport.immediate_resize,
+            );
             let prev_transform = self
                 .offscreen_viewport_prev_cameras
                 .get(&viewport.id)
@@ -4052,6 +4073,8 @@ impl GraphRenderer {
         self.gpu_indirect_capacity = 0;
         self.gpu_draws = Arc::new(Vec::new());
         self.gpu_draw_count = 0;
+        self.pending_graph_surface_resize = None;
+        self.offscreen_viewport_pending_resizes.clear();
 
         self.bundle_resource_epoch = 0;
         self.bundle_resource_change_frame = 0;
@@ -4517,6 +4540,8 @@ impl GraphRenderer {
 
         // Release swapchain views before reconfiguring to avoid DX12 resize failures.
         self.clear_active_graph();
+        self.pending_graph_surface_resize = None;
+        self.offscreen_viewport_pending_resizes.clear();
         self.bump_egui_epoch();
         self.frame_inputs.remove::<SwapchainFrameInput>();
 
@@ -4673,11 +4698,55 @@ impl GraphRenderer {
         config
     }
 
+    fn debounced_graph_surface_size(
+        &mut self,
+        desired_size: PhysicalSize<u32>,
+        debounce_ms: u32,
+        allow_debounce: bool,
+    ) -> PhysicalSize<u32> {
+        if !allow_debounce || debounce_ms == 0 {
+            self.pending_graph_surface_resize = None;
+            return desired_size;
+        }
+
+        // On initial setup we need a graph immediately; debounce only steady-state viewport drags.
+        let Some(active) = self.active_graph.as_ref() else {
+            self.pending_graph_surface_resize = None;
+            return desired_size;
+        };
+
+        let active_size = active.surface_size;
+        if desired_size == active_size {
+            self.pending_graph_surface_resize = None;
+            return desired_size;
+        }
+
+        let should_apply = match self.pending_graph_surface_resize.as_ref() {
+            Some(pending) if pending.size == desired_size => {
+                pending.since.elapsed().as_millis() >= debounce_ms as u128
+            }
+            _ => {
+                self.pending_graph_surface_resize = Some(PendingResize {
+                    size: desired_size,
+                    since: Instant::now(),
+                });
+                false
+            }
+        };
+
+        if should_apply {
+            self.pending_graph_surface_resize = None;
+            desired_size
+        } else {
+            active_size
+        }
+    }
+
     fn desired_graph_surface_size(
         surface_size: PhysicalSize<u32>,
         viewports: &[RenderViewportRequest],
         render_main_scene_to_swapchain: bool,
-    ) -> PhysicalSize<u32> {
+    ) -> (PhysicalSize<u32>, bool) {
         let mut width = if render_main_scene_to_swapchain {
             surface_size.width.max(1)
         } else {
@@ -4688,15 +4757,19 @@ impl GraphRenderer {
         } else {
             1
         };
+        let mut allow_debounce = true;
         for viewport in viewports {
             width = width.max(viewport.target_size[0].max(1));
             height = height.max(viewport.target_size[1].max(1));
+            if viewport.immediate_resize {
+                allow_debounce = false;
+            }
         }
         if width == 1 && height == 1 {
             width = surface_size.width.max(1);
             height = surface_size.height.max(1);
         }
-        PhysicalSize::new(width, height)
+        (PhysicalSize::new(width, height), allow_debounce)
     }
 
     fn ensure_offscreen_viewport_target(
@@ -4704,13 +4777,48 @@ impl GraphRenderer {
         id: u64,
         width: u32,
         height: u32,
+        debounce_ms: u32,
+        allow_debounce: bool,
     ) -> wgpu::TextureView {
-        let size = PhysicalSize::new(width.max(1), height.max(1));
-        let needs_recreate = self
-            .offscreen_viewports
-            .get(&id)
-            .map(|target| target.size != size)
-            .unwrap_or(true);
+        let desired_size = PhysicalSize::new(width.max(1), height.max(1));
+        let (size, needs_recreate) = match self.offscreen_viewports.get(&id) {
+            Some(target) if target.size == desired_size => {
+                self.offscreen_viewport_pending_resizes.remove(&id);
+                (desired_size, false)
+            }
+            Some(target) if !allow_debounce || debounce_ms == 0 => {
+                self.offscreen_viewport_pending_resizes.remove(&id);
+                (desired_size, true)
+            }
+            Some(target) => {
+                let should_apply = match self.offscreen_viewport_pending_resizes.get(&id) {
+                    Some(pending) if pending.size == desired_size => {
+                        pending.since.elapsed().as_millis() >= debounce_ms as u128
+                    }
+                    _ => {
+                        self.offscreen_viewport_pending_resizes.insert(
+                            id,
+                            PendingResize {
+                                size: desired_size,
+                                since: Instant::now(),
+                            },
+                        );
+                        false
+                    }
+                };
+
+                if should_apply {
+                    self.offscreen_viewport_pending_resizes.remove(&id);
+                    (desired_size, true)
+                } else {
+                    (target.size, false)
+                }
+            }
+            None => {
+                self.offscreen_viewport_pending_resizes.remove(&id);
+                (desired_size, true)
+            }
+        };
 
         if needs_recreate {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -4742,6 +4850,8 @@ impl GraphRenderer {
 
     fn prune_offscreen_viewports(&mut self, active: &HashSet<u64>) {
         self.offscreen_viewports.retain(|id, _| active.contains(id));
+        self.offscreen_viewport_pending_resizes
+            .retain(|id, _| active.contains(id));
         self.offscreen_viewport_prev_cameras
             .retain(|id, _| active.contains(id));
         self.offscreen_viewport_prev_view_proj

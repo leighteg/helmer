@@ -543,6 +543,7 @@ pub struct RenderViewportRequest {
     pub egui_texture_id: egui::TextureId,
     pub target_size: [u32; 2],
     pub temporal_history: bool,
+    pub immediate_resize: bool,
 }
 
 #[repr(u32)]

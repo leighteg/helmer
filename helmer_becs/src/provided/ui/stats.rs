@@ -1665,6 +1665,16 @@ impl StatsUI {
                         ui.label("streaming continues from logical camera");
 
                         ui.separator();
+                        ui.heading("viewport");
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.viewport_resize_debounce_ms)
+                                .speed(1.0)
+                                .range(0..=1000)
+                                .prefix("resize debounce ms: "),
+                        );
+                        ui.label("0 = immediate resize apply");
+
+                        ui.separator();
                         ui.heading("Culling & LOD");
                         ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
                         ui.checkbox(

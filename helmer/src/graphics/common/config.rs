@@ -79,6 +79,7 @@ pub struct RenderConfig {
     pub streaming_scan_budget: u32,
     pub streaming_request_budget: u32,
     pub streaming_allow_full_scan: bool,
+    pub viewport_resize_debounce_ms: u32,
     pub occlusion_stable_pos_epsilon: f32,
     pub occlusion_stable_rot_epsilon: f32,
 
@@ -257,6 +258,7 @@ impl Default for RenderConfig {
             streaming_scan_budget: 2048,
             streaming_request_budget: 512,
             streaming_allow_full_scan: false,
+            viewport_resize_debounce_ms: 120,
             occlusion_stable_pos_epsilon: 0.002,
             occlusion_stable_rot_epsilon: 1.0e-5,
 

@@ -159,6 +159,7 @@ pub struct EditorViewportRuntime {
     pub preview_texture_id: Option<TextureId>,
     pub main_rect_pixels: Option<ViewportRectPixels>,
     pub main_target_size: Option<[u32; 2]>,
+    pub main_resize_immediate: bool,
     pub preview_rect_pixels: Option<ViewportRectPixels>,
     pub preview_camera_entity: Option<Entity>,
     pub pointer_over_main: bool,
@@ -169,6 +170,7 @@ impl EditorViewportRuntime {
     pub fn begin_frame(&mut self) {
         self.main_rect_pixels = None;
         self.main_target_size = None;
+        self.main_resize_immediate = false;
         self.preview_rect_pixels = None;
         self.preview_camera_entity = None;
         self.pointer_over_main = false;

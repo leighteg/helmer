@@ -25,7 +25,15 @@ use helmer::provided::components::{
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::EguiResource;
-use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
+use helmer_becs::physics::components::{
+    CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
+    ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
+    KinematicRigidBody, MeshColliderKind, MeshColliderLod, PhysicsCombineRule, PhysicsHandle,
+    PhysicsJoint, PhysicsJointKind, PhysicsPointProjection, PhysicsPointProjectionHit,
+    PhysicsQueryFilter, PhysicsRayCast, PhysicsRayCastHit, PhysicsShapeCast, PhysicsShapeCastHit,
+    PhysicsWorldDefaults, RigidBodyProperties, RigidBodyPropertyInheritance,
+};
+use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
@@ -5096,17 +5104,71 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<DynamicRigidBody>();
+            remove_body_dependent_physics_components(world, entity);
             push_undo_snapshot(world, "Remove Dynamic Body");
-        } else if let Some(body) = world.get::<DynamicRigidBody>(entity) {
+        } else if let Some(body) = world.get::<DynamicRigidBody>(entity).copied() {
             let mut mass = body.mass;
             let mass_response = edit_float(ui, "Mass", &mut mass, 0.1);
             begin_edit_undo(world, "Physics", mass_response);
             if mass_response.changed {
                 if let Some(mut body) = world.get_mut::<DynamicRigidBody>(entity) {
-                    body.mass = mass;
+                    body.mass = mass.max(0.0);
                 }
             }
             end_edit_undo(world, mass_response);
+        }
+        ui.separator();
+    }
+
+    if world.get::<KinematicRigidBody>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Kinematic Rigid Body");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<KinematicRigidBody>();
+            remove_body_dependent_physics_components(world, entity);
+            push_undo_snapshot(world, "Remove Kinematic Body");
+        } else if let Some(mode) = world.get::<KinematicRigidBody>(entity).copied() {
+            let mut selected_mode = mode.mode;
+            let mut changed = false;
+            ComboBox::from_id_source(format!("kinematic_mode_{}", entity.to_bits()))
+                .selected_text(match selected_mode {
+                    KinematicMode::PositionBased => "Position Based",
+                    KinematicMode::VelocityBased => "Velocity Based",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            matches!(selected_mode, KinematicMode::PositionBased),
+                            "Position Based",
+                        )
+                        .clicked()
+                    {
+                        selected_mode = KinematicMode::PositionBased;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(selected_mode, KinematicMode::VelocityBased),
+                            "Velocity Based",
+                        )
+                        .clicked()
+                    {
+                        selected_mode = KinematicMode::VelocityBased;
+                        changed = true;
+                    }
+                });
+            if changed {
+                if let Some(mut body) = world.get_mut::<KinematicRigidBody>(entity) {
+                    body.mode = selected_mode;
+                }
+                push_undo_snapshot(world, "Kinematic Mode");
+            }
         }
         ui.separator();
     }
@@ -5122,7 +5184,728 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<FixedCollider>();
+            remove_body_dependent_physics_components(world, entity);
             push_undo_snapshot(world, "Remove Fixed Collider");
+        }
+        ui.separator();
+    }
+
+    if world.get::<PhysicsWorldDefaults>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Physics World Defaults");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            world.entity_mut(entity).remove::<PhysicsWorldDefaults>();
+            push_undo_snapshot(world, "Remove Physics World Defaults");
+        } else if let Some(mut defaults) = world.get_mut::<PhysicsWorldDefaults>(entity) {
+            let mut changed = false;
+            changed |= edit_vec3(ui, "Gravity", &mut defaults.gravity, 0.1).changed;
+
+            ui.collapsing("Rigid Body Defaults", |ui| {
+                changed |= edit_float(
+                    ui,
+                    "Linear Damping",
+                    &mut defaults.rigid_body_properties.linear_damping,
+                    0.01,
+                )
+                .changed;
+                changed |= edit_float(
+                    ui,
+                    "Angular Damping",
+                    &mut defaults.rigid_body_properties.angular_damping,
+                    0.01,
+                )
+                .changed;
+                changed |= edit_float(
+                    ui,
+                    "Gravity Scale",
+                    &mut defaults.rigid_body_properties.gravity_scale,
+                    0.01,
+                )
+                .changed;
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.ccd_enabled,
+                        "CCD Enabled",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut defaults.rigid_body_properties.can_sleep, "Can Sleep")
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.sleeping,
+                        "Start Sleeping",
+                    )
+                    .changed();
+                ui.horizontal(|ui| {
+                    ui.label("Dominance Group");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut defaults.rigid_body_properties.dominance_group)
+                                .speed(1.0),
+                        )
+                        .changed();
+                });
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_translation_x,
+                        "Lock Translation X",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_translation_y,
+                        "Lock Translation Y",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_translation_z,
+                        "Lock Translation Z",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_rotation_x,
+                        "Lock Rotation X",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_rotation_y,
+                        "Lock Rotation Y",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(
+                        &mut defaults.rigid_body_properties.lock_rotation_z,
+                        "Lock Rotation Z",
+                    )
+                    .changed();
+                changed |= edit_vec3(
+                    ui,
+                    "Linear Velocity",
+                    &mut defaults.rigid_body_properties.linear_velocity,
+                    0.05,
+                )
+                .changed;
+                changed |= edit_vec3(
+                    ui,
+                    "Angular Velocity",
+                    &mut defaults.rigid_body_properties.angular_velocity,
+                    0.05,
+                )
+                .changed;
+            });
+
+            ui.collapsing("Collider Defaults", |ui| {
+                changed |= edit_float(
+                    ui,
+                    "Friction",
+                    &mut defaults.collider_properties.friction,
+                    0.01,
+                )
+                .changed;
+                changed |= edit_float(
+                    ui,
+                    "Restitution",
+                    &mut defaults.collider_properties.restitution,
+                    0.01,
+                )
+                .changed;
+                changed |= edit_float(
+                    ui,
+                    "Density",
+                    &mut defaults.collider_properties.density,
+                    0.01,
+                )
+                .changed;
+                changed |= ui
+                    .checkbox(&mut defaults.collider_properties.is_sensor, "Sensor")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut defaults.collider_properties.enabled, "Enabled")
+                    .changed();
+                changed |= edit_vec3(
+                    ui,
+                    "Offset Position",
+                    &mut defaults.collider_properties.translation_offset,
+                    0.01,
+                )
+                .changed;
+                let mut rot = defaults
+                    .collider_properties
+                    .rotation_offset
+                    .to_euler(EulerRot::XYZ);
+                let mut rot_deg =
+                    Vec3::new(rot.0.to_degrees(), rot.1.to_degrees(), rot.2.to_degrees());
+                let rot_response = edit_vec3(ui, "Offset Rotation", &mut rot_deg, 0.5);
+                if rot_response.changed {
+                    defaults.collider_properties.rotation_offset = Quat::from_euler(
+                        EulerRot::XYZ,
+                        rot_deg.x.to_radians(),
+                        rot_deg.y.to_radians(),
+                        rot_deg.z.to_radians(),
+                    );
+                    changed = true;
+                }
+                changed |= edit_u32_range(
+                    ui,
+                    "Collision Memberships",
+                    &mut defaults.collider_properties.collision_memberships,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Collision Filter",
+                    &mut defaults.collider_properties.collision_filter,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Solver Memberships",
+                    &mut defaults.collider_properties.solver_memberships,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Solver Filter",
+                    &mut defaults.collider_properties.solver_filter,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+
+                let mut friction_rule = defaults.collider_properties.friction_combine_rule;
+                let mut restitution_rule = defaults.collider_properties.restitution_combine_rule;
+                ComboBox::from_id_source(format!(
+                    "world_defaults_friction_rule_{}",
+                    entity.to_bits()
+                ))
+                .selected_text(match friction_rule {
+                    PhysicsCombineRule::Average => "Average",
+                    PhysicsCombineRule::Min => "Min",
+                    PhysicsCombineRule::Multiply => "Multiply",
+                    PhysicsCombineRule::Max => "Max",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            matches!(friction_rule, PhysicsCombineRule::Average),
+                            "Average",
+                        )
+                        .clicked()
+                    {
+                        friction_rule = PhysicsCombineRule::Average;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(matches!(friction_rule, PhysicsCombineRule::Min), "Min")
+                        .clicked()
+                    {
+                        friction_rule = PhysicsCombineRule::Min;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(friction_rule, PhysicsCombineRule::Multiply),
+                            "Multiply",
+                        )
+                        .clicked()
+                    {
+                        friction_rule = PhysicsCombineRule::Multiply;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(matches!(friction_rule, PhysicsCombineRule::Max), "Max")
+                        .clicked()
+                    {
+                        friction_rule = PhysicsCombineRule::Max;
+                        changed = true;
+                    }
+                });
+                ComboBox::from_id_source(format!(
+                    "world_defaults_restitution_rule_{}",
+                    entity.to_bits()
+                ))
+                .selected_text(match restitution_rule {
+                    PhysicsCombineRule::Average => "Average",
+                    PhysicsCombineRule::Min => "Min",
+                    PhysicsCombineRule::Multiply => "Multiply",
+                    PhysicsCombineRule::Max => "Max",
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(
+                            matches!(restitution_rule, PhysicsCombineRule::Average),
+                            "Average",
+                        )
+                        .clicked()
+                    {
+                        restitution_rule = PhysicsCombineRule::Average;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(restitution_rule, PhysicsCombineRule::Min),
+                            "Min",
+                        )
+                        .clicked()
+                    {
+                        restitution_rule = PhysicsCombineRule::Min;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(restitution_rule, PhysicsCombineRule::Multiply),
+                            "Multiply",
+                        )
+                        .clicked()
+                    {
+                        restitution_rule = PhysicsCombineRule::Multiply;
+                        changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(restitution_rule, PhysicsCombineRule::Max),
+                            "Max",
+                        )
+                        .clicked()
+                    {
+                        restitution_rule = PhysicsCombineRule::Max;
+                        changed = true;
+                    }
+                });
+                defaults.collider_properties.friction_combine_rule = friction_rule;
+                defaults.collider_properties.restitution_combine_rule = restitution_rule;
+            });
+
+            if changed {
+                push_undo_snapshot(world, "Physics World Defaults");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<RigidBodyProperties>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Rigid Body Properties");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            world.entity_mut(entity).remove::<RigidBodyProperties>();
+            world
+                .entity_mut(entity)
+                .remove::<RigidBodyPropertyInheritance>();
+            push_undo_snapshot(world, "Remove Rigid Body Properties");
+        } else if let Some(current_properties) = world.get::<RigidBodyProperties>(entity).copied() {
+            let mut properties = current_properties;
+            let mut inheritance = world
+                .get::<RigidBodyPropertyInheritance>(entity)
+                .copied()
+                .unwrap_or_else(RigidBodyPropertyInheritance::none);
+            let world_defaults = default_rigid_body_properties_for_world(world);
+            let mut changed = false;
+            changed |= edit_inherited_float(
+                ui,
+                "Linear Damping",
+                &mut properties.linear_damping,
+                &mut inheritance.linear_damping,
+                world_defaults.linear_damping,
+                0.01,
+            );
+            changed |= edit_inherited_float(
+                ui,
+                "Angular Damping",
+                &mut properties.angular_damping,
+                &mut inheritance.angular_damping,
+                world_defaults.angular_damping,
+                0.01,
+            );
+            changed |= edit_inherited_float(
+                ui,
+                "Gravity Scale",
+                &mut properties.gravity_scale,
+                &mut inheritance.gravity_scale,
+                world_defaults.gravity_scale,
+                0.01,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "CCD Enabled",
+                &mut properties.ccd_enabled,
+                &mut inheritance.ccd_enabled,
+                world_defaults.ccd_enabled,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Can Sleep",
+                &mut properties.can_sleep,
+                &mut inheritance.can_sleep,
+                world_defaults.can_sleep,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Start Sleeping",
+                &mut properties.sleeping,
+                &mut inheritance.sleeping,
+                world_defaults.sleeping,
+            );
+            changed |= edit_inherited_i8(
+                ui,
+                "Dominance Group",
+                &mut properties.dominance_group,
+                &mut inheritance.dominance_group,
+                world_defaults.dominance_group,
+                1.0,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Translation X",
+                &mut properties.lock_translation_x,
+                &mut inheritance.lock_translation_x,
+                world_defaults.lock_translation_x,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Translation Y",
+                &mut properties.lock_translation_y,
+                &mut inheritance.lock_translation_y,
+                world_defaults.lock_translation_y,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Translation Z",
+                &mut properties.lock_translation_z,
+                &mut inheritance.lock_translation_z,
+                world_defaults.lock_translation_z,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Rotation X",
+                &mut properties.lock_rotation_x,
+                &mut inheritance.lock_rotation_x,
+                world_defaults.lock_rotation_x,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Rotation Y",
+                &mut properties.lock_rotation_y,
+                &mut inheritance.lock_rotation_y,
+                world_defaults.lock_rotation_y,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Lock Rotation Z",
+                &mut properties.lock_rotation_z,
+                &mut inheritance.lock_rotation_z,
+                world_defaults.lock_rotation_z,
+            );
+            changed |= edit_inherited_vec3(
+                ui,
+                "Linear Velocity",
+                &mut properties.linear_velocity,
+                &mut inheritance.linear_velocity,
+                world_defaults.linear_velocity,
+                0.05,
+            );
+            changed |= edit_inherited_vec3(
+                ui,
+                "Angular Velocity",
+                &mut properties.angular_velocity,
+                &mut inheritance.angular_velocity,
+                world_defaults.angular_velocity,
+                0.05,
+            );
+            if changed {
+                if let Some(mut props) = world.get_mut::<RigidBodyProperties>(entity) {
+                    *props = properties;
+                }
+                if let Some(mut inheritance_component) =
+                    world.get_mut::<RigidBodyPropertyInheritance>(entity)
+                {
+                    *inheritance_component = inheritance;
+                } else {
+                    world.entity_mut(entity).insert(inheritance);
+                }
+                push_undo_snapshot(world, "Rigid Body Properties");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<ColliderProperties>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Collider Properties");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            world.entity_mut(entity).remove::<ColliderProperties>();
+            world
+                .entity_mut(entity)
+                .remove::<ColliderPropertyInheritance>();
+            push_undo_snapshot(world, "Remove Collider Properties");
+        } else if let Some(current_properties) = world.get::<ColliderProperties>(entity).copied() {
+            let mut properties = current_properties;
+            let mut inheritance = world
+                .get::<ColliderPropertyInheritance>(entity)
+                .copied()
+                .unwrap_or_else(ColliderPropertyInheritance::none);
+            let world_defaults = default_collider_properties_for_world(world);
+            let mut changed = false;
+            changed |= edit_inherited_float(
+                ui,
+                "Friction",
+                &mut properties.friction,
+                &mut inheritance.friction,
+                world_defaults.friction,
+                0.01,
+            );
+            changed |= edit_inherited_float(
+                ui,
+                "Restitution",
+                &mut properties.restitution,
+                &mut inheritance.restitution,
+                world_defaults.restitution,
+                0.01,
+            );
+            changed |= edit_inherited_float(
+                ui,
+                "Density",
+                &mut properties.density,
+                &mut inheritance.density,
+                world_defaults.density,
+                0.01,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Sensor",
+                &mut properties.is_sensor,
+                &mut inheritance.is_sensor,
+                world_defaults.is_sensor,
+            );
+            changed |= edit_inherited_bool(
+                ui,
+                "Enabled",
+                &mut properties.enabled,
+                &mut inheritance.enabled,
+                world_defaults.enabled,
+            );
+            changed |= edit_inherited_vec3(
+                ui,
+                "Offset Position",
+                &mut properties.translation_offset,
+                &mut inheritance.translation_offset,
+                world_defaults.translation_offset,
+                0.01,
+            );
+            changed |= edit_inherited_quat_euler(
+                ui,
+                "Offset Rotation",
+                &mut properties.rotation_offset,
+                &mut inheritance.rotation_offset,
+                world_defaults.rotation_offset,
+                0.5,
+            );
+            changed |= edit_inherited_u32(
+                ui,
+                "Collision Memberships",
+                &mut properties.collision_memberships,
+                &mut inheritance.collision_memberships,
+                world_defaults.collision_memberships,
+            );
+            changed |= edit_inherited_u32(
+                ui,
+                "Collision Filter",
+                &mut properties.collision_filter,
+                &mut inheritance.collision_filter,
+                world_defaults.collision_filter,
+            );
+            changed |= edit_inherited_u32(
+                ui,
+                "Solver Memberships",
+                &mut properties.solver_memberships,
+                &mut inheritance.solver_memberships,
+                world_defaults.solver_memberships,
+            );
+            changed |= edit_inherited_u32(
+                ui,
+                "Solver Filter",
+                &mut properties.solver_filter,
+                &mut inheritance.solver_filter,
+                world_defaults.solver_filter,
+            );
+
+            let mut friction_rule = properties.friction_combine_rule;
+            let mut restitution_rule = properties.restitution_combine_rule;
+            if inheritance.friction_combine_rule {
+                friction_rule = world_defaults.friction_combine_rule;
+                if properties.friction_combine_rule != world_defaults.friction_combine_rule {
+                    changed = true;
+                }
+            }
+            if inheritance.restitution_combine_rule {
+                restitution_rule = world_defaults.restitution_combine_rule;
+                if properties.restitution_combine_rule != world_defaults.restitution_combine_rule {
+                    changed = true;
+                }
+            }
+
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut inheritance.friction_combine_rule, "Use World")
+                    .changed();
+                ui.label("Friction Combine Rule");
+                ui.add_enabled_ui(!inheritance.friction_combine_rule, |ui| {
+                    ComboBox::from_id_source(format!("friction_rule_{}", entity.to_bits()))
+                        .selected_text(match friction_rule {
+                            PhysicsCombineRule::Average => "Average",
+                            PhysicsCombineRule::Min => "Min",
+                            PhysicsCombineRule::Multiply => "Multiply",
+                            PhysicsCombineRule::Max => "Max",
+                        })
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    matches!(friction_rule, PhysicsCombineRule::Average),
+                                    "Average",
+                                )
+                                .clicked()
+                            {
+                                friction_rule = PhysicsCombineRule::Average;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(friction_rule, PhysicsCombineRule::Min),
+                                    "Min",
+                                )
+                                .clicked()
+                            {
+                                friction_rule = PhysicsCombineRule::Min;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(friction_rule, PhysicsCombineRule::Multiply),
+                                    "Multiply",
+                                )
+                                .clicked()
+                            {
+                                friction_rule = PhysicsCombineRule::Multiply;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(friction_rule, PhysicsCombineRule::Max),
+                                    "Max",
+                                )
+                                .clicked()
+                            {
+                                friction_rule = PhysicsCombineRule::Max;
+                                changed = true;
+                            }
+                        });
+                });
+            });
+
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut inheritance.restitution_combine_rule, "Use World")
+                    .changed();
+                ui.label("Restitution Combine Rule");
+                ui.add_enabled_ui(!inheritance.restitution_combine_rule, |ui| {
+                    ComboBox::from_id_source(format!("restitution_rule_{}", entity.to_bits()))
+                        .selected_text(match restitution_rule {
+                            PhysicsCombineRule::Average => "Average",
+                            PhysicsCombineRule::Min => "Min",
+                            PhysicsCombineRule::Multiply => "Multiply",
+                            PhysicsCombineRule::Max => "Max",
+                        })
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    matches!(restitution_rule, PhysicsCombineRule::Average),
+                                    "Average",
+                                )
+                                .clicked()
+                            {
+                                restitution_rule = PhysicsCombineRule::Average;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(restitution_rule, PhysicsCombineRule::Min),
+                                    "Min",
+                                )
+                                .clicked()
+                            {
+                                restitution_rule = PhysicsCombineRule::Min;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(restitution_rule, PhysicsCombineRule::Multiply),
+                                    "Multiply",
+                                )
+                                .clicked()
+                            {
+                                restitution_rule = PhysicsCombineRule::Multiply;
+                                changed = true;
+                            }
+                            if ui
+                                .selectable_label(
+                                    matches!(restitution_rule, PhysicsCombineRule::Max),
+                                    "Max",
+                                )
+                                .clicked()
+                            {
+                                restitution_rule = PhysicsCombineRule::Max;
+                                changed = true;
+                            }
+                        });
+                });
+            });
+
+            if inheritance.friction_combine_rule {
+                friction_rule = world_defaults.friction_combine_rule;
+            }
+            if inheritance.restitution_combine_rule {
+                restitution_rule = world_defaults.restitution_combine_rule;
+            }
+            properties.friction_combine_rule = friction_rule;
+            properties.restitution_combine_rule = restitution_rule;
+
+            if changed {
+                if let Some(mut props) = world.get_mut::<ColliderProperties>(entity) {
+                    *props = properties;
+                }
+                if let Some(mut inheritance_component) =
+                    world.get_mut::<ColliderPropertyInheritance>(entity)
+                {
+                    *inheritance_component = inheritance;
+                } else {
+                    world.entity_mut(entity).insert(inheritance);
+                }
+                push_undo_snapshot(world, "Collider Properties");
+            }
         }
         ui.separator();
     }
@@ -5145,6 +5928,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let label = match current {
                 ColliderShape::Cuboid => "Box",
                 ColliderShape::Sphere => "Sphere",
+                ColliderShape::CapsuleY => "Capsule",
+                ColliderShape::CylinderY => "Cylinder",
+                ColliderShape::ConeY => "Cone",
+                ColliderShape::RoundCuboid { .. } => "Round Box",
+                ColliderShape::Mesh { kind, .. } => match kind {
+                    MeshColliderKind::TriMesh => "Mesh",
+                    MeshColliderKind::ConvexHull => "Mesh Convex Hull",
+                },
             };
             ComboBox::from_id_source(format!("collider_shape_{}", entity.to_bits()))
                 .selected_text(label)
@@ -5163,12 +5954,709 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         current = ColliderShape::Sphere;
                         shape_changed = true;
                     }
+                    if ui
+                        .selectable_label(matches!(current, ColliderShape::CapsuleY), "Capsule")
+                        .clicked()
+                    {
+                        current = ColliderShape::CapsuleY;
+                        shape_changed = true;
+                    }
+                    if ui
+                        .selectable_label(matches!(current, ColliderShape::CylinderY), "Cylinder")
+                        .clicked()
+                    {
+                        current = ColliderShape::CylinderY;
+                        shape_changed = true;
+                    }
+                    if ui
+                        .selectable_label(matches!(current, ColliderShape::ConeY), "Cone")
+                        .clicked()
+                    {
+                        current = ColliderShape::ConeY;
+                        shape_changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(current, ColliderShape::RoundCuboid { .. }),
+                            "Round Box",
+                        )
+                        .clicked()
+                    {
+                        current = ColliderShape::RoundCuboid {
+                            border_radius: 0.05,
+                        };
+                        shape_changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(
+                                current,
+                                ColliderShape::Mesh {
+                                    kind: MeshColliderKind::TriMesh,
+                                    ..
+                                }
+                            ),
+                            "Mesh",
+                        )
+                        .clicked()
+                    {
+                        let mesh_id = world
+                            .get::<BevyMeshRenderer>(entity)
+                            .map(|renderer| renderer.0.mesh_id)
+                            .or_else(|| {
+                                world
+                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.0.mesh_id)
+                            });
+                        current = ColliderShape::Mesh {
+                            mesh_id,
+                            lod: MeshColliderLod::Lowest,
+                            kind: MeshColliderKind::TriMesh,
+                        };
+                        shape_changed = true;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(
+                                current,
+                                ColliderShape::Mesh {
+                                    kind: MeshColliderKind::ConvexHull,
+                                    ..
+                                }
+                            ),
+                            "Mesh Convex Hull",
+                        )
+                        .clicked()
+                    {
+                        let mesh_id = world
+                            .get::<BevyMeshRenderer>(entity)
+                            .map(|renderer| renderer.0.mesh_id)
+                            .or_else(|| {
+                                world
+                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.0.mesh_id)
+                            });
+                        current = ColliderShape::Mesh {
+                            mesh_id,
+                            lod: MeshColliderLod::Lowest,
+                            kind: MeshColliderKind::ConvexHull,
+                        };
+                        shape_changed = true;
+                    }
                 });
+
+            if let ColliderShape::RoundCuboid { border_radius } = &mut current {
+                let response = edit_float(ui, "Border Radius", border_radius, 0.01);
+                if response.changed {
+                    *border_radius = border_radius.max(0.0);
+                    shape_changed = true;
+                }
+            }
+
+            if let ColliderShape::Mesh { mesh_id, lod, kind } = &mut current {
+                let mesh_source_label = mesh_id
+                    .map(|id| format!("Collider Mesh: #{}", id))
+                    .unwrap_or_else(|| "Collider Mesh: Entity Mesh".to_string());
+
+                let mesh_source_button = ui.menu_button(mesh_source_label, |ui| {
+                    if ui.button("Use Entity Mesh").clicked() {
+                        *mesh_id = world
+                            .get::<BevyMeshRenderer>(entity)
+                            .map(|renderer| renderer.0.mesh_id)
+                            .or_else(|| {
+                                world
+                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.0.mesh_id)
+                            });
+                        shape_changed = true;
+                        ui.close_menu();
+                    }
+
+                    if let Some(path) = selected_asset.as_ref().filter(|path| is_model_file(path)) {
+                        if ui.button("Use Selected Asset").clicked() {
+                            if let Some(id) = collider_mesh_id_from_asset(world, &project, path) {
+                                *mesh_id = Some(id);
+                                shape_changed = true;
+                            }
+                            ui.close_menu();
+                        }
+                    }
+
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Model", &["glb", "gltf"])
+                            .pick_file()
+                        {
+                            if let Some(id) = collider_mesh_id_from_asset(world, &project, &path) {
+                                *mesh_id = Some(id);
+                                shape_changed = true;
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    if ui.button("Clear Mesh Override").clicked() {
+                        *mesh_id = None;
+                        shape_changed = true;
+                        ui.close_menu();
+                    }
+                });
+
+                if let Some(payload) = mesh_source_button
+                    .response
+                    .dnd_release_payload::<AssetDragPayload>()
+                {
+                    if let Some(path) = payload_primary_path(&payload) {
+                        if let Some(id) = collider_mesh_id_from_asset(world, &project, path) {
+                            *mesh_id = Some(id);
+                            shape_changed = true;
+                        }
+                    }
+                }
+                highlight_drop_target(ui, &mesh_source_button.response);
+
+                ComboBox::from_id_source(format!("mesh_collider_lod_{}", entity.to_bits()))
+                    .selected_text(match lod {
+                        MeshColliderLod::Lod0 => "LOD0",
+                        MeshColliderLod::Lod1 => "LOD1",
+                        MeshColliderLod::Lod2 => "LOD2",
+                        MeshColliderLod::Lowest => "Lowest",
+                        MeshColliderLod::Specific(_) => "Specific",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(matches!(lod, MeshColliderLod::Lod0), "LOD0")
+                            .clicked()
+                        {
+                            *lod = MeshColliderLod::Lod0;
+                            shape_changed = true;
+                        }
+                        if ui
+                            .selectable_label(matches!(lod, MeshColliderLod::Lod1), "LOD1")
+                            .clicked()
+                        {
+                            *lod = MeshColliderLod::Lod1;
+                            shape_changed = true;
+                        }
+                        if ui
+                            .selectable_label(matches!(lod, MeshColliderLod::Lod2), "LOD2")
+                            .clicked()
+                        {
+                            *lod = MeshColliderLod::Lod2;
+                            shape_changed = true;
+                        }
+                        if ui
+                            .selectable_label(matches!(lod, MeshColliderLod::Lowest), "Lowest")
+                            .clicked()
+                        {
+                            *lod = MeshColliderLod::Lowest;
+                            shape_changed = true;
+                        }
+                    });
+
+                ComboBox::from_id_source(format!("mesh_collider_kind_{}", entity.to_bits()))
+                    .selected_text(match kind {
+                        MeshColliderKind::TriMesh => "TriMesh",
+                        MeshColliderKind::ConvexHull => "Convex Hull",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(matches!(kind, MeshColliderKind::TriMesh), "TriMesh")
+                            .clicked()
+                        {
+                            *kind = MeshColliderKind::TriMesh;
+                            shape_changed = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(kind, MeshColliderKind::ConvexHull),
+                                "Convex Hull",
+                            )
+                            .clicked()
+                        {
+                            *kind = MeshColliderKind::ConvexHull;
+                            shape_changed = true;
+                        }
+                    });
+            }
+
             if shape_changed {
                 if let Some(mut shape) = world.get_mut::<ColliderShape>(entity) {
                     *shape = current;
                 }
                 push_undo_snapshot(world, "Collider Shape");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<PhysicsJoint>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Physics Joint");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            world.entity_mut(entity).remove::<PhysicsJoint>();
+            push_undo_snapshot(world, "Remove Joint");
+        } else {
+            let pinned_entity = world
+                .get_resource::<InspectorPinnedEntityResource>()
+                .and_then(|res| res.0);
+            if let Some(mut joint) = world.get_mut::<PhysicsJoint>(entity) {
+                let mut changed = false;
+                ComboBox::from_id_source(format!("joint_kind_{}", entity.to_bits()))
+                    .selected_text(match joint.kind {
+                        PhysicsJointKind::Fixed => "Fixed",
+                        PhysicsJointKind::Spherical => "Spherical",
+                        PhysicsJointKind::Revolute => "Revolute",
+                        PhysicsJointKind::Prismatic => "Prismatic",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                matches!(joint.kind, PhysicsJointKind::Fixed),
+                                "Fixed",
+                            )
+                            .clicked()
+                        {
+                            joint.kind = PhysicsJointKind::Fixed;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(joint.kind, PhysicsJointKind::Spherical),
+                                "Spherical",
+                            )
+                            .clicked()
+                        {
+                            joint.kind = PhysicsJointKind::Spherical;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(joint.kind, PhysicsJointKind::Revolute),
+                                "Revolute",
+                            )
+                            .clicked()
+                        {
+                            joint.kind = PhysicsJointKind::Revolute;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(joint.kind, PhysicsJointKind::Prismatic),
+                                "Prismatic",
+                            )
+                            .clicked()
+                        {
+                            joint.kind = PhysicsJointKind::Prismatic;
+                            changed = true;
+                        }
+                    });
+
+                changed |= ui
+                    .checkbox(&mut joint.contacts_enabled, "Contacts Enabled")
+                    .changed();
+                changed |= edit_vec3(ui, "Anchor A", &mut joint.local_anchor1, 0.05).changed;
+                changed |= edit_vec3(ui, "Anchor B", &mut joint.local_anchor2, 0.05).changed;
+                changed |= edit_vec3(ui, "Axis A", &mut joint.local_axis1, 0.05).changed;
+                changed |= edit_vec3(ui, "Axis B", &mut joint.local_axis2, 0.05).changed;
+                changed |= ui
+                    .checkbox(&mut joint.limit_enabled, "Use Limits")
+                    .changed();
+                if joint.limit_enabled {
+                    let mut min_limit = joint.limits[0];
+                    let mut max_limit = joint.limits[1];
+                    changed |= edit_float(ui, "Limit Min", &mut min_limit, 0.01).changed;
+                    changed |= edit_float(ui, "Limit Max", &mut max_limit, 0.01).changed;
+                    joint.limits = [min_limit, max_limit.max(min_limit)];
+                }
+                changed |= ui
+                    .checkbox(&mut joint.motor.enabled, "Motor Enabled")
+                    .changed();
+                if joint.motor.enabled {
+                    changed |= edit_float(
+                        ui,
+                        "Motor Target Position",
+                        &mut joint.motor.target_position,
+                        0.01,
+                    )
+                    .changed;
+                    changed |= edit_float(
+                        ui,
+                        "Motor Target Velocity",
+                        &mut joint.motor.target_velocity,
+                        0.01,
+                    )
+                    .changed;
+                    changed |=
+                        edit_float(ui, "Motor Stiffness", &mut joint.motor.stiffness, 0.01).changed;
+                    changed |=
+                        edit_float(ui, "Motor Damping", &mut joint.motor.damping, 0.01).changed;
+                    changed |=
+                        edit_float(ui, "Motor Max Force", &mut joint.motor.max_force, 0.1).changed;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Clear Target").clicked() {
+                        joint.target = None;
+                        changed = true;
+                    }
+                    if let Some(pinned) = pinned_entity {
+                        if ui.button("Use Pinned Entity").clicked() {
+                            joint.target = Some(pinned);
+                            changed = true;
+                        }
+                    }
+                });
+                let target_label = joint
+                    .target
+                    .and_then(|target| world.get::<Name>(target))
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
+                ui.label(format!("Target: {}", target_label));
+
+                if changed {
+                    push_undo_snapshot(world, "Joint");
+                }
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<CharacterController>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Character Controller");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            world.entity_mut(entity).remove::<CharacterController>();
+            world
+                .entity_mut(entity)
+                .remove::<CharacterControllerInput>();
+            world
+                .entity_mut(entity)
+                .remove::<CharacterControllerOutput>();
+            push_undo_snapshot(world, "Remove Character Controller");
+        } else if let Some(mut controller) = world.get_mut::<CharacterController>(entity) {
+            let mut changed = false;
+            changed |= edit_vec3(ui, "Up", &mut controller.up, 0.05).changed;
+            changed |= edit_float(ui, "Offset", &mut controller.offset, 0.001).changed;
+            changed |= ui.checkbox(&mut controller.slide, "Slide").changed();
+            changed |= edit_float(
+                ui,
+                "Autostep Max Height",
+                &mut controller.autostep_max_height,
+                0.01,
+            )
+            .changed;
+            changed |= edit_float(
+                ui,
+                "Autostep Min Width",
+                &mut controller.autostep_min_width,
+                0.01,
+            )
+            .changed;
+            changed |= ui
+                .checkbox(
+                    &mut controller.autostep_include_dynamic_bodies,
+                    "Autostep Include Dynamic Bodies",
+                )
+                .changed();
+            changed |= edit_float(
+                ui,
+                "Max Slope Climb Angle",
+                &mut controller.max_slope_climb_angle,
+                0.01,
+            )
+            .changed;
+            changed |= edit_float(
+                ui,
+                "Min Slope Slide Angle",
+                &mut controller.min_slope_slide_angle,
+                0.01,
+            )
+            .changed;
+            changed |=
+                edit_float(ui, "Snap To Ground", &mut controller.snap_to_ground, 0.01).changed;
+            changed |= edit_float(
+                ui,
+                "Normal Nudge Factor",
+                &mut controller.normal_nudge_factor,
+                0.0001,
+            )
+            .changed;
+            changed |= ui
+                .checkbox(
+                    &mut controller.apply_impulses_to_dynamic_bodies,
+                    "Apply Impulses To Dynamics",
+                )
+                .changed();
+            changed |=
+                edit_float(ui, "Character Mass", &mut controller.character_mass, 0.1).changed;
+
+            if let Some(mut input) = world.get_mut::<CharacterControllerInput>(entity) {
+                changed |= edit_vec3(
+                    ui,
+                    "Desired Translation",
+                    &mut input.desired_translation,
+                    0.05,
+                )
+                .changed;
+            } else {
+                world
+                    .entity_mut(entity)
+                    .insert(CharacterControllerInput::default());
+                changed = true;
+            }
+            if world.get::<CharacterControllerOutput>(entity).is_none() {
+                world
+                    .entity_mut(entity)
+                    .insert(CharacterControllerOutput::default());
+                changed = true;
+            } else if let Some(output) = world.get::<CharacterControllerOutput>(entity) {
+                ui.label(format!(
+                    "Grounded: {} | Sliding: {} | Contacts: {}",
+                    output.grounded, output.sliding_down_slope, output.collision_count
+                ));
+            }
+
+            if changed {
+                push_undo_snapshot(world, "Character Controller");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<PhysicsRayCast>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Ray Cast Query");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<PhysicsRayCast>();
+            world.entity_mut(entity).remove::<PhysicsRayCastHit>();
+            push_undo_snapshot(world, "Remove Ray Cast Query");
+        } else if let Some(mut query_data) = world.get_mut::<PhysicsRayCast>(entity) {
+            let mut changed = false;
+            changed |= edit_vec3(ui, "Origin", &mut query_data.origin, 0.05).changed;
+            changed |= edit_vec3(ui, "Direction", &mut query_data.direction, 0.05).changed;
+            changed |= edit_float(ui, "Max TOI", &mut query_data.max_toi, 0.1).changed;
+            changed |= ui.checkbox(&mut query_data.solid, "Solid").changed();
+            changed |= ui
+                .checkbox(&mut query_data.exclude_self, "Exclude Self")
+                .changed();
+            changed |= edit_u32_range(
+                ui,
+                "Filter Flags",
+                &mut query_data.filter.flags,
+                1.0,
+                0..=u32::MAX,
+            )
+            .changed;
+            changed |= ui
+                .checkbox(&mut query_data.filter.use_groups, "Use Groups")
+                .changed();
+            if query_data.filter.use_groups {
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Memberships",
+                    &mut query_data.filter.groups_memberships,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Filter",
+                    &mut query_data.filter.groups_filter,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+            }
+            if let Some(hit) = world.get::<PhysicsRayCastHit>(entity) {
+                ui.label(format!("Hit: {} | TOI: {:.4}", hit.has_hit, hit.toi));
+                if let Some(hit_entity) = hit.hit_entity {
+                    ui.label(format!(
+                        "Hit Entity: {}",
+                        entity_display_name(world, hit_entity)
+                    ));
+                }
+            }
+            if changed {
+                push_undo_snapshot(world, "Ray Cast Query");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<PhysicsPointProjection>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Point Projection Query");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<PhysicsPointProjection>();
+            world
+                .entity_mut(entity)
+                .remove::<PhysicsPointProjectionHit>();
+            push_undo_snapshot(world, "Remove Point Projection Query");
+        } else if let Some(mut query_data) = world.get_mut::<PhysicsPointProjection>(entity) {
+            let mut changed = false;
+            changed |= edit_vec3(ui, "Point", &mut query_data.point, 0.05).changed;
+            changed |= ui.checkbox(&mut query_data.solid, "Solid").changed();
+            changed |= ui
+                .checkbox(&mut query_data.exclude_self, "Exclude Self")
+                .changed();
+            changed |= edit_u32_range(
+                ui,
+                "Filter Flags",
+                &mut query_data.filter.flags,
+                1.0,
+                0..=u32::MAX,
+            )
+            .changed;
+            changed |= ui
+                .checkbox(&mut query_data.filter.use_groups, "Use Groups")
+                .changed();
+            if query_data.filter.use_groups {
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Memberships",
+                    &mut query_data.filter.groups_memberships,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Filter",
+                    &mut query_data.filter.groups_filter,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+            }
+            if let Some(hit) = world.get::<PhysicsPointProjectionHit>(entity) {
+                ui.label(format!(
+                    "Hit: {} | Distance: {:.4} | Inside: {}",
+                    hit.has_hit, hit.distance, hit.is_inside
+                ));
+            }
+            if changed {
+                push_undo_snapshot(world, "Point Projection Query");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<PhysicsShapeCast>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Shape Cast Query");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<PhysicsShapeCast>();
+            world.entity_mut(entity).remove::<PhysicsShapeCastHit>();
+            push_undo_snapshot(world, "Remove Shape Cast Query");
+        } else if let Some(mut query_data) = world.get_mut::<PhysicsShapeCast>(entity) {
+            let mut changed = false;
+            changed |= edit_vec3(ui, "Scale", &mut query_data.scale, 0.05).changed;
+            changed |= edit_vec3(ui, "Position", &mut query_data.position, 0.05).changed;
+            changed |= edit_vec3(ui, "Velocity", &mut query_data.velocity, 0.05).changed;
+            let mut rotation = query_data.rotation.to_euler(EulerRot::XYZ);
+            let mut rotation_deg = Vec3::new(
+                rotation.0.to_degrees(),
+                rotation.1.to_degrees(),
+                rotation.2.to_degrees(),
+            );
+            let rotation_response = edit_vec3(ui, "Rotation", &mut rotation_deg, 0.5);
+            if rotation_response.changed {
+                query_data.rotation = Quat::from_euler(
+                    EulerRot::XYZ,
+                    rotation_deg.x.to_radians(),
+                    rotation_deg.y.to_radians(),
+                    rotation_deg.z.to_radians(),
+                );
+                changed = true;
+            }
+            changed |= edit_float(
+                ui,
+                "Max Time Of Impact",
+                &mut query_data.max_time_of_impact,
+                0.1,
+            )
+            .changed;
+            changed |=
+                edit_float(ui, "Target Distance", &mut query_data.target_distance, 0.01).changed;
+            changed |= ui
+                .checkbox(&mut query_data.stop_at_penetration, "Stop At Penetration")
+                .changed();
+            changed |= ui
+                .checkbox(
+                    &mut query_data.compute_impact_geometry_on_penetration,
+                    "Compute Penetration Geometry",
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut query_data.exclude_self, "Exclude Self")
+                .changed();
+            changed |= edit_u32_range(
+                ui,
+                "Filter Flags",
+                &mut query_data.filter.flags,
+                1.0,
+                0..=u32::MAX,
+            )
+            .changed;
+            changed |= ui
+                .checkbox(&mut query_data.filter.use_groups, "Use Groups")
+                .changed();
+            if query_data.filter.use_groups {
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Memberships",
+                    &mut query_data.filter.groups_memberships,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+                changed |= edit_u32_range(
+                    ui,
+                    "Group Filter",
+                    &mut query_data.filter.groups_filter,
+                    1.0,
+                    0..=u32::MAX,
+                )
+                .changed;
+            }
+            if let Some(hit) = world.get::<PhysicsShapeCastHit>(entity) {
+                ui.label(format!(
+                    "Hit: {} | TOI: {:.4} | Status: {:?}",
+                    hit.has_hit, hit.toi, hit.status
+                ));
+            }
+            if changed {
+                push_undo_snapshot(world, "Shape Cast Query");
             }
         }
         ui.separator();
@@ -7249,6 +8737,13 @@ fn apply_entity_name(world: &mut World, entity: Entity, name: &str) {
     push_undo_snapshot(world, "Rename");
 }
 
+fn entity_display_name(world: &World, entity: Entity) -> String {
+    world
+        .get::<Name>(entity)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("Entity {}", entity.index()))
+}
+
 fn draw_material_editor_tab(
     ui: &mut Ui,
     world: &mut World,
@@ -7405,6 +8900,125 @@ fn draw_material_editor_tab(
     });
 }
 
+fn default_collider_shape_for_entity(world: &World, entity: Entity) -> ColliderShape {
+    if let Some(renderer) = world.get::<BevyMeshRenderer>(entity) {
+        return ColliderShape::Mesh {
+            mesh_id: Some(renderer.0.mesh_id),
+            lod: MeshColliderLod::Lowest,
+            kind: MeshColliderKind::TriMesh,
+        };
+    }
+
+    if let Some(renderer) = world.get::<BevySkinnedMeshRenderer>(entity) {
+        return ColliderShape::Mesh {
+            mesh_id: Some(renderer.0.mesh_id),
+            lod: MeshColliderLod::Lowest,
+            kind: MeshColliderKind::TriMesh,
+        };
+    }
+
+    ColliderShape::Cuboid
+}
+
+fn physics_world_defaults_for_world(world: &mut World) -> PhysicsWorldDefaults {
+    let mut selected: Option<(u64, PhysicsWorldDefaults)> = None;
+    let mut query = world.query::<(Entity, &PhysicsWorldDefaults)>();
+    for (entity, defaults) in query.iter(world) {
+        let key = entity.to_bits();
+        let should_replace = selected
+            .as_ref()
+            .map(|(selected_key, _)| key < *selected_key)
+            .unwrap_or(true);
+        if should_replace {
+            selected = Some((key, *defaults));
+        }
+    }
+    if let Some((_, defaults)) = selected {
+        return defaults;
+    }
+
+    world
+        .get_resource::<PhysicsResource>()
+        .map(|phys| PhysicsWorldDefaults {
+            gravity: phys.gravity,
+            collider_properties: phys.default_collider_properties,
+            rigid_body_properties: phys.default_rigid_body_properties,
+        })
+        .unwrap_or_default()
+}
+
+fn default_collider_properties_for_world(world: &mut World) -> ColliderProperties {
+    physics_world_defaults_for_world(world).collider_properties
+}
+
+fn default_rigid_body_properties_for_world(world: &mut World) -> RigidBodyProperties {
+    physics_world_defaults_for_world(world).rigid_body_properties
+}
+
+fn remove_body_dependent_physics_components(world: &mut World, entity: Entity) {
+    let has_any_body = world.get::<DynamicRigidBody>(entity).is_some()
+        || world.get::<KinematicRigidBody>(entity).is_some()
+        || world.get::<FixedCollider>(entity).is_some();
+    if has_any_body {
+        return;
+    }
+
+    world.entity_mut(entity).remove::<ColliderShape>();
+    world.entity_mut(entity).remove::<ColliderProperties>();
+    world
+        .entity_mut(entity)
+        .remove::<ColliderPropertyInheritance>();
+    world.entity_mut(entity).remove::<RigidBodyProperties>();
+    world
+        .entity_mut(entity)
+        .remove::<RigidBodyPropertyInheritance>();
+    world.entity_mut(entity).remove::<PhysicsHandle>();
+}
+
+fn collider_mesh_id_from_asset(
+    world: &mut World,
+    project: &Option<EditorProject>,
+    path: &Path,
+) -> Option<usize> {
+    if !is_model_file(path) {
+        set_status(world, "Collider mesh requires a model asset".to_string());
+        return None;
+    }
+
+    let cache_key = project_relative_path(project, path);
+    let mesh_id = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
+        let asset_server = world.get_resource::<BevyAssetServer>()?;
+        Some(load_mesh_asset(&cache_key, &mut cache, asset_server, project.as_ref()).id)
+    });
+
+    if mesh_id.is_none() {
+        set_status(world, "Asset server missing for collider mesh".to_string());
+    }
+
+    mesh_id
+}
+
+fn ensure_physics_defaults(world: &mut World, entity: Entity) {
+    if world.get::<ColliderProperties>(entity).is_none() {
+        let defaults = default_collider_properties_for_world(world);
+        world.entity_mut(entity).insert(defaults);
+    }
+    if world.get::<ColliderPropertyInheritance>(entity).is_none() {
+        world
+            .entity_mut(entity)
+            .insert(ColliderPropertyInheritance::default());
+    }
+    if world.get::<RigidBodyProperties>(entity).is_none() {
+        let defaults = default_rigid_body_properties_for_world(world);
+        world.entity_mut(entity).insert(defaults);
+    }
+    if world.get::<RigidBodyPropertyInheritance>(entity).is_none() {
+        world
+            .entity_mut(entity)
+            .insert(RigidBodyPropertyInheritance::default());
+    }
+}
+
 fn draw_add_component_menu(
     ui: &mut Ui,
     world: &mut World,
@@ -7424,6 +9038,17 @@ fn draw_add_component_menu(
     let has_freecam = world.get::<Freecam>(entity).is_some();
     let has_dynamic_body = world.get::<DynamicRigidBody>(entity).is_some();
     let has_fixed_collider = world.get::<FixedCollider>(entity).is_some();
+    let has_kinematic_body = world.get::<KinematicRigidBody>(entity).is_some();
+    let has_joint = world.get::<PhysicsJoint>(entity).is_some();
+    let has_character_controller = world.get::<CharacterController>(entity).is_some();
+    let has_ray_cast_query = world.get::<PhysicsRayCast>(entity).is_some();
+    let has_point_projection_query = world.get::<PhysicsPointProjection>(entity).is_some();
+    let has_shape_cast_query = world.get::<PhysicsShapeCast>(entity).is_some();
+    let has_world_defaults = world.get::<PhysicsWorldDefaults>(entity).is_some();
+    let any_world_defaults = {
+        let mut query = world.query::<&PhysicsWorldDefaults>();
+        query.iter(world).next().is_some()
+    };
     let has_spline = world.get::<BevySpline>(entity).is_some();
     let has_spline_follower = world.get::<BevySplineFollower>(entity).is_some();
     let has_look_at = world.get::<BevyLookAt>(entity).is_some();
@@ -7657,44 +9282,70 @@ fn draw_add_component_menu(
             }
         });
         ui.menu_button("Physics", |ui| {
-            if !has_dynamic_body && !has_fixed_collider {
-                if ui.button("Dynamic Body (Box)").clicked() {
-                    ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(DynamicRigidBody { mass: 1.0 });
-                    world.entity_mut(entity).insert(ColliderShape::Cuboid);
-                    push_undo_snapshot(world, "Add Dynamic Body");
+            if !has_world_defaults {
+                let add_world_defaults_button =
+                    ui.add_enabled(!any_world_defaults, egui::Button::new("World Defaults"));
+                if add_world_defaults_button.clicked() {
+                    let defaults = physics_world_defaults_for_world(world);
+                    world.entity_mut(entity).insert(defaults);
+                    push_undo_snapshot(world, "Add World Defaults");
                     ui.close_menu();
                 }
-                if ui.button("Dynamic Body (Sphere)").clicked() {
-                    ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(DynamicRigidBody { mass: 1.0 });
-                    world.entity_mut(entity).insert(ColliderShape::Sphere);
-                    push_undo_snapshot(world, "Add Dynamic Body");
-                    ui.close_menu();
+                if any_world_defaults {
+                    ui.label("World Defaults already exists on another entity");
                 }
                 ui.separator();
-                if ui.button("Fixed Collider (Box)").clicked() {
+            }
+
+            let has_any_body = has_dynamic_body || has_fixed_collider || has_kinematic_body;
+            if !has_any_body {
+                if ui.button("Dynamic Body").clicked() {
                     ensure_transform(world, entity);
-                    world.entity_mut(entity).insert(FixedCollider);
-                    world.entity_mut(entity).insert(ColliderShape::Cuboid);
+                    let shape = default_collider_shape_for_entity(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(DynamicRigidBody::default())
+                        .insert(shape);
+                    ensure_physics_defaults(world, entity);
+                    push_undo_snapshot(world, "Add Dynamic Body");
+                    ui.close_menu();
+                }
+                if ui.button("Kinematic Body (Position)").clicked() {
+                    ensure_transform(world, entity);
+                    let shape = default_collider_shape_for_entity(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(KinematicRigidBody {
+                            mode: KinematicMode::PositionBased,
+                        })
+                        .insert(shape);
+                    ensure_physics_defaults(world, entity);
+                    push_undo_snapshot(world, "Add Kinematic Body");
+                    ui.close_menu();
+                }
+                if ui.button("Kinematic Body (Velocity)").clicked() {
+                    ensure_transform(world, entity);
+                    let shape = default_collider_shape_for_entity(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(KinematicRigidBody {
+                            mode: KinematicMode::VelocityBased,
+                        })
+                        .insert(shape);
+                    ensure_physics_defaults(world, entity);
+                    push_undo_snapshot(world, "Add Kinematic Body");
+                    ui.close_menu();
+                }
+                if ui.button("Fixed Collider").clicked() {
+                    ensure_transform(world, entity);
+                    let shape = default_collider_shape_for_entity(world, entity);
+                    world.entity_mut(entity).insert(FixedCollider).insert(shape);
+                    ensure_physics_defaults(world, entity);
                     push_undo_snapshot(world, "Add Fixed Collider");
                     ui.close_menu();
                 }
-                if ui.button("Fixed Collider (Sphere)").clicked() {
-                    ensure_transform(world, entity);
-                    world.entity_mut(entity).insert(FixedCollider);
-                    world.entity_mut(entity).insert(ColliderShape::Sphere);
-                    push_undo_snapshot(world, "Add Fixed Collider");
-                    ui.close_menu();
-                }
-            } else if has_dynamic_body {
-                ui.label("Dynamic body already present.");
-            } else if has_fixed_collider {
-                ui.label("Fixed collider already present.");
+            } else {
+                ui.label("Body already present");
             }
 
             ui.separator();
@@ -7716,6 +9367,169 @@ fn draw_add_component_menu(
             {
                 world.entity_mut(entity).insert(ColliderShape::Sphere);
                 push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(
+                    matches!(collider_shape, Some(ColliderShape::CapsuleY)),
+                    "Capsule",
+                )
+                .clicked()
+            {
+                world.entity_mut(entity).insert(ColliderShape::CapsuleY);
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(
+                    matches!(collider_shape, Some(ColliderShape::CylinderY)),
+                    "Cylinder",
+                )
+                .clicked()
+            {
+                world.entity_mut(entity).insert(ColliderShape::CylinderY);
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(matches!(collider_shape, Some(ColliderShape::ConeY)), "Cone")
+                .clicked()
+            {
+                world.entity_mut(entity).insert(ColliderShape::ConeY);
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(
+                    matches!(collider_shape, Some(ColliderShape::RoundCuboid { .. })),
+                    "Round Box",
+                )
+                .clicked()
+            {
+                world.entity_mut(entity).insert(ColliderShape::RoundCuboid {
+                    border_radius: 0.05,
+                });
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(
+                    matches!(
+                        collider_shape,
+                        Some(ColliderShape::Mesh {
+                            kind: MeshColliderKind::TriMesh,
+                            ..
+                        })
+                    ),
+                    "Mesh (Lowest LOD)",
+                )
+                .clicked()
+            {
+                let mesh_id = world
+                    .get::<BevyMeshRenderer>(entity)
+                    .map(|renderer| renderer.0.mesh_id)
+                    .or_else(|| {
+                        world
+                            .get::<BevySkinnedMeshRenderer>(entity)
+                            .map(|r| r.0.mesh_id)
+                    });
+                world.entity_mut(entity).insert(ColliderShape::Mesh {
+                    mesh_id,
+                    lod: MeshColliderLod::Lowest,
+                    kind: MeshColliderKind::TriMesh,
+                });
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+            if ui
+                .selectable_label(
+                    matches!(
+                        collider_shape,
+                        Some(ColliderShape::Mesh {
+                            kind: MeshColliderKind::ConvexHull,
+                            ..
+                        })
+                    ),
+                    "Mesh Convex Hull",
+                )
+                .clicked()
+            {
+                let mesh_id = world
+                    .get::<BevyMeshRenderer>(entity)
+                    .map(|renderer| renderer.0.mesh_id)
+                    .or_else(|| {
+                        world
+                            .get::<BevySkinnedMeshRenderer>(entity)
+                            .map(|r| r.0.mesh_id)
+                    });
+                world.entity_mut(entity).insert(ColliderShape::Mesh {
+                    mesh_id,
+                    lod: MeshColliderLod::Lowest,
+                    kind: MeshColliderKind::ConvexHull,
+                });
+                push_undo_snapshot(world, "Collider Shape");
+                ui.close_menu();
+            }
+
+            ui.separator();
+            if !world.get::<ColliderProperties>(entity).is_some()
+                && ui.button("Collider Properties").clicked()
+            {
+                let defaults = default_collider_properties_for_world(world);
+                world
+                    .entity_mut(entity)
+                    .insert(defaults)
+                    .insert(ColliderPropertyInheritance::default());
+                push_undo_snapshot(world, "Add Collider Properties");
+                ui.close_menu();
+            }
+            if !world.get::<RigidBodyProperties>(entity).is_some()
+                && ui.button("Rigid Body Properties").clicked()
+            {
+                let defaults = default_rigid_body_properties_for_world(world);
+                world
+                    .entity_mut(entity)
+                    .insert(defaults)
+                    .insert(RigidBodyPropertyInheritance::default());
+                push_undo_snapshot(world, "Add Rigid Body Properties");
+                ui.close_menu();
+            }
+            if !has_joint && ui.button("Joint").clicked() {
+                world.entity_mut(entity).insert(PhysicsJoint::default());
+                push_undo_snapshot(world, "Add Joint");
+                ui.close_menu();
+            }
+            if !has_character_controller && ui.button("Character Controller").clicked() {
+                world
+                    .entity_mut(entity)
+                    .insert(CharacterController::default())
+                    .insert(CharacterControllerInput::default())
+                    .insert(CharacterControllerOutput::default());
+                push_undo_snapshot(world, "Add Character Controller");
+                ui.close_menu();
+            }
+            if !has_ray_cast_query && ui.button("Ray Cast Query").clicked() {
+                world
+                    .entity_mut(entity)
+                    .insert(PhysicsRayCast::default())
+                    .insert(PhysicsRayCastHit::default());
+                push_undo_snapshot(world, "Add Ray Cast Query");
+                ui.close_menu();
+            }
+            if !has_point_projection_query && ui.button("Point Projection Query").clicked() {
+                world
+                    .entity_mut(entity)
+                    .insert(PhysicsPointProjection::default())
+                    .insert(PhysicsPointProjectionHit::default());
+                push_undo_snapshot(world, "Add Point Query");
+                ui.close_menu();
+            }
+            if !has_shape_cast_query && ui.button("Shape Cast Query").clicked() {
+                world
+                    .entity_mut(entity)
+                    .insert(PhysicsShapeCast::default())
+                    .insert(PhysicsShapeCastHit::default());
+                push_undo_snapshot(world, "Add Shape Cast Query");
                 ui.close_menu();
             }
         });
@@ -8048,6 +9862,176 @@ fn edit_vec3_inline(ui: &mut Ui, value: &mut Vec3, speed: f32) -> EditResponse {
     let z_response = ui.add(DragValue::new(&mut value.z).speed(speed));
     response.merge(EditResponse::from_response(&z_response));
     response
+}
+
+fn edit_inherited_float(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    inherit: &mut bool,
+    world_value: f32,
+    speed: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        ui.label(label);
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            ui.label(format!("= {:.4}", world_value));
+        } else if ui.add(DragValue::new(value).speed(speed)).changed() {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn edit_inherited_bool(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut bool,
+    inherit: &mut bool,
+    world_value: bool,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            ui.label(format!("{} = {}", label, world_value));
+        } else if ui.checkbox(value, label).changed() {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn edit_inherited_i8(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut i8,
+    inherit: &mut bool,
+    world_value: i8,
+    speed: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        ui.label(label);
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            ui.label(format!("= {}", world_value));
+        } else if ui.add(DragValue::new(value).speed(speed)).changed() {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn edit_inherited_u32(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut u32,
+    inherit: &mut bool,
+    world_value: u32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        ui.label(label);
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            ui.label(format!("= {}", world_value));
+        } else if ui
+            .add(DragValue::new(value).speed(1.0).range(0..=u32::MAX))
+            .changed()
+        {
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn edit_inherited_vec3(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Vec3,
+    inherit: &mut bool,
+    world_value: Vec3,
+    speed: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            ui.label(format!(
+                "{} = [{:.3}, {:.3}, {:.3}]",
+                label, world_value.x, world_value.y, world_value.z
+            ));
+        } else {
+            ui.label(label);
+            changed |= edit_vec3_inline(ui, value, speed).changed;
+        }
+    });
+    changed
+}
+
+fn edit_inherited_quat_euler(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Quat,
+    inherit: &mut bool,
+    world_value: Quat,
+    speed: f32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(inherit, "Use World").changed();
+        if *inherit {
+            if *value != world_value {
+                *value = world_value;
+                changed = true;
+            }
+            let world_rot = world_value.to_euler(EulerRot::XYZ);
+            ui.label(format!(
+                "{} = [{:.1}, {:.1}, {:.1}]",
+                label,
+                world_rot.0.to_degrees(),
+                world_rot.1.to_degrees(),
+                world_rot.2.to_degrees()
+            ));
+        } else {
+            ui.label(label);
+            let rot = value.to_euler(EulerRot::XYZ);
+            let mut rot_deg = Vec3::new(rot.0.to_degrees(), rot.1.to_degrees(), rot.2.to_degrees());
+            if edit_vec3_inline(ui, &mut rot_deg, speed).changed {
+                *value = Quat::from_euler(
+                    EulerRot::XYZ,
+                    rot_deg.x.to_radians(),
+                    rot_deg.y.to_radians(),
+                    rot_deg.z.to_radians(),
+                );
+                changed = true;
+            }
+        }
+    });
+    changed
 }
 
 fn edit_dynamic_value(ui: &mut Ui, value: &mut DynamicValue) -> EditResponse {

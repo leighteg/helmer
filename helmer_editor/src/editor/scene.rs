@@ -16,7 +16,13 @@ use helmer::{
     },
     runtime::asset_server::{Handle, Scene},
 };
-use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
+use helmer_becs::physics::components::{
+    CharacterController, CharacterControllerInput, ColliderProperties, ColliderPropertyInheritance,
+    ColliderShape, DynamicRigidBody, FixedCollider, JointMotor, KinematicMode, KinematicRigidBody,
+    MeshColliderKind, MeshColliderLod, PhysicsCombineRule, PhysicsJoint, PhysicsJointKind,
+    PhysicsPointProjection, PhysicsQueryFilter, PhysicsRayCast, PhysicsShapeCast,
+    PhysicsWorldDefaults, RigidBodyProperties, RigidBodyPropertyInheritance,
+};
 use helmer_becs::{
     BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
     BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
@@ -192,6 +198,8 @@ pub struct SceneComponents {
     #[serde(default)]
     pub physics: Option<PhysicsComponentData>,
     #[serde(default)]
+    pub physics_world_defaults: Option<ScenePhysicsWorldDefaultsData>,
+    #[serde(default)]
     pub audio_emitter: Option<AudioEmitterData>,
     #[serde(default)]
     pub audio_listener: Option<AudioListenerData>,
@@ -201,18 +209,155 @@ pub struct SceneComponents {
 pub struct PhysicsComponentData {
     pub collider_shape: SceneColliderShape,
     pub body_kind: PhysicsBodyKind,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collider_properties: Option<SceneColliderPropertiesData>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collider_inheritance: Option<SceneColliderPropertyInheritanceData>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rigid_body_properties: Option<SceneRigidBodyPropertiesData>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rigid_body_inheritance: Option<SceneRigidBodyPropertyInheritanceData>,
+    #[serde(default)]
+    pub joint: Option<ScenePhysicsJointData>,
+    #[serde(default)]
+    pub character_controller: Option<SceneCharacterControllerData>,
+    #[serde(default)]
+    pub character_input: Option<SceneCharacterControllerInputData>,
+    #[serde(default)]
+    pub ray_cast: Option<ScenePhysicsRayCastData>,
+    #[serde(default)]
+    pub point_projection: Option<ScenePhysicsPointProjectionData>,
+    #[serde(default)]
+    pub shape_cast: Option<ScenePhysicsShapeCastData>,
+}
+
+impl Default for PhysicsComponentData {
+    fn default() -> Self {
+        Self {
+            collider_shape: SceneColliderShape::Cuboid,
+            body_kind: PhysicsBodyKind::Fixed,
+            collider_properties: None,
+            collider_inheritance: None,
+            rigid_body_properties: None,
+            rigid_body_inheritance: None,
+            joint: None,
+            character_controller: None,
+            character_input: None,
+            ray_cast: None,
+            point_projection: None,
+            shape_cast: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PhysicsBodyKind {
     Dynamic { mass: f32 },
+    Kinematic { mode: SceneKinematicMode },
     Fixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneKinematicMode {
+    PositionBased,
+    VelocityBased,
+}
+
+impl From<KinematicMode> for SceneKinematicMode {
+    fn from(mode: KinematicMode) -> Self {
+        match mode {
+            KinematicMode::PositionBased => SceneKinematicMode::PositionBased,
+            KinematicMode::VelocityBased => SceneKinematicMode::VelocityBased,
+        }
+    }
+}
+
+impl SceneKinematicMode {
+    fn to_component(self) -> KinematicMode {
+        match self {
+            SceneKinematicMode::PositionBased => KinematicMode::PositionBased,
+            SceneKinematicMode::VelocityBased => KinematicMode::VelocityBased,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneMeshColliderLod {
+    Lod0,
+    Lod1,
+    Lod2,
+    Lowest,
+    Specific(u8),
+}
+
+impl From<MeshColliderLod> for SceneMeshColliderLod {
+    fn from(lod: MeshColliderLod) -> Self {
+        match lod {
+            MeshColliderLod::Lod0 => SceneMeshColliderLod::Lod0,
+            MeshColliderLod::Lod1 => SceneMeshColliderLod::Lod1,
+            MeshColliderLod::Lod2 => SceneMeshColliderLod::Lod2,
+            MeshColliderLod::Lowest => SceneMeshColliderLod::Lowest,
+            MeshColliderLod::Specific(index) => SceneMeshColliderLod::Specific(index),
+        }
+    }
+}
+
+impl SceneMeshColliderLod {
+    fn to_component(self) -> MeshColliderLod {
+        match self {
+            SceneMeshColliderLod::Lod0 => MeshColliderLod::Lod0,
+            SceneMeshColliderLod::Lod1 => MeshColliderLod::Lod1,
+            SceneMeshColliderLod::Lod2 => MeshColliderLod::Lod2,
+            SceneMeshColliderLod::Lowest => MeshColliderLod::Lowest,
+            SceneMeshColliderLod::Specific(index) => MeshColliderLod::Specific(index),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneMeshColliderKind {
+    TriMesh,
+    ConvexHull,
+}
+
+impl From<MeshColliderKind> for SceneMeshColliderKind {
+    fn from(kind: MeshColliderKind) -> Self {
+        match kind {
+            MeshColliderKind::TriMesh => SceneMeshColliderKind::TriMesh,
+            MeshColliderKind::ConvexHull => SceneMeshColliderKind::ConvexHull,
+        }
+    }
+}
+
+impl SceneMeshColliderKind {
+    fn to_component(self) -> MeshColliderKind {
+        match self {
+            SceneMeshColliderKind::TriMesh => MeshColliderKind::TriMesh,
+            SceneMeshColliderKind::ConvexHull => MeshColliderKind::ConvexHull,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SceneColliderShape {
     Cuboid,
     Sphere,
+    CapsuleY,
+    CylinderY,
+    ConeY,
+    RoundCuboid {
+        border_radius: f32,
+    },
+    Mesh {
+        #[serde(default)]
+        mesh_id: Option<usize>,
+        lod: SceneMeshColliderLod,
+        kind: SceneMeshColliderKind,
+    },
 }
 
 impl From<ColliderShape> for SceneColliderShape {
@@ -220,6 +365,17 @@ impl From<ColliderShape> for SceneColliderShape {
         match shape {
             ColliderShape::Cuboid => SceneColliderShape::Cuboid,
             ColliderShape::Sphere => SceneColliderShape::Sphere,
+            ColliderShape::CapsuleY => SceneColliderShape::CapsuleY,
+            ColliderShape::CylinderY => SceneColliderShape::CylinderY,
+            ColliderShape::ConeY => SceneColliderShape::ConeY,
+            ColliderShape::RoundCuboid { border_radius } => {
+                SceneColliderShape::RoundCuboid { border_radius }
+            }
+            ColliderShape::Mesh { mesh_id, lod, kind } => SceneColliderShape::Mesh {
+                mesh_id,
+                lod: lod.into(),
+                kind: kind.into(),
+            },
         }
     }
 }
@@ -229,6 +385,680 @@ impl SceneColliderShape {
         match self {
             SceneColliderShape::Cuboid => ColliderShape::Cuboid,
             SceneColliderShape::Sphere => ColliderShape::Sphere,
+            SceneColliderShape::CapsuleY => ColliderShape::CapsuleY,
+            SceneColliderShape::CylinderY => ColliderShape::CylinderY,
+            SceneColliderShape::ConeY => ColliderShape::ConeY,
+            SceneColliderShape::RoundCuboid { border_radius } => ColliderShape::RoundCuboid {
+                border_radius: *border_radius,
+            },
+            SceneColliderShape::Mesh { mesh_id, lod, kind } => ColliderShape::Mesh {
+                mesh_id: *mesh_id,
+                lod: lod.to_component(),
+                kind: kind.to_component(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScenePhysicsCombineRule {
+    Average,
+    Min,
+    Multiply,
+    Max,
+}
+
+impl From<PhysicsCombineRule> for ScenePhysicsCombineRule {
+    fn from(rule: PhysicsCombineRule) -> Self {
+        match rule {
+            PhysicsCombineRule::Average => ScenePhysicsCombineRule::Average,
+            PhysicsCombineRule::Min => ScenePhysicsCombineRule::Min,
+            PhysicsCombineRule::Multiply => ScenePhysicsCombineRule::Multiply,
+            PhysicsCombineRule::Max => ScenePhysicsCombineRule::Max,
+        }
+    }
+}
+
+impl ScenePhysicsCombineRule {
+    fn to_component(self) -> PhysicsCombineRule {
+        match self {
+            ScenePhysicsCombineRule::Average => PhysicsCombineRule::Average,
+            ScenePhysicsCombineRule::Min => PhysicsCombineRule::Min,
+            ScenePhysicsCombineRule::Multiply => PhysicsCombineRule::Multiply,
+            ScenePhysicsCombineRule::Max => PhysicsCombineRule::Max,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneColliderPropertiesData {
+    pub friction: f32,
+    pub restitution: f32,
+    pub density: f32,
+    pub is_sensor: bool,
+    pub enabled: bool,
+    pub collision_memberships: u32,
+    pub collision_filter: u32,
+    pub solver_memberships: u32,
+    pub solver_filter: u32,
+    pub friction_combine_rule: ScenePhysicsCombineRule,
+    pub restitution_combine_rule: ScenePhysicsCombineRule,
+    pub translation_offset: [f32; 3],
+    pub rotation_offset: [f32; 4],
+}
+
+impl Default for SceneColliderPropertiesData {
+    fn default() -> Self {
+        Self::from(ColliderProperties::default())
+    }
+}
+
+impl From<ColliderProperties> for SceneColliderPropertiesData {
+    fn from(value: ColliderProperties) -> Self {
+        Self {
+            friction: value.friction,
+            restitution: value.restitution,
+            density: value.density,
+            is_sensor: value.is_sensor,
+            enabled: value.enabled,
+            collision_memberships: value.collision_memberships,
+            collision_filter: value.collision_filter,
+            solver_memberships: value.solver_memberships,
+            solver_filter: value.solver_filter,
+            friction_combine_rule: value.friction_combine_rule.into(),
+            restitution_combine_rule: value.restitution_combine_rule.into(),
+            translation_offset: value.translation_offset.to_array(),
+            rotation_offset: value.rotation_offset.to_array(),
+        }
+    }
+}
+
+impl SceneColliderPropertiesData {
+    fn to_component(&self) -> ColliderProperties {
+        ColliderProperties {
+            friction: self.friction,
+            restitution: self.restitution,
+            density: self.density,
+            is_sensor: self.is_sensor,
+            enabled: self.enabled,
+            collision_memberships: self.collision_memberships,
+            collision_filter: self.collision_filter,
+            solver_memberships: self.solver_memberships,
+            solver_filter: self.solver_filter,
+            friction_combine_rule: self.friction_combine_rule.to_component(),
+            restitution_combine_rule: self.restitution_combine_rule.to_component(),
+            translation_offset: glam::Vec3::from_array(self.translation_offset),
+            rotation_offset: glam::Quat::from_array(self.rotation_offset),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneColliderPropertyInheritanceData {
+    pub friction: bool,
+    pub restitution: bool,
+    pub density: bool,
+    pub is_sensor: bool,
+    pub enabled: bool,
+    pub collision_memberships: bool,
+    pub collision_filter: bool,
+    pub solver_memberships: bool,
+    pub solver_filter: bool,
+    pub friction_combine_rule: bool,
+    pub restitution_combine_rule: bool,
+    pub translation_offset: bool,
+    pub rotation_offset: bool,
+}
+
+impl From<ColliderPropertyInheritance> for SceneColliderPropertyInheritanceData {
+    fn from(value: ColliderPropertyInheritance) -> Self {
+        Self {
+            friction: value.friction,
+            restitution: value.restitution,
+            density: value.density,
+            is_sensor: value.is_sensor,
+            enabled: value.enabled,
+            collision_memberships: value.collision_memberships,
+            collision_filter: value.collision_filter,
+            solver_memberships: value.solver_memberships,
+            solver_filter: value.solver_filter,
+            friction_combine_rule: value.friction_combine_rule,
+            restitution_combine_rule: value.restitution_combine_rule,
+            translation_offset: value.translation_offset,
+            rotation_offset: value.rotation_offset,
+        }
+    }
+}
+
+impl SceneColliderPropertyInheritanceData {
+    fn to_component(self) -> ColliderPropertyInheritance {
+        ColliderPropertyInheritance {
+            friction: self.friction,
+            restitution: self.restitution,
+            density: self.density,
+            is_sensor: self.is_sensor,
+            enabled: self.enabled,
+            collision_memberships: self.collision_memberships,
+            collision_filter: self.collision_filter,
+            solver_memberships: self.solver_memberships,
+            solver_filter: self.solver_filter,
+            friction_combine_rule: self.friction_combine_rule,
+            restitution_combine_rule: self.restitution_combine_rule,
+            translation_offset: self.translation_offset,
+            rotation_offset: self.rotation_offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneRigidBodyPropertiesData {
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    pub ccd_enabled: bool,
+    pub can_sleep: bool,
+    pub sleeping: bool,
+    pub dominance_group: i8,
+    pub lock_translation_x: bool,
+    pub lock_translation_y: bool,
+    pub lock_translation_z: bool,
+    pub lock_rotation_x: bool,
+    pub lock_rotation_y: bool,
+    pub lock_rotation_z: bool,
+    pub linear_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+}
+
+impl Default for SceneRigidBodyPropertiesData {
+    fn default() -> Self {
+        Self::from(RigidBodyProperties::default())
+    }
+}
+
+impl From<RigidBodyProperties> for SceneRigidBodyPropertiesData {
+    fn from(value: RigidBodyProperties) -> Self {
+        Self {
+            linear_damping: value.linear_damping,
+            angular_damping: value.angular_damping,
+            gravity_scale: value.gravity_scale,
+            ccd_enabled: value.ccd_enabled,
+            can_sleep: value.can_sleep,
+            sleeping: value.sleeping,
+            dominance_group: value.dominance_group,
+            lock_translation_x: value.lock_translation_x,
+            lock_translation_y: value.lock_translation_y,
+            lock_translation_z: value.lock_translation_z,
+            lock_rotation_x: value.lock_rotation_x,
+            lock_rotation_y: value.lock_rotation_y,
+            lock_rotation_z: value.lock_rotation_z,
+            linear_velocity: value.linear_velocity.to_array(),
+            angular_velocity: value.angular_velocity.to_array(),
+        }
+    }
+}
+
+impl SceneRigidBodyPropertiesData {
+    fn to_component(&self) -> RigidBodyProperties {
+        RigidBodyProperties {
+            linear_damping: self.linear_damping,
+            angular_damping: self.angular_damping,
+            gravity_scale: self.gravity_scale,
+            ccd_enabled: self.ccd_enabled,
+            can_sleep: self.can_sleep,
+            sleeping: self.sleeping,
+            dominance_group: self.dominance_group,
+            lock_translation_x: self.lock_translation_x,
+            lock_translation_y: self.lock_translation_y,
+            lock_translation_z: self.lock_translation_z,
+            lock_rotation_x: self.lock_rotation_x,
+            lock_rotation_y: self.lock_rotation_y,
+            lock_rotation_z: self.lock_rotation_z,
+            linear_velocity: glam::Vec3::from_array(self.linear_velocity),
+            angular_velocity: glam::Vec3::from_array(self.angular_velocity),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneRigidBodyPropertyInheritanceData {
+    pub linear_damping: bool,
+    pub angular_damping: bool,
+    pub gravity_scale: bool,
+    pub ccd_enabled: bool,
+    pub can_sleep: bool,
+    pub sleeping: bool,
+    pub dominance_group: bool,
+    pub lock_translation_x: bool,
+    pub lock_translation_y: bool,
+    pub lock_translation_z: bool,
+    pub lock_rotation_x: bool,
+    pub lock_rotation_y: bool,
+    pub lock_rotation_z: bool,
+    pub linear_velocity: bool,
+    pub angular_velocity: bool,
+}
+
+impl From<RigidBodyPropertyInheritance> for SceneRigidBodyPropertyInheritanceData {
+    fn from(value: RigidBodyPropertyInheritance) -> Self {
+        Self {
+            linear_damping: value.linear_damping,
+            angular_damping: value.angular_damping,
+            gravity_scale: value.gravity_scale,
+            ccd_enabled: value.ccd_enabled,
+            can_sleep: value.can_sleep,
+            sleeping: value.sleeping,
+            dominance_group: value.dominance_group,
+            lock_translation_x: value.lock_translation_x,
+            lock_translation_y: value.lock_translation_y,
+            lock_translation_z: value.lock_translation_z,
+            lock_rotation_x: value.lock_rotation_x,
+            lock_rotation_y: value.lock_rotation_y,
+            lock_rotation_z: value.lock_rotation_z,
+            linear_velocity: value.linear_velocity,
+            angular_velocity: value.angular_velocity,
+        }
+    }
+}
+
+impl SceneRigidBodyPropertyInheritanceData {
+    fn to_component(self) -> RigidBodyPropertyInheritance {
+        RigidBodyPropertyInheritance {
+            linear_damping: self.linear_damping,
+            angular_damping: self.angular_damping,
+            gravity_scale: self.gravity_scale,
+            ccd_enabled: self.ccd_enabled,
+            can_sleep: self.can_sleep,
+            sleeping: self.sleeping,
+            dominance_group: self.dominance_group,
+            lock_translation_x: self.lock_translation_x,
+            lock_translation_y: self.lock_translation_y,
+            lock_translation_z: self.lock_translation_z,
+            lock_rotation_x: self.lock_rotation_x,
+            lock_rotation_y: self.lock_rotation_y,
+            lock_rotation_z: self.lock_rotation_z,
+            linear_velocity: self.linear_velocity,
+            angular_velocity: self.angular_velocity,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsWorldDefaultsData {
+    pub gravity: [f32; 3],
+    pub collider_properties: SceneColliderPropertiesData,
+    pub rigid_body_properties: SceneRigidBodyPropertiesData,
+}
+
+impl From<PhysicsWorldDefaults> for ScenePhysicsWorldDefaultsData {
+    fn from(value: PhysicsWorldDefaults) -> Self {
+        Self {
+            gravity: value.gravity.to_array(),
+            collider_properties: value.collider_properties.into(),
+            rigid_body_properties: value.rigid_body_properties.into(),
+        }
+    }
+}
+
+impl ScenePhysicsWorldDefaultsData {
+    fn to_component(&self) -> PhysicsWorldDefaults {
+        PhysicsWorldDefaults {
+            gravity: glam::Vec3::from_array(self.gravity),
+            collider_properties: self.collider_properties.to_component(),
+            rigid_body_properties: self.rigid_body_properties.to_component(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScenePhysicsJointKind {
+    Fixed,
+    Spherical,
+    Revolute,
+    Prismatic,
+}
+
+impl From<PhysicsJointKind> for ScenePhysicsJointKind {
+    fn from(value: PhysicsJointKind) -> Self {
+        match value {
+            PhysicsJointKind::Fixed => ScenePhysicsJointKind::Fixed,
+            PhysicsJointKind::Spherical => ScenePhysicsJointKind::Spherical,
+            PhysicsJointKind::Revolute => ScenePhysicsJointKind::Revolute,
+            PhysicsJointKind::Prismatic => ScenePhysicsJointKind::Prismatic,
+        }
+    }
+}
+
+impl ScenePhysicsJointKind {
+    fn to_component(self) -> PhysicsJointKind {
+        match self {
+            ScenePhysicsJointKind::Fixed => PhysicsJointKind::Fixed,
+            ScenePhysicsJointKind::Spherical => PhysicsJointKind::Spherical,
+            ScenePhysicsJointKind::Revolute => PhysicsJointKind::Revolute,
+            ScenePhysicsJointKind::Prismatic => PhysicsJointKind::Prismatic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneJointMotorData {
+    pub enabled: bool,
+    pub target_position: f32,
+    pub target_velocity: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub max_force: f32,
+}
+
+impl Default for SceneJointMotorData {
+    fn default() -> Self {
+        Self::from(JointMotor::default())
+    }
+}
+
+impl From<JointMotor> for SceneJointMotorData {
+    fn from(value: JointMotor) -> Self {
+        Self {
+            enabled: value.enabled,
+            target_position: value.target_position,
+            target_velocity: value.target_velocity,
+            stiffness: value.stiffness,
+            damping: value.damping,
+            max_force: value.max_force,
+        }
+    }
+}
+
+impl SceneJointMotorData {
+    fn to_component(&self) -> JointMotor {
+        JointMotor {
+            enabled: self.enabled,
+            target_position: self.target_position,
+            target_velocity: self.target_velocity,
+            stiffness: self.stiffness,
+            damping: self.damping,
+            max_force: self.max_force,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsJointData {
+    #[serde(default)]
+    pub target_name: Option<String>,
+    pub kind: ScenePhysicsJointKind,
+    pub contacts_enabled: bool,
+    pub local_anchor1: [f32; 3],
+    pub local_anchor2: [f32; 3],
+    pub local_axis1: [f32; 3],
+    pub local_axis2: [f32; 3],
+    pub limit_enabled: bool,
+    pub limits: [f32; 2],
+    #[serde(default)]
+    pub motor: SceneJointMotorData,
+}
+
+impl ScenePhysicsJointData {
+    fn from_component(joint: PhysicsJoint, target_name: Option<String>) -> Self {
+        Self {
+            target_name,
+            kind: joint.kind.into(),
+            contacts_enabled: joint.contacts_enabled,
+            local_anchor1: joint.local_anchor1.to_array(),
+            local_anchor2: joint.local_anchor2.to_array(),
+            local_axis1: joint.local_axis1.to_array(),
+            local_axis2: joint.local_axis2.to_array(),
+            limit_enabled: joint.limit_enabled,
+            limits: joint.limits,
+            motor: joint.motor.into(),
+        }
+    }
+
+    fn to_component(&self) -> PhysicsJoint {
+        PhysicsJoint {
+            target: None,
+            kind: self.kind.to_component(),
+            contacts_enabled: self.contacts_enabled,
+            local_anchor1: glam::Vec3::from_array(self.local_anchor1),
+            local_anchor2: glam::Vec3::from_array(self.local_anchor2),
+            local_axis1: glam::Vec3::from_array(self.local_axis1),
+            local_axis2: glam::Vec3::from_array(self.local_axis2),
+            limit_enabled: self.limit_enabled,
+            limits: self.limits,
+            motor: self.motor.to_component(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneCharacterControllerData {
+    pub up: [f32; 3],
+    pub offset: f32,
+    pub slide: bool,
+    pub autostep_max_height: f32,
+    pub autostep_min_width: f32,
+    pub autostep_include_dynamic_bodies: bool,
+    pub max_slope_climb_angle: f32,
+    pub min_slope_slide_angle: f32,
+    pub snap_to_ground: f32,
+    pub normal_nudge_factor: f32,
+    pub apply_impulses_to_dynamic_bodies: bool,
+    pub character_mass: f32,
+}
+
+impl From<CharacterController> for SceneCharacterControllerData {
+    fn from(value: CharacterController) -> Self {
+        Self {
+            up: value.up.to_array(),
+            offset: value.offset,
+            slide: value.slide,
+            autostep_max_height: value.autostep_max_height,
+            autostep_min_width: value.autostep_min_width,
+            autostep_include_dynamic_bodies: value.autostep_include_dynamic_bodies,
+            max_slope_climb_angle: value.max_slope_climb_angle,
+            min_slope_slide_angle: value.min_slope_slide_angle,
+            snap_to_ground: value.snap_to_ground,
+            normal_nudge_factor: value.normal_nudge_factor,
+            apply_impulses_to_dynamic_bodies: value.apply_impulses_to_dynamic_bodies,
+            character_mass: value.character_mass,
+        }
+    }
+}
+
+impl SceneCharacterControllerData {
+    fn to_component(&self) -> CharacterController {
+        CharacterController {
+            up: glam::Vec3::from_array(self.up),
+            offset: self.offset,
+            slide: self.slide,
+            autostep_max_height: self.autostep_max_height,
+            autostep_min_width: self.autostep_min_width,
+            autostep_include_dynamic_bodies: self.autostep_include_dynamic_bodies,
+            max_slope_climb_angle: self.max_slope_climb_angle,
+            min_slope_slide_angle: self.min_slope_slide_angle,
+            snap_to_ground: self.snap_to_ground,
+            normal_nudge_factor: self.normal_nudge_factor,
+            apply_impulses_to_dynamic_bodies: self.apply_impulses_to_dynamic_bodies,
+            character_mass: self.character_mass,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneCharacterControllerInputData {
+    pub desired_translation: [f32; 3],
+}
+
+impl From<CharacterControllerInput> for SceneCharacterControllerInputData {
+    fn from(value: CharacterControllerInput) -> Self {
+        Self {
+            desired_translation: value.desired_translation.to_array(),
+        }
+    }
+}
+
+impl SceneCharacterControllerInputData {
+    fn to_component(&self) -> CharacterControllerInput {
+        CharacterControllerInput {
+            desired_translation: glam::Vec3::from_array(self.desired_translation),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsQueryFilterData {
+    pub flags: u32,
+    pub groups_memberships: u32,
+    pub groups_filter: u32,
+    pub use_groups: bool,
+}
+
+impl Default for ScenePhysicsQueryFilterData {
+    fn default() -> Self {
+        Self::from(PhysicsQueryFilter::default())
+    }
+}
+
+impl From<PhysicsQueryFilter> for ScenePhysicsQueryFilterData {
+    fn from(value: PhysicsQueryFilter) -> Self {
+        Self {
+            flags: value.flags,
+            groups_memberships: value.groups_memberships,
+            groups_filter: value.groups_filter,
+            use_groups: value.use_groups,
+        }
+    }
+}
+
+impl ScenePhysicsQueryFilterData {
+    fn to_component(&self) -> PhysicsQueryFilter {
+        PhysicsQueryFilter {
+            flags: self.flags,
+            groups_memberships: self.groups_memberships,
+            groups_filter: self.groups_filter,
+            use_groups: self.use_groups,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsRayCastData {
+    pub origin: [f32; 3],
+    pub direction: [f32; 3],
+    pub max_toi: f32,
+    pub solid: bool,
+    #[serde(default)]
+    pub filter: ScenePhysicsQueryFilterData,
+    #[serde(default)]
+    pub exclude_self: bool,
+}
+
+impl From<PhysicsRayCast> for ScenePhysicsRayCastData {
+    fn from(value: PhysicsRayCast) -> Self {
+        Self {
+            origin: value.origin.to_array(),
+            direction: value.direction.to_array(),
+            max_toi: value.max_toi,
+            solid: value.solid,
+            filter: value.filter.into(),
+            exclude_self: value.exclude_self,
+        }
+    }
+}
+
+impl ScenePhysicsRayCastData {
+    fn to_component(&self) -> PhysicsRayCast {
+        PhysicsRayCast {
+            origin: glam::Vec3::from_array(self.origin),
+            direction: glam::Vec3::from_array(self.direction),
+            max_toi: self.max_toi,
+            solid: self.solid,
+            filter: self.filter.to_component(),
+            exclude_self: self.exclude_self,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsPointProjectionData {
+    pub point: [f32; 3],
+    pub solid: bool,
+    #[serde(default)]
+    pub filter: ScenePhysicsQueryFilterData,
+    #[serde(default)]
+    pub exclude_self: bool,
+}
+
+impl From<PhysicsPointProjection> for ScenePhysicsPointProjectionData {
+    fn from(value: PhysicsPointProjection) -> Self {
+        Self {
+            point: value.point.to_array(),
+            solid: value.solid,
+            filter: value.filter.into(),
+            exclude_self: value.exclude_self,
+        }
+    }
+}
+
+impl ScenePhysicsPointProjectionData {
+    fn to_component(&self) -> PhysicsPointProjection {
+        PhysicsPointProjection {
+            point: glam::Vec3::from_array(self.point),
+            solid: self.solid,
+            filter: self.filter.to_component(),
+            exclude_self: self.exclude_self,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePhysicsShapeCastData {
+    pub shape: SceneColliderShape,
+    pub scale: [f32; 3],
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub velocity: [f32; 3],
+    pub max_time_of_impact: f32,
+    pub target_distance: f32,
+    pub stop_at_penetration: bool,
+    pub compute_impact_geometry_on_penetration: bool,
+    #[serde(default)]
+    pub filter: ScenePhysicsQueryFilterData,
+    #[serde(default)]
+    pub exclude_self: bool,
+}
+
+impl From<PhysicsShapeCast> for ScenePhysicsShapeCastData {
+    fn from(value: PhysicsShapeCast) -> Self {
+        Self {
+            shape: value.shape.into(),
+            scale: value.scale.to_array(),
+            position: value.position.to_array(),
+            rotation: value.rotation.to_array(),
+            velocity: value.velocity.to_array(),
+            max_time_of_impact: value.max_time_of_impact,
+            target_distance: value.target_distance,
+            stop_at_penetration: value.stop_at_penetration,
+            compute_impact_geometry_on_penetration: value.compute_impact_geometry_on_penetration,
+            filter: value.filter.into(),
+            exclude_self: value.exclude_self,
+        }
+    }
+}
+
+impl ScenePhysicsShapeCastData {
+    fn to_component(&self) -> PhysicsShapeCast {
+        PhysicsShapeCast {
+            shape: self.shape.to_collider_shape(),
+            scale: glam::Vec3::from_array(self.scale),
+            position: glam::Vec3::from_array(self.position),
+            rotation: glam::Quat::from_array(self.rotation),
+            velocity: glam::Vec3::from_array(self.velocity),
+            max_time_of_impact: self.max_time_of_impact,
+            target_distance: self.target_distance,
+            stop_at_penetration: self.stop_at_penetration,
+            compute_impact_geometry_on_penetration: self.compute_impact_geometry_on_penetration,
+            filter: self.filter.to_component(),
+            exclude_self: self.exclude_self,
         }
     }
 }
@@ -1770,20 +2600,81 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             .get::<ColliderShape>(entity)
             .copied()
             .and_then(|shape| {
-                if let Some(body) = world.get::<DynamicRigidBody>(entity) {
-                    Some(PhysicsComponentData {
-                        collider_shape: SceneColliderShape::from(shape),
-                        body_kind: PhysicsBodyKind::Dynamic { mass: body.mass },
+                let body_kind = if let Some(body) = world.get::<DynamicRigidBody>(entity) {
+                    Some(PhysicsBodyKind::Dynamic { mass: body.mass })
+                } else if let Some(body) = world.get::<KinematicRigidBody>(entity) {
+                    Some(PhysicsBodyKind::Kinematic {
+                        mode: body.mode.into(),
                     })
                 } else if world.get::<FixedCollider>(entity).is_some() {
-                    Some(PhysicsComponentData {
-                        collider_shape: SceneColliderShape::from(shape),
-                        body_kind: PhysicsBodyKind::Fixed,
-                    })
+                    Some(PhysicsBodyKind::Fixed)
                 } else {
                     None
-                }
+                }?;
+
+                let collider_properties = world
+                    .get::<ColliderProperties>(entity)
+                    .copied()
+                    .map(SceneColliderPropertiesData::from);
+                let collider_inheritance = world
+                    .get::<ColliderPropertyInheritance>(entity)
+                    .copied()
+                    .map(SceneColliderPropertyInheritanceData::from);
+                let rigid_body_properties = world
+                    .get::<RigidBodyProperties>(entity)
+                    .copied()
+                    .map(SceneRigidBodyPropertiesData::from);
+                let rigid_body_inheritance = world
+                    .get::<RigidBodyPropertyInheritance>(entity)
+                    .copied()
+                    .map(SceneRigidBodyPropertyInheritanceData::from);
+                let joint = world.get::<PhysicsJoint>(entity).map(|joint| {
+                    let target_name = joint
+                        .target
+                        .and_then(|target| world.get::<Name>(target))
+                        .map(|name| name.to_string());
+                    ScenePhysicsJointData::from_component(*joint, target_name)
+                });
+                let character_controller = world
+                    .get::<CharacterController>(entity)
+                    .copied()
+                    .map(SceneCharacterControllerData::from);
+                let character_input = world
+                    .get::<CharacterControllerInput>(entity)
+                    .copied()
+                    .map(SceneCharacterControllerInputData::from);
+                let ray_cast = world
+                    .get::<PhysicsRayCast>(entity)
+                    .copied()
+                    .map(ScenePhysicsRayCastData::from);
+                let point_projection = world
+                    .get::<PhysicsPointProjection>(entity)
+                    .copied()
+                    .map(ScenePhysicsPointProjectionData::from);
+                let shape_cast = world
+                    .get::<PhysicsShapeCast>(entity)
+                    .copied()
+                    .map(ScenePhysicsShapeCastData::from);
+
+                Some(PhysicsComponentData {
+                    collider_shape: SceneColliderShape::from(shape),
+                    body_kind,
+                    collider_properties,
+                    collider_inheritance,
+                    rigid_body_properties,
+                    rigid_body_inheritance,
+                    joint,
+                    character_controller,
+                    character_input,
+                    ray_cast,
+                    point_projection,
+                    shape_cast,
+                })
             });
+        let physics_world_defaults = world
+            .get::<PhysicsWorldDefaults>(entity)
+            .copied()
+            .map(ScenePhysicsWorldDefaultsData::from);
 
         let audio_emitter = audio_emitter.map(|emitter| {
             let (path, streaming) = editor_audio
@@ -1826,6 +2717,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             pose_override,
             freecam,
             physics,
+            physics_world_defaults,
             audio_emitter,
             audio_listener,
         };
@@ -1974,6 +2866,7 @@ pub fn spawn_scene_from_document(
     let mut pending_followers: Vec<(Entity, SplineFollowerData)> = Vec::new();
     let mut pending_look_ats: Vec<(Entity, LookAtData)> = Vec::new();
     let mut pending_entity_followers: Vec<(Entity, EntityFollowerData)> = Vec::new();
+    let mut pending_joints: Vec<(Entity, String)> = Vec::new();
     let mut pending_parent_relations: Vec<(Entity, usize)> = Vec::new();
     let mut pending_scene_children: Vec<(Entity, SceneChildLinkData)> = Vec::new();
     let mut pending_scene_child_renderers: Vec<(Entity, SceneChildRendererData)> = Vec::new();
@@ -2163,14 +3056,69 @@ pub fn spawn_scene_from_document(
 
         if let Some(physics) = &entity_data.components.physics {
             entity.insert(physics.collider_shape.to_collider_shape());
+            if let Some(collider_props) = physics.collider_properties.as_ref() {
+                entity.insert(collider_props.to_component());
+            }
+            if let Some(collider_inheritance) = physics.collider_inheritance {
+                entity.insert(collider_inheritance.to_component());
+            }
+            if let Some(rigid_body_props) = physics.rigid_body_properties.as_ref() {
+                entity.insert(rigid_body_props.to_component());
+            }
+            if let Some(rigid_body_inheritance) = physics.rigid_body_inheritance {
+                entity.insert(rigid_body_inheritance.to_component());
+            }
             match physics.body_kind.clone() {
                 PhysicsBodyKind::Dynamic { mass } => {
                     entity.insert(DynamicRigidBody { mass });
+                }
+                PhysicsBodyKind::Kinematic { mode } => {
+                    entity.insert(KinematicRigidBody {
+                        mode: mode.to_component(),
+                    });
                 }
                 PhysicsBodyKind::Fixed => {
                     entity.insert(FixedCollider);
                 }
             }
+
+            if let Some(joint) = physics.joint.as_ref() {
+                entity.insert(joint.to_component());
+                if let Some(target_name) = joint.target_name.as_ref() {
+                    pending_joints.push((entity.id(), target_name.clone()));
+                }
+            }
+
+            let has_character_controller = physics.character_controller.is_some();
+            if let Some(controller) = physics.character_controller.as_ref() {
+                entity.insert(controller.to_component());
+            }
+            if let Some(input) = physics.character_input.as_ref() {
+                entity.insert(input.to_component());
+            } else if has_character_controller {
+                entity.insert(CharacterControllerInput::default());
+            }
+            if has_character_controller {
+                entity
+                    .insert(helmer_becs::physics::components::CharacterControllerOutput::default());
+            }
+            if let Some(ray_cast) = physics.ray_cast.as_ref() {
+                entity.insert(ray_cast.to_component());
+                entity.insert(helmer_becs::physics::components::PhysicsRayCastHit::default());
+            }
+            if let Some(point_projection) = physics.point_projection.as_ref() {
+                entity.insert(point_projection.to_component());
+                entity
+                    .insert(helmer_becs::physics::components::PhysicsPointProjectionHit::default());
+            }
+            if let Some(shape_cast) = physics.shape_cast.as_ref() {
+                entity.insert(shape_cast.to_component());
+                entity.insert(helmer_becs::physics::components::PhysicsShapeCastHit::default());
+            }
+        }
+
+        if let Some(world_defaults) = &entity_data.components.physics_world_defaults {
+            entity.insert(world_defaults.to_component());
         }
 
         let entity_id = entity.id();
@@ -2407,6 +3355,7 @@ pub fn spawn_scene_from_document(
     if !pending_followers.is_empty()
         || !pending_look_ats.is_empty()
         || !pending_entity_followers.is_empty()
+        || !pending_joints.is_empty()
     {
         let mut name_map: HashMap<String, Entity> = HashMap::new();
         for entity in &created {
@@ -2447,6 +3396,15 @@ pub fn spawn_scene_from_document(
             };
             if let Some(mut component) = world.get_mut::<BevyEntityFollower>(entity) {
                 component.0.target_entity = Some(target_entity.to_bits());
+            }
+        }
+
+        for (entity, target_name) in pending_joints {
+            let Some(target_entity) = name_map.get(&target_name) else {
+                continue;
+            };
+            if let Some(mut joint) = world.get_mut::<PhysicsJoint>(entity) {
+                joint.target = Some(*target_entity);
             }
         }
     }

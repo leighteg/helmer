@@ -40,7 +40,8 @@ use crate::{
     physics::{
         physics_resource::PhysicsResource,
         systems::{
-            cleanup_physics_system, physics_step_system, sync_entities_to_physics_system,
+            character_controller_system, cleanup_physics_system, physics_scene_query_system,
+            physics_step_system, sync_entities_to_physics_system, sync_joints_to_physics_system,
             sync_physics_to_entities_system, sync_transforms_to_physics_system,
         },
     },
@@ -327,9 +328,12 @@ fn helmer_becs_init_impl<F>(
                 (
                     cleanup_physics_system,
                     sync_entities_to_physics_system,
+                    sync_joints_to_physics_system,
                     sync_transforms_to_physics_system,
+                    character_controller_system,
                     physics_step_system,
                     sync_physics_to_entities_system,
+                    physics_scene_query_system,
                     audio_system,
                 )
                     .chain(),

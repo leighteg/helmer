@@ -64,7 +64,7 @@ use crate::editor::{
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
     set_play_camera,
-    viewport::EditorViewportState,
+    viewport::{EditorViewportState, PlayViewportKind},
 };
 
 const RUST_SCRIPT_PLUGIN_SYMBOL: &[u8] = b"helmer_get_script_plugin\0";
@@ -3060,6 +3060,90 @@ fn build_ecs_table(
             }
             set_active_camera(world, entity);
             Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_viewport_mode = world_ptr;
+    ecs.set(
+        "get_viewport_mode",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_get_viewport_mode as *mut World) };
+            let mode = world
+                .get_resource::<EditorViewportState>()
+                .map(|state| state.play_mode_view.as_str().to_string())
+                .unwrap_or_else(|| PlayViewportKind::default().as_str().to_string());
+            Ok(mode)
+        })?,
+    )?;
+
+    let world_ptr_set_viewport_mode = world_ptr;
+    ecs.set(
+        "set_viewport_mode",
+        lua.create_function(move |_, mode: String| {
+            let world = unsafe { &mut *(world_ptr_set_viewport_mode as *mut World) };
+            let Some(mode) = PlayViewportKind::parse(&mode) else {
+                return Ok(false);
+            };
+            if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+                viewport_state.play_mode_view = mode;
+                return Ok(true);
+            }
+            Ok(false)
+        })?,
+    )?;
+
+    let world_ptr_get_viewport_preview = world_ptr;
+    ecs.set(
+        "get_viewport_preview_camera",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_get_viewport_preview as *mut World) };
+            Ok(world
+                .get_resource::<EditorViewportState>()
+                .and_then(|state| state.pinned_camera)
+                .map(|entity| entity.to_bits()))
+        })?,
+    )?;
+
+    let world_ptr_set_viewport_preview = world_ptr;
+    ecs.set(
+        "set_viewport_preview_camera",
+        lua.create_function(move |_, value: Value| {
+            let world = unsafe { &mut *(world_ptr_set_viewport_preview as *mut World) };
+            let pinned_camera = match value {
+                Value::Nil => None,
+                Value::Integer(raw_id) => {
+                    if raw_id < 0 {
+                        return Ok(false);
+                    }
+                    let Some(entity) = lookup_editor_entity(world, raw_id as u64) else {
+                        return Ok(false);
+                    };
+                    if world.get::<BevyCamera>(entity).is_none() {
+                        return Ok(false);
+                    }
+                    Some(entity)
+                }
+                Value::Number(raw_id) => {
+                    if !raw_id.is_finite() || raw_id < 0.0 {
+                        return Ok(false);
+                    }
+                    let raw_id = raw_id as u64;
+                    let Some(entity) = lookup_editor_entity(world, raw_id) else {
+                        return Ok(false);
+                    };
+                    if world.get::<BevyCamera>(entity).is_none() {
+                        return Ok(false);
+                    }
+                    Some(entity)
+                }
+                _ => return Ok(false),
+            };
+
+            if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+                viewport_state.pinned_camera = pinned_camera;
+                return Ok(true);
+            }
+            Ok(false)
         })?,
     )?;
 
@@ -7709,6 +7793,9 @@ fn parse_light_type(value: &str, current: LightType) -> LightType {
 
 fn set_active_camera(world: &mut World, entity: Entity) {
     set_play_camera(world, entity);
+    if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+        viewport_state.play_mode_view = PlayViewportKind::Gameplay;
+    }
     let world_state = world
         .get_resource::<EditorSceneState>()
         .map(|state| state.world_state)

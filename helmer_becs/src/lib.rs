@@ -36,7 +36,7 @@ use crate::systems::follow_system::{entity_follow_system, look_at_system};
 use crate::systems::render_system::RenderGraphResource;
 use crate::systems::spline_system::spline_follow_system;
 use crate::{
-    egui_integration::{EguiResource, egui_system},
+    egui_integration::{EguiInputPassthrough, EguiResource, egui_system},
     physics::{
         physics_resource::PhysicsResource,
         systems::{
@@ -49,7 +49,10 @@ use crate::{
     },
     systems::{
         render_system::RenderObjectCount,
-        render_system::{RenderPacket, RenderResetRequest, RenderSyncRequest, render_data_system},
+        render_system::{
+            RenderMainSceneToSwapchain, RenderPacket, RenderResetRequest, RenderSyncRequest,
+            RenderViewportRequests, render_data_system,
+        },
         scene_system::{
             SceneSpawnedChildren, apply_scene_commands_system, scene_child_skinning_system,
             scene_spawning_system, update_scene_child_transforms,
@@ -289,9 +292,14 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<RenderObjectCount>(RenderObjectCount::default());
             world.insert_resource::<RenderResetRequest>(RenderResetRequest::default());
             world.insert_resource::<RenderSyncRequest>(RenderSyncRequest::default());
+            world.insert_resource::<RenderViewportRequests>(RenderViewportRequests::default());
+            world.insert_resource::<RenderMainSceneToSwapchain>(
+                RenderMainSceneToSwapchain::default(),
+            );
             world.insert_resource(RenderGraphResource::default());
             world.insert_resource(SceneSpawnedChildren::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
+            world.insert_resource::<EguiInputPassthrough>(EguiInputPassthrough::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
             world.insert_resource::<AudioBackendResource>(AudioBackendResource(Arc::new(
                 AudioBackend::new(),
@@ -357,12 +365,17 @@ fn helmer_becs_init_impl<F>(
                 world.resource_scope::<BevyRuntimeConfig, _>(|ecs_core, runtime_config| {
                     let runtime_config = runtime_config.0;
                     ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
+                        let passthrough = ecs
+                            .get_resource::<EguiInputPassthrough>()
+                            .copied()
+                            .unwrap_or_default();
                         if runtime_config.egui {
                             if input_manager.active_mouse_buttons.len() == 0 {
                                 input_manager.egui_wants_pointer =
-                                    egui_resource.ctx.wants_pointer_input();
+                                    egui_resource.ctx.wants_pointer_input() && !passthrough.pointer;
                             }
-                            input_manager.egui_wants_key = egui_resource.ctx.wants_keyboard_input();
+                            input_manager.egui_wants_key =
+                                egui_resource.ctx.wants_keyboard_input() && !passthrough.keyboard;
                         } else if egui_resource.accepting_input {
                             input_manager.clear_egui_state();
                         }

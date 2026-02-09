@@ -860,6 +860,10 @@ type HelmerEcs = {
     get_camera: (id: EntityId) -> CameraData?,
     set_camera: (id: EntityId, data: CameraPatch) -> boolean,
     set_active_camera: (id: EntityId) -> boolean,
+    get_viewport_mode: () -> string,
+    set_viewport_mode: (mode: string) -> boolean,
+    get_viewport_preview_camera: () -> EntityId?,
+    set_viewport_preview_camera: (id: EntityId?) -> boolean,
 
     get_mesh_renderer: (id: EntityId) -> MeshRendererData?,
     set_mesh_renderer: (id: EntityId, data: MeshRendererPatch) -> boolean,
@@ -1093,6 +1097,10 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.get_camera(id) -> {fov_y_rad, aspect_ratio, near_plane, far_plane, active}|nil
 --   ecs.set_camera(id, {fov_y_rad?, aspect_ratio?, near_plane?, far_plane?, active?}) -> bool
 --   ecs.set_active_camera(id) -> bool
+--   ecs.get_viewport_mode() -> "editor"|"gameplay"
+--   ecs.set_viewport_mode(mode) -> bool
+--   ecs.get_viewport_preview_camera() -> id|nil
+--   ecs.set_viewport_preview_camera(id|nil) -> bool
 --   ecs.get_mesh_renderer(id) -> {source, material?, casts_shadow, visible}|nil
 --   ecs.set_mesh_renderer(id, {source?, material?, casts_shadow?, visible?}) -> bool
 --   ecs.get_scene_asset(id) -> path|nil

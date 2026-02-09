@@ -132,6 +132,7 @@ pub struct FrameGlobals {
     pub sky_uniforms: SkyUniforms,
     pub surface_size: PhysicalSize<u32>,
     pub render_config: RenderConfig,
+    pub clear_swapchain_before_egui: bool,
     pub occlusion_camera_stable: bool,
     pub gbuffer_bundle_key: GBufferBundleKey,
     pub shadow_bundle_key: ShadowBundleKey,

@@ -526,11 +526,22 @@ pub struct RenderData {
     pub previous_camera_transform: Transform,
     pub current_camera_transform: Transform,
     pub camera_component: Camera,
+    pub render_main_scene_to_swapchain: bool,
+    pub viewports: Vec<RenderViewportRequest>,
     pub timestamp: Instant,
     pub render_config: RenderConfig,
     pub render_graph: RenderGraphSpec,
     pub gizmo: GizmoData,
     pub skin_palette: Vec<Mat4>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderViewportRequest {
+    pub id: u64,
+    pub camera_transform: Transform,
+    pub camera_component: Camera,
+    pub egui_texture_id: egui::TextureId,
+    pub target_size: [u32; 2],
 }
 
 #[repr(u32)]
@@ -803,6 +814,8 @@ pub struct RenderDelta {
     pub lights_upsert: Vec<RenderLightDelta>,
     pub lights_remove: Vec<usize>,
     pub camera: Option<RenderCameraDelta>,
+    pub render_main_scene_to_swapchain: Option<bool>,
+    pub viewports: Option<Vec<RenderViewportRequest>>,
     pub render_config: Option<RenderConfig>,
     pub render_graph: Option<RenderGraphSpec>,
     pub gizmo: Option<GizmoData>,
@@ -818,6 +831,8 @@ impl RenderDelta {
             && self.lights_upsert.is_empty()
             && self.lights_remove.is_empty()
             && self.camera.is_none()
+            && self.render_main_scene_to_swapchain.is_none()
+            && self.viewports.is_none()
             && self.render_config.is_none()
             && self.render_graph.is_none()
             && self.gizmo.is_none()
@@ -867,6 +882,12 @@ impl RenderDelta {
         if other.camera.is_some() {
             self.camera = other.camera;
         }
+        if other.render_main_scene_to_swapchain.is_some() {
+            self.render_main_scene_to_swapchain = other.render_main_scene_to_swapchain;
+        }
+        if other.viewports.is_some() {
+            self.viewports = other.viewports;
+        }
         if other.render_config.is_some() {
             self.render_config = other.render_config;
         }
@@ -909,6 +930,12 @@ impl RenderDelta {
 
         if delta.camera.is_some() {
             self.camera = delta.camera;
+        }
+        if delta.render_main_scene_to_swapchain.is_some() {
+            self.render_main_scene_to_swapchain = delta.render_main_scene_to_swapchain;
+        }
+        if delta.viewports.is_some() {
+            self.viewports = delta.viewports.clone();
         }
         if delta.render_config.is_some() {
             self.render_config = delta.render_config;
@@ -1366,6 +1393,18 @@ pub struct EguiRenderData {
     pub primitives: Vec<egui::ClippedPrimitive>,
     pub textures_delta: egui::TexturesDelta,
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
+}
+
+#[derive(Clone)]
+pub struct EguiNativeTextureBinding {
+    pub texture_id: egui::TextureId,
+    pub texture_view: wgpu::TextureView,
+    pub texture_filter: wgpu::FilterMode,
+}
+
+#[derive(Clone, Default)]
+pub struct EguiNativeTextures {
+    pub bindings: Vec<EguiNativeTextureBinding>,
 }
 
 #[derive(Clone)]

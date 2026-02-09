@@ -22,6 +22,12 @@ pub struct EguiWindowSpec {
     pub title: String,
 }
 
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct EguiInputPassthrough {
+    pub pointer: bool,
+    pub keyboard: bool,
+}
+
 #[derive(Resource, Default)]
 pub struct EguiResource {
     pub ctx: Context,

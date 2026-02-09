@@ -1,5 +1,7 @@
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
+use egui::{TextureHandle, TextureId};
+use glam::DVec2;
 
 use helmer::provided::components::{ActiveCamera, AudioListener};
 use helmer_becs::{BevyActiveCamera, BevyAudioListener, BevyCamera, BevyTransform, BevyWrapper};
@@ -10,9 +12,185 @@ pub struct EditorViewportCamera;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorPlayCamera;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayViewportKind {
+    Editor,
+    Gameplay,
+}
+
+impl PlayViewportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Editor => "editor",
+            Self::Gameplay => "gameplay",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "editor" => Some(Self::Editor),
+            "gameplay" => Some(Self::Gameplay),
+            _ => None,
+        }
+    }
+}
+
+impl Default for PlayViewportKind {
+    fn default() -> Self {
+        Self::Gameplay
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportResolutionPreset {
+    Canvas,
+    R640x360,
+    R854x480,
+    R1280x720,
+    R1600x900,
+    R1920x1080,
+    R2560x1440,
+    R3840x2160,
+}
+
+impl ViewportResolutionPreset {
+    pub const ALL: [Self; 8] = [
+        Self::Canvas,
+        Self::R640x360,
+        Self::R854x480,
+        Self::R1280x720,
+        Self::R1600x900,
+        Self::R1920x1080,
+        Self::R2560x1440,
+        Self::R3840x2160,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Canvas => "Canvas (Auto)",
+            Self::R640x360 => "640x360",
+            Self::R854x480 => "854x480",
+            Self::R1280x720 => "1280x720",
+            Self::R1600x900 => "1600x900",
+            Self::R1920x1080 => "1920x1080",
+            Self::R2560x1440 => "2560x1440",
+            Self::R3840x2160 => "3840x2160",
+        }
+    }
+
+    pub fn target_size(self, canvas_size: [u32; 2]) -> [u32; 2] {
+        match self {
+            Self::Canvas => [canvas_size[0].max(1), canvas_size[1].max(1)],
+            Self::R640x360 => [640, 360],
+            Self::R854x480 => [854, 480],
+            Self::R1280x720 => [1280, 720],
+            Self::R1600x900 => [1600, 900],
+            Self::R1920x1080 => [1920, 1080],
+            Self::R2560x1440 => [2560, 1440],
+            Self::R3840x2160 => [3840, 2160],
+        }
+    }
+}
+
+impl Default for ViewportResolutionPreset {
+    fn default() -> Self {
+        Self::Canvas
+    }
+}
+
+pub const VIEWPORT_ID_EDITOR: u64 = 1;
+pub const VIEWPORT_ID_GAMEPLAY: u64 = 2;
+pub const VIEWPORT_ID_PREVIEW: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewportRectPixels {
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+impl ViewportRectPixels {
+    pub fn new(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Option<Self> {
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            return None;
+        }
+        if max_x <= min_x || max_y <= min_y {
+            return None;
+        }
+        Some(Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
+    }
+
+    pub fn width(self) -> f32 {
+        (self.max_x - self.min_x).max(1.0)
+    }
+
+    pub fn height(self) -> f32 {
+        (self.max_y - self.min_y).max(1.0)
+    }
+
+    pub fn aspect_ratio(self) -> f32 {
+        self.width() / self.height()
+    }
+
+    pub fn target_size(self) -> [u32; 2] {
+        [
+            self.width().round().max(1.0) as u32,
+            self.height().round().max(1.0) as u32,
+        ]
+    }
+
+    pub fn contains(self, cursor: DVec2) -> bool {
+        let x = cursor.x as f32;
+        let y = cursor.y as f32;
+        x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct EditorViewportRuntime {
+    pub editor_texture_id: Option<TextureId>,
+    pub gameplay_texture_id: Option<TextureId>,
+    pub preview_texture_id: Option<TextureId>,
+    pub main_rect_pixels: Option<ViewportRectPixels>,
+    pub main_target_size: Option<[u32; 2]>,
+    pub preview_rect_pixels: Option<ViewportRectPixels>,
+    pub preview_camera_entity: Option<Entity>,
+    pub pointer_over_main: bool,
+    pub keyboard_focus: bool,
+}
+
+impl EditorViewportRuntime {
+    pub fn begin_frame(&mut self) {
+        self.main_rect_pixels = None;
+        self.main_target_size = None;
+        self.preview_rect_pixels = None;
+        self.preview_camera_entity = None;
+        self.pointer_over_main = false;
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct EditorViewportTextures {
+    pub editor: Option<TextureHandle>,
+    pub gameplay: Option<TextureHandle>,
+    pub preview: Option<TextureHandle>,
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct EditorViewportState {
     pub graph_template: String,
+    pub play_mode_view: PlayViewportKind,
+    pub render_resolution: ViewportResolutionPreset,
+    pub pinned_camera: Option<Entity>,
+    pub preview_position_norm: [f32; 2],
+    pub preview_width_norm: f32,
+    pub show_options_panel: bool,
     pub gizmos_in_play: bool,
     pub execute_scripts_in_edit_mode: bool,
     pub show_camera_gizmos: bool,
@@ -27,6 +205,12 @@ impl Default for EditorViewportState {
     fn default() -> Self {
         Self {
             graph_template: "debug-graph".to_string(),
+            play_mode_view: PlayViewportKind::Gameplay,
+            render_resolution: ViewportResolutionPreset::Canvas,
+            pinned_camera: None,
+            preview_position_norm: [0.03, 0.74],
+            preview_width_norm: 0.28,
+            show_options_panel: false,
             gizmos_in_play: false,
             execute_scripts_in_edit_mode: false,
             show_camera_gizmos: true,

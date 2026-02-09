@@ -21,8 +21,8 @@ use helmer_becs::{
 
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
 use crate::editor::{
-    EditorPlayCamera, EditorUndoState, EditorViewportState, PoseEditorState,
-    request_begin_undo_group, request_end_undo_group,
+    EditorPlayCamera, EditorUndoState, EditorViewportRuntime, EditorViewportState, PoseEditorState,
+    ViewportRectPixels, request_begin_undo_group, request_end_undo_group,
 };
 use std::collections::HashMap;
 
@@ -386,6 +386,7 @@ pub struct GizmoSystemParams<'w, 's> {
     spline_state: ResMut<'w, EditorSplineState>,
     pose_state: ResMut<'w, PoseEditorState>,
     viewport_state: Res<'w, EditorViewportState>,
+    viewport_runtime: Res<'w, EditorViewportRuntime>,
     selection: Res<'w, InspectorSelectedEntityResource>,
     scene_state: Res<'w, EditorSceneState>,
     undo_state: ResMut<'w, EditorUndoState>,
@@ -437,6 +438,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         mut spline_state,
         mut pose_state,
         viewport_state,
+        viewport_runtime,
         selection,
         scene_state,
         mut undo_state,
@@ -629,6 +631,10 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     }
 
     let input_manager = input.0.read();
+    let viewport_rect = viewport_runtime.main_rect_pixels;
+    let pointer_in_viewport = viewport_rect
+        .map(|rect| rect.contains(input_manager.cursor_position))
+        .unwrap_or(false);
     let wants_pointer = input_manager.egui_wants_pointer;
     let wants_key = input_manager.egui_wants_key;
     let freecam_looking = input_manager.is_mouse_button_active(MouseButton::Right);
@@ -638,13 +644,16 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     state.last_mouse_down = left_down;
 
     let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform);
-    let allow_ui_raycast =
-        state.drag.is_some() || state.key_drag_active || spline_state.key_dragging;
+    let allow_ui_raycast = pointer_in_viewport
+        || state.drag.is_some()
+        || state.key_drag_active
+        || spline_state.key_dragging;
     let ray = if wants_pointer && !allow_ui_raycast {
         None
     } else {
         screen_ray(
             input_manager.cursor_position,
+            viewport_rect,
             input_manager.window_size,
             inv_view_proj,
             camera_transform.position,
@@ -1365,6 +1374,7 @@ pub struct SelectionSystemParams<'w, 's> {
     pose_state: Res<'w, PoseEditorState>,
     settings: Res<'w, EditorGizmoSettings>,
     viewport_state: Res<'w, EditorViewportState>,
+    viewport_runtime: Res<'w, EditorViewportRuntime>,
     scene_state: Res<'w, EditorSceneState>,
     input: Res<'w, BevyInputManager>,
     asset_server: Res<'w, BevyAssetServer>,
@@ -1416,6 +1426,7 @@ pub fn selection_system(params: SelectionSystemParams) {
         pose_state,
         settings,
         viewport_state,
+        viewport_runtime,
         scene_state,
         input,
         asset_server,
@@ -1448,11 +1459,15 @@ pub fn selection_system(params: SelectionSystemParams) {
     }
 
     let input_manager = input.0.read();
+    let viewport_rect = viewport_runtime.main_rect_pixels;
+    let pointer_in_viewport = viewport_rect
+        .map(|rect| rect.contains(input_manager.cursor_position))
+        .unwrap_or(false);
     let left_down = input_manager.is_mouse_button_active(MouseButton::Left);
     let left_pressed = left_down && !selection_state.last_mouse_down;
     selection_state.last_mouse_down = left_down;
 
-    if input_manager.egui_wants_pointer || !left_pressed {
+    if !pointer_in_viewport || !left_pressed {
         return;
     }
 
@@ -1471,6 +1486,7 @@ pub fn selection_system(params: SelectionSystemParams) {
     let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform.0);
     let Some((ray_origin, ray_dir)) = screen_ray(
         input_manager.cursor_position,
+        viewport_rect,
         input_manager.window_size,
         inv_view_proj,
         camera_transform.0.position,
@@ -1977,15 +1993,39 @@ fn camera_inv_view_proj(camera: &Camera, transform: &Transform) -> Mat4 {
 
 fn screen_ray(
     cursor: glam::DVec2,
+    viewport_rect: Option<ViewportRectPixels>,
     window_size: glam::UVec2,
     inv_view_proj: Mat4,
     camera_position: Vec3,
 ) -> Option<(Vec3, Vec3)> {
-    if window_size.x == 0 || window_size.y == 0 {
+    let (cursor_x, cursor_y, width, height) = if let Some(rect) = viewport_rect {
+        if !rect.contains(cursor) {
+            return None;
+        }
+        (
+            cursor.x as f32 - rect.min_x,
+            cursor.y as f32 - rect.min_y,
+            rect.width(),
+            rect.height(),
+        )
+    } else {
+        if window_size.x == 0 || window_size.y == 0 {
+            return None;
+        }
+        (
+            cursor.x as f32,
+            cursor.y as f32,
+            window_size.x as f32,
+            window_size.y as f32,
+        )
+    };
+
+    if width <= 0.0 || height <= 0.0 {
         return None;
     }
-    let x = (cursor.x as f32 / window_size.x as f32) * 2.0 - 1.0;
-    let y = 1.0 - (cursor.y as f32 / window_size.y as f32) * 2.0;
+
+    let x = (cursor_x / width) * 2.0 - 1.0;
+    let y = 1.0 - (cursor_y / height) * 2.0;
     let ndc_near = Vec3::new(x, y, 1.0);
     let near = inv_view_proj * ndc_near.extend(1.0);
     if near.w.abs() < 1.0e-6 {

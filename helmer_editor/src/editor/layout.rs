@@ -139,11 +139,12 @@ impl Default for EditorLayoutState {
 }
 
 pub fn default_layout() -> EditorLayout {
-    let top: f32 = 0.07;
+    let top: f32 = 0.085;
+    let center_top = top;
     let bottom: f32 = 0.28;
     let side: f32 = 0.22;
     let stack_offset: f32 = 0.03;
-    let center_height = (1.0_f32 - top - bottom).max(0.2_f32);
+    let center_height = (1.0_f32 - center_top - bottom).max(0.2_f32);
     let left_height = (1.0_f32 - bottom).max(0.2_f32);
     let center_width = (1.0_f32 - side - side).max(0.2_f32);
     let toolbar_x = (1.0_f32 - center_width) * 0.5_f32;
@@ -202,11 +203,11 @@ pub fn default_layout() -> EditorLayout {
         LayoutWindow {
             rect: NormalizedRect {
                 x: side,
-                y: top,
+                y: center_top,
                 w: center_width,
                 h: center_height,
             },
-            collapsed: true,
+            collapsed: false,
         },
     );
     windows.insert(
@@ -214,7 +215,7 @@ pub fn default_layout() -> EditorLayout {
         LayoutWindow {
             rect: NormalizedRect {
                 x: side,
-                y: top + stack_offset,
+                y: center_top + stack_offset,
                 w: center_width,
                 h: center_height,
             },
@@ -226,7 +227,7 @@ pub fn default_layout() -> EditorLayout {
         LayoutWindow {
             rect: NormalizedRect {
                 x: side,
-                y: top + stack_offset * 2.0,
+                y: center_top + stack_offset * 2.0,
                 w: center_width,
                 h: center_height,
             },

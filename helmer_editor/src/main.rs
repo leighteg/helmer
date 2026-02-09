@@ -3,7 +3,7 @@ use std::{env, path::PathBuf, sync::OnceLock};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::runtime::asset_server::AssetServer;
-use helmer_becs::systems::render_system::RenderGizmoState;
+use helmer_becs::systems::render_system::{RenderGizmoState, RenderMainSceneToSwapchain};
 use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_becs_init};
 
 use helmer_editor::editor::{
@@ -11,19 +11,21 @@ use helmer_editor::editor::{
     EditorCommand, EditorCommandQueue, EditorGizmoSettings, EditorGizmoState,
     EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
     EditorProject, EditorRenderRefresh, EditorSceneState, EditorSelectionState, EditorSplineState,
-    EditorTimelineState, EditorUiState, EditorUndoState, EditorViewportState, EditorWorkspaceState,
-    EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
-    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
-    PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
-    ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
-    activate_viewport_camera, apply_scene_child_animations_system,
-    apply_scene_child_pose_overrides_system, asset_scan_system, drag_drop_system,
-    editor_command_system, editor_layout_apply_system, editor_layout_save_system,
-    editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
-    editor_shortcut_system, editor_ui_system, editor_undo_request_system, file_watch_system,
-    freecam_system, gizmo_system, load_layout_state, load_recent_projects,
-    pane_manager_toggle_system, pending_scene_child_renderer_system, pending_skinned_mesh_system,
-    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
+    EditorTimelineState, EditorUiState, EditorUndoState, EditorViewportRuntime,
+    EditorViewportState, EditorViewportTextures, EditorWorkspaceState, EntityDragState,
+    FileWatchState, HierarchyUiState, InspectorNameEditState, InspectorPinnedEntityResource,
+    MaterialEditorCache, MiddleDragUiState, PendingSceneChildAnimations,
+    PendingSceneChildPoseOverrides, PoseEditorState, ScriptEditModeState, ScriptInputState,
+    ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera,
+    apply_scene_child_animations_system, apply_scene_child_pose_overrides_system,
+    asset_scan_system, drag_drop_system, editor_command_system, editor_layout_apply_system,
+    editor_layout_save_system, editor_layout_update_system, editor_physics_state_system,
+    editor_render_refresh_system, editor_shortcut_system, editor_ui_system,
+    editor_undo_request_system, editor_viewport_camera_mode_system,
+    editor_viewport_render_requests_system, file_watch_system, freecam_system, gizmo_system,
+    load_layout_state, load_recent_projects, pane_manager_toggle_system,
+    pending_scene_child_renderer_system, pending_skinned_mesh_system, scene_dirty_system,
+    script_execution_system, script_registry_system, selection_system,
     set_viewport_audio_listener_enabled, timeline_playback_system,
 };
 
@@ -86,7 +88,10 @@ fn editor_init(
     world.insert_resource(EditorSplineState::default());
     world.insert_resource(EditorTimelineState::default());
     world.insert_resource(EditorViewportState::default());
+    world.insert_resource(EditorViewportRuntime::default());
+    world.insert_resource(EditorViewportTextures::default());
     world.insert_resource(RenderGizmoState::default());
+    world.insert_resource(RenderMainSceneToSwapchain(false));
     world.insert_resource(EditorPaneVisibility::default());
     world.insert_resource(EditorPaneManagerState::default());
     world.insert_resource(EditorPaneAutoState::default());
@@ -188,6 +193,14 @@ fn editor_init(
         .add_systems(editor_layout_update_system.after(helmer_becs::egui_integration::egui_system));
     schedule.add_systems(editor_layout_save_system.after(editor_layout_update_system));
     schedule.add_systems(timeline_playback_system);
+    schedule.add_systems(
+        editor_viewport_camera_mode_system
+            .before(helmer_becs::systems::render_system::render_data_system),
+    );
+    schedule.add_systems(
+        editor_viewport_render_requests_system
+            .before(helmer_becs::systems::render_system::render_data_system),
+    );
     schedule
         .add_systems(gizmo_system.before(helmer_becs::systems::render_system::render_data_system));
     schedule.add_systems(

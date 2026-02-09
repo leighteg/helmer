@@ -64,6 +64,8 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_script",
     "get_spline",
     "get_transform",
+    "get_viewport_mode",
+    "get_viewport_preview_camera",
     "has_component",
     "list_audio_buses",
     "list_dynamic_components",
@@ -108,6 +110,8 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "set_spline",
     "set_spline_point",
     "set_transform",
+    "set_viewport_mode",
+    "set_viewport_preview_camera",
     "spawn_entity",
     "spline_length",
     "switch_scene",
@@ -1777,6 +1781,22 @@ impl Host {
 
     pub fn set_active_camera(&self, entity_id: EntityId) -> Result<bool, String> {
         self.ecs_call("set_active_camera", (entity_id,))
+    }
+
+    pub fn get_viewport_mode(&self) -> Result<String, String> {
+        self.ecs_call("get_viewport_mode", ())
+    }
+
+    pub fn set_viewport_mode(&self, mode: &str) -> Result<bool, String> {
+        self.ecs_call("set_viewport_mode", (mode,))
+    }
+
+    pub fn get_viewport_preview_camera(&self) -> Result<Option<EntityId>, String> {
+        self.ecs_call("get_viewport_preview_camera", ())
+    }
+
+    pub fn set_viewport_preview_camera(&self, entity_id: Option<EntityId>) -> Result<bool, String> {
+        self.ecs_call("set_viewport_preview_camera", (entity_id,))
     }
 
     pub fn get_mesh_renderer(&self, entity_id: EntityId) -> Result<Option<Value>, String> {

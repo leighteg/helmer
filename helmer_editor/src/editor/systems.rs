@@ -9,16 +9,19 @@ use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
 use bevy_ecs::{component::Component, name::Name};
 use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
+use helmer::graphics::common::renderer::RenderViewportRequest;
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::provided::components::{
-    Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
+    Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
-use helmer_becs::egui_integration::{EguiResource, EguiWindowSpec};
+use helmer_becs::egui_integration::{EguiInputPassthrough, EguiResource, EguiWindowSpec};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
-use helmer_becs::systems::render_system::{RenderGraphResource, RenderSyncRequest};
+use helmer_becs::systems::render_system::{
+    RenderGraphResource, RenderSyncRequest, RenderViewportRequests,
+};
 use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
@@ -33,8 +36,9 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
     EditorLayout, EditorLayoutState, EditorPlayCamera, EditorTimelineState, EditorViewportCamera,
-    EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect,
-    activate_play_camera, activate_viewport_camera,
+    EditorViewportRuntime, EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest,
+    NormalizedRect, PlayViewportKind, VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY,
+    VIEWPORT_ID_PREVIEW, ViewportRectPixels, activate_play_camera, activate_viewport_camera,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
         MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
@@ -42,6 +46,7 @@ use crate::editor::{
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::DynamicComponents,
+    ensure_play_camera, ensure_viewport_camera,
     gizmos::EditorGizmoState,
     layout_window_ids, mark_undo_clean,
     project::{
@@ -78,6 +83,13 @@ use crate::editor::{
 };
 
 pub fn editor_ui_system(world: &mut World) {
+    if let Some(mut viewport_runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+        viewport_runtime.begin_frame();
+    }
+    if let Some(mut passthrough) = world.get_resource_mut::<EguiInputPassthrough>() {
+        *passthrough = EguiInputPassthrough::default();
+    }
+
     let project_open = world
         .get_resource::<EditorProject>()
         .and_then(|project| project.root.as_ref())
@@ -2692,6 +2704,9 @@ fn handle_set_active_camera(world: &mut World, entity: Entity) -> bool {
     }
 
     set_play_camera(world, entity);
+    if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+        viewport_state.play_mode_view = PlayViewportKind::Gameplay;
+    }
 
     let world_state = world
         .get_resource::<EditorSceneState>()
@@ -2717,6 +2732,162 @@ fn apply_viewport_graph(world: &mut World) {
     };
     if let Some(mut graph_res) = world.get_resource_mut::<RenderGraphResource>() {
         graph_res.0 = (template.build)();
+    }
+}
+
+fn has_camera(world: &World, entity: Entity) -> bool {
+    world.get::<BevyCamera>(entity).is_some() && world.get::<BevyTransform>(entity).is_some()
+}
+
+fn viewport_request_for_entity(
+    world: &World,
+    entity: Entity,
+    id: u64,
+    texture_id: egui::TextureId,
+    viewport_rect: ViewportRectPixels,
+    target_size_override: Option<[u32; 2]>,
+) -> Option<RenderViewportRequest> {
+    let transform = world.get::<BevyTransform>(entity)?.0;
+    let mut camera = world.get::<BevyCamera>(entity)?.0;
+    let target_size = target_size_override.unwrap_or_else(|| viewport_rect.target_size());
+    let aspect_ratio = target_size[0].max(1) as f32 / target_size[1].max(1) as f32;
+    if aspect_ratio.is_finite() && aspect_ratio > 0.0 {
+        camera.aspect_ratio = aspect_ratio;
+    }
+    Some(RenderViewportRequest {
+        id,
+        camera_transform: transform,
+        camera_component: camera,
+        egui_texture_id: texture_id,
+        target_size,
+    })
+}
+
+pub fn editor_viewport_camera_mode_system(world: &mut World) {
+    let world_state = world
+        .get_resource::<EditorSceneState>()
+        .map(|scene| scene.world_state)
+        .unwrap_or(WorldState::Edit);
+    let play_mode = world
+        .get_resource::<EditorViewportState>()
+        .map(|state| state.play_mode_view)
+        .unwrap_or(PlayViewportKind::Editor);
+
+    let viewport_entity = ensure_viewport_camera(world);
+    let desired = match world_state {
+        WorldState::Edit => viewport_entity,
+        WorldState::Play => {
+            if play_mode == PlayViewportKind::Gameplay {
+                ensure_play_camera(world).unwrap_or(viewport_entity)
+            } else {
+                viewport_entity
+            }
+        }
+    };
+
+    let current = world
+        .query::<(Entity, &helmer_becs::BevyActiveCamera)>()
+        .iter(world)
+        .next()
+        .map(|(entity, _)| entity);
+    if current == Some(desired) {
+        return;
+    }
+
+    if desired == viewport_entity {
+        activate_viewport_camera(world);
+    } else {
+        set_play_camera(world, desired);
+        activate_play_camera(world);
+    }
+}
+
+pub fn editor_viewport_render_requests_system(world: &mut World) {
+    let runtime = world
+        .get_resource::<EditorViewportRuntime>()
+        .cloned()
+        .unwrap_or_default();
+    let world_state = world
+        .get_resource::<EditorSceneState>()
+        .map(|scene| scene.world_state)
+        .unwrap_or(WorldState::Edit);
+    let play_mode = world
+        .get_resource::<EditorViewportState>()
+        .map(|state| state.play_mode_view)
+        .unwrap_or(PlayViewportKind::Editor);
+
+    let mut requests = Vec::new();
+    let main_rect = runtime.main_rect_pixels;
+    if let Some(main_rect) = main_rect {
+        let editor_entity = ensure_viewport_camera(world);
+        let play_entity = if world_state == WorldState::Play {
+            ensure_play_camera(world)
+        } else {
+            None
+        };
+        let main_target_size = runtime
+            .main_target_size
+            .unwrap_or_else(|| main_rect.target_size());
+
+        if let Some(texture_id) = runtime.editor_texture_id {
+            if let Some(request) = viewport_request_for_entity(
+                world,
+                editor_entity,
+                VIEWPORT_ID_EDITOR,
+                texture_id,
+                main_rect,
+                Some(main_target_size),
+            ) {
+                requests.push(request);
+            }
+        }
+
+        if world_state == WorldState::Play {
+            if let (Some(play_entity), Some(texture_id)) =
+                (play_entity, runtime.gameplay_texture_id)
+            {
+                if let Some(request) = viewport_request_for_entity(
+                    world,
+                    play_entity,
+                    VIEWPORT_ID_GAMEPLAY,
+                    texture_id,
+                    main_rect,
+                    Some(main_target_size),
+                ) {
+                    requests.push(request);
+                }
+            }
+        }
+
+        let main_display_entity =
+            if world_state == WorldState::Play && play_mode == PlayViewportKind::Gameplay {
+                play_entity.unwrap_or(editor_entity)
+            } else {
+                editor_entity
+            };
+
+        if let (Some(preview_entity), Some(texture_id), Some(preview_rect)) = (
+            runtime.preview_camera_entity,
+            runtime.preview_texture_id,
+            runtime.preview_rect_pixels,
+        ) {
+            if preview_entity != main_display_entity && has_camera(world, preview_entity) {
+                if let Some(request) = viewport_request_for_entity(
+                    world,
+                    preview_entity,
+                    VIEWPORT_ID_PREVIEW,
+                    texture_id,
+                    preview_rect,
+                    None,
+                ) {
+                    requests.push(request);
+                }
+            }
+        }
+    }
+
+    if let Some(mut viewport_requests) = world.get_resource_mut::<RenderViewportRequests>() {
+        viewport_requests.0 = requests;
     }
 }
 
@@ -3098,6 +3269,8 @@ pub fn freecam_system(
     time: Res<DeltaTime>,
     gizmo_state: Res<EditorGizmoState>,
     scene_state: Res<EditorSceneState>,
+    viewport_state: Res<EditorViewportState>,
+    viewport_runtime: Res<EditorViewportRuntime>,
     mut viewport_query: bevy_ecs::prelude::Query<
         (Entity, &mut BevyTransform, &mut BevyCamera),
         (
@@ -3125,6 +3298,10 @@ pub fn freecam_system(
     let input_manager = &input.0.read();
     let wants_pointer = input_manager.egui_wants_pointer;
     let gizmo_blocking = gizmo_state.is_drag_active();
+    let pointer_in_viewport = viewport_runtime
+        .main_rect_pixels
+        .map(|rect| rect.contains(input_manager.cursor_position))
+        .unwrap_or(false);
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;
@@ -3135,7 +3312,10 @@ pub fn freecam_system(
     let mut yaw_delta = 0.0;
     let mut pitch_delta = 0.0;
 
-    if !gizmo_blocking && !wants_pointer && input_manager.is_mouse_button_active(MouseButton::Right)
+    if !gizmo_blocking
+        && !wants_pointer
+        && input_manager.is_mouse_button_active(MouseButton::Right)
+        && (pointer_in_viewport || state.is_looking)
     {
         if !state.is_looking {
             state.last_cursor_position = input_manager.cursor_position;
@@ -3168,7 +3348,7 @@ pub fn freecam_system(
         }
     }
 
-    if !wants_pointer && keyboard_active {
+    if !wants_pointer && keyboard_active && pointer_in_viewport {
         state.speed += input_manager.mouse_wheel.y * 2.0;
     }
 
@@ -3280,8 +3460,14 @@ pub fn freecam_system(
             }
         }
         WorldState::Play => {
-            for (entity, mut transform, mut camera) in play_query.iter_mut() {
-                apply_freecam(entity, &mut transform, &mut camera);
+            if viewport_state.play_mode_view == PlayViewportKind::Editor {
+                for (entity, mut transform, mut camera) in viewport_query.iter_mut() {
+                    apply_freecam(entity, &mut transform, &mut camera);
+                }
+            } else {
+                for (entity, mut transform, mut camera) in play_query.iter_mut() {
+                    apply_freecam(entity, &mut transform, &mut camera);
+                }
             }
         }
     }

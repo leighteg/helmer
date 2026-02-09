@@ -35,14 +35,15 @@ use crate::graphics::{
         },
         renderer::{
             Aabb, AlphaMode, AssetStreamKind, AssetStreamingRequest, CameraUniforms,
-            CascadeUniform, DdgiGridConstants, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw,
-            LightData, MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
+            CascadeUniform, DdgiGridConstants, EguiNativeTextureBinding, EguiNativeTextures,
+            EguiRenderData, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw, LightData,
+            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
             OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
             OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
             RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
-            RenderObject, RenderObjectDelta, RenderPassTiming, RendererStats, ShaderConstants,
-            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
-            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            RenderObject, RenderObjectDelta, RenderPassTiming, RenderViewportRequest,
+            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
+            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -1289,6 +1290,11 @@ struct ActiveGraph {
     config_signature: RenderGraphConfigSignature,
 }
 
+struct OffscreenViewportTarget {
+    size: PhysicalSize<u32>,
+    view: wgpu::TextureView,
+}
+
 struct RenderSceneState {
     data: RenderData,
     object_indices: HashMap<usize, usize>,
@@ -1616,6 +1622,9 @@ pub struct GraphRenderer {
     // Materials that can't upload yet (usually waiting on textures); keeps dependency metadata alive for streaming.
     pending_materials: HashMap<usize, MaterialGpuData>,
     current_render_data: Option<RenderSceneState>,
+    offscreen_viewports: HashMap<u64, OffscreenViewportTarget>,
+    offscreen_viewport_prev_cameras: HashMap<u64, Transform>,
+    offscreen_viewport_prev_view_proj: HashMap<u64, Mat4>,
 
     surface_size: PhysicalSize<u32>,
     prev_view_proj: Mat4,
@@ -2625,6 +2634,9 @@ impl GraphRenderer {
             texture_low_res_state: SlotVec::new(),
             pending_materials: HashMap::new(),
             current_render_data: None,
+            offscreen_viewports: HashMap::new(),
+            offscreen_viewport_prev_cameras: HashMap::new(),
+            offscreen_viewport_prev_view_proj: HashMap::new(),
 
             surface_size: size,
             prev_view_proj: Mat4::IDENTITY,
@@ -2836,32 +2848,18 @@ impl GraphRenderer {
             );
         }
 
-        let globals_start = if profiling_enabled {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let globals = if let Some(globals) = self.prepare_frame_globals(&scene) {
-            globals
-        } else {
-            self.current_render_data = Some(scene);
-            self.clear_and_present(&output_view, output_frame);
-            self.frame_index = self.frame_index.wrapping_add(1);
-            return Ok(());
-        };
-        if let Some(start) = globals_start {
-            self.shared_stats.render_prepare_globals_us.store(
-                start.elapsed().as_micros() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
-
-        let graph_sig = RenderGraphConfigSignature::from_render_config(&globals.render_config);
+        let main_render_config = scene.data.render_config;
+        let graph_surface_size = Self::desired_graph_surface_size(
+            self.surface_size,
+            &scene.data.viewports,
+            scene.data.render_main_scene_to_swapchain,
+        );
+        let graph_sig = RenderGraphConfigSignature::from_render_config(&main_render_config);
         let tracing_active = graph_spec.name == "traced-graph"
             || (graph_spec.name == "hybrid-graph"
-                && (globals.render_config.ddgi_pass || globals.render_config.rt_reflections));
+                && (main_render_config.ddgi_pass || main_render_config.rt_reflections));
 
-        if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig) {
+        if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig, graph_surface_size) {
             self.current_render_data = Some(scene);
             return Err(err);
         }
@@ -2876,6 +2874,149 @@ impl GraphRenderer {
                 return Ok(());
             }
         };
+
+        self.backend
+            .begin_frame(&self.device, &self.queue, &self.pool, self.frame_index);
+
+        let pressure = self.update_streaming_pressure();
+        if self.active_graph.is_none() {
+            warn!("Render graph missing compilation; skipping frame");
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return Ok(());
+        }
+
+        let mut submitted_cmds = Vec::new();
+        let mut native_texture_bindings = Vec::new();
+        let mut active_offscreen_ids = HashSet::new();
+
+        let cached_egui_data = self.frame_inputs.get::<EguiRenderData>();
+        let cached_egui_textures = self.frame_inputs.get::<EguiTextureCache>();
+        self.frame_inputs.remove::<EguiRenderData>();
+        self.frame_inputs.remove::<EguiTextureCache>();
+
+        let main_camera_transform = scene.data.current_camera_transform;
+        let main_prev_camera_transform = scene.data.previous_camera_transform;
+        let main_camera_component = scene.data.camera_component;
+
+        for viewport in scene.data.viewports.clone() {
+            active_offscreen_ids.insert(viewport.id);
+            let target_width = viewport.target_size[0].max(1);
+            let target_height = viewport.target_size[1].max(1);
+            let target_view =
+                self.ensure_offscreen_viewport_target(viewport.id, target_width, target_height);
+            let prev_transform = self
+                .offscreen_viewport_prev_cameras
+                .get(&viewport.id)
+                .copied()
+                .unwrap_or(viewport.camera_transform);
+
+            let saved_prev_view_proj = self.prev_view_proj;
+            let saved_prev_sky_uniforms = self.prev_sky_uniforms;
+            let saved_prev_shader_constants = self.prev_shader_constants;
+            let saved_needs_atmosphere_precompute = self.needs_atmosphere_precompute;
+            let saved_occlusion_stable_frames = self.occlusion_stable_frames;
+            let viewport_prev_view_proj = self
+                .offscreen_viewport_prev_view_proj
+                .get(&viewport.id)
+                .copied()
+                .unwrap_or(saved_prev_view_proj);
+
+            scene.data.previous_camera_transform = prev_transform;
+            scene.data.current_camera_transform = viewport.camera_transform;
+            scene.data.camera_component = viewport.camera_component;
+            if !scene.data.camera_component.aspect_ratio.is_finite()
+                || scene.data.camera_component.aspect_ratio <= 0.0
+            {
+                scene.data.camera_component.aspect_ratio =
+                    target_width as f32 / target_height as f32;
+            }
+            self.prev_view_proj = viewport_prev_view_proj;
+
+            if let Some(globals) = self.prepare_frame_globals(&scene) {
+                self.update_swapchain_entry(swapchain_id, target_view.clone());
+                self.frame_inputs.set(globals);
+                self.frame_inputs.set(SwapchainFrameInput {
+                    view: target_view.clone(),
+                    format: self.surface_config.format,
+                });
+                let (graph, compiled_graph) = match self.active_graph.as_ref() {
+                    Some(active) => (&active.graph, &active.compiled),
+                    None => {
+                        warn!("Render graph missing during offscreen viewport render");
+                        break;
+                    }
+                };
+                let cmds = RenderGraphExecutor::execute(
+                    graph,
+                    compiled_graph,
+                    &self.device,
+                    &self.queue,
+                    &mut self.pool,
+                    self.backend.as_ref(),
+                    self.frame_index,
+                    &self.frame_inputs,
+                    self.streaming_tuning.graph_encoder_batch_size,
+                    Some(&self.pass_overrides),
+                    None,
+                    None,
+                );
+                if !cmds.is_empty() {
+                    self.queue.submit(cmds);
+                }
+                native_texture_bindings.push(EguiNativeTextureBinding {
+                    texture_id: viewport.egui_texture_id,
+                    texture_view: target_view,
+                    texture_filter: wgpu::FilterMode::Linear,
+                });
+                self.offscreen_viewport_prev_cameras
+                    .insert(viewport.id, viewport.camera_transform);
+                self.offscreen_viewport_prev_view_proj
+                    .insert(viewport.id, self.prev_view_proj);
+            }
+
+            scene.data.current_camera_transform = main_camera_transform;
+            scene.data.previous_camera_transform = main_prev_camera_transform;
+            scene.data.camera_component = main_camera_component;
+            self.prev_view_proj = saved_prev_view_proj;
+            self.prev_sky_uniforms = saved_prev_sky_uniforms;
+            self.prev_shader_constants = saved_prev_shader_constants;
+            self.needs_atmosphere_precompute = saved_needs_atmosphere_precompute;
+            self.occlusion_stable_frames = saved_occlusion_stable_frames;
+        }
+        self.prune_offscreen_viewports(&active_offscreen_ids);
+
+        if let Some(data) = cached_egui_data {
+            self.frame_inputs.set_arc(data);
+        }
+        if let Some(cache) = cached_egui_textures {
+            self.frame_inputs.set_arc(cache);
+        }
+
+        let main_saved_render_config = scene.data.render_config;
+        if !scene.data.render_main_scene_to_swapchain {
+            scene.data.render_config = Self::ui_only_main_render_config(main_saved_render_config);
+        }
+
+        let globals_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        let globals = if let Some(globals) = self.prepare_frame_globals(&scene) {
+            globals
+        } else {
+            scene.data.render_config = main_saved_render_config;
+            self.current_render_data = Some(scene);
+            self.clear_and_present(&output_view, output_frame);
+            self.frame_index = self.frame_index.wrapping_add(1);
+            return Ok(());
+        };
+        if let Some(start) = globals_start {
+            self.shared_stats.render_prepare_globals_us.store(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         self.update_swapchain_entry(swapchain_id, output_view.clone());
 
@@ -2896,7 +3037,8 @@ impl GraphRenderer {
             );
         }
         self.run_atmosphere_precompute(&globals);
-        if tracing_active {
+        let tracing_active_for_main = tracing_active && scene.data.render_main_scene_to_swapchain;
+        if tracing_active_for_main {
             if let Some(rt_inputs) = self.prepare_ray_tracing_inputs(&scene, &globals) {
                 self.frame_inputs.set(rt_inputs);
             } else {
@@ -2906,25 +3048,18 @@ impl GraphRenderer {
             self.frame_inputs.remove::<RayTracingFrameInput>();
             self.rt_state.reset_accumulation = true;
         }
+        if native_texture_bindings.is_empty() {
+            self.frame_inputs.remove::<EguiNativeTextures>();
+        } else {
+            self.frame_inputs.set(EguiNativeTextures {
+                bindings: native_texture_bindings,
+            });
+        }
         self.frame_inputs.set(globals);
-
         self.frame_inputs.set(SwapchainFrameInput {
-            view: output_view,
+            view: output_view.clone(),
             format: self.surface_config.format,
         });
-
-        self.backend
-            .begin_frame(&self.device, &self.queue, &self.pool, self.frame_index);
-
-        let pressure = self.update_streaming_pressure();
-        let (graph, compiled_graph) = match self.active_graph.as_ref() {
-            Some(active) => (&active.graph, &active.compiled),
-            None => {
-                warn!("Render graph missing compilation; skipping frame");
-                self.frame_index = self.frame_index.wrapping_add(1);
-                return Ok(());
-            }
-        };
 
         if let Some(prev_idle_frames_before_evict) = self.prev_idle_frames_before_evict.take() {
             self.pool.idle_frames_before_evict = prev_idle_frames_before_evict;
@@ -2949,6 +3084,17 @@ impl GraphRenderer {
         } else {
             None
         };
+        let (graph, compiled_graph) = match self.active_graph.as_ref() {
+            Some(active) => (&active.graph, &active.compiled),
+            None => {
+                scene.data.render_config = main_saved_render_config;
+                warn!("Render graph missing during main render pass");
+                self.current_render_data = Some(scene);
+                self.clear_and_present(&output_view, output_frame);
+                self.frame_index = self.frame_index.wrapping_add(1);
+                return Ok(());
+            }
+        };
         let cmds = RenderGraphExecutor::execute(
             graph,
             compiled_graph,
@@ -2967,6 +3113,7 @@ impl GraphRenderer {
             },
             pass_timings,
         );
+        submitted_cmds.extend(cmds);
         if let Some(start) = graph_start {
             let graph_total_us = start.elapsed().as_micros() as u64;
             self.shared_stats
@@ -3026,7 +3173,7 @@ impl GraphRenderer {
         } else {
             None
         };
-        self.queue.submit(cmds);
+        self.queue.submit(submitted_cmds);
         if let Some(start) = submit_start {
             self.shared_stats.render_submit_us.store(
                 start.elapsed().as_micros() as u64,
@@ -3046,6 +3193,7 @@ impl GraphRenderer {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
+        scene.data.render_config = main_saved_render_config;
         self.frame_index = self.frame_index.wrapping_add(1);
         self.current_render_data = Some(scene);
         Ok(())
@@ -3380,6 +3528,8 @@ impl GraphRenderer {
             lights_upsert,
             lights_remove,
             camera,
+            render_main_scene_to_swapchain,
+            viewports,
             render_config,
             render_graph,
             gizmo,
@@ -3408,6 +3558,8 @@ impl GraphRenderer {
                 previous_camera_transform: camera_transform,
                 current_camera_transform: camera_transform,
                 camera_component,
+                render_main_scene_to_swapchain: true,
+                viewports: viewports.clone().unwrap_or_default(),
                 timestamp: Instant::now(),
                 render_config: config,
                 render_graph: graph,
@@ -3446,6 +3598,13 @@ impl GraphRenderer {
             state.data.camera_component = cam.camera;
         } else if full {
             state.data.previous_camera_transform = state.data.current_camera_transform;
+        }
+
+        if let Some(viewports) = viewports {
+            state.data.viewports = viewports;
+        }
+        if let Some(render_main_scene_to_swapchain) = render_main_scene_to_swapchain {
+            state.data.render_main_scene_to_swapchain = render_main_scene_to_swapchain;
         }
 
         if let Some(config) = render_config {
@@ -4344,12 +4503,13 @@ impl GraphRenderer {
         &mut self,
         spec: &RenderGraphSpec,
         config_sig: RenderGraphConfigSignature,
+        graph_surface_size: PhysicalSize<u32>,
     ) -> Result<(), RendererError> {
         let needs_rebuild = match &self.active_graph {
             None => true,
             Some(active) => {
                 active.spec_version != spec.version
-                    || active.surface_size != self.surface_size
+                    || active.surface_size != graph_surface_size
                     || active.surface_format != self.surface_config.format
                     || active.config_signature != config_sig
             }
@@ -4359,7 +4519,7 @@ impl GraphRenderer {
             self.clear_active_graph();
 
             let params = RenderGraphBuildParams {
-                surface_size: self.surface_size,
+                surface_size: graph_surface_size,
                 surface_format: self.surface_config.format,
                 shadow_format: self.shadow_format,
                 hdr_format: self.hdr_format,
@@ -4395,7 +4555,7 @@ impl GraphRenderer {
 
             self.active_graph = Some(ActiveGraph {
                 spec_version: spec.version,
-                surface_size: self.surface_size,
+                surface_size: graph_surface_size,
                 surface_format: self.surface_config.format,
                 swapchain_id: build.swapchain_id,
                 resource_ids: build.resource_ids,
@@ -4430,6 +4590,110 @@ impl GraphRenderer {
             entry.texture_view = Some(view);
         }
         self.pool.mark_resident(id, self.frame_index);
+    }
+
+    fn ui_only_main_render_config(config: RenderConfig) -> RenderConfig {
+        let mut config = config;
+        config.gbuffer_pass = false;
+        config.shadow_pass = false;
+        config.direct_lighting_pass = false;
+        config.sky_pass = false;
+        config.ssgi_pass = false;
+        config.ssgi_denoise_pass = false;
+        config.ssr_pass = false;
+        config.ddgi_pass = false;
+        config.transparent_pass = false;
+        config.gizmo_pass = false;
+        config.gpu_driven = false;
+        config.occlusion_culling = false;
+        config.frustum_culling = false;
+        config.render_bundles = false;
+        config.rt_accumulation = false;
+        config.rt_direct_lighting = false;
+        config.rt_shadows = false;
+        config.rt_use_textures = false;
+        config.rt_reflections = false;
+        config.rt_reflection_direct_lighting = false;
+        config.rt_reflection_shadows = false;
+        config.rt_reflection_accumulation = false;
+        config.use_dont_care_load_ops = false;
+        config.egui_pass = true;
+        config
+    }
+
+    fn desired_graph_surface_size(
+        surface_size: PhysicalSize<u32>,
+        viewports: &[RenderViewportRequest],
+        render_main_scene_to_swapchain: bool,
+    ) -> PhysicalSize<u32> {
+        let mut width = if render_main_scene_to_swapchain {
+            surface_size.width.max(1)
+        } else {
+            1
+        };
+        let mut height = if render_main_scene_to_swapchain {
+            surface_size.height.max(1)
+        } else {
+            1
+        };
+        for viewport in viewports {
+            width = width.max(viewport.target_size[0].max(1));
+            height = height.max(viewport.target_size[1].max(1));
+        }
+        if width == 1 && height == 1 {
+            width = surface_size.width.max(1);
+            height = surface_size.height.max(1);
+        }
+        PhysicalSize::new(width, height)
+    }
+
+    fn ensure_offscreen_viewport_target(
+        &mut self,
+        id: u64,
+        width: u32,
+        height: u32,
+    ) -> wgpu::TextureView {
+        let size = PhysicalSize::new(width.max(1), height.max(1));
+        let needs_recreate = self
+            .offscreen_viewports
+            .get(&id)
+            .map(|target| target.size != size)
+            .unwrap_or(true);
+
+        if needs_recreate {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("GraphRenderer/OffscreenViewport"),
+                size: wgpu::Extent3d {
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.surface_config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.offscreen_viewports
+                .insert(id, OffscreenViewportTarget { size, view });
+        }
+
+        self.offscreen_viewports
+            .get(&id)
+            .map(|target| target.view.clone())
+            .expect("offscreen viewport target should exist after creation")
+    }
+
+    fn prune_offscreen_viewports(&mut self, active: &HashSet<u64>) {
+        self.offscreen_viewports.retain(|id, _| active.contains(id));
+        self.offscreen_viewport_prev_cameras
+            .retain(|id, _| active.contains(id));
+        self.offscreen_viewport_prev_view_proj
+            .retain(|id, _| active.contains(id));
     }
 
     fn fallback_mesh_geometry() -> (Vec<Vertex>, Vec<u32>) {
@@ -7501,6 +7765,12 @@ impl GraphRenderer {
             .and_then(|graph| graph.hiz_id)
             .and_then(|id| self.pool.texture_view(id).cloned());
 
+        let graph_surface_size = self
+            .active_graph
+            .as_ref()
+            .map(|graph| graph.surface_size)
+            .unwrap_or(self.surface_size);
+
         Some(FrameGlobals {
             frame_index: self.frame_index,
             device_caps: Arc::clone(&self.device_caps),
@@ -7560,8 +7830,9 @@ impl GraphRenderer {
             lights,
             shader_constants,
             sky_uniforms,
-            surface_size: self.surface_size,
+            surface_size: graph_surface_size,
             render_config: frame_render_config,
+            clear_swapchain_before_egui: !render_data.render_main_scene_to_swapchain,
             occlusion_camera_stable,
             gbuffer_bundle_key,
             shadow_bundle_key,

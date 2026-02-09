@@ -15,7 +15,8 @@ use helmer::{
             graph::RenderGraphSpec,
             renderer::{
                 Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
-                RenderDelta, RenderLightDelta, RenderObjectDelta, StreamingTuning,
+                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderViewportRequest,
+                StreamingTuning,
             },
         },
         render_graphs::default_graph_spec,
@@ -89,6 +90,18 @@ pub struct RenderGizmoState(pub GizmoData);
 impl Default for RenderGizmoState {
     fn default() -> Self {
         Self(GizmoData::default())
+    }
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct RenderViewportRequests(pub Vec<RenderViewportRequest>);
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct RenderMainSceneToSwapchain(pub bool);
+
+impl Default for RenderMainSceneToSwapchain {
+    fn default() -> Self {
+        Self(true)
     }
 }
 
@@ -483,6 +496,7 @@ pub struct RenderWorkerState {
     last_streaming_tuning: Option<StreamingTuning>,
     last_lod_tuning: Option<LodTuning>,
     last_worker_tuning: Option<RenderWorkerTuning>,
+    last_main_scene_to_swapchain: Option<bool>,
     last_gizmo: Option<GizmoData>,
 }
 
@@ -492,6 +506,8 @@ pub struct RenderSystemResources<'w> {
     runtime_config: Option<Res<'w, BevyRuntimeConfig>>,
     render_graph: Option<Res<'w, RenderGraphResource>>,
     gizmo_state: Option<Res<'w, RenderGizmoState>>,
+    viewport_requests: Option<Res<'w, RenderViewportRequests>>,
+    main_scene_to_swapchain: Option<Res<'w, RenderMainSceneToSwapchain>>,
     streaming_tuning: Option<Res<'w, BevyStreamingTuning>>,
     lod_tuning: Option<Res<'w, BevyLodTuning>>,
     worker_tuning: Option<Res<'w, BevyRenderWorkerTuning>>,
@@ -1772,6 +1788,8 @@ impl RenderWorkerCore {
             lights_upsert,
             lights_remove,
             camera: None,
+            render_main_scene_to_swapchain: None,
+            viewports: None,
             render_config: None,
             render_graph: None,
             gizmo: None,
@@ -2320,6 +2338,16 @@ pub fn render_data_system(
     if gizmo_changed {
         direct_delta.gizmo = Some(gizmo_data.clone());
         worker_state.last_gizmo = Some(gizmo_data);
+    }
+
+    if let Some(viewports) = resources.viewport_requests.as_ref() {
+        direct_delta.viewports = Some(viewports.0.clone());
+    }
+    if let Some(main_scene_to_swapchain) = resources.main_scene_to_swapchain.as_ref() {
+        let desired = main_scene_to_swapchain.0;
+        // Always emit this toggle so renderer state cannot drift after worker/full-sync churn
+        direct_delta.render_main_scene_to_swapchain = Some(desired);
+        worker_state.last_main_scene_to_swapchain = Some(desired);
     }
 
     let mut camera_available = false;

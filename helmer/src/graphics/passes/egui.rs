@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::graphics::{
-    common::renderer::{EguiRenderData, EguiTextureCache},
+    common::renderer::{EguiNativeTextures, EguiRenderData, EguiTextureCache},
     graph::{
         definition::{render_pass::RenderPass, resource_id::ResourceId},
         logic::{
@@ -110,6 +110,12 @@ impl RenderPass for EguiPass {
     }
 
     fn execute(&self, ctx: &mut RenderGraphExecCtx) {
+        let clear_swapchain_before_egui = ctx
+            .rpctx
+            .frame_inputs
+            .get::<FrameGlobals>()
+            .map(|frame| frame.clear_swapchain_before_egui)
+            .unwrap_or(false);
         let swapchain = match ctx.rpctx.frame_inputs.get::<SwapchainFrameInput>() {
             Some(s) => s,
             None => return,
@@ -119,6 +125,7 @@ impl RenderPass for EguiPass {
             None => return,
         };
         let cached_delta = ctx.rpctx.frame_inputs.get::<EguiTextureCache>();
+        let native_textures = ctx.rpctx.frame_inputs.get::<EguiNativeTextures>();
 
         let recreated = self.ensure_renderer(ctx.device(), swapchain.format);
         let mut renderer_guard = self.renderer.write();
@@ -138,15 +145,10 @@ impl RenderPass for EguiPass {
         }
 
         let last_version = self.last_texture_version.load(Ordering::Relaxed);
-        let mut screen_descriptor = egui_wgpu::ScreenDescriptor {
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: egui_data.screen_descriptor.size_in_pixels,
             pixels_per_point: egui_data.screen_descriptor.pixels_per_point,
         };
-
-        if let Some(globals) = ctx.rpctx.frame_inputs.get::<FrameGlobals>() {
-            screen_descriptor.size_in_pixels =
-                [globals.surface_size.width, globals.surface_size.height];
-        }
 
         if *self.last_screen_size.read() != screen_descriptor.size_in_pixels {
             *self.last_screen_size.write() = screen_descriptor.size_in_pixels;
@@ -218,6 +220,17 @@ impl RenderPass for EguiPass {
             self.last_texture_version.store(0, Ordering::Relaxed);
         }
 
+        if let Some(native_textures) = native_textures.as_ref() {
+            for binding in &native_textures.bindings {
+                renderer.update_egui_texture_from_wgpu_texture(
+                    ctx.device(),
+                    &binding.texture_view,
+                    binding.texture_filter,
+                    binding.texture_id,
+                );
+            }
+        }
+
         let device = ctx.rpctx.device;
         let queue = ctx.rpctx.queue;
         renderer.update_buffers(
@@ -228,14 +241,18 @@ impl RenderPass for EguiPass {
             &screen_descriptor,
         );
 
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("RenderGraph/Egui"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &swapchain.view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: if clear_swapchain_before_egui {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],

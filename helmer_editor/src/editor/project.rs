@@ -292,6 +292,489 @@ type ScriptData = {
     language: string,
 }
 
+type AudioBus = "Master" | "Music" | "Sfx" | "Ui" | "Ambience" | "World" | number
+type AudioBusValue = AudioBus | string
+type AudioPlaybackStateValue = "Playing" | "Paused" | "Stopped" | string | number
+
+type AudioEmitterData = {
+    path: string?,
+    streaming: boolean,
+    bus: AudioBus,
+    volume: number,
+    pitch: number,
+    looping: boolean,
+    spatial: boolean,
+    min_distance: number,
+    max_distance: number,
+    rolloff: number,
+    spatial_blend: number,
+    playback_state: string,
+    play_on_spawn: boolean,
+    clip_id: number?,
+}
+
+type AudioEmitterPatch = {
+    path: string?,
+    streaming: boolean?,
+    bus: AudioBusValue?,
+    volume: number?,
+    pitch: number?,
+    looping: boolean?,
+    spatial: boolean?,
+    min_distance: number?,
+    max_distance: number?,
+    rolloff: number?,
+    spatial_blend: number?,
+    playback_state: AudioPlaybackStateValue?,
+    play_on_spawn: boolean?,
+}
+
+type AudioListenerData = {
+    enabled: boolean,
+}
+
+type AudioListenerPatch = {
+    enabled: boolean?,
+}
+
+type AudioStreamingConfig = {
+    buffer_frames: number,
+    chunk_frames: number,
+}
+
+type PhysicsCombineRule = "Average" | "Min" | "Multiply" | "Max"
+type KinematicMode = "PositionBased" | "VelocityBased"
+type PhysicsJointKind = "Fixed" | "Spherical" | "Revolute" | "Prismatic"
+type MeshColliderKind = "TriMesh" | "ConvexHull"
+type MeshColliderLod = "Lod0" | "Lod1" | "Lod2" | "Lowest" | number
+type PhysicsShapeCastStatus =
+    "NoHit"
+    | "Converged"
+    | "OutOfIterations"
+    | "Failed"
+    | "PenetratingOrWithinTargetDist"
+
+type PhysicsBodyKindData =
+    { type: "Dynamic", mass: number }
+    | { type: "Kinematic", mode: KinematicMode }
+    | { type: "Fixed" }
+type PhysicsBodyKindValue = PhysicsBodyKindData | "Dynamic" | "Kinematic" | "Fixed" | string
+
+type ColliderShapeData =
+    { type: "Cuboid" }
+    | { type: "Sphere" }
+    | { type: "CapsuleY" }
+    | { type: "CylinderY" }
+    | { type: "ConeY" }
+    | { type: "RoundCuboid", border_radius: number }
+    | { type: "Mesh", mesh_id: number?, lod: MeshColliderLod, kind: MeshColliderKind }
+type ColliderShapePatch =
+    { type: "Cuboid" }
+    | { type: "Sphere" }
+    | { type: "CapsuleY" }
+    | { type: "CylinderY" }
+    | { type: "ConeY" }
+    | { type: "RoundCuboid", border_radius: number? }
+    | { type: "Mesh", mesh_id: number?, lod: MeshColliderLod?, kind: MeshColliderKind? }
+type ColliderShapeValue = ColliderShapePatch | string
+
+type PhysicsQueryFilterData = {
+    flags: number,
+    groups_memberships: number,
+    groups_filter: number,
+    use_groups: boolean,
+    exclude_fixed_flag: number?,
+    exclude_kinematic_flag: number?,
+    exclude_dynamic_flag: number?,
+    exclude_sensors_flag: number?,
+    exclude_solids_flag: number?,
+}
+
+type PhysicsQueryFilterPatch = {
+    flags: number?,
+    groups_memberships: number?,
+    groups_filter: number?,
+    use_groups: boolean?,
+}
+
+type ColliderPropertiesData = {
+    friction: number,
+    restitution: number,
+    density: number,
+    is_sensor: boolean,
+    enabled: boolean,
+    collision_memberships: number,
+    collision_filter: number,
+    solver_memberships: number,
+    solver_filter: number,
+    friction_combine_rule: PhysicsCombineRule,
+    restitution_combine_rule: PhysicsCombineRule,
+    translation_offset: Vec3,
+    rotation_offset: Quat,
+}
+
+type ColliderPropertiesPatch = {
+    friction: number?,
+    restitution: number?,
+    density: number?,
+    is_sensor: boolean?,
+    enabled: boolean?,
+    collision_memberships: number?,
+    collision_filter: number?,
+    solver_memberships: number?,
+    solver_filter: number?,
+    friction_combine_rule: PhysicsCombineRule?,
+    restitution_combine_rule: PhysicsCombineRule?,
+    translation_offset: Vec3?,
+    rotation_offset: Quat?,
+}
+
+type ColliderInheritanceData = {
+    friction: boolean,
+    restitution: boolean,
+    density: boolean,
+    is_sensor: boolean,
+    enabled: boolean,
+    collision_memberships: boolean,
+    collision_filter: boolean,
+    solver_memberships: boolean,
+    solver_filter: boolean,
+    friction_combine_rule: boolean,
+    restitution_combine_rule: boolean,
+    translation_offset: boolean,
+    rotation_offset: boolean,
+}
+
+type ColliderInheritancePatch = {
+    friction: boolean?,
+    restitution: boolean?,
+    density: boolean?,
+    is_sensor: boolean?,
+    enabled: boolean?,
+    collision_memberships: boolean?,
+    collision_filter: boolean?,
+    solver_memberships: boolean?,
+    solver_filter: boolean?,
+    friction_combine_rule: boolean?,
+    restitution_combine_rule: boolean?,
+    translation_offset: boolean?,
+    rotation_offset: boolean?,
+}
+
+type RigidBodyPropertiesData = {
+    linear_damping: number,
+    angular_damping: number,
+    gravity_scale: number,
+    ccd_enabled: boolean,
+    can_sleep: boolean,
+    sleeping: boolean,
+    dominance_group: number,
+    lock_translation_x: boolean,
+    lock_translation_y: boolean,
+    lock_translation_z: boolean,
+    lock_rotation_x: boolean,
+    lock_rotation_y: boolean,
+    lock_rotation_z: boolean,
+    linear_velocity: Vec3,
+    angular_velocity: Vec3,
+}
+
+type RigidBodyPropertiesPatch = {
+    linear_damping: number?,
+    angular_damping: number?,
+    gravity_scale: number?,
+    ccd_enabled: boolean?,
+    can_sleep: boolean?,
+    sleeping: boolean?,
+    dominance_group: number?,
+    lock_translation_x: boolean?,
+    lock_translation_y: boolean?,
+    lock_translation_z: boolean?,
+    lock_rotation_x: boolean?,
+    lock_rotation_y: boolean?,
+    lock_rotation_z: boolean?,
+    linear_velocity: Vec3?,
+    angular_velocity: Vec3?,
+}
+
+type RigidBodyInheritanceData = {
+    linear_damping: boolean,
+    angular_damping: boolean,
+    gravity_scale: boolean,
+    ccd_enabled: boolean,
+    can_sleep: boolean,
+    sleeping: boolean,
+    dominance_group: boolean,
+    lock_translation_x: boolean,
+    lock_translation_y: boolean,
+    lock_translation_z: boolean,
+    lock_rotation_x: boolean,
+    lock_rotation_y: boolean,
+    lock_rotation_z: boolean,
+    linear_velocity: boolean,
+    angular_velocity: boolean,
+}
+
+type RigidBodyInheritancePatch = {
+    linear_damping: boolean?,
+    angular_damping: boolean?,
+    gravity_scale: boolean?,
+    ccd_enabled: boolean?,
+    can_sleep: boolean?,
+    sleeping: boolean?,
+    dominance_group: boolean?,
+    lock_translation_x: boolean?,
+    lock_translation_y: boolean?,
+    lock_translation_z: boolean?,
+    lock_rotation_x: boolean?,
+    lock_rotation_y: boolean?,
+    lock_rotation_z: boolean?,
+    linear_velocity: boolean?,
+    angular_velocity: boolean?,
+}
+
+type PhysicsJointLimitsData = {
+    min: number,
+    max: number,
+    [number]: number,
+}
+
+type PhysicsJointMotorData = {
+    enabled: boolean,
+    target_position: number,
+    target_velocity: number,
+    stiffness: number,
+    damping: number,
+    max_force: number,
+}
+
+type PhysicsJointMotorPatch = {
+    enabled: boolean?,
+    target_position: number?,
+    target_velocity: number?,
+    stiffness: number?,
+    damping: number?,
+    max_force: number?,
+}
+
+type PhysicsJointData = {
+    target: EntityId?,
+    kind: PhysicsJointKind,
+    contacts_enabled: boolean,
+    local_anchor1: Vec3,
+    local_anchor2: Vec3,
+    local_axis1: Vec3,
+    local_axis2: Vec3,
+    limit_enabled: boolean,
+    limits: PhysicsJointLimitsData,
+    motor: PhysicsJointMotorData,
+}
+
+type PhysicsJointPatch = {
+    target: EntityId?,
+    kind: PhysicsJointKind?,
+    contacts_enabled: boolean?,
+    local_anchor1: Vec3?,
+    local_anchor2: Vec3?,
+    local_axis1: Vec3?,
+    local_axis2: Vec3?,
+    limit_enabled: boolean?,
+    limits: PhysicsJointLimitsData?,
+    motor: PhysicsJointMotorPatch?,
+}
+
+type CharacterControllerData = {
+    up: Vec3,
+    offset: number,
+    slide: boolean,
+    autostep_max_height: number,
+    autostep_min_width: number,
+    autostep_include_dynamic_bodies: boolean,
+    max_slope_climb_angle: number,
+    min_slope_slide_angle: number,
+    snap_to_ground: number,
+    normal_nudge_factor: number,
+    apply_impulses_to_dynamic_bodies: boolean,
+    character_mass: number,
+}
+
+type CharacterControllerPatch = {
+    up: Vec3?,
+    offset: number?,
+    slide: boolean?,
+    autostep_max_height: number?,
+    autostep_min_width: number?,
+    autostep_include_dynamic_bodies: boolean?,
+    max_slope_climb_angle: number?,
+    min_slope_slide_angle: number?,
+    snap_to_ground: number?,
+    normal_nudge_factor: number?,
+    apply_impulses_to_dynamic_bodies: boolean?,
+    character_mass: number?,
+}
+
+type CharacterControllerInputData = {
+    desired_translation: Vec3,
+}
+
+type CharacterControllerInputPatch = {
+    desired_translation: Vec3?,
+}
+
+type CharacterControllerOutputData = {
+    effective_translation: Vec3,
+    grounded: boolean,
+    sliding_down_slope: boolean,
+    collision_count: number,
+}
+
+type PhysicsRayCastData = {
+    origin: Vec3,
+    direction: Vec3,
+    max_toi: number,
+    solid: boolean,
+    filter: PhysicsQueryFilterData,
+    exclude_self: boolean,
+}
+
+type PhysicsRayCastPatch = {
+    origin: Vec3?,
+    direction: Vec3?,
+    max_toi: number?,
+    solid: boolean?,
+    filter: PhysicsQueryFilterPatch?,
+    exclude_self: boolean?,
+}
+
+type PhysicsRayCastHitData = {
+    has_hit: boolean,
+    hit_entity: EntityId?,
+    point: Vec3,
+    normal: Vec3,
+    toi: number,
+}
+
+type PhysicsPointProjectionData = {
+    point: Vec3,
+    solid: boolean,
+    filter: PhysicsQueryFilterData,
+    exclude_self: boolean,
+}
+
+type PhysicsPointProjectionPatch = {
+    point: Vec3?,
+    solid: boolean?,
+    filter: PhysicsQueryFilterPatch?,
+    exclude_self: boolean?,
+}
+
+type PhysicsPointProjectionHitData = {
+    has_hit: boolean,
+    hit_entity: EntityId?,
+    projected_point: Vec3,
+    is_inside: boolean,
+    distance: number,
+}
+
+type PhysicsShapeCastData = {
+    shape: ColliderShapeData,
+    scale: Vec3,
+    position: Vec3,
+    rotation: Quat,
+    velocity: Vec3,
+    max_time_of_impact: number,
+    target_distance: number,
+    stop_at_penetration: boolean,
+    compute_impact_geometry_on_penetration: boolean,
+    filter: PhysicsQueryFilterData,
+    exclude_self: boolean,
+}
+
+type PhysicsShapeCastPatch = {
+    shape: ColliderShapeValue?,
+    scale: Vec3?,
+    position: Vec3?,
+    rotation: Quat?,
+    velocity: Vec3?,
+    max_time_of_impact: number?,
+    target_distance: number?,
+    stop_at_penetration: boolean?,
+    compute_impact_geometry_on_penetration: boolean?,
+    filter: PhysicsQueryFilterPatch?,
+    exclude_self: boolean?,
+}
+
+type PhysicsShapeCastHitData = {
+    has_hit: boolean,
+    hit_entity: EntityId?,
+    toi: number,
+    witness1: Vec3,
+    witness2: Vec3,
+    normal1: Vec3,
+    normal2: Vec3,
+    status: PhysicsShapeCastStatus,
+}
+
+type PhysicsWorldDefaultsData = {
+    gravity: Vec3,
+    collider_properties: ColliderPropertiesData,
+    rigid_body_properties: RigidBodyPropertiesData,
+}
+
+type PhysicsWorldDefaultsPatch = {
+    gravity: Vec3?,
+    collider_properties: ColliderPropertiesPatch?,
+    rigid_body_properties: RigidBodyPropertiesPatch?,
+}
+
+type PhysicsVelocityData = {
+    linear: Vec3?,
+    angular: Vec3?,
+}
+
+type PhysicsVelocityPatch = {
+    linear: Vec3?,
+    angular: Vec3?,
+    wake_up: boolean?,
+}
+
+type PhysicsData = {
+    collider_shape: ColliderShapeData?,
+    body_kind: PhysicsBodyKindData?,
+    collider_properties: ColliderPropertiesData?,
+    collider_inheritance: ColliderInheritanceData?,
+    rigid_body_properties: RigidBodyPropertiesData?,
+    rigid_body_inheritance: RigidBodyInheritanceData?,
+    joint: PhysicsJointData?,
+    character_controller: CharacterControllerData?,
+    character_input: CharacterControllerInputData?,
+    character_output: CharacterControllerOutputData?,
+    ray_cast: PhysicsRayCastData?,
+    ray_cast_hit: PhysicsRayCastHitData?,
+    point_projection: PhysicsPointProjectionData?,
+    point_projection_hit: PhysicsPointProjectionHitData?,
+    shape_cast: PhysicsShapeCastData?,
+    shape_cast_hit: PhysicsShapeCastHitData?,
+    world_defaults: PhysicsWorldDefaultsData?,
+    has_handle: boolean,
+}
+
+type PhysicsPatch = {
+    collider_shape: ColliderShapeValue?,
+    body_kind: PhysicsBodyKindValue?,
+    collider_properties: ColliderPropertiesPatch?,
+    collider_inheritance: ColliderInheritancePatch?,
+    rigid_body_properties: RigidBodyPropertiesPatch?,
+    rigid_body_inheritance: RigidBodyInheritancePatch?,
+    joint: PhysicsJointPatch?,
+    character_controller: CharacterControllerPatch?,
+    character_input: CharacterControllerInputPatch?,
+    ray_cast: PhysicsRayCastPatch?,
+    point_projection: PhysicsPointProjectionPatch?,
+    shape_cast: PhysicsShapeCastPatch?,
+    world_defaults: PhysicsWorldDefaultsPatch?,
+}
+
 type DynamicFieldValue = boolean | number | string | Vec3
 type DynamicFields = { [string]: DynamicFieldValue }
 
@@ -299,6 +782,45 @@ type DynamicComponentData = {
     name: string,
     fields: DynamicFields,
 }
+
+type EcsComponentName =
+    "name"
+    | "transform"
+    | "camera"
+    | "light"
+    | "mesh"
+    | "mesh_renderer"
+    | "spline"
+    | "spline_follower"
+    | "look_at"
+    | "entity_follower"
+    | "animator"
+    | "scene"
+    | "audio"
+    | "audio_emitter"
+    | "audio_listener"
+    | "script"
+    | "dynamic"
+    | "physics"
+    | "collider_shape"
+    | "dynamic_rigid_body"
+    | "kinematic_rigid_body"
+    | "fixed_collider"
+    | "collider_properties"
+    | "collider_inheritance"
+    | "rigid_body_properties"
+    | "rigid_body_inheritance"
+    | "physics_joint"
+    | "character_controller"
+    | "character_controller_input"
+    | "character_controller_output"
+    | "physics_ray_cast"
+    | "physics_ray_cast_hit"
+    | "physics_point_projection"
+    | "physics_point_projection_hit"
+    | "physics_shape_cast"
+    | "physics_shape_cast_hit"
+    | "physics_world_defaults"
 
 type HelmerEcs = {
     list_entities: () -> { EntityId },
@@ -308,9 +830,9 @@ type HelmerEcs = {
     get_entity_name: (id: EntityId) -> string?,
     set_entity_name: (id: EntityId, name: string) -> boolean,
     delete_entity: (id: EntityId) -> boolean,
-    has_component: (id: EntityId, component: string) -> boolean,
-    add_component: (id: EntityId, component: string) -> boolean,
-    remove_component: (id: EntityId, component: string) -> boolean,
+    has_component: (id: EntityId, component: EcsComponentName) -> boolean,
+    add_component: (id: EntityId, component: EcsComponentName) -> boolean,
+    remove_component: (id: EntityId, component: EcsComponentName) -> boolean,
 
     get_transform: (id: EntityId) -> Transform?,
     set_transform: (id: EntityId, data: TransformPatch) -> boolean,
@@ -347,6 +869,46 @@ type HelmerEcs = {
 
     get_script: (id: EntityId) -> ScriptData?,
     set_script: (id: EntityId, path: string, language: string?) -> boolean,
+
+    get_audio_emitter: (id: EntityId) -> AudioEmitterData?,
+    set_audio_emitter: (id: EntityId, data: AudioEmitterPatch) -> boolean,
+    get_audio_listener: (id: EntityId) -> AudioListenerData?,
+    set_audio_listener: (id: EntityId, data: AudioListenerPatch) -> boolean,
+
+    set_audio_enabled: (enabled: boolean) -> boolean,
+    get_audio_enabled: () -> boolean,
+    list_audio_buses: () -> { AudioBus },
+    create_audio_bus: (name: string?) -> AudioBus?,
+    remove_audio_bus: (bus: AudioBusValue) -> boolean,
+    get_audio_bus_name: (bus: AudioBusValue) -> string?,
+    set_audio_bus_name: (bus: AudioBusValue, name: string) -> boolean,
+    set_audio_bus_volume: (bus: AudioBusValue, volume: number) -> boolean,
+    get_audio_bus_volume: (bus: AudioBusValue) -> number?,
+    set_audio_scene_volume: (scene_id: number, volume: number) -> boolean,
+    get_audio_scene_volume: (scene_id: number) -> number?,
+    clear_audio_emitters: () -> boolean,
+    set_audio_head_width: (width: number) -> boolean,
+    get_audio_head_width: () -> number?,
+    set_audio_speed_of_sound: (speed: number) -> boolean,
+    get_audio_speed_of_sound: () -> number?,
+    set_audio_streaming_config: (buffer_frames: number, chunk_frames: number) -> boolean,
+    get_audio_streaming_config: () -> AudioStreamingConfig?,
+
+    get_physics: (id: EntityId) -> PhysicsData?,
+    set_physics: (id: EntityId, data: PhysicsPatch) -> boolean,
+    clear_physics: (id: EntityId) -> boolean,
+    get_physics_world_defaults: (id: EntityId) -> PhysicsWorldDefaultsData?,
+    set_physics_world_defaults: (id: EntityId, data: PhysicsWorldDefaultsPatch) -> boolean,
+    get_character_controller_output: (id: EntityId) -> CharacterControllerOutputData?,
+    get_physics_ray_cast_hit: (id: EntityId) -> PhysicsRayCastHitData?,
+    get_physics_point_projection_hit: (id: EntityId) -> PhysicsPointProjectionHitData?,
+    get_physics_shape_cast_hit: (id: EntityId) -> PhysicsShapeCastHitData?,
+    get_physics_velocity: (id: EntityId) -> PhysicsVelocityData?,
+    set_physics_velocity: (id: EntityId, data: PhysicsVelocityPatch) -> boolean,
+    set_physics_running: (running: boolean) -> boolean,
+    get_physics_running: () -> boolean,
+    set_physics_gravity: (gravity: Vec3) -> boolean,
+    get_physics_gravity: () -> Vec3?,
 
     list_dynamic_components: (id: EntityId) -> { DynamicComponentData }?,
     get_dynamic_component: (id: EntityId, name: string) -> DynamicFields?,
@@ -477,7 +1039,8 @@ pub fn default_script_template_full() -> &'static str {
 --   input.key(name) -> key|nil
 --   input.mouse_button(name) -> button|nil
 --   input.gamepad_button(name) -> button|nil
---   input.gamepad_axis(name) -> axis|nil
+--   input.gamepad_axis_handle(name) -> axis|nil
+--   input.gamepad_axis_ref(name) -> axis|nil
 -- input constants:
 --   input.keys.<Name>, input.mouse_buttons.<Name>, input.gamepad_buttons.<Name>, input.gamepad_axes.<Name>
 -- ecs table:
@@ -488,9 +1051,11 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.get_entity_name(id) -> string|nil
 --   ecs.set_entity_name(id, name) -> bool (empty name removes Name)
 --   ecs.delete_entity(id) -> bool
---   ecs.has_component(id, "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"scene"|"script"|"dynamic") -> bool
---   ecs.add_component(id, "transform"|"camera"|"light"|"dynamic") -> bool
---   ecs.remove_component(id, "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"scene"|"script"|"dynamic") -> bool
+--   ecs.has_component(id, component) -> bool
+--   ecs.add_component(id, component) -> bool
+--   ecs.remove_component(id, component) -> bool
+--     component:
+--       "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"spline"|"spline_follower"|"look_at"|"entity_follower"|"animator"|"scene"|"audio"|"audio_emitter"|"audio_listener"|"script"|"dynamic"|"physics"|"collider_shape"|"dynamic_rigid_body"|"kinematic_rigid_body"|"fixed_collider"|"collider_properties"|"collider_inheritance"|"rigid_body_properties"|"rigid_body_inheritance"|"physics_joint"|"character_controller"|"character_controller_input"|"character_controller_output"|"physics_ray_cast"|"physics_ray_cast_hit"|"physics_point_projection"|"physics_point_projection_hit"|"physics_shape_cast"|"physics_shape_cast_hit"|"physics_world_defaults"
 --   ecs.get_transform(id) -> {position={x,y,z}, rotation={x,y,z,w}, scale={x,y,z}}|nil
 --   ecs.set_transform(id, {position?, rotation?, scale?}) -> bool
 --   ecs.get_spline(id) -> {points={{x,y,z}}, closed, tension, mode}|nil
@@ -526,6 +1091,45 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_dynamic_field(id, comp_name, field_name, value) -> bool
 --   ecs.remove_dynamic_component(id, name) -> bool
 --   ecs.remove_dynamic_field(id, comp_name, field_name) -> bool
+-- audio:
+--   ecs.get_audio_emitter(id) -> {path?, streaming, bus, volume, pitch, looping, spatial, min_distance, max_distance, rolloff, spatial_blend, playback_state, play_on_spawn, clip_id?}|nil
+--   ecs.set_audio_emitter(id, data) -> bool
+--   ecs.get_audio_listener(id) -> {enabled}|nil
+--   ecs.set_audio_listener(id, {enabled?}) -> bool
+--   ecs.set_audio_enabled(enabled) -> bool
+--   ecs.get_audio_enabled() -> bool
+--   ecs.list_audio_buses() -> {bus, ...}
+--   ecs.create_audio_bus(name?) -> bus|nil
+--   ecs.remove_audio_bus(bus) -> bool
+--   ecs.get_audio_bus_name(bus) -> string|nil
+--   ecs.set_audio_bus_name(bus, name) -> bool
+--   ecs.set_audio_bus_volume(bus, volume) -> bool
+--   ecs.get_audio_bus_volume(bus) -> number|nil
+--   ecs.set_audio_scene_volume(scene_id, volume) -> bool
+--   ecs.get_audio_scene_volume(scene_id) -> number|nil
+--   ecs.clear_audio_emitters() -> bool
+--   ecs.set_audio_head_width(width) -> bool
+--   ecs.get_audio_head_width() -> number|nil
+--   ecs.set_audio_speed_of_sound(speed) -> bool
+--   ecs.get_audio_speed_of_sound() -> number|nil
+--   ecs.set_audio_streaming_config(buffer_frames, chunk_frames) -> bool
+--   ecs.get_audio_streaming_config() -> {buffer_frames, chunk_frames}|nil
+-- physics:
+--   ecs.get_physics(id) -> table|nil
+--   ecs.set_physics(id, patch_table) -> bool
+--   ecs.clear_physics(id) -> bool
+--   ecs.get_physics_world_defaults(id) -> {gravity, collider_properties, rigid_body_properties}|nil
+--   ecs.set_physics_world_defaults(id, patch) -> bool
+--   ecs.get_character_controller_output(id) -> {effective_translation, grounded, sliding_down_slope, collision_count}|nil
+--   ecs.get_physics_ray_cast_hit(id) -> {has_hit, hit_entity?, point, normal, toi}|nil
+--   ecs.get_physics_point_projection_hit(id) -> {has_hit, hit_entity?, projected_point, is_inside, distance}|nil
+--   ecs.get_physics_shape_cast_hit(id) -> {has_hit, hit_entity?, toi, witness1, witness2, normal1, normal2, status}|nil
+--   ecs.get_physics_velocity(id) -> {linear?, angular?}|nil
+--   ecs.set_physics_velocity(id, {linear?, angular?, wake_up?}) -> bool
+--   ecs.set_physics_running(running) -> bool
+--   ecs.get_physics_running() -> bool
+--   ecs.set_physics_gravity({x,y,z}) -> bool
+--   ecs.get_physics_gravity() -> {x,y,z}|nil
 
 local mover: number = -1
 local t = 0.0

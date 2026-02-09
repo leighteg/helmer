@@ -13,24 +13,35 @@ use glam::{DVec2, Quat, Vec2, Vec3};
 use mlua::{Function, Lua, RegistryKey, Table, UserData, Value, Variadic};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
+use helmer::audio::{AudioBus, AudioPlaybackState};
 use helmer::provided::components::{
-    EntityFollower, Light, LightType, LookAt, MeshAsset, MeshRenderer, Spline, SplineFollower,
-    SplineMode,
+    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshAsset, MeshRenderer,
+    Spline, SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
+use helmer_becs::physics::components::{
+    CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
+    ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
+    KinematicRigidBody, MeshColliderKind, MeshColliderLod, PhysicsCombineRule, PhysicsHandle,
+    PhysicsJoint, PhysicsJointKind, PhysicsPointProjection, PhysicsPointProjectionHit,
+    PhysicsQueryFilter, PhysicsRayCast, PhysicsRayCastHit, PhysicsShapeCast, PhysicsShapeCastHit,
+    PhysicsShapeCastStatus, PhysicsWorldDefaults, RigidBodyProperties,
+    RigidBodyPropertyInheritance,
+};
+use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::systems::scene_system::SceneRoot;
 use helmer_becs::{
-    BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyCamera, BevyEntityFollower,
-    BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer, BevySpline, BevySplineFollower,
-    BevyTransform, BevyWrapper, DeltaTime,
+    AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
+    BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
+    BevyMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
     EditorPlayCamera, activate_play_camera,
     assets::{
-        EditorAssetCache, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
-        cached_scene_handle,
+        EditorAssetCache, EditorAudio, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        cached_audio_handle, cached_scene_handle,
     },
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
     project::EditorProject,
@@ -826,11 +837,47 @@ fn build_ecs_table(
                 "entity_follower" => world.get::<BevyEntityFollower>(entity).is_some(),
                 "animator" => world.get::<BevyAnimator>(entity).is_some(),
                 "scene" => world.get::<SceneRoot>(entity).is_some(),
+                "audio" => {
+                    world.get::<BevyAudioEmitter>(entity).is_some()
+                        || world.get::<BevyAudioListener>(entity).is_some()
+                }
+                "audio_emitter" => world.get::<BevyAudioEmitter>(entity).is_some(),
+                "audio_listener" => world.get::<BevyAudioListener>(entity).is_some(),
                 "script" => world
                     .get::<ScriptComponent>(entity)
                     .map(|scripts| !scripts.scripts.is_empty())
                     .unwrap_or(false),
                 "dynamic" => world.get::<DynamicComponents>(entity).is_some(),
+                "physics" => has_physics_component(world, entity),
+                "collider_shape" => world.get::<ColliderShape>(entity).is_some(),
+                "dynamic_rigid_body" => world.get::<DynamicRigidBody>(entity).is_some(),
+                "kinematic_rigid_body" => world.get::<KinematicRigidBody>(entity).is_some(),
+                "fixed_collider" => world.get::<FixedCollider>(entity).is_some(),
+                "collider_properties" => world.get::<ColliderProperties>(entity).is_some(),
+                "collider_inheritance" => {
+                    world.get::<ColliderPropertyInheritance>(entity).is_some()
+                }
+                "rigid_body_properties" => world.get::<RigidBodyProperties>(entity).is_some(),
+                "rigid_body_inheritance" => {
+                    world.get::<RigidBodyPropertyInheritance>(entity).is_some()
+                }
+                "physics_joint" => world.get::<PhysicsJoint>(entity).is_some(),
+                "character_controller" => world.get::<CharacterController>(entity).is_some(),
+                "character_controller_input" => {
+                    world.get::<CharacterControllerInput>(entity).is_some()
+                }
+                "character_controller_output" => {
+                    world.get::<CharacterControllerOutput>(entity).is_some()
+                }
+                "physics_ray_cast" => world.get::<PhysicsRayCast>(entity).is_some(),
+                "physics_ray_cast_hit" => world.get::<PhysicsRayCastHit>(entity).is_some(),
+                "physics_point_projection" => world.get::<PhysicsPointProjection>(entity).is_some(),
+                "physics_point_projection_hit" => {
+                    world.get::<PhysicsPointProjectionHit>(entity).is_some()
+                }
+                "physics_shape_cast" => world.get::<PhysicsShapeCast>(entity).is_some(),
+                "physics_shape_cast_hit" => world.get::<PhysicsShapeCastHit>(entity).is_some(),
+                "physics_world_defaults" => world.get::<PhysicsWorldDefaults>(entity).is_some(),
                 _ => false,
             };
             Ok(has)
@@ -884,10 +931,137 @@ fn build_ecs_table(
                         .entity_mut(entity)
                         .insert(BevyEntityFollower(EntityFollower::default()));
                 }
+                "audio_emitter" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyWrapper(AudioEmitter::default()));
+                    world.entity_mut(entity).insert(EditorAudio {
+                        path: None,
+                        streaming: false,
+                    });
+                }
+                "audio_listener" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyWrapper(AudioListener::default()));
+                }
                 "dynamic" => {
                     world
                         .entity_mut(entity)
                         .insert(DynamicComponents::default());
+                }
+                "physics" => {
+                    ensure_transform(world, entity);
+                    world.entity_mut(entity).insert(ColliderShape::default());
+                    set_physics_body_kind(world, entity, PhysicsBodyKind::Fixed);
+                }
+                "collider_shape" => {
+                    ensure_transform(world, entity);
+                    world.entity_mut(entity).insert(ColliderShape::default());
+                }
+                "dynamic_rigid_body" => {
+                    ensure_transform(world, entity);
+                    set_physics_body_kind(world, entity, PhysicsBodyKind::Dynamic { mass: 1.0 });
+                }
+                "kinematic_rigid_body" => {
+                    ensure_transform(world, entity);
+                    set_physics_body_kind(
+                        world,
+                        entity,
+                        PhysicsBodyKind::Kinematic {
+                            mode: KinematicMode::default(),
+                        },
+                    );
+                }
+                "fixed_collider" => {
+                    ensure_transform(world, entity);
+                    set_physics_body_kind(world, entity, PhysicsBodyKind::Fixed);
+                }
+                "collider_properties" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(ColliderProperties::default());
+                }
+                "collider_inheritance" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(ColliderPropertyInheritance::default());
+                }
+                "rigid_body_properties" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(RigidBodyProperties::default());
+                }
+                "rigid_body_inheritance" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(RigidBodyPropertyInheritance::default());
+                }
+                "physics_joint" => {
+                    world.entity_mut(entity).insert(PhysicsJoint::default());
+                }
+                "character_controller" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(CharacterController::default());
+                    world
+                        .entity_mut(entity)
+                        .insert(CharacterControllerInput::default());
+                    world
+                        .entity_mut(entity)
+                        .insert(CharacterControllerOutput::default());
+                }
+                "character_controller_input" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(CharacterControllerInput::default());
+                }
+                "character_controller_output" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(CharacterControllerOutput::default());
+                }
+                "physics_ray_cast" => {
+                    world.entity_mut(entity).insert(PhysicsRayCast::default());
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsRayCastHit::default());
+                }
+                "physics_ray_cast_hit" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsRayCastHit::default());
+                }
+                "physics_point_projection" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsPointProjection::default());
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsPointProjectionHit::default());
+                }
+                "physics_point_projection_hit" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsPointProjectionHit::default());
+                }
+                "physics_shape_cast" => {
+                    world.entity_mut(entity).insert(PhysicsShapeCast::default());
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsShapeCastHit::default());
+                }
+                "physics_shape_cast_hit" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsShapeCastHit::default());
+                }
+                "physics_world_defaults" => {
+                    world
+                        .entity_mut(entity)
+                        .insert(PhysicsWorldDefaults::default());
                 }
                 _ => return Ok(false),
             }
@@ -942,11 +1116,108 @@ fn build_ecs_table(
                     world.entity_mut(entity).remove::<SceneRoot>();
                     world.entity_mut(entity).remove::<SceneAssetPath>();
                 }
+                "audio" => {
+                    world.entity_mut(entity).remove::<BevyAudioEmitter>();
+                    world.entity_mut(entity).remove::<EditorAudio>();
+                    world.entity_mut(entity).remove::<BevyAudioListener>();
+                }
+                "audio_emitter" => {
+                    world.entity_mut(entity).remove::<BevyAudioEmitter>();
+                    world.entity_mut(entity).remove::<EditorAudio>();
+                }
+                "audio_listener" => {
+                    world.entity_mut(entity).remove::<BevyAudioListener>();
+                }
                 "script" => {
                     world.entity_mut(entity).remove::<ScriptComponent>();
                 }
                 "dynamic" => {
                     world.entity_mut(entity).remove::<DynamicComponents>();
+                }
+                "physics" => {
+                    remove_all_physics_components(world, entity);
+                }
+                "collider_shape" => {
+                    world.entity_mut(entity).remove::<ColliderShape>();
+                    world.entity_mut(entity).remove::<PhysicsHandle>();
+                }
+                "dynamic_rigid_body" => {
+                    world.entity_mut(entity).remove::<DynamicRigidBody>();
+                    world.entity_mut(entity).remove::<PhysicsHandle>();
+                }
+                "kinematic_rigid_body" => {
+                    world.entity_mut(entity).remove::<KinematicRigidBody>();
+                    world.entity_mut(entity).remove::<PhysicsHandle>();
+                }
+                "fixed_collider" => {
+                    world.entity_mut(entity).remove::<FixedCollider>();
+                    world.entity_mut(entity).remove::<PhysicsHandle>();
+                }
+                "collider_properties" => {
+                    world.entity_mut(entity).remove::<ColliderProperties>();
+                }
+                "collider_inheritance" => {
+                    world
+                        .entity_mut(entity)
+                        .remove::<ColliderPropertyInheritance>();
+                }
+                "rigid_body_properties" => {
+                    world.entity_mut(entity).remove::<RigidBodyProperties>();
+                }
+                "rigid_body_inheritance" => {
+                    world
+                        .entity_mut(entity)
+                        .remove::<RigidBodyPropertyInheritance>();
+                }
+                "physics_joint" => {
+                    world.entity_mut(entity).remove::<PhysicsJoint>();
+                }
+                "character_controller" => {
+                    world.entity_mut(entity).remove::<CharacterController>();
+                    world
+                        .entity_mut(entity)
+                        .remove::<CharacterControllerInput>();
+                    world
+                        .entity_mut(entity)
+                        .remove::<CharacterControllerOutput>();
+                }
+                "character_controller_input" => {
+                    world
+                        .entity_mut(entity)
+                        .remove::<CharacterControllerInput>();
+                }
+                "character_controller_output" => {
+                    world
+                        .entity_mut(entity)
+                        .remove::<CharacterControllerOutput>();
+                }
+                "physics_ray_cast" => {
+                    world.entity_mut(entity).remove::<PhysicsRayCast>();
+                    world.entity_mut(entity).remove::<PhysicsRayCastHit>();
+                }
+                "physics_ray_cast_hit" => {
+                    world.entity_mut(entity).remove::<PhysicsRayCastHit>();
+                }
+                "physics_point_projection" => {
+                    world.entity_mut(entity).remove::<PhysicsPointProjection>();
+                    world
+                        .entity_mut(entity)
+                        .remove::<PhysicsPointProjectionHit>();
+                }
+                "physics_point_projection_hit" => {
+                    world
+                        .entity_mut(entity)
+                        .remove::<PhysicsPointProjectionHit>();
+                }
+                "physics_shape_cast" => {
+                    world.entity_mut(entity).remove::<PhysicsShapeCast>();
+                    world.entity_mut(entity).remove::<PhysicsShapeCastHit>();
+                }
+                "physics_shape_cast_hit" => {
+                    world.entity_mut(entity).remove::<PhysicsShapeCastHit>();
+                }
+                "physics_world_defaults" => {
+                    world.entity_mut(entity).remove::<PhysicsWorldDefaults>();
                 }
                 _ => return Ok(false),
             }
@@ -1859,7 +2130,2285 @@ fn build_ecs_table(
         )?,
     )?;
 
+    let world_ptr_get_audio_emitter = world_ptr;
+    ecs.set(
+        "get_audio_emitter",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_audio_emitter as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(emitter) = world
+                .get::<BevyAudioEmitter>(entity)
+                .map(|emitter| emitter.0)
+            else {
+                return Ok(None);
+            };
+            let editor_audio = world
+                .get::<EditorAudio>(entity)
+                .cloned()
+                .unwrap_or(EditorAudio {
+                    path: None,
+                    streaming: false,
+                });
+
+            let table = lua.create_table()?;
+            match editor_audio.path {
+                Some(path) => table.set("path", path)?,
+                None => table.set("path", Value::Nil)?,
+            }
+            table.set("streaming", editor_audio.streaming)?;
+            table.set("bus", audio_bus_to_lua(lua, emitter.bus)?)?;
+            table.set("volume", emitter.volume)?;
+            table.set("pitch", emitter.pitch)?;
+            table.set("looping", emitter.looping)?;
+            table.set("spatial", emitter.spatial)?;
+            table.set("min_distance", emitter.min_distance)?;
+            table.set("max_distance", emitter.max_distance)?;
+            table.set("rolloff", emitter.rolloff)?;
+            table.set("spatial_blend", emitter.spatial_blend)?;
+            table.set(
+                "playback_state",
+                audio_playback_state_name(emitter.playback_state),
+            )?;
+            table.set("play_on_spawn", emitter.play_on_spawn)?;
+            if let Some(clip_id) = emitter.clip_id {
+                table.set("clip_id", clip_id as u64)?;
+            }
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_set_audio_emitter = world_ptr;
+    ecs.set(
+        "set_audio_emitter",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_audio_emitter as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+
+            let mut emitter = world
+                .get::<BevyAudioEmitter>(entity)
+                .map(|emitter| emitter.0)
+                .unwrap_or_default();
+            let mut editor_audio =
+                world
+                    .get::<EditorAudio>(entity)
+                    .cloned()
+                    .unwrap_or(EditorAudio {
+                        path: None,
+                        streaming: false,
+                    });
+            let project = world.get_resource::<EditorProject>().cloned();
+
+            if let Ok(bus) = data.get::<Value>("bus") {
+                if let Some(parsed) =
+                    audio_bus_from_value(bus, world.get_resource::<AudioBackendResource>())
+                {
+                    emitter.bus = parsed;
+                }
+            }
+            if let Ok(volume) = data.get::<f32>("volume") {
+                emitter.volume = volume.max(0.0);
+            }
+            if let Ok(pitch) = data.get::<f32>("pitch") {
+                emitter.pitch = pitch.max(0.001);
+            }
+            if let Ok(looping) = data.get::<bool>("looping") {
+                emitter.looping = looping;
+            }
+            if let Ok(spatial) = data.get::<bool>("spatial") {
+                emitter.spatial = spatial;
+            }
+            if let Ok(min_distance) = data.get::<f32>("min_distance") {
+                emitter.min_distance = min_distance.max(0.0);
+            }
+            if let Ok(max_distance) = data.get::<f32>("max_distance") {
+                emitter.max_distance = max_distance.max(0.0);
+            }
+            if emitter.max_distance < emitter.min_distance {
+                emitter.max_distance = emitter.min_distance;
+            }
+            if let Ok(rolloff) = data.get::<f32>("rolloff") {
+                emitter.rolloff = rolloff.max(0.0);
+            }
+            if let Ok(spatial_blend) = data.get::<f32>("spatial_blend") {
+                emitter.spatial_blend = spatial_blend.clamp(0.0, 1.0);
+            }
+            if let Ok(play_on_spawn) = data.get::<bool>("play_on_spawn") {
+                emitter.play_on_spawn = play_on_spawn;
+            }
+            if let Ok(playback_state_value) = data.get::<Value>("playback_state") {
+                if let Some(state) = audio_playback_state_from_value(playback_state_value) {
+                    emitter.playback_state = state;
+                }
+            }
+            if let Ok(streaming) = data.get::<bool>("streaming") {
+                editor_audio.streaming = streaming;
+            }
+
+            if let Ok(path_value) = data.get::<Value>("path") {
+                match path_value {
+                    Value::Nil => {
+                        editor_audio.path = None;
+                    }
+                    Value::String(path) => {
+                        let path = path.to_string_lossy().to_string();
+                        if path.trim().is_empty() {
+                            editor_audio.path = None;
+                        } else {
+                            let normalized =
+                                normalize_project_path(project.as_ref(), Path::new(path.trim()));
+                            editor_audio.path = Some(normalized);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if !apply_audio_emitter_asset(world, project.as_ref(), &mut emitter, &editor_audio) {
+                emitter.clip_id = None;
+            }
+
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert((BevyWrapper(emitter), editor_audio));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_audio_listener = world_ptr;
+    ecs.set(
+        "get_audio_listener",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_audio_listener as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(listener) = world
+                .get::<BevyAudioListener>(entity)
+                .map(|listener| listener.0)
+            else {
+                return Ok(None);
+            };
+            let table = lua.create_table()?;
+            table.set("enabled", listener.enabled)?;
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_set_audio_listener = world_ptr;
+    ecs.set(
+        "set_audio_listener",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_audio_listener as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let mut listener = world
+                .get::<BevyAudioListener>(entity)
+                .map(|listener| listener.0)
+                .unwrap_or_default();
+            if let Ok(enabled) = data.get::<bool>("enabled") {
+                listener.enabled = enabled;
+            }
+            ensure_transform(world, entity);
+            world.entity_mut(entity).insert(BevyWrapper(listener));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_enabled = world_ptr;
+    ecs.set(
+        "set_audio_enabled",
+        lua.create_function(move |_, enabled: bool| {
+            let world = unsafe { &mut *(world_ptr_audio_enabled as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.set_enabled(enabled);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_is_enabled = world_ptr;
+    ecs.set(
+        "get_audio_enabled",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_is_enabled as *mut World) };
+            Ok(world
+                .get_resource::<AudioBackendResource>()
+                .map(|audio| audio.0.enabled())
+                .unwrap_or(false))
+        })?,
+    )?;
+
+    let world_ptr_audio_buses = world_ptr;
+    ecs.set(
+        "list_audio_buses",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_buses as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(lua.create_table()?);
+            };
+            let table = lua.create_table()?;
+            let buses = audio.0.bus_list();
+            for (index, bus) in buses.iter().enumerate() {
+                table.set(index + 1, audio_bus_to_lua(lua, *bus)?)?;
+            }
+            Ok(table)
+        })?,
+    )?;
+
+    let world_ptr_audio_create_bus = world_ptr;
+    ecs.set(
+        "create_audio_bus",
+        lua.create_function(move |lua, name: Option<String>| {
+            let world = unsafe { &mut *(world_ptr_audio_create_bus as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(Value::Nil);
+            };
+            let bus = audio.0.create_custom_bus(name);
+            audio_bus_to_lua(lua, bus)
+        })?,
+    )?;
+
+    let world_ptr_audio_remove_bus = world_ptr;
+    ecs.set(
+        "remove_audio_bus",
+        lua.create_function(move |_, bus: Value| {
+            let world = unsafe { &mut *(world_ptr_audio_remove_bus as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
+                return Ok(false);
+            };
+            audio.0.remove_bus(bus);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_bus_name = world_ptr;
+    ecs.set(
+        "get_audio_bus_name",
+        lua.create_function(move |_, bus: Value| {
+            let world = unsafe { &mut *(world_ptr_audio_bus_name as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(None);
+            };
+            let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
+                return Ok(None);
+            };
+            Ok(Some(audio.0.bus_name(bus)))
+        })?,
+    )?;
+
+    let world_ptr_audio_set_bus_name = world_ptr;
+    ecs.set(
+        "set_audio_bus_name",
+        lua.create_function(move |_, (bus, name): (Value, String)| {
+            let world = unsafe { &mut *(world_ptr_audio_set_bus_name as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
+                return Ok(false);
+            };
+            audio.0.set_bus_name(bus, name);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_set_bus_volume = world_ptr;
+    ecs.set(
+        "set_audio_bus_volume",
+        lua.create_function(move |_, (bus, volume): (Value, f32)| {
+            let world = unsafe { &mut *(world_ptr_audio_set_bus_volume as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
+                return Ok(false);
+            };
+            audio.0.set_bus_volume(bus, volume.max(0.0));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_get_bus_volume = world_ptr;
+    ecs.set(
+        "get_audio_bus_volume",
+        lua.create_function(move |_, bus: Value| {
+            let world = unsafe { &mut *(world_ptr_audio_get_bus_volume as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(None);
+            };
+            let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
+                return Ok(None);
+            };
+            Ok(Some(audio.0.bus_volume(bus)))
+        })?,
+    )?;
+
+    let world_ptr_audio_set_scene_volume = world_ptr;
+    ecs.set(
+        "set_audio_scene_volume",
+        lua.create_function(move |_, (scene_id, volume): (u64, f32)| {
+            let world = unsafe { &mut *(world_ptr_audio_set_scene_volume as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.set_scene_volume(scene_id, volume.max(0.0));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_get_scene_volume = world_ptr;
+    ecs.set(
+        "get_audio_scene_volume",
+        lua.create_function(move |_, scene_id: u64| {
+            let world = unsafe { &mut *(world_ptr_audio_get_scene_volume as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(None);
+            };
+            Ok(Some(audio.0.scene_volume(scene_id)))
+        })?,
+    )?;
+
+    let world_ptr_audio_clear = world_ptr;
+    ecs.set(
+        "clear_audio_emitters",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_clear as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.clear_emitters();
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_set_head_width = world_ptr;
+    ecs.set(
+        "set_audio_head_width",
+        lua.create_function(move |_, width: f32| {
+            let world = unsafe { &mut *(world_ptr_audio_set_head_width as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.set_head_width(width);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_get_head_width = world_ptr;
+    ecs.set(
+        "get_audio_head_width",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_get_head_width as *mut World) };
+            Ok(world
+                .get_resource::<AudioBackendResource>()
+                .map(|audio| audio.0.head_width()))
+        })?,
+    )?;
+
+    let world_ptr_audio_set_speed = world_ptr;
+    ecs.set(
+        "set_audio_speed_of_sound",
+        lua.create_function(move |_, speed: f32| {
+            let world = unsafe { &mut *(world_ptr_audio_set_speed as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.set_speed_of_sound(speed);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_get_speed = world_ptr;
+    ecs.set(
+        "get_audio_speed_of_sound",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_get_speed as *mut World) };
+            Ok(world
+                .get_resource::<AudioBackendResource>()
+                .map(|audio| audio.0.speed_of_sound()))
+        })?,
+    )?;
+
+    let world_ptr_audio_set_streaming = world_ptr;
+    ecs.set(
+        "set_audio_streaming_config",
+        lua.create_function(move |_, (buffer_frames, chunk_frames): (usize, usize)| {
+            let world = unsafe { &mut *(world_ptr_audio_set_streaming as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(false);
+            };
+            audio.0.set_streaming_config(buffer_frames, chunk_frames);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_audio_get_streaming = world_ptr;
+    ecs.set(
+        "get_audio_streaming_config",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_audio_get_streaming as *mut World) };
+            let Some(audio) = world.get_resource::<AudioBackendResource>() else {
+                return Ok(None);
+            };
+            let (buffer_frames, chunk_frames) = audio.0.streaming_config();
+            let table = lua.create_table()?;
+            table.set("buffer_frames", buffer_frames as u64)?;
+            table.set("chunk_frames", chunk_frames as u64)?;
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_get_physics = world_ptr;
+    ecs.set(
+        "get_physics",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_physics as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            if !has_physics_component(world, entity) {
+                return Ok(None);
+            }
+            Ok(Some(physics_entity_to_table(lua, world, entity)?))
+        })?,
+    )?;
+
+    let world_ptr_set_physics = world_ptr;
+    ecs.set(
+        "set_physics",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_physics as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            ensure_transform(world, entity);
+            apply_physics_patch(world, entity, &data);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_clear_physics = world_ptr;
+    ecs.set(
+        "clear_physics",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_clear_physics as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            remove_all_physics_components(world, entity);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_physics_world_defaults = world_ptr;
+    ecs.set(
+        "get_physics_world_defaults",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_physics_world_defaults as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(defaults) = world.get::<PhysicsWorldDefaults>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(physics_world_defaults_to_table(lua, defaults)?))
+        })?,
+    )?;
+
+    let world_ptr_set_physics_world_defaults = world_ptr;
+    ecs.set(
+        "set_physics_world_defaults",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_physics_world_defaults as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let mut defaults = world
+                .get::<PhysicsWorldDefaults>(entity)
+                .copied()
+                .unwrap_or_default();
+            patch_physics_world_defaults(&mut defaults, &data);
+            world.entity_mut(entity).insert(defaults);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_character_output = world_ptr;
+    ecs.set(
+        "get_character_controller_output",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_output as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(character_output_to_table(lua, output)?))
+        })?,
+    )?;
+
+    let world_ptr_get_ray_hit = world_ptr;
+    ecs.set(
+        "get_physics_ray_cast_hit",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_ray_hit as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(hit) = world.get::<PhysicsRayCastHit>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(ray_cast_hit_to_table(lua, hit)?))
+        })?,
+    )?;
+
+    let world_ptr_get_point_hit = world_ptr;
+    ecs.set(
+        "get_physics_point_projection_hit",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_point_hit as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(hit) = world.get::<PhysicsPointProjectionHit>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(point_projection_hit_to_table(lua, hit)?))
+        })?,
+    )?;
+
+    let world_ptr_get_shape_hit = world_ptr;
+    ecs.set(
+        "get_physics_shape_cast_hit",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_shape_hit as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(hit) = world.get::<PhysicsShapeCastHit>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(shape_cast_hit_to_table(lua, hit)?))
+        })?,
+    )?;
+
+    let world_ptr_get_velocity = world_ptr;
+    ecs.set(
+        "get_physics_velocity",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_velocity as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(table) = physics_velocity_to_table(lua, world, entity)? else {
+                return Ok(None);
+            };
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_set_velocity = world_ptr;
+    ecs.set(
+        "set_physics_velocity",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_velocity as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            Ok(set_physics_velocity(world, entity, &data))
+        })?,
+    )?;
+
+    let world_ptr_set_phys_running = world_ptr;
+    ecs.set(
+        "set_physics_running",
+        lua.create_function(move |_, running: bool| {
+            let world = unsafe { &mut *(world_ptr_set_phys_running as *mut World) };
+            let Some(mut phys) = world.get_resource_mut::<PhysicsResource>() else {
+                return Ok(false);
+            };
+            phys.running = running;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_phys_running = world_ptr;
+    ecs.set(
+        "get_physics_running",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_get_phys_running as *mut World) };
+            Ok(world
+                .get_resource::<PhysicsResource>()
+                .map(|phys| phys.running)
+                .unwrap_or(false))
+        })?,
+    )?;
+
+    let world_ptr_set_phys_gravity = world_ptr;
+    ecs.set(
+        "set_physics_gravity",
+        lua.create_function(move |_, gravity: Table| {
+            let world = unsafe { &mut *(world_ptr_set_phys_gravity as *mut World) };
+            let Some(gravity) = table_to_vec3(&gravity) else {
+                return Ok(false);
+            };
+            let Some(mut phys) = world.get_resource_mut::<PhysicsResource>() else {
+                return Ok(false);
+            };
+            phys.gravity = gravity;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_phys_gravity = world_ptr;
+    ecs.set(
+        "get_physics_gravity",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_phys_gravity as *mut World) };
+            let Some(phys) = world.get_resource::<PhysicsResource>() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, phys.gravity)?))
+        })?,
+    )?;
+
     Ok(ecs)
+}
+
+fn has_physics_component(world: &World, entity: Entity) -> bool {
+    world.get::<ColliderShape>(entity).is_some()
+        || world.get::<DynamicRigidBody>(entity).is_some()
+        || world.get::<KinematicRigidBody>(entity).is_some()
+        || world.get::<FixedCollider>(entity).is_some()
+        || world.get::<ColliderProperties>(entity).is_some()
+        || world.get::<ColliderPropertyInheritance>(entity).is_some()
+        || world.get::<RigidBodyProperties>(entity).is_some()
+        || world.get::<RigidBodyPropertyInheritance>(entity).is_some()
+        || world.get::<PhysicsJoint>(entity).is_some()
+        || world.get::<CharacterController>(entity).is_some()
+        || world.get::<CharacterControllerInput>(entity).is_some()
+        || world.get::<CharacterControllerOutput>(entity).is_some()
+        || world.get::<PhysicsRayCast>(entity).is_some()
+        || world.get::<PhysicsRayCastHit>(entity).is_some()
+        || world.get::<PhysicsPointProjection>(entity).is_some()
+        || world.get::<PhysicsPointProjectionHit>(entity).is_some()
+        || world.get::<PhysicsShapeCast>(entity).is_some()
+        || world.get::<PhysicsShapeCastHit>(entity).is_some()
+        || world.get::<PhysicsWorldDefaults>(entity).is_some()
+}
+
+fn set_physics_body_kind(world: &mut World, entity: Entity, body_kind: PhysicsBodyKind) {
+    world.entity_mut(entity).remove::<DynamicRigidBody>();
+    world.entity_mut(entity).remove::<KinematicRigidBody>();
+    world.entity_mut(entity).remove::<FixedCollider>();
+    world.entity_mut(entity).remove::<PhysicsHandle>();
+
+    match body_kind {
+        PhysicsBodyKind::Dynamic { mass } => {
+            world.entity_mut(entity).insert(DynamicRigidBody {
+                mass: mass.max(0.0),
+            });
+        }
+        PhysicsBodyKind::Kinematic { mode } => {
+            world.entity_mut(entity).insert(KinematicRigidBody { mode });
+        }
+        PhysicsBodyKind::Fixed => {
+            world.entity_mut(entity).insert(FixedCollider);
+        }
+    }
+}
+
+fn remove_all_physics_components(world: &mut World, entity: Entity) {
+    world.entity_mut(entity).remove::<ColliderShape>();
+    world.entity_mut(entity).remove::<DynamicRigidBody>();
+    world.entity_mut(entity).remove::<KinematicRigidBody>();
+    world.entity_mut(entity).remove::<FixedCollider>();
+    world.entity_mut(entity).remove::<ColliderProperties>();
+    world
+        .entity_mut(entity)
+        .remove::<ColliderPropertyInheritance>();
+    world.entity_mut(entity).remove::<RigidBodyProperties>();
+    world
+        .entity_mut(entity)
+        .remove::<RigidBodyPropertyInheritance>();
+    world.entity_mut(entity).remove::<PhysicsJoint>();
+    world.entity_mut(entity).remove::<CharacterController>();
+    world
+        .entity_mut(entity)
+        .remove::<CharacterControllerInput>();
+    world
+        .entity_mut(entity)
+        .remove::<CharacterControllerOutput>();
+    world.entity_mut(entity).remove::<PhysicsRayCast>();
+    world.entity_mut(entity).remove::<PhysicsRayCastHit>();
+    world.entity_mut(entity).remove::<PhysicsPointProjection>();
+    world
+        .entity_mut(entity)
+        .remove::<PhysicsPointProjectionHit>();
+    world.entity_mut(entity).remove::<PhysicsShapeCast>();
+    world.entity_mut(entity).remove::<PhysicsShapeCastHit>();
+    world.entity_mut(entity).remove::<PhysicsWorldDefaults>();
+    world.entity_mut(entity).remove::<PhysicsHandle>();
+}
+
+fn audio_bus_to_lua(lua: &Lua, bus: AudioBus) -> mlua::Result<Value> {
+    match bus {
+        AudioBus::Master => Ok(Value::String(lua.create_string("Master")?)),
+        AudioBus::Music => Ok(Value::String(lua.create_string("Music")?)),
+        AudioBus::Sfx => Ok(Value::String(lua.create_string("Sfx")?)),
+        AudioBus::Ui => Ok(Value::String(lua.create_string("Ui")?)),
+        AudioBus::Ambience => Ok(Value::String(lua.create_string("Ambience")?)),
+        AudioBus::World => Ok(Value::String(lua.create_string("World")?)),
+        AudioBus::Custom(id) => Ok(Value::Integer(id as i64)),
+    }
+}
+
+fn audio_bus_from_value(value: Value, backend: Option<&AudioBackendResource>) -> Option<AudioBus> {
+    match value {
+        Value::Integer(id) => {
+            if id > 0 {
+                Some(AudioBus::Custom(id as u32))
+            } else {
+                None
+            }
+        }
+        Value::Number(id) => {
+            if id > 0.0 {
+                Some(AudioBus::Custom(id as u32))
+            } else {
+                None
+            }
+        }
+        Value::String(raw) => {
+            let raw = raw.to_string_lossy().to_string();
+            let normalized = normalize_name(&raw);
+            let direct = match normalized.as_str() {
+                "master" => Some(AudioBus::Master),
+                "music" => Some(AudioBus::Music),
+                "sfx" => Some(AudioBus::Sfx),
+                "ui" => Some(AudioBus::Ui),
+                "ambience" | "ambient" => Some(AudioBus::Ambience),
+                "world" => Some(AudioBus::World),
+                _ => None,
+            };
+            if direct.is_some() {
+                return direct;
+            }
+            if let Some(custom) = normalized.strip_prefix("custom") {
+                if let Ok(id) = custom.parse::<u32>() {
+                    if id > 0 {
+                        return Some(AudioBus::Custom(id));
+                    }
+                }
+            }
+            if let Some(audio) = backend {
+                let candidate = normalize_name(&raw);
+                for bus in audio.0.bus_list() {
+                    let name = audio.0.bus_name(bus);
+                    if normalize_name(&name) == candidate {
+                        return Some(bus);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn audio_playback_state_name(state: AudioPlaybackState) -> &'static str {
+    match state {
+        AudioPlaybackState::Playing => "Playing",
+        AudioPlaybackState::Paused => "Paused",
+        AudioPlaybackState::Stopped => "Stopped",
+    }
+}
+
+fn audio_playback_state_from_value(value: Value) -> Option<AudioPlaybackState> {
+    match value {
+        Value::Integer(value) => match value {
+            0 => Some(AudioPlaybackState::Playing),
+            1 => Some(AudioPlaybackState::Paused),
+            2 => Some(AudioPlaybackState::Stopped),
+            _ => None,
+        },
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "playing" | "play" => Some(AudioPlaybackState::Playing),
+                "paused" | "pause" => Some(AudioPlaybackState::Paused),
+                "stopped" | "stop" => Some(AudioPlaybackState::Stopped),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn apply_audio_emitter_asset(
+    world: &mut World,
+    project: Option<&EditorProject>,
+    emitter: &mut AudioEmitter,
+    editor_audio: &EditorAudio,
+) -> bool {
+    let Some(path) = editor_audio.path.as_ref() else {
+        emitter.clip_id = None;
+        return true;
+    };
+
+    let resolved = resolve_project_path(project, Path::new(path));
+    let mut loaded_id = None;
+    world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
+        let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+            return;
+        };
+        let handle =
+            cached_audio_handle(&mut cache, asset_server, &resolved, editor_audio.streaming);
+        loaded_id = Some(handle.id);
+    });
+    emitter.clip_id = loaded_id;
+    loaded_id.is_some()
+}
+
+fn combine_rule_name(rule: PhysicsCombineRule) -> &'static str {
+    match rule {
+        PhysicsCombineRule::Average => "Average",
+        PhysicsCombineRule::Min => "Min",
+        PhysicsCombineRule::Multiply => "Multiply",
+        PhysicsCombineRule::Max => "Max",
+    }
+}
+
+fn combine_rule_from_value(value: Value) -> Option<PhysicsCombineRule> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "average" => Some(PhysicsCombineRule::Average),
+                "min" | "minimum" => Some(PhysicsCombineRule::Min),
+                "multiply" | "mul" => Some(PhysicsCombineRule::Multiply),
+                "max" | "maximum" => Some(PhysicsCombineRule::Max),
+                _ => None,
+            }
+        }
+        Value::Integer(value) => match value {
+            0 => Some(PhysicsCombineRule::Average),
+            1 => Some(PhysicsCombineRule::Min),
+            2 => Some(PhysicsCombineRule::Multiply),
+            3 => Some(PhysicsCombineRule::Max),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn kinematic_mode_name(mode: KinematicMode) -> &'static str {
+    match mode {
+        KinematicMode::PositionBased => "PositionBased",
+        KinematicMode::VelocityBased => "VelocityBased",
+    }
+}
+
+fn kinematic_mode_from_value(value: Value) -> Option<KinematicMode> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "positionbased" | "position" => Some(KinematicMode::PositionBased),
+                "velocitybased" | "velocity" => Some(KinematicMode::VelocityBased),
+                _ => None,
+            }
+        }
+        Value::Integer(value) => match value {
+            0 => Some(KinematicMode::PositionBased),
+            1 => Some(KinematicMode::VelocityBased),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn joint_kind_name(kind: PhysicsJointKind) -> &'static str {
+    match kind {
+        PhysicsJointKind::Fixed => "Fixed",
+        PhysicsJointKind::Spherical => "Spherical",
+        PhysicsJointKind::Revolute => "Revolute",
+        PhysicsJointKind::Prismatic => "Prismatic",
+    }
+}
+
+fn joint_kind_from_value(value: Value) -> Option<PhysicsJointKind> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "fixed" => Some(PhysicsJointKind::Fixed),
+                "spherical" => Some(PhysicsJointKind::Spherical),
+                "revolute" => Some(PhysicsJointKind::Revolute),
+                "prismatic" => Some(PhysicsJointKind::Prismatic),
+                _ => None,
+            }
+        }
+        Value::Integer(value) => match value {
+            0 => Some(PhysicsJointKind::Fixed),
+            1 => Some(PhysicsJointKind::Spherical),
+            2 => Some(PhysicsJointKind::Revolute),
+            3 => Some(PhysicsJointKind::Prismatic),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn mesh_collider_lod_to_lua(lua: &Lua, lod: MeshColliderLod) -> mlua::Result<Value> {
+    match lod {
+        MeshColliderLod::Lod0 => Ok(Value::String(lua.create_string("Lod0")?)),
+        MeshColliderLod::Lod1 => Ok(Value::String(lua.create_string("Lod1")?)),
+        MeshColliderLod::Lod2 => Ok(Value::String(lua.create_string("Lod2")?)),
+        MeshColliderLod::Lowest => Ok(Value::String(lua.create_string("Lowest")?)),
+        MeshColliderLod::Specific(index) => Ok(Value::Integer(index as i64)),
+    }
+}
+
+fn mesh_collider_lod_from_value(value: Value) -> Option<MeshColliderLod> {
+    match value {
+        Value::Integer(index) => {
+            if index >= 0 && index <= u8::MAX as i64 {
+                Some(MeshColliderLod::Specific(index as u8))
+            } else {
+                None
+            }
+        }
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "lod0" => Some(MeshColliderLod::Lod0),
+                "lod1" => Some(MeshColliderLod::Lod1),
+                "lod2" => Some(MeshColliderLod::Lod2),
+                "lowest" => Some(MeshColliderLod::Lowest),
+                _ => {
+                    if let Some(rest) = normalized.strip_prefix("lod") {
+                        if let Ok(index) = rest.parse::<u8>() {
+                            return Some(MeshColliderLod::Specific(index));
+                        }
+                    }
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn mesh_collider_kind_name(kind: MeshColliderKind) -> &'static str {
+    match kind {
+        MeshColliderKind::TriMesh => "TriMesh",
+        MeshColliderKind::ConvexHull => "ConvexHull",
+    }
+}
+
+fn mesh_collider_kind_from_value(value: Value) -> Option<MeshColliderKind> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "trimesh" | "mesh" => Some(MeshColliderKind::TriMesh),
+                "convexhull" | "convex" => Some(MeshColliderKind::ConvexHull),
+                _ => None,
+            }
+        }
+        Value::Integer(value) => match value {
+            0 => Some(MeshColliderKind::TriMesh),
+            1 => Some(MeshColliderKind::ConvexHull),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn shape_cast_status_name(status: PhysicsShapeCastStatus) -> &'static str {
+    match status {
+        PhysicsShapeCastStatus::NoHit => "NoHit",
+        PhysicsShapeCastStatus::Converged => "Converged",
+        PhysicsShapeCastStatus::OutOfIterations => "OutOfIterations",
+        PhysicsShapeCastStatus::Failed => "Failed",
+        PhysicsShapeCastStatus::PenetratingOrWithinTargetDist => "PenetratingOrWithinTargetDist",
+    }
+}
+
+fn lookup_editor_entity_ref(world: &World, entity_id: u64) -> Option<Entity> {
+    let entity = Entity::from_bits(entity_id);
+    if world.get_entity(entity).is_err() {
+        return None;
+    }
+    if world.get::<EditorEntity>(entity).is_none() {
+        return None;
+    }
+    Some(entity)
+}
+
+fn physics_body_kind_from_world(world: &World, entity: Entity) -> Option<PhysicsBodyKind> {
+    if let Some(body) = world.get::<DynamicRigidBody>(entity) {
+        return Some(PhysicsBodyKind::Dynamic { mass: body.mass });
+    }
+    if let Some(body) = world.get::<KinematicRigidBody>(entity) {
+        return Some(PhysicsBodyKind::Kinematic { mode: body.mode });
+    }
+    if world.get::<FixedCollider>(entity).is_some() {
+        return Some(PhysicsBodyKind::Fixed);
+    }
+    None
+}
+
+fn physics_body_kind_to_table(lua: &Lua, kind: PhysicsBodyKind) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    match kind {
+        PhysicsBodyKind::Dynamic { mass } => {
+            table.set("type", "Dynamic")?;
+            table.set("mass", mass)?;
+        }
+        PhysicsBodyKind::Kinematic { mode } => {
+            table.set("type", "Kinematic")?;
+            table.set("mode", kinematic_mode_name(mode))?;
+        }
+        PhysicsBodyKind::Fixed => {
+            table.set("type", "Fixed")?;
+        }
+    }
+    Ok(table)
+}
+
+fn physics_body_kind_from_value(value: Value) -> Option<PhysicsBodyKind> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "dynamic" => Some(PhysicsBodyKind::Dynamic { mass: 1.0 }),
+                "kinematic" => Some(PhysicsBodyKind::Kinematic {
+                    mode: KinematicMode::default(),
+                }),
+                "fixed" => Some(PhysicsBodyKind::Fixed),
+                _ => None,
+            }
+        }
+        Value::Table(table) => {
+            let kind = table
+                .get::<String>("type")
+                .ok()
+                .or_else(|| table.get::<String>("kind").ok())
+                .map(|kind| normalize_name(&kind));
+            match kind.as_deref() {
+                Some("dynamic") => {
+                    let mass = table.get::<f32>("mass").unwrap_or(1.0);
+                    Some(PhysicsBodyKind::Dynamic {
+                        mass: mass.max(0.0),
+                    })
+                }
+                Some("kinematic") => {
+                    let mode = table
+                        .get::<Value>("mode")
+                        .ok()
+                        .and_then(kinematic_mode_from_value)
+                        .unwrap_or_default();
+                    Some(PhysicsBodyKind::Kinematic { mode })
+                }
+                Some("fixed") => Some(PhysicsBodyKind::Fixed),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn collider_shape_to_table(lua: &Lua, shape: ColliderShape) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    match shape {
+        ColliderShape::Cuboid => {
+            table.set("type", "Cuboid")?;
+        }
+        ColliderShape::Sphere => {
+            table.set("type", "Sphere")?;
+        }
+        ColliderShape::CapsuleY => {
+            table.set("type", "CapsuleY")?;
+        }
+        ColliderShape::CylinderY => {
+            table.set("type", "CylinderY")?;
+        }
+        ColliderShape::ConeY => {
+            table.set("type", "ConeY")?;
+        }
+        ColliderShape::RoundCuboid { border_radius } => {
+            table.set("type", "RoundCuboid")?;
+            table.set("border_radius", border_radius)?;
+        }
+        ColliderShape::Mesh { mesh_id, lod, kind } => {
+            table.set("type", "Mesh")?;
+            if let Some(mesh_id) = mesh_id {
+                table.set("mesh_id", mesh_id as u64)?;
+            } else {
+                table.set("mesh_id", Value::Nil)?;
+            }
+            table.set("lod", mesh_collider_lod_to_lua(lua, lod)?)?;
+            table.set("kind", mesh_collider_kind_name(kind))?;
+        }
+    }
+    Ok(table)
+}
+
+fn collider_shape_from_value(
+    value: Value,
+    current: Option<ColliderShape>,
+) -> Option<ColliderShape> {
+    match value {
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "cuboid" | "box" => Some(ColliderShape::Cuboid),
+                "sphere" | "ball" => Some(ColliderShape::Sphere),
+                "capsuley" | "capsule" => Some(ColliderShape::CapsuleY),
+                "cylindery" | "cylinder" => Some(ColliderShape::CylinderY),
+                "coney" | "cone" => Some(ColliderShape::ConeY),
+                "roundcuboid" => Some(ColliderShape::RoundCuboid {
+                    border_radius: 0.05,
+                }),
+                "mesh" => Some(ColliderShape::Mesh {
+                    mesh_id: None,
+                    lod: MeshColliderLod::Lod0,
+                    kind: MeshColliderKind::TriMesh,
+                }),
+                _ => None,
+            }
+        }
+        Value::Table(table) => {
+            let kind = table
+                .get::<String>("type")
+                .ok()
+                .or_else(|| table.get::<String>("shape").ok())
+                .map(|value| normalize_name(&value));
+            match kind.as_deref() {
+                Some("cuboid") | Some("box") => Some(ColliderShape::Cuboid),
+                Some("sphere") | Some("ball") => Some(ColliderShape::Sphere),
+                Some("capsuley") | Some("capsule") => Some(ColliderShape::CapsuleY),
+                Some("cylindery") | Some("cylinder") => Some(ColliderShape::CylinderY),
+                Some("coney") | Some("cone") => Some(ColliderShape::ConeY),
+                Some("roundcuboid") => {
+                    let current_radius = match current {
+                        Some(ColliderShape::RoundCuboid { border_radius }) => border_radius,
+                        _ => 0.05,
+                    };
+                    let border_radius = table.get::<f32>("border_radius").unwrap_or(current_radius);
+                    Some(ColliderShape::RoundCuboid {
+                        border_radius: border_radius.max(0.0),
+                    })
+                }
+                Some("mesh") => {
+                    let (mesh_id, lod, mesh_kind) = match current {
+                        Some(ColliderShape::Mesh { mesh_id, lod, kind }) => (mesh_id, lod, kind),
+                        _ => (None, MeshColliderLod::Lod0, MeshColliderKind::TriMesh),
+                    };
+                    let parsed_mesh_id = match table.get::<Value>("mesh_id") {
+                        Ok(Value::Integer(id)) => {
+                            if id >= 0 {
+                                Some(id as usize)
+                            } else {
+                                None
+                            }
+                        }
+                        Ok(Value::Number(id)) => {
+                            if id >= 0.0 {
+                                Some(id as usize)
+                            } else {
+                                None
+                            }
+                        }
+                        Ok(Value::Nil) => None,
+                        _ => mesh_id,
+                    };
+                    let parsed_lod = table
+                        .get::<Value>("lod")
+                        .ok()
+                        .and_then(mesh_collider_lod_from_value)
+                        .unwrap_or(lod);
+                    let parsed_kind = table
+                        .get::<Value>("kind")
+                        .ok()
+                        .and_then(mesh_collider_kind_from_value)
+                        .unwrap_or(mesh_kind);
+                    Some(ColliderShape::Mesh {
+                        mesh_id: parsed_mesh_id,
+                        lod: parsed_lod,
+                        kind: parsed_kind,
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn query_filter_to_table(lua: &Lua, filter: PhysicsQueryFilter) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("flags", filter.flags)?;
+    table.set("groups_memberships", filter.groups_memberships)?;
+    table.set("groups_filter", filter.groups_filter)?;
+    table.set("use_groups", filter.use_groups)?;
+    table.set("exclude_fixed_flag", PhysicsQueryFilter::EXCLUDE_FIXED)?;
+    table.set(
+        "exclude_kinematic_flag",
+        PhysicsQueryFilter::EXCLUDE_KINEMATIC,
+    )?;
+    table.set("exclude_dynamic_flag", PhysicsQueryFilter::EXCLUDE_DYNAMIC)?;
+    table.set("exclude_sensors_flag", PhysicsQueryFilter::EXCLUDE_SENSORS)?;
+    table.set("exclude_solids_flag", PhysicsQueryFilter::EXCLUDE_SOLIDS)?;
+    Ok(table)
+}
+
+fn patch_query_filter(filter: &mut PhysicsQueryFilter, data: &Table) {
+    if let Ok(flags) = data.get::<u32>("flags") {
+        filter.flags = flags;
+    }
+    if let Ok(value) = data.get::<u32>("groups_memberships") {
+        filter.groups_memberships = value;
+    }
+    if let Ok(value) = data.get::<u32>("groups_filter") {
+        filter.groups_filter = value;
+    }
+    if let Ok(value) = data.get::<bool>("use_groups") {
+        filter.use_groups = value;
+    }
+}
+
+fn collider_properties_to_table(lua: &Lua, props: ColliderProperties) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("friction", props.friction)?;
+    table.set("restitution", props.restitution)?;
+    table.set("density", props.density)?;
+    table.set("is_sensor", props.is_sensor)?;
+    table.set("enabled", props.enabled)?;
+    table.set("collision_memberships", props.collision_memberships)?;
+    table.set("collision_filter", props.collision_filter)?;
+    table.set("solver_memberships", props.solver_memberships)?;
+    table.set("solver_filter", props.solver_filter)?;
+    table.set(
+        "friction_combine_rule",
+        combine_rule_name(props.friction_combine_rule),
+    )?;
+    table.set(
+        "restitution_combine_rule",
+        combine_rule_name(props.restitution_combine_rule),
+    )?;
+    table.set(
+        "translation_offset",
+        vec3_to_table(lua, props.translation_offset)?,
+    )?;
+    table.set(
+        "rotation_offset",
+        quat_to_table(lua, props.rotation_offset)?,
+    )?;
+    Ok(table)
+}
+
+fn patch_collider_properties(props: &mut ColliderProperties, data: &Table) {
+    if let Ok(value) = data.get::<f32>("friction") {
+        props.friction = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("restitution") {
+        props.restitution = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("density") {
+        props.density = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("is_sensor") {
+        props.is_sensor = value;
+    }
+    if let Ok(value) = data.get::<bool>("enabled") {
+        props.enabled = value;
+    }
+    if let Ok(value) = data.get::<u32>("collision_memberships") {
+        props.collision_memberships = value;
+    }
+    if let Ok(value) = data.get::<u32>("collision_filter") {
+        props.collision_filter = value;
+    }
+    if let Ok(value) = data.get::<u32>("solver_memberships") {
+        props.solver_memberships = value;
+    }
+    if let Ok(value) = data.get::<u32>("solver_filter") {
+        props.solver_filter = value;
+    }
+    if let Ok(value) = data.get::<Value>("friction_combine_rule") {
+        if let Some(rule) = combine_rule_from_value(value) {
+            props.friction_combine_rule = rule;
+        }
+    }
+    if let Ok(value) = data.get::<Value>("restitution_combine_rule") {
+        if let Some(rule) = combine_rule_from_value(value) {
+            props.restitution_combine_rule = rule;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("translation_offset") {
+        if let Some(offset) = table_to_vec3(&value) {
+            props.translation_offset = offset;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("rotation_offset") {
+        if let Some(offset) = table_to_quat(&value) {
+            props.rotation_offset = offset;
+        }
+    }
+}
+
+fn collider_inheritance_to_table(
+    lua: &Lua,
+    inheritance: ColliderPropertyInheritance,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("friction", inheritance.friction)?;
+    table.set("restitution", inheritance.restitution)?;
+    table.set("density", inheritance.density)?;
+    table.set("is_sensor", inheritance.is_sensor)?;
+    table.set("enabled", inheritance.enabled)?;
+    table.set("collision_memberships", inheritance.collision_memberships)?;
+    table.set("collision_filter", inheritance.collision_filter)?;
+    table.set("solver_memberships", inheritance.solver_memberships)?;
+    table.set("solver_filter", inheritance.solver_filter)?;
+    table.set("friction_combine_rule", inheritance.friction_combine_rule)?;
+    table.set(
+        "restitution_combine_rule",
+        inheritance.restitution_combine_rule,
+    )?;
+    table.set("translation_offset", inheritance.translation_offset)?;
+    table.set("rotation_offset", inheritance.rotation_offset)?;
+    Ok(table)
+}
+
+fn patch_collider_inheritance(inheritance: &mut ColliderPropertyInheritance, data: &Table) {
+    if let Ok(value) = data.get::<bool>("friction") {
+        inheritance.friction = value;
+    }
+    if let Ok(value) = data.get::<bool>("restitution") {
+        inheritance.restitution = value;
+    }
+    if let Ok(value) = data.get::<bool>("density") {
+        inheritance.density = value;
+    }
+    if let Ok(value) = data.get::<bool>("is_sensor") {
+        inheritance.is_sensor = value;
+    }
+    if let Ok(value) = data.get::<bool>("enabled") {
+        inheritance.enabled = value;
+    }
+    if let Ok(value) = data.get::<bool>("collision_memberships") {
+        inheritance.collision_memberships = value;
+    }
+    if let Ok(value) = data.get::<bool>("collision_filter") {
+        inheritance.collision_filter = value;
+    }
+    if let Ok(value) = data.get::<bool>("solver_memberships") {
+        inheritance.solver_memberships = value;
+    }
+    if let Ok(value) = data.get::<bool>("solver_filter") {
+        inheritance.solver_filter = value;
+    }
+    if let Ok(value) = data.get::<bool>("friction_combine_rule") {
+        inheritance.friction_combine_rule = value;
+    }
+    if let Ok(value) = data.get::<bool>("restitution_combine_rule") {
+        inheritance.restitution_combine_rule = value;
+    }
+    if let Ok(value) = data.get::<bool>("translation_offset") {
+        inheritance.translation_offset = value;
+    }
+    if let Ok(value) = data.get::<bool>("rotation_offset") {
+        inheritance.rotation_offset = value;
+    }
+}
+
+fn rigid_body_properties_to_table(lua: &Lua, props: RigidBodyProperties) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("linear_damping", props.linear_damping)?;
+    table.set("angular_damping", props.angular_damping)?;
+    table.set("gravity_scale", props.gravity_scale)?;
+    table.set("ccd_enabled", props.ccd_enabled)?;
+    table.set("can_sleep", props.can_sleep)?;
+    table.set("sleeping", props.sleeping)?;
+    table.set("dominance_group", props.dominance_group as i64)?;
+    table.set("lock_translation_x", props.lock_translation_x)?;
+    table.set("lock_translation_y", props.lock_translation_y)?;
+    table.set("lock_translation_z", props.lock_translation_z)?;
+    table.set("lock_rotation_x", props.lock_rotation_x)?;
+    table.set("lock_rotation_y", props.lock_rotation_y)?;
+    table.set("lock_rotation_z", props.lock_rotation_z)?;
+    table.set(
+        "linear_velocity",
+        vec3_to_table(lua, props.linear_velocity)?,
+    )?;
+    table.set(
+        "angular_velocity",
+        vec3_to_table(lua, props.angular_velocity)?,
+    )?;
+    Ok(table)
+}
+
+fn patch_rigid_body_properties(props: &mut RigidBodyProperties, data: &Table) {
+    if let Ok(value) = data.get::<f32>("linear_damping") {
+        props.linear_damping = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("angular_damping") {
+        props.angular_damping = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("gravity_scale") {
+        props.gravity_scale = value;
+    }
+    if let Ok(value) = data.get::<bool>("ccd_enabled") {
+        props.ccd_enabled = value;
+    }
+    if let Ok(value) = data.get::<bool>("can_sleep") {
+        props.can_sleep = value;
+    }
+    if let Ok(value) = data.get::<bool>("sleeping") {
+        props.sleeping = value;
+    }
+    if let Ok(value) = data.get::<i64>("dominance_group") {
+        props.dominance_group = value.clamp(i8::MIN as i64, i8::MAX as i64) as i8;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_x") {
+        props.lock_translation_x = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_y") {
+        props.lock_translation_y = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_z") {
+        props.lock_translation_z = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_x") {
+        props.lock_rotation_x = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_y") {
+        props.lock_rotation_y = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_z") {
+        props.lock_rotation_z = value;
+    }
+    if let Ok(value) = data.get::<Table>("linear_velocity") {
+        if let Some(velocity) = table_to_vec3(&value) {
+            props.linear_velocity = velocity;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("angular_velocity") {
+        if let Some(velocity) = table_to_vec3(&value) {
+            props.angular_velocity = velocity;
+        }
+    }
+}
+
+fn rigid_body_inheritance_to_table(
+    lua: &Lua,
+    inheritance: RigidBodyPropertyInheritance,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("linear_damping", inheritance.linear_damping)?;
+    table.set("angular_damping", inheritance.angular_damping)?;
+    table.set("gravity_scale", inheritance.gravity_scale)?;
+    table.set("ccd_enabled", inheritance.ccd_enabled)?;
+    table.set("can_sleep", inheritance.can_sleep)?;
+    table.set("sleeping", inheritance.sleeping)?;
+    table.set("dominance_group", inheritance.dominance_group)?;
+    table.set("lock_translation_x", inheritance.lock_translation_x)?;
+    table.set("lock_translation_y", inheritance.lock_translation_y)?;
+    table.set("lock_translation_z", inheritance.lock_translation_z)?;
+    table.set("lock_rotation_x", inheritance.lock_rotation_x)?;
+    table.set("lock_rotation_y", inheritance.lock_rotation_y)?;
+    table.set("lock_rotation_z", inheritance.lock_rotation_z)?;
+    table.set("linear_velocity", inheritance.linear_velocity)?;
+    table.set("angular_velocity", inheritance.angular_velocity)?;
+    Ok(table)
+}
+
+fn patch_rigid_body_inheritance(inheritance: &mut RigidBodyPropertyInheritance, data: &Table) {
+    if let Ok(value) = data.get::<bool>("linear_damping") {
+        inheritance.linear_damping = value;
+    }
+    if let Ok(value) = data.get::<bool>("angular_damping") {
+        inheritance.angular_damping = value;
+    }
+    if let Ok(value) = data.get::<bool>("gravity_scale") {
+        inheritance.gravity_scale = value;
+    }
+    if let Ok(value) = data.get::<bool>("ccd_enabled") {
+        inheritance.ccd_enabled = value;
+    }
+    if let Ok(value) = data.get::<bool>("can_sleep") {
+        inheritance.can_sleep = value;
+    }
+    if let Ok(value) = data.get::<bool>("sleeping") {
+        inheritance.sleeping = value;
+    }
+    if let Ok(value) = data.get::<bool>("dominance_group") {
+        inheritance.dominance_group = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_x") {
+        inheritance.lock_translation_x = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_y") {
+        inheritance.lock_translation_y = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_translation_z") {
+        inheritance.lock_translation_z = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_x") {
+        inheritance.lock_rotation_x = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_y") {
+        inheritance.lock_rotation_y = value;
+    }
+    if let Ok(value) = data.get::<bool>("lock_rotation_z") {
+        inheritance.lock_rotation_z = value;
+    }
+    if let Ok(value) = data.get::<bool>("linear_velocity") {
+        inheritance.linear_velocity = value;
+    }
+    if let Ok(value) = data.get::<bool>("angular_velocity") {
+        inheritance.angular_velocity = value;
+    }
+}
+
+fn joint_to_table(lua: &Lua, joint: PhysicsJoint) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    match joint.target {
+        Some(target) => table.set("target", target.to_bits())?,
+        None => table.set("target", Value::Nil)?,
+    }
+    table.set("kind", joint_kind_name(joint.kind))?;
+    table.set("contacts_enabled", joint.contacts_enabled)?;
+    table.set("local_anchor1", vec3_to_table(lua, joint.local_anchor1)?)?;
+    table.set("local_anchor2", vec3_to_table(lua, joint.local_anchor2)?)?;
+    table.set("local_axis1", vec3_to_table(lua, joint.local_axis1)?)?;
+    table.set("local_axis2", vec3_to_table(lua, joint.local_axis2)?)?;
+    table.set("limit_enabled", joint.limit_enabled)?;
+
+    let limits = lua.create_table()?;
+    limits.set("min", joint.limits[0])?;
+    limits.set("max", joint.limits[1])?;
+    limits.set(1, joint.limits[0])?;
+    limits.set(2, joint.limits[1])?;
+    table.set("limits", limits)?;
+
+    let motor = lua.create_table()?;
+    motor.set("enabled", joint.motor.enabled)?;
+    motor.set("target_position", joint.motor.target_position)?;
+    motor.set("target_velocity", joint.motor.target_velocity)?;
+    motor.set("stiffness", joint.motor.stiffness)?;
+    motor.set("damping", joint.motor.damping)?;
+    motor.set("max_force", joint.motor.max_force)?;
+    table.set("motor", motor)?;
+    Ok(table)
+}
+
+fn patch_joint(joint: &mut PhysicsJoint, data: &Table, world: &World) {
+    if let Ok(value) = data.get::<Value>("target") {
+        match value {
+            Value::Nil => {
+                joint.target = None;
+            }
+            Value::Integer(id) => {
+                joint.target = lookup_editor_entity_ref(world, id as u64);
+            }
+            Value::Number(id) => {
+                joint.target = lookup_editor_entity_ref(world, id as u64);
+            }
+            _ => {}
+        }
+    }
+    if let Ok(value) = data.get::<Value>("kind") {
+        if let Some(kind) = joint_kind_from_value(value) {
+            joint.kind = kind;
+        }
+    }
+    if let Ok(value) = data.get::<bool>("contacts_enabled") {
+        joint.contacts_enabled = value;
+    }
+    if let Ok(value) = data.get::<Table>("local_anchor1") {
+        if let Some(anchor) = table_to_vec3(&value) {
+            joint.local_anchor1 = anchor;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("local_anchor2") {
+        if let Some(anchor) = table_to_vec3(&value) {
+            joint.local_anchor2 = anchor;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("local_axis1") {
+        if let Some(axis) = table_to_vec3(&value) {
+            joint.local_axis1 = axis;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("local_axis2") {
+        if let Some(axis) = table_to_vec3(&value) {
+            joint.local_axis2 = axis;
+        }
+    }
+    if let Ok(value) = data.get::<bool>("limit_enabled") {
+        joint.limit_enabled = value;
+    }
+    if let Ok(value) = data.get::<Value>("limits") {
+        if let Value::Table(table) = value {
+            if let Ok(min) = table.get::<f32>("min") {
+                joint.limits[0] = min;
+            } else if let Ok(min) = table.get::<f32>(1) {
+                joint.limits[0] = min;
+            }
+            if let Ok(max) = table.get::<f32>("max") {
+                joint.limits[1] = max;
+            } else if let Ok(max) = table.get::<f32>(2) {
+                joint.limits[1] = max;
+            }
+        }
+    }
+    if let Ok(motor) = data.get::<Table>("motor") {
+        if let Ok(value) = motor.get::<bool>("enabled") {
+            joint.motor.enabled = value;
+        }
+        if let Ok(value) = motor.get::<f32>("target_position") {
+            joint.motor.target_position = value;
+        }
+        if let Ok(value) = motor.get::<f32>("target_velocity") {
+            joint.motor.target_velocity = value;
+        }
+        if let Ok(value) = motor.get::<f32>("stiffness") {
+            joint.motor.stiffness = value.max(0.0);
+        }
+        if let Ok(value) = motor.get::<f32>("damping") {
+            joint.motor.damping = value.max(0.0);
+        }
+        if let Ok(value) = motor.get::<f32>("max_force") {
+            joint.motor.max_force = value.max(0.0);
+        }
+    }
+}
+
+fn character_controller_to_table(
+    lua: &Lua,
+    controller: CharacterController,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("up", vec3_to_table(lua, controller.up)?)?;
+    table.set("offset", controller.offset)?;
+    table.set("slide", controller.slide)?;
+    table.set("autostep_max_height", controller.autostep_max_height)?;
+    table.set("autostep_min_width", controller.autostep_min_width)?;
+    table.set(
+        "autostep_include_dynamic_bodies",
+        controller.autostep_include_dynamic_bodies,
+    )?;
+    table.set("max_slope_climb_angle", controller.max_slope_climb_angle)?;
+    table.set("min_slope_slide_angle", controller.min_slope_slide_angle)?;
+    table.set("snap_to_ground", controller.snap_to_ground)?;
+    table.set("normal_nudge_factor", controller.normal_nudge_factor)?;
+    table.set(
+        "apply_impulses_to_dynamic_bodies",
+        controller.apply_impulses_to_dynamic_bodies,
+    )?;
+    table.set("character_mass", controller.character_mass)?;
+    Ok(table)
+}
+
+fn patch_character_controller(controller: &mut CharacterController, data: &Table) {
+    if let Ok(value) = data.get::<Table>("up") {
+        if let Some(up) = table_to_vec3(&value) {
+            controller.up = up;
+        }
+    }
+    if let Ok(value) = data.get::<f32>("offset") {
+        controller.offset = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("slide") {
+        controller.slide = value;
+    }
+    if let Ok(value) = data.get::<f32>("autostep_max_height") {
+        controller.autostep_max_height = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("autostep_min_width") {
+        controller.autostep_min_width = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("autostep_include_dynamic_bodies") {
+        controller.autostep_include_dynamic_bodies = value;
+    }
+    if let Ok(value) = data.get::<f32>("max_slope_climb_angle") {
+        controller.max_slope_climb_angle = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("min_slope_slide_angle") {
+        controller.min_slope_slide_angle = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("snap_to_ground") {
+        controller.snap_to_ground = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("normal_nudge_factor") {
+        controller.normal_nudge_factor = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("apply_impulses_to_dynamic_bodies") {
+        controller.apply_impulses_to_dynamic_bodies = value;
+    }
+    if let Ok(value) = data.get::<f32>("character_mass") {
+        controller.character_mass = value.max(0.0);
+    }
+}
+
+fn character_input_to_table(lua: &Lua, input: CharacterControllerInput) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set(
+        "desired_translation",
+        vec3_to_table(lua, input.desired_translation)?,
+    )?;
+    Ok(table)
+}
+
+fn patch_character_input(input: &mut CharacterControllerInput, data: &Table) {
+    if let Ok(value) = data.get::<Table>("desired_translation") {
+        if let Some(v) = table_to_vec3(&value) {
+            input.desired_translation = v;
+        }
+    }
+}
+
+fn character_output_to_table(lua: &Lua, output: CharacterControllerOutput) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set(
+        "effective_translation",
+        vec3_to_table(lua, output.effective_translation)?,
+    )?;
+    table.set("grounded", output.grounded)?;
+    table.set("sliding_down_slope", output.sliding_down_slope)?;
+    table.set("collision_count", output.collision_count)?;
+    Ok(table)
+}
+
+fn ray_cast_to_table(lua: &Lua, request: PhysicsRayCast) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("origin", vec3_to_table(lua, request.origin)?)?;
+    table.set("direction", vec3_to_table(lua, request.direction)?)?;
+    table.set("max_toi", request.max_toi)?;
+    table.set("solid", request.solid)?;
+    table.set("filter", query_filter_to_table(lua, request.filter)?)?;
+    table.set("exclude_self", request.exclude_self)?;
+    Ok(table)
+}
+
+fn patch_ray_cast(request: &mut PhysicsRayCast, data: &Table) {
+    if let Ok(value) = data.get::<Table>("origin") {
+        if let Some(origin) = table_to_vec3(&value) {
+            request.origin = origin;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("direction") {
+        if let Some(direction) = table_to_vec3(&value) {
+            request.direction = direction;
+        }
+    }
+    if let Ok(value) = data.get::<f32>("max_toi") {
+        request.max_toi = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("solid") {
+        request.solid = value;
+    }
+    if let Ok(filter) = data.get::<Table>("filter") {
+        patch_query_filter(&mut request.filter, &filter);
+    }
+    if let Ok(value) = data.get::<bool>("exclude_self") {
+        request.exclude_self = value;
+    }
+}
+
+fn ray_cast_hit_to_table(lua: &Lua, hit: PhysicsRayCastHit) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("has_hit", hit.has_hit)?;
+    if let Some(entity) = hit.hit_entity {
+        table.set("hit_entity", entity.to_bits())?;
+    } else {
+        table.set("hit_entity", Value::Nil)?;
+    }
+    table.set("point", vec3_to_table(lua, hit.point)?)?;
+    table.set("normal", vec3_to_table(lua, hit.normal)?)?;
+    table.set("toi", hit.toi)?;
+    Ok(table)
+}
+
+fn point_projection_to_table(lua: &Lua, request: PhysicsPointProjection) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("point", vec3_to_table(lua, request.point)?)?;
+    table.set("solid", request.solid)?;
+    table.set("filter", query_filter_to_table(lua, request.filter)?)?;
+    table.set("exclude_self", request.exclude_self)?;
+    Ok(table)
+}
+
+fn patch_point_projection(request: &mut PhysicsPointProjection, data: &Table) {
+    if let Ok(value) = data.get::<Table>("point") {
+        if let Some(point) = table_to_vec3(&value) {
+            request.point = point;
+        }
+    }
+    if let Ok(value) = data.get::<bool>("solid") {
+        request.solid = value;
+    }
+    if let Ok(filter) = data.get::<Table>("filter") {
+        patch_query_filter(&mut request.filter, &filter);
+    }
+    if let Ok(value) = data.get::<bool>("exclude_self") {
+        request.exclude_self = value;
+    }
+}
+
+fn point_projection_hit_to_table(lua: &Lua, hit: PhysicsPointProjectionHit) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("has_hit", hit.has_hit)?;
+    if let Some(entity) = hit.hit_entity {
+        table.set("hit_entity", entity.to_bits())?;
+    } else {
+        table.set("hit_entity", Value::Nil)?;
+    }
+    table.set("projected_point", vec3_to_table(lua, hit.projected_point)?)?;
+    table.set("is_inside", hit.is_inside)?;
+    table.set("distance", hit.distance)?;
+    Ok(table)
+}
+
+fn shape_cast_to_table(lua: &Lua, request: PhysicsShapeCast) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("shape", collider_shape_to_table(lua, request.shape)?)?;
+    table.set("scale", vec3_to_table(lua, request.scale)?)?;
+    table.set("position", vec3_to_table(lua, request.position)?)?;
+    table.set("rotation", quat_to_table(lua, request.rotation)?)?;
+    table.set("velocity", vec3_to_table(lua, request.velocity)?)?;
+    table.set("max_time_of_impact", request.max_time_of_impact)?;
+    table.set("target_distance", request.target_distance)?;
+    table.set("stop_at_penetration", request.stop_at_penetration)?;
+    table.set(
+        "compute_impact_geometry_on_penetration",
+        request.compute_impact_geometry_on_penetration,
+    )?;
+    table.set("filter", query_filter_to_table(lua, request.filter)?)?;
+    table.set("exclude_self", request.exclude_self)?;
+    Ok(table)
+}
+
+fn patch_shape_cast(request: &mut PhysicsShapeCast, data: &Table) {
+    if let Ok(value) = data.get::<Value>("shape") {
+        if let Some(shape) = collider_shape_from_value(value, Some(request.shape)) {
+            request.shape = shape;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("scale") {
+        if let Some(scale) = table_to_vec3(&value) {
+            request.scale = scale;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("position") {
+        if let Some(position) = table_to_vec3(&value) {
+            request.position = position;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("rotation") {
+        if let Some(rotation) = table_to_quat(&value) {
+            request.rotation = rotation;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("velocity") {
+        if let Some(velocity) = table_to_vec3(&value) {
+            request.velocity = velocity;
+        }
+    }
+    if let Ok(value) = data.get::<f32>("max_time_of_impact") {
+        request.max_time_of_impact = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("target_distance") {
+        request.target_distance = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<bool>("stop_at_penetration") {
+        request.stop_at_penetration = value;
+    }
+    if let Ok(value) = data.get::<bool>("compute_impact_geometry_on_penetration") {
+        request.compute_impact_geometry_on_penetration = value;
+    }
+    if let Ok(filter) = data.get::<Table>("filter") {
+        patch_query_filter(&mut request.filter, &filter);
+    }
+    if let Ok(value) = data.get::<bool>("exclude_self") {
+        request.exclude_self = value;
+    }
+}
+
+fn shape_cast_hit_to_table(lua: &Lua, hit: PhysicsShapeCastHit) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("has_hit", hit.has_hit)?;
+    if let Some(entity) = hit.hit_entity {
+        table.set("hit_entity", entity.to_bits())?;
+    } else {
+        table.set("hit_entity", Value::Nil)?;
+    }
+    table.set("toi", hit.toi)?;
+    table.set("witness1", vec3_to_table(lua, hit.witness1)?)?;
+    table.set("witness2", vec3_to_table(lua, hit.witness2)?)?;
+    table.set("normal1", vec3_to_table(lua, hit.normal1)?)?;
+    table.set("normal2", vec3_to_table(lua, hit.normal2)?)?;
+    table.set("status", shape_cast_status_name(hit.status))?;
+    Ok(table)
+}
+
+fn physics_world_defaults_to_table(
+    lua: &Lua,
+    defaults: PhysicsWorldDefaults,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("gravity", vec3_to_table(lua, defaults.gravity)?)?;
+    table.set(
+        "collider_properties",
+        collider_properties_to_table(lua, defaults.collider_properties)?,
+    )?;
+    table.set(
+        "rigid_body_properties",
+        rigid_body_properties_to_table(lua, defaults.rigid_body_properties)?,
+    )?;
+    Ok(table)
+}
+
+fn patch_physics_world_defaults(defaults: &mut PhysicsWorldDefaults, data: &Table) {
+    if let Ok(value) = data.get::<Table>("gravity") {
+        if let Some(gravity) = table_to_vec3(&value) {
+            defaults.gravity = gravity;
+        }
+    }
+    if let Ok(value) = data.get::<Table>("collider_properties") {
+        let mut props = defaults.collider_properties;
+        patch_collider_properties(&mut props, &value);
+        defaults.collider_properties = props;
+    }
+    if let Ok(value) = data.get::<Table>("rigid_body_properties") {
+        let mut props = defaults.rigid_body_properties;
+        patch_rigid_body_properties(&mut props, &value);
+        defaults.rigid_body_properties = props;
+    }
+}
+
+fn physics_entity_to_table(lua: &Lua, world: &World, entity: Entity) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    if let Some(shape) = world.get::<ColliderShape>(entity).copied() {
+        table.set("collider_shape", collider_shape_to_table(lua, shape)?)?;
+    }
+    if let Some(body_kind) = physics_body_kind_from_world(world, entity) {
+        table.set("body_kind", physics_body_kind_to_table(lua, body_kind)?)?;
+    }
+    if let Some(props) = world.get::<ColliderProperties>(entity).copied() {
+        table.set(
+            "collider_properties",
+            collider_properties_to_table(lua, props)?,
+        )?;
+    }
+    if let Some(value) = world.get::<ColliderPropertyInheritance>(entity).copied() {
+        table.set(
+            "collider_inheritance",
+            collider_inheritance_to_table(lua, value)?,
+        )?;
+    }
+    if let Some(props) = world.get::<RigidBodyProperties>(entity).copied() {
+        table.set(
+            "rigid_body_properties",
+            rigid_body_properties_to_table(lua, props)?,
+        )?;
+    }
+    if let Some(value) = world.get::<RigidBodyPropertyInheritance>(entity).copied() {
+        table.set(
+            "rigid_body_inheritance",
+            rigid_body_inheritance_to_table(lua, value)?,
+        )?;
+    }
+    if let Some(joint) = world.get::<PhysicsJoint>(entity).copied() {
+        table.set("joint", joint_to_table(lua, joint)?)?;
+    }
+    if let Some(controller) = world.get::<CharacterController>(entity).copied() {
+        table.set(
+            "character_controller",
+            character_controller_to_table(lua, controller)?,
+        )?;
+    }
+    if let Some(input) = world.get::<CharacterControllerInput>(entity).copied() {
+        table.set("character_input", character_input_to_table(lua, input)?)?;
+    }
+    if let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() {
+        table.set("character_output", character_output_to_table(lua, output)?)?;
+    }
+    if let Some(request) = world.get::<PhysicsRayCast>(entity).copied() {
+        table.set("ray_cast", ray_cast_to_table(lua, request)?)?;
+    }
+    if let Some(hit) = world.get::<PhysicsRayCastHit>(entity).copied() {
+        table.set("ray_cast_hit", ray_cast_hit_to_table(lua, hit)?)?;
+    }
+    if let Some(request) = world.get::<PhysicsPointProjection>(entity).copied() {
+        table.set("point_projection", point_projection_to_table(lua, request)?)?;
+    }
+    if let Some(hit) = world.get::<PhysicsPointProjectionHit>(entity).copied() {
+        table.set(
+            "point_projection_hit",
+            point_projection_hit_to_table(lua, hit)?,
+        )?;
+    }
+    if let Some(request) = world.get::<PhysicsShapeCast>(entity).copied() {
+        table.set("shape_cast", shape_cast_to_table(lua, request)?)?;
+    }
+    if let Some(hit) = world.get::<PhysicsShapeCastHit>(entity).copied() {
+        table.set("shape_cast_hit", shape_cast_hit_to_table(lua, hit)?)?;
+    }
+    if let Some(defaults) = world.get::<PhysicsWorldDefaults>(entity).copied() {
+        table.set(
+            "world_defaults",
+            physics_world_defaults_to_table(lua, defaults)?,
+        )?;
+    }
+    table.set("has_handle", world.get::<PhysicsHandle>(entity).is_some())?;
+    Ok(table)
+}
+
+fn apply_physics_patch(world: &mut World, entity: Entity, data: &Table) {
+    if let Ok(value) = data.get::<Value>("collider_shape") {
+        if !matches!(value, Value::Nil) {
+            let current = world.get::<ColliderShape>(entity).copied();
+            if let Some(shape) = collider_shape_from_value(value, current) {
+                world.entity_mut(entity).insert(shape);
+                world.entity_mut(entity).remove::<PhysicsHandle>();
+            }
+        }
+    }
+    if let Ok(value) = data.get::<Value>("body_kind") {
+        if let Some(kind) = physics_body_kind_from_value(value) {
+            set_physics_body_kind(world, entity, kind);
+        }
+    }
+    if let Ok(value) = data.get::<Table>("collider_properties") {
+        let mut props = world
+            .get::<ColliderProperties>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_collider_properties(&mut props, &value);
+        world.entity_mut(entity).insert(props);
+    }
+    if let Ok(value) = data.get::<Table>("collider_inheritance") {
+        let mut inheritance = world
+            .get::<ColliderPropertyInheritance>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_collider_inheritance(&mut inheritance, &value);
+        world.entity_mut(entity).insert(inheritance);
+    }
+    if let Ok(value) = data.get::<Table>("rigid_body_properties") {
+        let mut props = world
+            .get::<RigidBodyProperties>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_rigid_body_properties(&mut props, &value);
+        world.entity_mut(entity).insert(props);
+    }
+    if let Ok(value) = data.get::<Table>("rigid_body_inheritance") {
+        let mut inheritance = world
+            .get::<RigidBodyPropertyInheritance>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_rigid_body_inheritance(&mut inheritance, &value);
+        world.entity_mut(entity).insert(inheritance);
+    }
+    if let Ok(value) = data.get::<Table>("joint") {
+        let mut joint = world
+            .get::<PhysicsJoint>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_joint(&mut joint, &value, world);
+        world.entity_mut(entity).insert(joint);
+    }
+    if let Ok(value) = data.get::<Table>("character_controller") {
+        let mut controller = world
+            .get::<CharacterController>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_character_controller(&mut controller, &value);
+        world.entity_mut(entity).insert(controller);
+        world
+            .entity_mut(entity)
+            .insert(CharacterControllerOutput::default());
+        if world.get::<CharacterControllerInput>(entity).is_none() {
+            world
+                .entity_mut(entity)
+                .insert(CharacterControllerInput::default());
+        }
+    }
+    if let Ok(value) = data.get::<Table>("character_input") {
+        let mut input = world
+            .get::<CharacterControllerInput>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_character_input(&mut input, &value);
+        world.entity_mut(entity).insert(input);
+    }
+    if let Ok(value) = data.get::<Table>("ray_cast") {
+        let mut request = world
+            .get::<PhysicsRayCast>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_ray_cast(&mut request, &value);
+        world.entity_mut(entity).insert(request);
+        if world.get::<PhysicsRayCastHit>(entity).is_none() {
+            world
+                .entity_mut(entity)
+                .insert(PhysicsRayCastHit::default());
+        }
+    }
+    if let Ok(value) = data.get::<Table>("point_projection") {
+        let mut request = world
+            .get::<PhysicsPointProjection>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_point_projection(&mut request, &value);
+        world.entity_mut(entity).insert(request);
+        if world.get::<PhysicsPointProjectionHit>(entity).is_none() {
+            world
+                .entity_mut(entity)
+                .insert(PhysicsPointProjectionHit::default());
+        }
+    }
+    if let Ok(value) = data.get::<Table>("shape_cast") {
+        let mut request = world
+            .get::<PhysicsShapeCast>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_shape_cast(&mut request, &value);
+        world.entity_mut(entity).insert(request);
+        if world.get::<PhysicsShapeCastHit>(entity).is_none() {
+            world
+                .entity_mut(entity)
+                .insert(PhysicsShapeCastHit::default());
+        }
+    }
+    if let Ok(value) = data.get::<Table>("world_defaults") {
+        let mut defaults = world
+            .get::<PhysicsWorldDefaults>(entity)
+            .copied()
+            .unwrap_or_default();
+        patch_physics_world_defaults(&mut defaults, &value);
+        world.entity_mut(entity).insert(defaults);
+    }
+}
+
+fn physics_velocity_to_table(
+    lua: &Lua,
+    world: &mut World,
+    entity: Entity,
+) -> mlua::Result<Option<Table>> {
+    let mut linear = None;
+    let mut angular = None;
+
+    if let Some(handle) = world.get::<PhysicsHandle>(entity).copied() {
+        if let Some(phys) = world.get_resource::<PhysicsResource>() {
+            if let Some(body) = phys.rigid_body_set.get(handle.rigid_body) {
+                let linvel = body.linvel();
+                linear = Some(Vec3::new(linvel.x, linvel.y, linvel.z));
+                let angvel = body.angvel();
+                angular = Some(Vec3::new(angvel.x, angvel.y, angvel.z));
+            }
+        }
+    }
+
+    if (linear.is_none() || angular.is_none()) && world.get::<RigidBodyProperties>(entity).is_some()
+    {
+        if let Some(props) = world.get::<RigidBodyProperties>(entity) {
+            if linear.is_none() {
+                linear = Some(props.linear_velocity);
+            }
+            if angular.is_none() {
+                angular = Some(props.angular_velocity);
+            }
+        }
+    }
+
+    if linear.is_none() && angular.is_none() {
+        return Ok(None);
+    }
+
+    let table = lua.create_table()?;
+    if let Some(value) = linear {
+        table.set("linear", vec3_to_table(lua, value)?)?;
+    }
+    if let Some(value) = angular {
+        table.set("angular", vec3_to_table(lua, value)?)?;
+    }
+    Ok(Some(table))
+}
+
+fn set_physics_velocity(world: &mut World, entity: Entity, data: &Table) -> bool {
+    let linear = data
+        .get::<Table>("linear")
+        .ok()
+        .and_then(|value| table_to_vec3(&value));
+    let angular = data
+        .get::<Table>("angular")
+        .ok()
+        .and_then(|value| table_to_vec3(&value));
+    let wake_up = data.get::<bool>("wake_up").unwrap_or(true);
+    if linear.is_none() && angular.is_none() {
+        return false;
+    }
+
+    let handle = world.get::<PhysicsHandle>(entity).copied();
+    if let Some(handle) = handle {
+        if let Some(mut phys) = world.get_resource_mut::<PhysicsResource>() {
+            if let Some(body) = phys.rigid_body_set.get_mut(handle.rigid_body) {
+                if let Some(linear) = linear {
+                    let mut linvel = body.linvel();
+                    linvel.x = linear.x;
+                    linvel.y = linear.y;
+                    linvel.z = linear.z;
+                    body.set_linvel(linvel, wake_up);
+                }
+                if let Some(angular) = angular {
+                    let mut angvel = body.angvel();
+                    angvel.x = angular.x;
+                    angvel.y = angular.y;
+                    angvel.z = angular.z;
+                    body.set_angvel(angvel, wake_up);
+                }
+            }
+        }
+    }
+
+    if let Some(mut props) = world.get_mut::<RigidBodyProperties>(entity) {
+        if let Some(linear) = linear {
+            props.linear_velocity = linear;
+        }
+        if let Some(angular) = angular {
+            props.angular_velocity = angular;
+        }
+    } else {
+        let mut props = RigidBodyProperties::default();
+        if let Some(linear) = linear {
+            props.linear_velocity = linear;
+        }
+        if let Some(angular) = angular {
+            props.angular_velocity = angular;
+        }
+        world.entity_mut(entity).insert(props);
+    }
+
+    true
 }
 
 fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
@@ -2380,6 +4929,13 @@ impl UserData for LuaGamepadAxis {}
 enum TriggerSide {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PhysicsBodyKind {
+    Dynamic { mass: f32 },
+    Kinematic { mode: KinematicMode },
+    Fixed,
 }
 
 fn fill_key_constants(lua: &Lua, table: &Table) -> mlua::Result<()> {

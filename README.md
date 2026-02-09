@@ -28,7 +28,7 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - output: `dist/helmer_view` (serve with `python3 -m http.server --directory dist/helmer_view`)
 
 ## todo 😡
-- [ ] web/WASM support
+- [x] web/WASM support
 - [ ] promote statelessness of GraphRenderer
 - [ ] ditch monolithic ShaderConstants for modularized uniforms
 - [x] provide custom runtime hooks?
@@ -43,7 +43,7 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - [ ] taskable worker pool system/api for ecs (resource based? - asynchronously taskable by systems?)
 - [x] asset streaming
 - [x] AssetServer improved worker pool usage (scene parsing)
-- [ ] skinned mesh & animation system/support
+- [x] skinned mesh & animation system/support
 - [x] precomputed atmospheric scattering
 - [x] fix sky light contribution (generally fixed)
 - [x] account for atmosphere ground (we sorta do)
@@ -53,7 +53,7 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - [x] occlusion culling [broken?]
 - [x] soft shadows (PCSS?) [basic pcf for now]
 - [ ] point light shadows
-- [ ] full gi (SDFGI, DDGI?)
+- [x] full gi (SDFGI, DDGI?)
 - [ ] full pbr/modern brdf
 - [ ] ~~implement supported advanced features to forward renderers~~
 - [ ] ~~replace forward renderer(s) shadow pipeline with a simpler implementation~~ [implement alternate shadow pipeline]
@@ -62,4 +62,4 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - [ ] ~~gpu compute based culling?~~
 - [ ] hardware RT path/pipeline or acceleration?
 - [ ] touch support
-- [ ] physically based audio engine
+- [x] physically based audio engine

@@ -910,7 +910,16 @@ type HelmerEcs = {
     add_force: (id: EntityId, force: Vec3, wake_up: boolean?) -> boolean,
     add_torque: (id: EntityId, torque: Vec3, wake_up: boolean?) -> boolean,
     add_force_at_point: (id: EntityId, force: Vec3, point: Vec3, wake_up: boolean?) -> boolean,
+    add_persistent_force: (id: EntityId, force: Vec3, wake_up: boolean?) -> boolean,
+    set_persistent_force: (id: EntityId, force: Vec3, wake_up: boolean?) -> boolean,
+    add_persistent_torque: (id: EntityId, torque: Vec3, wake_up: boolean?) -> boolean,
+    set_persistent_torque: (id: EntityId, torque: Vec3, wake_up: boolean?) -> boolean,
+    add_persistent_force_at_point: (id: EntityId, force: Vec3, point: Vec3, wake_up: boolean?) -> boolean,
+    clear_persistent_forces: (id: EntityId) -> boolean,
     apply_impulse: (id: EntityId, impulse: Vec3, wake_up: boolean?) -> boolean,
+    apply_angular_impulse: (id: EntityId, impulse: Vec3, wake_up: boolean?) -> boolean,
+    apply_torque_impulse: (id: EntityId, impulse: Vec3, wake_up: boolean?) -> boolean,
+    apply_impulse_at_point: (id: EntityId, impulse: Vec3, point: Vec3, wake_up: boolean?) -> boolean,
     set_physics_running: (running: boolean) -> boolean,
     get_physics_running: () -> boolean,
     set_physics_gravity: (gravity: Vec3) -> boolean,
@@ -1134,10 +1143,19 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.get_physics_shape_cast_hit(id) -> {has_hit, hit_entity?, toi, witness1, witness2, normal1, normal2, status}|nil
 --   ecs.get_physics_velocity(id) -> {linear?, angular?}|nil
 --   ecs.set_physics_velocity(id, {linear?, angular?, wake_up?}) -> bool
---   ecs.add_force(id, {x,y,z}, wake_up?) -> bool
---   ecs.add_torque(id, {x,y,z}, wake_up?) -> bool
---   ecs.add_force_at_point(id, {x,y,z}, {x,y,z}, wake_up?) -> bool
+--   ecs.add_force(id, {x,y,z}, wake_up?) -> bool                 -- non-persistent (cleared each frame)
+--   ecs.add_torque(id, {x,y,z}, wake_up?) -> bool                -- non-persistent (cleared each frame)
+--   ecs.add_force_at_point(id, {x,y,z}, {x,y,z}, wake_up?) -> bool -- non-persistent (cleared each frame)
+--   ecs.add_persistent_force(id, {x,y,z}, wake_up?) -> bool
+--   ecs.set_persistent_force(id, {x,y,z}, wake_up?) -> bool
+--   ecs.add_persistent_torque(id, {x,y,z}, wake_up?) -> bool
+--   ecs.set_persistent_torque(id, {x,y,z}, wake_up?) -> bool
+--   ecs.add_persistent_force_at_point(id, {x,y,z}, {x,y,z}, wake_up?) -> bool
+--   ecs.clear_persistent_forces(id) -> bool
 --   ecs.apply_impulse(id, {x,y,z}, wake_up?) -> bool
+--   ecs.apply_angular_impulse(id, {x,y,z}, wake_up?) -> bool
+--   ecs.apply_torque_impulse(id, {x,y,z}, wake_up?) -> bool
+--   ecs.apply_impulse_at_point(id, {x,y,z}, {x,y,z}, wake_up?) -> bool
 --   ecs.set_physics_running(running) -> bool
 --   ecs.get_physics_running() -> bool
 --   ecs.set_physics_gravity({x,y,z}) -> bool

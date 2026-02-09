@@ -30,7 +30,7 @@ use crate::{
             PhysicsPointProjection, PhysicsPointProjectionHit, PhysicsQueryFilter, PhysicsRayCast,
             PhysicsRayCastHit, PhysicsShapeCast, PhysicsShapeCastHit, PhysicsShapeCastStatus,
             PhysicsWorldDefaults, RigidBodyForces, RigidBodyImpulseQueue, RigidBodyProperties,
-            RigidBodyPropertyInheritance,
+            RigidBodyPropertyInheritance, RigidBodyTransientForces,
         },
         physics_resource::PhysicsResource,
     },
@@ -1048,6 +1048,49 @@ pub fn apply_persistent_forces_system(
     }
 }
 
+pub fn apply_transient_forces_system(
+    mut phys: ResMut<PhysicsResource>,
+    mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyTransientForces)>,
+) {
+    for (handle, mut forces) in query.iter_mut() {
+        let has_transient_force = forces.force != Vec3::ZERO
+            || forces.torque != Vec3::ZERO
+            || !forces.point_forces.is_empty();
+        if !has_transient_force && !forces.force_wake_up && !forces.torque_wake_up {
+            continue;
+        }
+
+        if phys.running {
+            if let Some(handle) = handle {
+                if let Some(rigid_body) = phys.rigid_body_set.get_mut(handle.rigid_body) {
+                    if forces.force != Vec3::ZERO {
+                        rigid_body.add_force(to_vector(forces.force), forces.force_wake_up);
+                    }
+                    if forces.torque != Vec3::ZERO {
+                        rigid_body.add_torque(to_vector(forces.torque), forces.torque_wake_up);
+                    }
+                    for point_force in forces.point_forces.iter() {
+                        if point_force.force == Vec3::ZERO {
+                            continue;
+                        }
+                        rigid_body.add_force_at_point(
+                            to_vector(point_force.force),
+                            to_vector(point_force.point),
+                            point_force.wake_up,
+                        );
+                    }
+                }
+            }
+        }
+
+        forces.force = Vec3::ZERO;
+        forces.force_wake_up = false;
+        forces.torque = Vec3::ZERO;
+        forces.torque_wake_up = false;
+        forces.point_forces.clear();
+    }
+}
+
 pub fn apply_queued_impulses_system(
     mut phys: ResMut<PhysicsResource>,
     mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyImpulseQueue)>,
@@ -1057,7 +1100,10 @@ pub fn apply_queued_impulses_system(
     }
 
     for (handle, mut queue) in query.iter_mut() {
-        if queue.impulse == Vec3::ZERO {
+        if queue.impulse == Vec3::ZERO
+            && queue.angular_impulse == Vec3::ZERO
+            && queue.point_impulses.is_empty()
+        {
             continue;
         }
 
@@ -1068,9 +1114,31 @@ pub fn apply_queued_impulses_system(
             continue;
         };
 
-        rigid_body.apply_impulse(to_vector(queue.impulse), queue.wake_up);
+        if queue.impulse != Vec3::ZERO {
+            rigid_body.apply_impulse(to_vector(queue.impulse), queue.impulse_wake_up);
+        }
+        if queue.angular_impulse != Vec3::ZERO {
+            rigid_body.apply_torque_impulse(
+                to_vector(queue.angular_impulse),
+                queue.angular_impulse_wake_up,
+            );
+        }
+        for point_impulse in queue.point_impulses.iter() {
+            if point_impulse.impulse == Vec3::ZERO {
+                continue;
+            }
+            rigid_body.apply_impulse_at_point(
+                to_vector(point_impulse.impulse),
+                to_vector(point_impulse.point),
+                point_impulse.wake_up,
+            );
+        }
+
         queue.impulse = Vec3::ZERO;
-        queue.wake_up = false;
+        queue.impulse_wake_up = false;
+        queue.angular_impulse = Vec3::ZERO;
+        queue.angular_impulse_wake_up = false;
+        queue.point_impulses.clear();
     }
 }
 

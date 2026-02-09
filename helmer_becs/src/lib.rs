@@ -41,9 +41,10 @@ use crate::{
         physics_resource::PhysicsResource,
         systems::{
             apply_persistent_forces_system, apply_queued_impulses_system,
-            character_controller_system, cleanup_physics_system, physics_scene_query_system,
-            physics_step_system, sync_entities_to_physics_system, sync_joints_to_physics_system,
-            sync_physics_to_entities_system, sync_transforms_to_physics_system,
+            apply_transient_forces_system, character_controller_system, cleanup_physics_system,
+            physics_scene_query_system, physics_step_system, sync_entities_to_physics_system,
+            sync_joints_to_physics_system, sync_physics_to_entities_system,
+            sync_transforms_to_physics_system,
         },
     },
     systems::{
@@ -332,6 +333,7 @@ fn helmer_becs_init_impl<F>(
                     sync_joints_to_physics_system,
                     sync_transforms_to_physics_system,
                     character_controller_system,
+                    apply_transient_forces_system,
                     apply_persistent_forces_system,
                     apply_queued_impulses_system,
                     physics_step_system,

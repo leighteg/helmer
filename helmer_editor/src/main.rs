@@ -174,7 +174,12 @@ fn editor_init(
             .before(helmer_becs::systems::render_system::render_data_system),
     );
     schedule.add_systems(script_registry_system);
-    schedule.add_systems(script_execution_system);
+    schedule.add_systems(
+        script_execution_system
+            .before(helmer_becs::physics::systems::apply_transient_forces_system)
+            .before(helmer_becs::physics::systems::apply_persistent_forces_system)
+            .before(helmer_becs::physics::systems::apply_queued_impulses_system),
+    );
     schedule.add_systems(editor_layout_apply_system.before(editor_ui_system));
     schedule.add_systems(editor_ui_system.before(helmer_becs::egui_integration::egui_system));
     schedule

@@ -255,7 +255,7 @@ impl Default for RigidBodyProperties {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PersistentPointForce {
+pub struct PointForce {
     pub force: Vec3,
     pub point: Vec3,
     pub wake_up: bool,
@@ -267,7 +267,7 @@ pub struct RigidBodyForces {
     pub force_wake_up: bool,
     pub torque: Vec3,
     pub torque_wake_up: bool,
-    pub point_forces: Vec<PersistentPointForce>,
+    pub point_forces: Vec<PointForce>,
 }
 
 impl Default for RigidBodyForces {
@@ -282,17 +282,51 @@ impl Default for RigidBodyForces {
     }
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, PartialEq)]
+pub struct RigidBodyTransientForces {
+    pub force: Vec3,
+    pub force_wake_up: bool,
+    pub torque: Vec3,
+    pub torque_wake_up: bool,
+    pub point_forces: Vec<PointForce>,
+}
+
+impl Default for RigidBodyTransientForces {
+    fn default() -> Self {
+        Self {
+            force: Vec3::ZERO,
+            force_wake_up: false,
+            torque: Vec3::ZERO,
+            torque_wake_up: false,
+            point_forces: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointImpulse {
+    pub impulse: Vec3,
+    pub point: Vec3,
+    pub wake_up: bool,
+}
+
+#[derive(Component, Debug, Clone, PartialEq)]
 pub struct RigidBodyImpulseQueue {
     pub impulse: Vec3,
-    pub wake_up: bool,
+    pub impulse_wake_up: bool,
+    pub angular_impulse: Vec3,
+    pub angular_impulse_wake_up: bool,
+    pub point_impulses: Vec<PointImpulse>,
 }
 
 impl Default for RigidBodyImpulseQueue {
     fn default() -> Self {
         Self {
             impulse: Vec3::ZERO,
-            wake_up: false,
+            impulse_wake_up: false,
+            angular_impulse: Vec3::ZERO,
+            angular_impulse_wake_up: false,
+            point_impulses: Vec::new(),
         }
     }
 }

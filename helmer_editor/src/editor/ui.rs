@@ -7,9 +7,11 @@ use std::{
 
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, With, World};
+use egui::containers::menu::{MenuButton, MenuConfig};
 use egui::{
     Align, Align2, Color32, ComboBox, DragValue, FontId, Id, Layout, Modifiers, Order,
-    PointerButton, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2,
+    PointerButton, PopupCloseBehavior, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind,
+    TextStyle, Ui, Vec2,
 };
 use glam::{EulerRot, Mat3, Quat, Vec3};
 use helmer::animation::{AnimationClip, Pose, Skeleton};
@@ -1321,17 +1323,61 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.play_mode_view)
             .unwrap_or_default();
-        let mut show_options_panel = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_options_panel)
-            .unwrap_or(false);
+        let show_options_panel = false;
         let mut render_resolution = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.render_resolution)
             .unwrap_or_default();
+        let templates = graph_templates();
+        let mut graph_template = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.graph_template.clone())
+            .unwrap_or_else(|| {
+                templates
+                    .first()
+                    .map(|template| template.name.to_string())
+                    .unwrap_or_else(|| "default-graph".to_string())
+            });
+        let previous_graph_template = graph_template.clone();
         let mut pinned_camera = world
             .get_resource::<EditorViewportState>()
             .and_then(|state| state.pinned_camera);
+        let mut gizmos_in_play = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.gizmos_in_play)
+            .unwrap_or(false);
+        let mut execute_scripts_in_edit_mode = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.execute_scripts_in_edit_mode)
+            .unwrap_or(false);
+        let mut show_camera_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_camera_gizmos)
+            .unwrap_or(true);
+        let mut show_directional_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_directional_light_gizmos)
+            .unwrap_or(true);
+        let mut show_point_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_point_light_gizmos)
+            .unwrap_or(true);
+        let mut show_spot_light_gizmos = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spot_light_gizmos)
+            .unwrap_or(true);
+        let mut show_spline_paths = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spline_paths)
+            .unwrap_or(true);
+        let mut show_spline_points = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_spline_points)
+            .unwrap_or(true);
+        let mut gizmo_mode = world
+            .get_resource::<EditorGizmoState>()
+            .map(|state| state.mode)
+            .unwrap_or(GizmoMode::None);
         let mut preview_position_norm = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.preview_position_norm)
@@ -1340,13 +1386,36 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.preview_width_norm)
             .unwrap_or(0.28);
+        let script_registry_status = world
+            .get_resource::<ScriptRegistry>()
+            .and_then(|registry| registry.status.clone());
+        let (rust_status, script_errors, script_error_count) =
+            if let Some(runtime) = world.get_resource::<ScriptRuntime>() {
+                (
+                    runtime.rust_status.clone(),
+                    runtime.errors.iter().take(3).cloned().collect::<Vec<_>>(),
+                    runtime.errors.len(),
+                )
+            } else {
+                (None, Vec::new(), 0)
+            };
+        let menu_max_height = (ui.ctx().content_rect().height() * 0.62).clamp(170.0, 520.0);
+        let menu_max_width = (ui.ctx().content_rect().width() * 0.26).clamp(150.0, 340.0);
+        let advanced_menu_max_height =
+            (ui.ctx().content_rect().height() * 0.78).clamp(220.0, 760.0);
+        let advanced_menu_width = (ui.ctx().content_rect().width() * 0.36).clamp(220.0, 460.0);
+        let viewport_menu_config =
+            MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside);
+        let advanced_menu_config =
+            MenuConfig::new().close_behavior(PopupCloseBehavior::IgnoreClicks);
+        let mut graph_selection_changed = false;
 
         let selected_camera = world
             .get_resource::<InspectorSelectedEntityResource>()
             .and_then(|selection| selection.0)
             .filter(|entity| world.get::<BevyCamera>(*entity).is_some());
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Viewport");
             if world_state == WorldState::Play {
                 ui.separator();
@@ -1362,13 +1431,576 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                     }
                 });
             ui.separator();
-            if ui
-                .button(if show_options_panel { "O*" } else { "O" })
-                .on_hover_text("Viewport options and tuning")
-                .clicked()
-            {
-                show_options_panel = !show_options_panel;
-            }
+            MenuButton::new("Render")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            ui.label("Render Graph");
+                            for template in templates.iter() {
+                                if ui
+                                    .selectable_value(
+                                        &mut graph_template,
+                                        template.name.to_string(),
+                                        template.label,
+                                    )
+                                    .changed()
+                                {
+                                    graph_selection_changed = true;
+                                    //ui.close_menu();
+                                }
+                            }
+                        });
+                });
+            MenuButton::new("Scripting")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            ui.checkbox(
+                                &mut execute_scripts_in_edit_mode,
+                                "Execute Scripts in Edit Mode",
+                            );
+                            if world_state == WorldState::Edit
+                                && !execute_scripts_in_edit_mode
+                                && ui.button("Stop All Edit Scripts").clicked()
+                            {
+                                if let Some(mut edit_state) =
+                                    world.get_resource_mut::<ScriptEditModeState>()
+                                {
+                                    edit_state.queue(ScriptEditCommand::StopAll);
+                                }
+                            }
+                            if let Some(status) = script_registry_status.as_ref() {
+                                ui.label(format!("Registry: {}", status));
+                            }
+                            if let Some(status) = rust_status.as_ref() {
+                                ui.label(format!("Rust: {}", status));
+                            }
+                            if script_error_count > 0 {
+                                ui.colored_label(
+                                    Color32::from_rgb(180, 60, 60),
+                                    format!("Script Errors: {}", script_error_count),
+                                );
+                                for error in &script_errors {
+                                    ui.label(error);
+                                }
+                                if script_error_count > script_errors.len() {
+                                    ui.label(format!(
+                                        "... {} more",
+                                        script_error_count - script_errors.len()
+                                    ));
+                                }
+                            }
+                        });
+                });
+            MenuButton::new("Gizmos")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
+                            ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
+                            ui.checkbox(
+                                &mut show_directional_light_gizmos,
+                                "Show Directional Light Gizmos",
+                            );
+                            ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
+                            ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
+                            ui.checkbox(&mut show_spline_paths, "Show Spline Paths");
+                            ui.checkbox(&mut show_spline_points, "Show Spline Points");
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui| {
+                                ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
+                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
+                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
+                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale");
+                            });
+                        });
+                });
+            MenuButton::new("Advanced")
+                .config(advanced_menu_config)
+                .ui(ui, |ui| {
+                    ui.set_max_width(advanced_menu_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, false])
+                        .max_height(advanced_menu_max_height)
+                        .show(ui, |ui| {
+                            ui.collapsing("Gizmo Style", |ui| {
+                                if let Some(mut gizmo_settings) =
+                                    world.get_resource_mut::<EditorGizmoSettings>()
+                                {
+                                    if ui.button("Defaults").clicked() {
+                                        *gizmo_settings = EditorGizmoSettings::default();
+                                    }
+
+                                    if gizmo_settings.size_min > gizmo_settings.size_max {
+                                        let size_min = gizmo_settings.size_min;
+                                        gizmo_settings.size_min = gizmo_settings.size_max;
+                                        gizmo_settings.size_max = size_min;
+                                    }
+
+                                    ui.collapsing("General", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Size Scale",
+                                            &mut gizmo_settings.size_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        let size_max_limit = gizmo_settings.size_max;
+                                        edit_float_range(
+                                            ui,
+                                            "Size Min",
+                                            &mut gizmo_settings.size_min,
+                                            0.01,
+                                            0.0..=size_max_limit,
+                                        );
+                                        let size_min_limit = gizmo_settings.size_min;
+                                        edit_float_range(
+                                            ui,
+                                            "Size Max",
+                                            &mut gizmo_settings.size_max,
+                                            1.0,
+                                            size_min_limit..=f32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Picking", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Axis Pick Scale",
+                                            &mut gizmo_settings.axis_pick_radius_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Axis Pick Min",
+                                            &mut gizmo_settings.axis_pick_radius_min,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Center Pick Scale",
+                                            &mut gizmo_settings.center_pick_radius_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Center Pick Min",
+                                            &mut gizmo_settings.center_pick_radius_min,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Rotate Pick Scale",
+                                            &mut gizmo_settings.rotate_pick_radius_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Rotate Pick Min",
+                                            &mut gizmo_settings.rotate_pick_radius_min,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Icon Pick Scale",
+                                            &mut gizmo_settings.icon_pick_radius_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Icon Pick Min",
+                                            &mut gizmo_settings.icon_pick_radius_min,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Translate", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Scale",
+                                            &mut gizmo_settings.translate_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Min",
+                                            &mut gizmo_settings.translate_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Head Length Scale",
+                                            &mut gizmo_settings.translate_head_length_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Head Width Scale",
+                                            &mut gizmo_settings.translate_head_width_scale,
+                                            0.05,
+                                            0.0..=f32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Rotate", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Ring Radius Scale",
+                                            &mut gizmo_settings.rotate_radius_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Ring Thickness Scale",
+                                            &mut gizmo_settings.rotate_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Ring Thickness Min",
+                                            &mut gizmo_settings.rotate_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_u32_range(
+                                            ui,
+                                            "Ring Segments",
+                                            &mut gizmo_settings.ring_segments,
+                                            1.0,
+                                            3..=u32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Scale", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Scale",
+                                            &mut gizmo_settings.scale_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Min",
+                                            &mut gizmo_settings.scale_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Head Length Scale",
+                                            &mut gizmo_settings.scale_head_length_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Box Scale",
+                                            &mut gizmo_settings.scale_box_scale,
+                                            0.05,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Scale Min",
+                                            &mut gizmo_settings.scale_min,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Origin", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Size Scale",
+                                            &mut gizmo_settings.origin_size_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Size Min",
+                                            &mut gizmo_settings.origin_size_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Colors", |ui| {
+                                        edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
+                                        edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
+                                        edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
+                                        edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
+                                        edit_float_range(
+                                            ui,
+                                            "Axis Alpha",
+                                            &mut gizmo_settings.axis_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Origin Alpha",
+                                            &mut gizmo_settings.origin_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                    });
+
+                                    ui.collapsing("Bounds Outline", |ui| {
+                                        ui.checkbox(
+                                            &mut gizmo_settings.show_bounds_outline,
+                                            "Show Bounds Outline",
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Scale",
+                                            &mut gizmo_settings.selection_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Min",
+                                            &mut gizmo_settings.selection_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_color(
+                                            ui,
+                                            "Color",
+                                            &mut gizmo_settings.selection_color,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Alpha",
+                                            &mut gizmo_settings.selection_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                    });
+
+                                    ui.collapsing("Mesh Outline", |ui| {
+                                        ui.checkbox(
+                                            &mut gizmo_settings.show_mesh_outline,
+                                            "Show Mesh Outline",
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Scale",
+                                            &mut gizmo_settings.outline_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Thickness Min",
+                                            &mut gizmo_settings.outline_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_u32_range(
+                                            ui,
+                                            "Max Lines",
+                                            &mut gizmo_settings.outline_max_lines,
+                                            1.0,
+                                            0..=u32::MAX,
+                                        );
+                                        edit_color(ui, "Color", &mut gizmo_settings.outline_color);
+                                        edit_float_range(
+                                            ui,
+                                            "Alpha",
+                                            &mut gizmo_settings.outline_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                    });
+
+                                    ui.collapsing("Icons", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Icon Size Scale",
+                                            &mut gizmo_settings.icon_size_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Line Thickness Scale",
+                                            &mut gizmo_settings.icon_thickness_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Line Thickness Min",
+                                            &mut gizmo_settings.icon_thickness_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Camera Alpha",
+                                            &mut gizmo_settings.camera_icon_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Light Alpha",
+                                            &mut gizmo_settings.light_icon_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_color(
+                                            ui,
+                                            "Camera Color",
+                                            &mut gizmo_settings.camera_icon_color,
+                                        );
+                                        edit_color(
+                                            ui,
+                                            "Active Camera Color",
+                                            &mut gizmo_settings.active_camera_icon_color,
+                                        );
+                                    });
+
+                                    ui.collapsing("Highlight", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Hover Mix",
+                                            &mut gizmo_settings.hover_mix,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Active Mix",
+                                            &mut gizmo_settings.active_mix,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                    });
+
+                                    gizmo_settings.sanitize();
+                                } else {
+                                    ui.label("Gizmo settings unavailable.");
+                                }
+                            });
+
+                            ui.separator();
+                            ui.collapsing("Skinning", |ui| {
+                                if let Some(mut runtime_config) =
+                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                {
+                                    let mut render_config = runtime_config.0.render_config;
+                                    ui.label("Mode");
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.selectable_value(
+                                            &mut render_config.skinning_mode,
+                                            SkinningMode::Auto,
+                                            "Auto",
+                                        );
+                                        ui.selectable_value(
+                                            &mut render_config.skinning_mode,
+                                            SkinningMode::Gpu,
+                                            "GPU",
+                                        );
+                                        ui.selectable_value(
+                                            &mut render_config.skinning_mode,
+                                            SkinningMode::Cpu,
+                                            "CPU",
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Palette Capacity");
+                                        ui.add(
+                                            DragValue::new(
+                                                &mut render_config.skin_palette_capacity,
+                                            )
+                                            .range(0..=u32::MAX)
+                                            .speed(1),
+                                        );
+                                    });
+                                    let _ = edit_float(
+                                        ui,
+                                        "Palette Growth",
+                                        &mut render_config.skin_palette_growth,
+                                        0.01,
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label("CPU Vertex Budget");
+                                        ui.add(
+                                            DragValue::new(
+                                                &mut render_config.cpu_skinning_vertex_budget,
+                                            )
+                                            .range(0..=u32::MAX)
+                                            .speed(1),
+                                        );
+                                    });
+                                    runtime_config.0.render_config = render_config;
+                                } else {
+                                    ui.label("Runtime config unavailable.");
+                                }
+                            });
+
+                            ui.separator();
+                            ui.collapsing("Camera", |ui| {
+                                let mut camera_query = world.query_filtered::<
+                                (&mut BevyCamera, &mut BevyTransform),
+                                With<EditorViewportCamera>,
+                            >();
+                                if let Some((mut camera, mut transform)) =
+                                    camera_query.iter_mut(world).next()
+                                {
+                                    let camera = &mut camera.0;
+                                    let transform = &mut transform.0;
+
+                                    let mut fov = camera.fov_y_rad.to_degrees();
+                                    let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
+                                    if fov_response.changed {
+                                        camera.fov_y_rad = fov.to_radians();
+                                    }
+                                    let _ = edit_float(ui, "Near", &mut camera.near_plane, 0.01);
+                                    let _ = edit_float(ui, "Far", &mut camera.far_plane, 1.0);
+
+                                    let mut position = transform.position;
+                                    let position_response =
+                                        edit_vec3(ui, "Position", &mut position, 0.1);
+                                    if position_response.changed {
+                                        transform.position = position;
+                                    }
+                                } else {
+                                    ui.label("Viewport camera missing.");
+                                }
+                            });
+                        });
+                });
+            ui.separator();
             if let Some(selected_camera) = selected_camera {
                 if ui
                     .button("P")
@@ -1409,11 +2041,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             };
 
             let available = ui.available_size_before_wrap();
-            let viewport_size = if show_options_panel {
-                Vec2::new(available.x.max(128.0), available.y.clamp(220.0, 520.0))
-            } else {
-                Vec2::new(available.x.max(128.0), available.y.max(128.0))
-            };
+            let viewport_size = Vec2::new(available.x.max(128.0), available.y.max(128.0));
             let (main_rect, main_response) =
                 ui.allocate_exact_size(viewport_size, Sense::click_and_drag());
 
@@ -1574,6 +2202,12 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 }
             }
 
+            let pointer_pos = ui.ctx().input(|input| {
+                input
+                    .pointer
+                    .interact_pos()
+                    .or_else(|| input.pointer.hover_pos())
+            });
             let pointer_over_main = ui
                 .ctx()
                 .input(|input| {
@@ -1583,7 +2217,11 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         .or_else(|| input.pointer.hover_pos())
                 })
                 .is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
-                && !preview_pointer_blocked;
+                && main_response.hovered()
+                && !preview_pointer_blocked
+                && pointer_pos
+                    .and_then(|pos| ui.ctx().layer_id_at(pos))
+                    .map_or(true, |layer| layer == ui.layer_id());
             let mut keyboard_focus = false;
             if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
                 runtime.editor_texture_id = Some(editor_texture_id);
@@ -1598,11 +2236,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 if main_response.clicked_by(PointerButton::Primary)
                     || main_response.clicked_by(PointerButton::Secondary)
                 {
-                    let click_inside = ui
-                        .ctx()
-                        .input(|input| input.pointer.interact_pos())
-                        .is_some_and(|pointer_pos| scene_rect.contains(pointer_pos));
-                    if click_inside {
+                    if pointer_over_main {
                         runtime.keyboard_focus = true;
                     }
                 } else if ui.ctx().input(|input| input.pointer.any_pressed()) && !pointer_over_main
@@ -1618,651 +2252,47 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             }
         }
 
+        if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
+            gizmo_state.mode = gizmo_mode;
+        }
+
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+            viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
             viewport_state.pinned_camera = pinned_camera;
             viewport_state.preview_position_norm = preview_position_norm;
             viewport_state.preview_width_norm = preview_width_norm;
+            viewport_state.gizmos_in_play = gizmos_in_play;
+            viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
+            viewport_state.show_camera_gizmos = show_camera_gizmos;
+            viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
+            viewport_state.show_point_light_gizmos = show_point_light_gizmos;
+            viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
+            viewport_state.show_spline_paths = show_spline_paths;
+            viewport_state.show_spline_points = show_spline_points;
             viewport_state.show_options_panel = show_options_panel;
         }
 
-        if show_options_panel {
-            ui.separator();
-
-            let templates = graph_templates();
-            let mut graph_template = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.graph_template.clone())
-                .unwrap_or_else(|| {
-                    templates
-                        .first()
-                        .map(|template| template.name.to_string())
-                        .unwrap_or_else(|| "default-graph".to_string())
-                });
-            let previous_template = graph_template.clone();
-
-            let mut gizmos_in_play = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.gizmos_in_play)
-                .unwrap_or(false);
-            let mut execute_scripts_in_edit_mode = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.execute_scripts_in_edit_mode)
-                .unwrap_or(false);
-            let mut show_camera_gizmos = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_camera_gizmos)
-                .unwrap_or(true);
-            let mut show_directional_light_gizmos = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_directional_light_gizmos)
-                .unwrap_or(true);
-            let mut show_point_light_gizmos = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_point_light_gizmos)
-                .unwrap_or(true);
-            let mut show_spot_light_gizmos = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_spot_light_gizmos)
-                .unwrap_or(true);
-            let mut show_spline_paths = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_spline_paths)
-                .unwrap_or(true);
-            let mut show_spline_points = world
-                .get_resource::<EditorViewportState>()
-                .map(|state| state.show_spline_points)
-                .unwrap_or(true);
-
-            let selected_label = templates
-                .iter()
-                .find(|template| template.name == graph_template)
-                .map(|template| template.label)
-                .unwrap_or(graph_template.as_str());
-
-            ui.label("Render Graph");
-            ComboBox::from_id_source("viewport_graph_template")
-                .selected_text(selected_label)
-                .show_ui(ui, |ui| {
-                    for template in templates {
-                        if ui
-                            .selectable_label(template.name == graph_template, template.label)
-                            .clicked()
-                        {
-                            graph_template = template.name.to_string();
-                        }
-                    }
-                });
-
-            if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-                viewport_state.graph_template = graph_template.clone();
-                viewport_state.play_mode_view = play_mode_view;
-                viewport_state.render_resolution = render_resolution;
-                viewport_state.pinned_camera = pinned_camera;
-                viewport_state.preview_position_norm = preview_position_norm;
-                viewport_state.preview_width_norm = preview_width_norm;
-                viewport_state.show_options_panel = show_options_panel;
-                viewport_state.gizmos_in_play = gizmos_in_play;
-                viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
-                viewport_state.show_camera_gizmos = show_camera_gizmos;
-                viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
-                viewport_state.show_point_light_gizmos = show_point_light_gizmos;
-                viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
-                viewport_state.show_spline_paths = show_spline_paths;
-                viewport_state.show_spline_points = show_spline_points;
-            }
-
-            if previous_template != graph_template {
-                if let Some(template) = template_for_graph(&graph_template) {
-                    if let Some(mut graph_res) =
-                world.get_resource_mut::<helmer_becs::systems::render_system::RenderGraphResource>()
-            {
-                graph_res.0 = (template.build)();
-            }
+        if graph_selection_changed || previous_graph_template != graph_template {
+            if let Some(template) = template_for_graph(&graph_template) {
+                if let Some(mut graph_res) =
+                    world.get_resource_mut::<helmer_becs::systems::render_system::RenderGraphResource>()
+                {
+                    graph_res.0 = (template.build)();
                 }
-            }
-
-            ui.separator();
-
-            ui.heading("Scripting");
-            ui.checkbox(
-                &mut execute_scripts_in_edit_mode,
-                "Execute Scripts in Edit Mode",
-            );
-            if world_state == WorldState::Edit
-                && !execute_scripts_in_edit_mode
-                && ui.button("Stop All Edit Scripts").clicked()
-            {
-                if let Some(mut edit_state) = world.get_resource_mut::<ScriptEditModeState>() {
-                    edit_state.queue(ScriptEditCommand::StopAll);
+                if let Some(mut render_sync) =
+                    world
+                        .get_resource_mut::<helmer_becs::systems::render_system::RenderSyncRequest>(
+                        )
+                {
+                    render_sync.request_with_epoch(3);
                 }
-            }
-            if let Some(status) = world
-                .get_resource::<ScriptRegistry>()
-                .and_then(|registry| registry.status.clone())
-            {
-                ui.label(format!("Registry: {}", status));
-            }
-            if let Some(runtime) = world.get_resource::<ScriptRuntime>() {
-                if let Some(status) = runtime.rust_status.as_ref() {
-                    ui.label(format!("Rust: {}", status));
+                if let Some(mut refresh) =
+                    world.get_resource_mut::<crate::editor::scene::EditorRenderRefresh>()
+                {
+                    refresh.pending = true;
                 }
-                if !runtime.errors.is_empty() {
-                    ui.colored_label(
-                        Color32::from_rgb(180, 60, 60),
-                        format!("Script Errors: {}", runtime.errors.len()),
-                    );
-                    for error in runtime.errors.iter().take(3) {
-                        ui.label(error);
-                    }
-                    if runtime.errors.len() > 3 {
-                        ui.label(format!("... {} more", runtime.errors.len() - 3));
-                    }
-                }
-            }
-            ui.separator();
-
-            ui.heading("Gizmos");
-            ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
-            ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
-            ui.checkbox(
-                &mut show_directional_light_gizmos,
-                "Show Directional Light Gizmos",
-            );
-            ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
-            ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
-            ui.checkbox(&mut show_spline_paths, "Show Spline Paths");
-            ui.checkbox(&mut show_spline_points, "Show Spline Points");
-            if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-                viewport_state.play_mode_view = play_mode_view;
-                viewport_state.render_resolution = render_resolution;
-                viewport_state.pinned_camera = pinned_camera;
-                viewport_state.preview_position_norm = preview_position_norm;
-                viewport_state.preview_width_norm = preview_width_norm;
-                viewport_state.show_options_panel = show_options_panel;
-                viewport_state.gizmos_in_play = gizmos_in_play;
-                viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
-                viewport_state.show_camera_gizmos = show_camera_gizmos;
-                viewport_state.show_directional_light_gizmos = show_directional_light_gizmos;
-                viewport_state.show_point_light_gizmos = show_point_light_gizmos;
-                viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
-                viewport_state.show_spline_paths = show_spline_paths;
-                viewport_state.show_spline_points = show_spline_points;
-            }
-
-            let mut gizmo_mode = world
-                .get_resource::<EditorGizmoState>()
-                .map(|state| state.mode)
-                .unwrap_or(GizmoMode::None);
-
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
-                ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
-                ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
-                ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale/Resize");
-            });
-
-            if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
-                gizmo_state.mode = gizmo_mode;
-            }
-
-            ui.separator();
-            if let Some(mut gizmo_settings) = world.get_resource_mut::<EditorGizmoSettings>() {
-                ui.collapsing("Gizmo Settings", |ui| {
-                    if ui.button("Defaults").clicked() {
-                        *gizmo_settings = EditorGizmoSettings::default();
-                    }
-
-                    if gizmo_settings.size_min > gizmo_settings.size_max {
-                        let size_min = gizmo_settings.size_min;
-                        gizmo_settings.size_min = gizmo_settings.size_max;
-                        gizmo_settings.size_max = size_min;
-                    }
-
-                    ui.collapsing("General", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Size Scale",
-                            &mut gizmo_settings.size_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        let size_max_limit = gizmo_settings.size_max;
-                        edit_float_range(
-                            ui,
-                            "Size Min",
-                            &mut gizmo_settings.size_min,
-                            0.01,
-                            0.0..=size_max_limit,
-                        );
-                        let size_min_limit = gizmo_settings.size_min;
-                        edit_float_range(
-                            ui,
-                            "Size Max",
-                            &mut gizmo_settings.size_max,
-                            1.0,
-                            size_min_limit..=f32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Picking", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Axis Pick Scale",
-                            &mut gizmo_settings.axis_pick_radius_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Axis Pick Min",
-                            &mut gizmo_settings.axis_pick_radius_min,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Center Pick Scale",
-                            &mut gizmo_settings.center_pick_radius_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Center Pick Min",
-                            &mut gizmo_settings.center_pick_radius_min,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Rotate Pick Scale",
-                            &mut gizmo_settings.rotate_pick_radius_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Rotate Pick Min",
-                            &mut gizmo_settings.rotate_pick_radius_min,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Icon Pick Scale",
-                            &mut gizmo_settings.icon_pick_radius_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Icon Pick Min",
-                            &mut gizmo_settings.icon_pick_radius_min,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Translate", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Thickness Scale",
-                            &mut gizmo_settings.translate_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Thickness Min",
-                            &mut gizmo_settings.translate_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Head Length Scale",
-                            &mut gizmo_settings.translate_head_length_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Head Width Scale",
-                            &mut gizmo_settings.translate_head_width_scale,
-                            0.05,
-                            0.0..=f32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Rotate", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Ring Radius Scale",
-                            &mut gizmo_settings.rotate_radius_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Ring Thickness Scale",
-                            &mut gizmo_settings.rotate_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Ring Thickness Min",
-                            &mut gizmo_settings.rotate_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_u32_range(
-                            ui,
-                            "Ring Segments",
-                            &mut gizmo_settings.ring_segments,
-                            1.0,
-                            3..=u32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Scale", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Thickness Scale",
-                            &mut gizmo_settings.scale_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Thickness Min",
-                            &mut gizmo_settings.scale_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Head Length Scale",
-                            &mut gizmo_settings.scale_head_length_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Box Scale",
-                            &mut gizmo_settings.scale_box_scale,
-                            0.05,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Scale Min",
-                            &mut gizmo_settings.scale_min,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Origin", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Size Scale",
-                            &mut gizmo_settings.origin_size_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Size Min",
-                            &mut gizmo_settings.origin_size_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                    });
-
-                    ui.collapsing("Colors", |ui| {
-                        edit_color(ui, "Axis X", &mut gizmo_settings.axis_color_x);
-                        edit_color(ui, "Axis Y", &mut gizmo_settings.axis_color_y);
-                        edit_color(ui, "Axis Z", &mut gizmo_settings.axis_color_z);
-                        edit_color(ui, "Origin", &mut gizmo_settings.origin_color);
-                        edit_float_range(
-                            ui,
-                            "Axis Alpha",
-                            &mut gizmo_settings.axis_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Origin Alpha",
-                            &mut gizmo_settings.origin_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                    });
-
-                    ui.collapsing("Bounds Outline", |ui| {
-                        ui.checkbox(
-                            &mut gizmo_settings.show_bounds_outline,
-                            "Show Bounds Outline",
-                        );
-                        edit_float_range(
-                            ui,
-                            "Thickness Scale",
-                            &mut gizmo_settings.selection_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Thickness Min",
-                            &mut gizmo_settings.selection_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_color(ui, "Color", &mut gizmo_settings.selection_color);
-                        edit_float_range(
-                            ui,
-                            "Alpha",
-                            &mut gizmo_settings.selection_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                    });
-
-                    ui.collapsing("Mesh Outline", |ui| {
-                        ui.checkbox(&mut gizmo_settings.show_mesh_outline, "Show Mesh Outline");
-                        edit_float_range(
-                            ui,
-                            "Thickness Scale",
-                            &mut gizmo_settings.outline_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Thickness Min",
-                            &mut gizmo_settings.outline_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_u32_range(
-                            ui,
-                            "Max Lines",
-                            &mut gizmo_settings.outline_max_lines,
-                            1.0,
-                            0..=u32::MAX,
-                        );
-                        edit_color(ui, "Color", &mut gizmo_settings.outline_color);
-                        edit_float_range(
-                            ui,
-                            "Alpha",
-                            &mut gizmo_settings.outline_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                    });
-
-                    ui.collapsing("Icons", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Icon Size Scale",
-                            &mut gizmo_settings.icon_size_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Line Thickness Scale",
-                            &mut gizmo_settings.icon_thickness_scale,
-                            0.01,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Line Thickness Min",
-                            &mut gizmo_settings.icon_thickness_min,
-                            0.005,
-                            0.0..=f32::MAX,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Camera Alpha",
-                            &mut gizmo_settings.camera_icon_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Light Alpha",
-                            &mut gizmo_settings.light_icon_alpha,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                        edit_color(ui, "Camera Color", &mut gizmo_settings.camera_icon_color);
-                        edit_color(
-                            ui,
-                            "Active Camera Color",
-                            &mut gizmo_settings.active_camera_icon_color,
-                        );
-                    });
-
-                    ui.collapsing("Highlight", |ui| {
-                        edit_float_range(
-                            ui,
-                            "Hover Mix",
-                            &mut gizmo_settings.hover_mix,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                        edit_float_range(
-                            ui,
-                            "Active Mix",
-                            &mut gizmo_settings.active_mix,
-                            0.01,
-                            0.0..=1.0,
-                        );
-                    });
-
-                    gizmo_settings.sanitize();
-                });
-            }
-
-            ui.separator();
-
-            ui.heading("Skinning");
-            if let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() {
-                let mut render_config = runtime_config.0.render_config;
-
-                let mode_label = match render_config.skinning_mode {
-                    SkinningMode::Auto => "Auto",
-                    SkinningMode::Gpu => "GPU",
-                    SkinningMode::Cpu => "CPU",
-                };
-                ComboBox::from_id_source("skinning_mode")
-                    .selected_text(mode_label)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(
-                                matches!(render_config.skinning_mode, SkinningMode::Auto),
-                                "Auto",
-                            )
-                            .clicked()
-                        {
-                            render_config.skinning_mode = SkinningMode::Auto;
-                        }
-                        if ui
-                            .selectable_label(
-                                matches!(render_config.skinning_mode, SkinningMode::Gpu),
-                                "GPU",
-                            )
-                            .clicked()
-                        {
-                            render_config.skinning_mode = SkinningMode::Gpu;
-                        }
-                        if ui
-                            .selectable_label(
-                                matches!(render_config.skinning_mode, SkinningMode::Cpu),
-                                "CPU",
-                            )
-                            .clicked()
-                        {
-                            render_config.skinning_mode = SkinningMode::Cpu;
-                        }
-                    });
-
-                ui.horizontal(|ui| {
-                    ui.label("Palette Capacity");
-                    ui.add(
-                        DragValue::new(&mut render_config.skin_palette_capacity)
-                            .range(0..=u32::MAX)
-                            .speed(1),
-                    );
-                });
-                let _ = edit_float(
-                    ui,
-                    "Palette Growth",
-                    &mut render_config.skin_palette_growth,
-                    0.01,
-                );
-                ui.horizontal(|ui| {
-                    ui.label("CPU Vertex Budget");
-                    ui.add(
-                        DragValue::new(&mut render_config.cpu_skinning_vertex_budget)
-                            .range(0..=u32::MAX)
-                            .speed(1),
-                    );
-                });
-
-                runtime_config.0.render_config = render_config;
-            } else {
-                ui.label("Runtime config unavailable.");
-            }
-
-            ui.heading("Camera");
-            let mut camera_query = world
-            .query_filtered::<(&mut BevyCamera, &mut BevyTransform), With<EditorViewportCamera>>();
-            if let Some((mut camera, mut transform)) = camera_query.iter_mut(world).next() {
-                let camera = &mut camera.0;
-                let transform = &mut transform.0;
-
-                let mut fov = camera.fov_y_rad.to_degrees();
-                let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
-                if fov_response.changed {
-                    camera.fov_y_rad = fov.to_radians();
-                }
-                let _ = edit_float(ui, "Near", &mut camera.near_plane, 0.01);
-                let _ = edit_float(ui, "Far", &mut camera.far_plane, 1.0);
-
-                let mut position = transform.position;
-                let position_response = edit_vec3(ui, "Position", &mut position, 0.1);
-                if position_response.changed {
-                    transform.position = position;
-                }
-            } else {
-                ui.label("Viewport camera missing.");
             }
         }
     });

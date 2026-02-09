@@ -2855,9 +2855,11 @@ impl GraphRenderer {
             scene.data.render_main_scene_to_swapchain,
         );
         let graph_sig = RenderGraphConfigSignature::from_render_config(&main_render_config);
-        let tracing_active = graph_spec.name == "traced-graph"
-            || (graph_spec.name == "hybrid-graph"
-                && (main_render_config.ddgi_pass || main_render_config.rt_reflections));
+        let tracing_active_for_config = |config: &RenderConfig| {
+            graph_spec.name == "traced-graph"
+                || (graph_spec.name == "hybrid-graph"
+                    && (config.ddgi_pass || config.rt_reflections))
+        };
 
         if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig, graph_surface_size) {
             self.current_render_data = Some(scene);
@@ -2888,6 +2890,7 @@ impl GraphRenderer {
         let mut submitted_cmds = Vec::new();
         let mut native_texture_bindings = Vec::new();
         let mut active_offscreen_ids = HashSet::new();
+        let mut tracing_rendered_this_frame = false;
 
         let cached_egui_data = self.frame_inputs.get::<EguiRenderData>();
         let cached_egui_textures = self.frame_inputs.get::<EguiTextureCache>();
@@ -2915,6 +2918,7 @@ impl GraphRenderer {
             let saved_prev_shader_constants = self.prev_shader_constants;
             let saved_needs_atmosphere_precompute = self.needs_atmosphere_precompute;
             let saved_occlusion_stable_frames = self.occlusion_stable_frames;
+            let saved_viewport_render_config = scene.data.render_config;
             let viewport_prev_view_proj = self
                 .offscreen_viewport_prev_view_proj
                 .get(&viewport.id)
@@ -2930,9 +2934,34 @@ impl GraphRenderer {
                 scene.data.camera_component.aspect_ratio =
                     target_width as f32 / target_height as f32;
             }
+            let mut viewport_render_config = saved_viewport_render_config;
+            // offscreen viewport rendering does not share a stable on screen depth history, so occlusion culling can become too aggressive
+            viewport_render_config.occlusion_culling = false;
+            if !viewport.temporal_history {
+                viewport_render_config =
+                    Self::viewport_non_temporal_render_config(viewport_render_config);
+            }
+            let viewport_tracing_active = tracing_active_for_config(&viewport_render_config);
+            scene.data.render_config = viewport_render_config;
             self.prev_view_proj = viewport_prev_view_proj;
 
             if let Some(globals) = self.prepare_frame_globals(&scene) {
+                if globals.render_config.gpu_driven {
+                    self.run_gpu_culling(&globals);
+                } else {
+                    self.run_occlusion_culling(&globals);
+                }
+                self.run_atmosphere_precompute(&globals);
+                if viewport_tracing_active {
+                    if let Some(rt_inputs) = self.prepare_ray_tracing_inputs(&scene, &globals) {
+                        self.frame_inputs.set(rt_inputs);
+                        tracing_rendered_this_frame = true;
+                    } else {
+                        self.frame_inputs.remove::<RayTracingFrameInput>();
+                    }
+                } else {
+                    self.frame_inputs.remove::<RayTracingFrameInput>();
+                }
                 self.update_swapchain_entry(swapchain_id, target_view.clone());
                 self.frame_inputs.set(globals);
                 self.frame_inputs.set(SwapchainFrameInput {
@@ -2977,6 +3006,7 @@ impl GraphRenderer {
             scene.data.current_camera_transform = main_camera_transform;
             scene.data.previous_camera_transform = main_prev_camera_transform;
             scene.data.camera_component = main_camera_component;
+            scene.data.render_config = saved_viewport_render_config;
             self.prev_view_proj = saved_prev_view_proj;
             self.prev_sky_uniforms = saved_prev_sky_uniforms;
             self.prev_shader_constants = saved_prev_shader_constants;
@@ -3037,15 +3067,19 @@ impl GraphRenderer {
             );
         }
         self.run_atmosphere_precompute(&globals);
-        let tracing_active_for_main = tracing_active && scene.data.render_main_scene_to_swapchain;
+        let tracing_active_for_main = scene.data.render_main_scene_to_swapchain
+            && tracing_active_for_config(&globals.render_config);
         if tracing_active_for_main {
             if let Some(rt_inputs) = self.prepare_ray_tracing_inputs(&scene, &globals) {
                 self.frame_inputs.set(rt_inputs);
+                tracing_rendered_this_frame = true;
             } else {
                 self.frame_inputs.remove::<RayTracingFrameInput>();
             }
         } else {
             self.frame_inputs.remove::<RayTracingFrameInput>();
+        }
+        if !tracing_rendered_this_frame {
             self.rt_state.reset_accumulation = true;
         }
         if native_texture_bindings.is_empty() {
@@ -4604,7 +4638,6 @@ impl GraphRenderer {
         config.ddgi_pass = false;
         config.transparent_pass = false;
         config.gizmo_pass = false;
-        config.gpu_driven = false;
         config.occlusion_culling = false;
         config.frustum_culling = false;
         config.render_bundles = false;
@@ -4618,6 +4651,25 @@ impl GraphRenderer {
         config.rt_reflection_accumulation = false;
         config.use_dont_care_load_ops = false;
         config.egui_pass = true;
+        config
+    }
+
+    fn viewport_non_temporal_render_config(config: RenderConfig) -> RenderConfig {
+        let mut config = config;
+        // secondary offscreen viewports can render in the same frame as the main viewport
+        // and share graph history resources. disable temporal history there to keep
+        // primary viewport gizmos/outlines stable
+        config.ssgi_pass = false;
+        config.ssgi_denoise_pass = false;
+        config.ssr_pass = false;
+        config.ddgi_pass = false;
+        config.occlusion_culling = false;
+        config.frustum_culling = false;
+        config.render_bundles = false;
+        config.rt_accumulation = false;
+        config.rt_reflections = false;
+        config.rt_reflection_accumulation = false;
+        config.rt_reflection_history_weight = 0.0;
         config
     }
 
@@ -7298,7 +7350,7 @@ impl GraphRenderer {
             gpu_frame = self.prepare_gpu_driven_frame(render_data, alpha);
         }
         let use_gpu_driven = gpu_frame.is_some();
-        if gpu_driven && !use_gpu_driven {
+        if gpu_driven && (gbuffer_pass || shadow_pass) && !use_gpu_driven {
             frame_render_config.gpu_driven = false;
             self.shared_stats
                 .gpu_fallbacks

@@ -542,6 +542,7 @@ pub struct RenderViewportRequest {
     pub camera_component: Camera,
     pub egui_texture_id: egui::TextureId,
     pub target_size: [u32; 2],
+    pub temporal_history: bool,
 }
 
 #[repr(u32)]

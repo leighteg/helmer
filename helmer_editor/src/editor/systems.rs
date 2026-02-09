@@ -2746,6 +2746,7 @@ fn viewport_request_for_entity(
     texture_id: egui::TextureId,
     viewport_rect: ViewportRectPixels,
     target_size_override: Option<[u32; 2]>,
+    temporal_history: bool,
 ) -> Option<RenderViewportRequest> {
     let transform = world.get::<BevyTransform>(entity)?.0;
     let mut camera = world.get::<BevyCamera>(entity)?.0;
@@ -2760,6 +2761,7 @@ fn viewport_request_for_entity(
         camera_component: camera,
         egui_texture_id: texture_id,
         target_size,
+        temporal_history,
     })
 }
 
@@ -2829,42 +2831,51 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
             .main_target_size
             .unwrap_or_else(|| main_rect.target_size());
 
-        if let Some(texture_id) = runtime.editor_texture_id {
+        let wants_gameplay_main =
+            world_state == WorldState::Play && play_mode == PlayViewportKind::Gameplay;
+        let main_view = if wants_gameplay_main {
+            match (play_entity, runtime.gameplay_texture_id) {
+                (Some(entity), Some(texture_id)) => {
+                    Some((entity, texture_id, VIEWPORT_ID_GAMEPLAY))
+                }
+                _ => runtime
+                    .editor_texture_id
+                    .map(|texture_id| (editor_entity, texture_id, VIEWPORT_ID_EDITOR)),
+            }
+        } else {
+            runtime
+                .editor_texture_id
+                .map(|texture_id| (editor_entity, texture_id, VIEWPORT_ID_EDITOR))
+                .or_else(|| {
+                    if world_state == WorldState::Play {
+                        match (play_entity, runtime.gameplay_texture_id) {
+                            (Some(entity), Some(texture_id)) => {
+                                Some((entity, texture_id, VIEWPORT_ID_GAMEPLAY))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                })
+        };
+
+        let main_display_entity = if let Some((main_entity, texture_id, viewport_id)) = main_view {
             if let Some(request) = viewport_request_for_entity(
                 world,
-                editor_entity,
-                VIEWPORT_ID_EDITOR,
+                main_entity,
+                viewport_id,
                 texture_id,
                 main_rect,
                 Some(main_target_size),
+                true,
             ) {
                 requests.push(request);
             }
-        }
-
-        if world_state == WorldState::Play {
-            if let (Some(play_entity), Some(texture_id)) =
-                (play_entity, runtime.gameplay_texture_id)
-            {
-                if let Some(request) = viewport_request_for_entity(
-                    world,
-                    play_entity,
-                    VIEWPORT_ID_GAMEPLAY,
-                    texture_id,
-                    main_rect,
-                    Some(main_target_size),
-                ) {
-                    requests.push(request);
-                }
-            }
-        }
-
-        let main_display_entity =
-            if world_state == WorldState::Play && play_mode == PlayViewportKind::Gameplay {
-                play_entity.unwrap_or(editor_entity)
-            } else {
-                editor_entity
-            };
+            main_entity
+        } else {
+            editor_entity
+        };
 
         if let (Some(preview_entity), Some(texture_id), Some(preview_rect)) = (
             runtime.preview_camera_entity,
@@ -2879,6 +2890,7 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                     texture_id,
                     preview_rect,
                     None,
+                    false,
                 ) {
                     requests.push(request);
                 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use egui::{TextureHandle, TextureId};
@@ -6,8 +8,16 @@ use glam::DVec2;
 use helmer::provided::components::{ActiveCamera, AudioListener};
 use helmer_becs::{BevyActiveCamera, BevyAudioListener, BevyCamera, BevyTransform, BevyWrapper};
 
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct EditorViewportCamera;
+#[derive(Component, Debug, Clone, Copy)]
+pub struct EditorViewportCamera {
+    pub pane_id: u64,
+}
+
+impl Default for EditorViewportCamera {
+    fn default() -> Self {
+        Self { pane_id: 0 }
+    }
+}
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorPlayCamera;
@@ -164,6 +174,9 @@ pub struct EditorViewportRuntime {
     pub preview_camera_entity: Option<Entity>,
     pub pointer_over_main: bool,
     pub keyboard_focus: bool,
+    pub pane_requests: Vec<EditorViewportPaneRequest>,
+    pub active_pane_id: Option<u64>,
+    pub active_camera_entity: Option<Entity>,
 }
 
 impl EditorViewportRuntime {
@@ -174,7 +187,20 @@ impl EditorViewportRuntime {
         self.preview_rect_pixels = None;
         self.preview_camera_entity = None;
         self.pointer_over_main = false;
+        self.pane_requests.clear();
+        self.active_camera_entity = None;
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EditorViewportPaneRequest {
+    pub pane_id: u64,
+    pub camera_entity: Entity,
+    pub texture_id: TextureId,
+    pub viewport_rect: ViewportRectPixels,
+    pub target_size: [u32; 2],
+    pub temporal_history: bool,
+    pub immediate_resize: bool,
 }
 
 #[derive(Resource, Default)]
@@ -182,6 +208,7 @@ pub struct EditorViewportTextures {
     pub editor: Option<TextureHandle>,
     pub gameplay: Option<TextureHandle>,
     pub preview: Option<TextureHandle>,
+    pub pane_textures: HashMap<u64, TextureHandle>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -226,26 +253,50 @@ impl Default for EditorViewportState {
 }
 
 pub fn ensure_viewport_camera(world: &mut World) -> Entity {
+    ensure_viewport_camera_for_pane(world, 0)
+}
+
+pub fn ensure_viewport_camera_for_pane(world: &mut World, pane_id: u64) -> Entity {
+    if let Some((entity, _)) = world
+        .query::<(Entity, &EditorViewportCamera)>()
+        .iter(world)
+        .find(|(_, camera)| camera.pane_id == pane_id)
+    {
+        return entity;
+    }
+
     if let Some((entity, _)) = world
         .query::<(Entity, &EditorViewportCamera)>()
         .iter(world)
         .next()
     {
-        return entity;
+        if pane_id == 0 {
+            return entity;
+        }
     }
+
+    let name = if pane_id == 0 {
+        "Viewport Camera".to_string()
+    } else {
+        format!("Viewport Camera {}", pane_id)
+    };
 
     world
         .spawn((
-            EditorViewportCamera,
+            EditorViewportCamera { pane_id },
             BevyTransform::default(),
             BevyCamera::default(),
-            Name::new("Viewport Camera"),
+            Name::new(name),
         ))
         .id()
 }
 
 pub fn activate_viewport_camera(world: &mut World) -> Entity {
-    let entity = ensure_viewport_camera(world);
+    activate_viewport_camera_for_pane(world, 0)
+}
+
+pub fn activate_viewport_camera_for_pane(world: &mut World, pane_id: u64) -> Entity {
+    let entity = ensure_viewport_camera_for_pane(world, pane_id);
     clear_active_camera(world);
     world
         .entity_mut(entity)
@@ -254,19 +305,38 @@ pub fn activate_viewport_camera(world: &mut World) -> Entity {
 }
 
 pub fn set_viewport_audio_listener_enabled(world: &mut World, enabled: bool) {
-    let entity = ensure_viewport_camera(world);
-    if enabled {
+    let entities: Vec<Entity> = world
+        .query::<(Entity, &EditorViewportCamera)>()
+        .iter(world)
+        .map(|(entity, _)| entity)
+        .collect();
+
+    if entities.is_empty() && enabled {
+        let entity = ensure_viewport_camera(world);
         world
             .entity_mut(entity)
             .insert(BevyWrapper(AudioListener { enabled: true }));
         return;
     }
-    if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
-        listener.0.enabled = false;
+
+    for entity in entities {
+        if enabled {
+            world
+                .entity_mut(entity)
+                .insert(BevyWrapper(AudioListener { enabled: true }));
+        } else if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
+            listener.0.enabled = false;
+        }
     }
 }
 
 pub fn set_play_camera(world: &mut World, entity: Entity) {
+    if world.get_entity(entity).is_err() {
+        return;
+    }
+    if world.get::<BevyCamera>(entity).is_none() || world.get::<BevyTransform>(entity).is_none() {
+        return;
+    }
     if world.get::<EditorViewportCamera>(entity).is_some() {
         return;
     }

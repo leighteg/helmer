@@ -56,6 +56,7 @@ pub struct EguiResource {
     pub layout_allow_move: bool,
     pub layout_force_positions: bool,
     pub layout_resizing_window: Option<String>,
+    pub disable_window_drag: bool,
 }
 
 pub struct RenderGraphPassesUiState {
@@ -185,6 +186,7 @@ pub fn egui_system(world: &mut World) {
         let suppress_snap = egui_res.suppress_snap;
         let layout_active = egui_res.layout_active;
         let layout_force_positions = egui_res.layout_force_positions;
+        let disable_window_drag = egui_res.disable_window_drag;
         egui_res.suppress_snap = false;
 
         drop(egui_res);
@@ -228,6 +230,10 @@ pub fn egui_system(world: &mut World) {
 
             if let Some(order) = window_order_overrides.get(&spec.id) {
                 window = window.order(*order);
+            }
+
+            if disable_window_drag {
+                window = window.movable(false);
             }
 
             if is_layout_window {

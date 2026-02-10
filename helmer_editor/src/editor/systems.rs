@@ -39,6 +39,7 @@ use crate::editor::{
     EditorViewportRuntime, EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest,
     NormalizedRect, PlayViewportKind, VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY,
     VIEWPORT_ID_PREVIEW, ViewportRectPixels, activate_play_camera, activate_viewport_camera,
+    activate_viewport_camera_for_pane,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
         MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
@@ -71,12 +72,11 @@ use crate::editor::{
     },
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
-        AssetDragState, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
-        EditorUiState, EditorWorkspaceState, EntityDragState, InspectorPinnedEntityResource,
-        MiddleDragUiState, close_editor_window, draw_assets_window, draw_audio_mixer_window,
-        draw_editor_window, draw_history_window, draw_inspector_window, draw_pane_manager_window,
-        draw_project_window, draw_scene_window, draw_timeline_window, draw_toolbar,
-        draw_viewport_window,
+        AssetDragState, EditorPaneManagerState, EditorPaneWorkspaceState, EditorUiState,
+        EditorWorkspaceState, EntityDragState, InspectorPinnedEntityResource, MiddleDragUiState,
+        close_editor_window, close_pane_workspace_window, draw_editor_window,
+        draw_pane_manager_window, draw_pane_workspace_window, ensure_default_pane_workspace,
+        spawn_play_viewport_pane,
     },
     undo_action,
     watch::configure_file_watcher,
@@ -90,22 +90,7 @@ pub fn editor_ui_system(world: &mut World) {
         *passthrough = EguiInputPassthrough::default();
     }
 
-    let project_open = world
-        .get_resource::<EditorProject>()
-        .and_then(|project| project.root.as_ref())
-        .is_some();
-    let auto_hide_project = world
-        .get_resource::<EditorPaneAutoState>()
-        .map(|state| state.project_auto_hide)
-        .unwrap_or(false);
-    if auto_hide_project {
-        if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
-            panes.project = !project_open;
-        }
-    }
-    if let Some(mut auto_state) = world.get_resource_mut::<EditorPaneAutoState>() {
-        auto_state.last_project_open = project_open;
-    }
+    ensure_default_pane_workspace(world);
 
     let editor_windows = world
         .get_resource::<EditorWorkspaceState>()
@@ -117,10 +102,22 @@ pub fn editor_ui_system(world: &mut World) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let pane_visibility = world
-        .get_resource::<EditorPaneVisibility>()
-        .cloned()
+    let editor_tab_dragging = world
+        .get_resource::<EditorWorkspaceState>()
+        .is_some_and(|state| state.dragging.is_some());
+    let pane_windows = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .map(|state| {
+            state
+                .windows
+                .iter()
+                .map(|window| (window.id.clone(), window.layout_managed))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
+    let pane_tab_dragging = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .is_some_and(|state| state.dragging.is_some());
     let pane_manager_open = world
         .get_resource::<EditorPaneManagerState>()
         .map(|state| state.open)
@@ -129,132 +126,32 @@ pub fn editor_ui_system(world: &mut World) {
     if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
         workspace.drop_handled = false;
     }
+    if let Some(mut workspace) = world.get_resource_mut::<EditorPaneWorkspaceState>() {
+        workspace.drop_handled = false;
+    }
 
     let mut egui_res = world
         .get_resource_mut::<EguiResource>()
         .expect("EguiResource missing");
 
     egui_res.inspector_ui = false;
-    if pane_visibility.toolbar {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_toolbar(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Toolbar".to_string(),
-                title: "Toolbar".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.viewport {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_viewport_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Viewport".to_string(),
-                title: "Viewport".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.project {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_project_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Project".to_string(),
-                title: "Project".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.hierarchy {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_scene_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Hierarchy".to_string(),
-                title: "Hierarchy".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.inspector {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_inspector_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Inspector".to_string(),
-                title: "Inspector".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.history {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_history_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "History".to_string(),
-                title: "History".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.audio_mixer {
+    egui_res.disable_window_drag = editor_tab_dragging || pane_tab_dragging;
+    for (window_id, _layout_managed) in pane_windows {
+        let close_id = window_id.clone();
         egui_res.close_actions.insert(
-            "Audio Mixer".to_string(),
-            Box::new(|world: &mut World| {
-                if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
-                    panes.audio_mixer = false;
-                }
+            window_id.clone(),
+            Box::new(move |world: &mut World| {
+                close_pane_workspace_window(world, &close_id);
             }),
         );
+        let pane_window_id = window_id.clone();
         egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_audio_mixer_window(ui, world);
+            Box::new(move |ui: &mut Ui, world: &mut World, _| {
+                draw_pane_workspace_window(ui, world, &pane_window_id);
             }),
             EguiWindowSpec {
-                id: "Audio Mixer".to_string(),
-                title: "Audio Mixer".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.timeline {
-        egui_res.close_actions.insert(
-            "Timeline".to_string(),
-            Box::new(|world: &mut World| {
-                if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
-                    panes.timeline = false;
-                }
-            }),
-        );
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_timeline_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Timeline".to_string(),
-                title: "Timeline".to_string(),
-            },
-        ));
-    }
-
-    if pane_visibility.content_browser {
-        egui_res.windows.push((
-            Box::new(|ui: &mut Ui, world: &mut World, _| {
-                draw_assets_window(ui, world);
-            }),
-            EguiWindowSpec {
-                id: "Content Browser".to_string(),
-                title: "Content Browser".to_string(),
+                id: window_id,
+                title: String::new(),
             },
         ));
     }
@@ -310,6 +207,8 @@ pub fn editor_ui_system(world: &mut World) {
 }
 
 pub fn editor_layout_apply_system(world: &mut World) {
+    ensure_default_pane_workspace(world);
+
     let project_open = world
         .get_resource::<crate::editor::EditorProject>()
         .and_then(|project| project.root.as_ref())
@@ -2776,17 +2675,33 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
         .get_resource::<EditorViewportState>()
         .map(|state| state.play_mode_view)
         .unwrap_or(PlayViewportKind::Editor);
+    let runtime_camera = world
+        .get_resource::<EditorViewportRuntime>()
+        .map(|runtime| {
+            runtime
+                .active_camera_entity
+                .or_else(|| runtime.pane_requests.first().map(|pane| pane.camera_entity))
+        })
+        .flatten()
+        .filter(|entity| has_camera(world, *entity));
 
     let viewport_entity = ensure_viewport_camera(world);
     let desired = match world_state {
-        WorldState::Edit => viewport_entity,
+        WorldState::Edit => runtime_camera.unwrap_or(viewport_entity),
         WorldState::Play => {
-            if play_mode == PlayViewportKind::Gameplay {
+            if let Some(entity) = runtime_camera {
+                entity
+            } else if play_mode == PlayViewportKind::Gameplay {
                 ensure_play_camera(world).unwrap_or(viewport_entity)
             } else {
                 viewport_entity
             }
         }
+    };
+    let desired = if has_camera(world, desired) {
+        desired
+    } else {
+        viewport_entity
     };
 
     let current = world
@@ -2798,8 +2713,8 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
         return;
     }
 
-    if desired == viewport_entity {
-        activate_viewport_camera(world);
+    if let Some(viewport_camera) = world.get::<EditorViewportCamera>(desired).copied() {
+        activate_viewport_camera_for_pane(world, viewport_camera.pane_id);
     } else {
         set_play_camera(world, desired);
         activate_play_camera(world);
@@ -2811,6 +2726,28 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
         .get_resource::<EditorViewportRuntime>()
         .cloned()
         .unwrap_or_default();
+    if !runtime.pane_requests.is_empty() {
+        let mut requests = Vec::new();
+        for pane in runtime.pane_requests {
+            if let Some(request) = viewport_request_for_entity(
+                world,
+                pane.camera_entity,
+                pane.pane_id,
+                pane.texture_id,
+                pane.viewport_rect,
+                Some(pane.target_size),
+                pane.temporal_history,
+                pane.immediate_resize,
+            ) {
+                requests.push(request);
+            }
+        }
+        if let Some(mut viewport_requests) = world.get_resource_mut::<RenderViewportRequests>() {
+            viewport_requests.0 = requests;
+        }
+        return;
+    }
+
     let world_state = world
         .get_resource::<EditorSceneState>()
         .map(|scene| scene.world_state)
@@ -2938,6 +2875,7 @@ fn handle_toggle_play(world: &mut World) {
             activate_play_camera(world);
             set_viewport_audio_listener_enabled(world, false);
             apply_viewport_graph(world);
+            spawn_play_viewport_pane(world);
 
             set_status(world, "Play mode".to_string());
         }
@@ -3282,6 +3220,7 @@ pub struct Freecam;
 pub fn freecam_system(
     mut state: bevy_ecs::system::Local<FreecamState>,
     input: Res<BevyInputManager>,
+    egui_res: Res<EguiResource>,
     time: Res<DeltaTime>,
     gizmo_state: Res<EditorGizmoState>,
     scene_state: Res<EditorSceneState>,
@@ -3312,12 +3251,47 @@ pub fn freecam_system(
 
     let dt = time.0;
     let input_manager = &input.0.read();
+    let egui_pixels_per_point = egui_res.ctx.pixels_per_point() as f64;
+    let egui_cursor_position = egui_res.ctx.input(|input| {
+        input
+            .pointer
+            .interact_pos()
+            .or_else(|| input.pointer.hover_pos())
+            .map(|pos| {
+                DVec2::new(
+                    pos.x as f64 * egui_pixels_per_point,
+                    pos.y as f64 * egui_pixels_per_point,
+                )
+            })
+    });
+    let cursor_position = egui_cursor_position.unwrap_or(input_manager.cursor_position);
+    let right_mouse_down = input_manager.is_mouse_button_active(MouseButton::Right)
+        || egui_res
+            .ctx
+            .input(|input| input.pointer.button_down(egui::PointerButton::Secondary));
     let wants_pointer = input_manager.egui_wants_pointer;
     let gizmo_blocking = gizmo_state.is_drag_active();
-    let pointer_in_viewport = viewport_runtime
-        .main_rect_pixels
-        .map(|rect| rect.contains(input_manager.cursor_position))
+    let hovered_pane_request = viewport_runtime
+        .pane_requests
+        .iter()
+        .find(|pane| pane.viewport_rect.contains(cursor_position));
+    let pointer_rect = hovered_pane_request
+        .map(|pane| pane.viewport_rect)
+        .or(viewport_runtime.main_rect_pixels)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.viewport_rect)
+        });
+    let pointer_in_viewport = pointer_rect
+        .map(|rect| rect.contains(cursor_position))
         .unwrap_or(false);
+    let pointer_over_active_viewport = viewport_runtime.pointer_over_main;
+    let allow_viewport_look_input = !wants_pointer
+        || viewport_runtime.keyboard_focus
+        || pointer_over_active_viewport
+        || pointer_in_viewport;
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;
@@ -3329,16 +3303,16 @@ pub fn freecam_system(
     let mut pitch_delta = 0.0;
 
     if !gizmo_blocking
-        && !wants_pointer
-        && input_manager.is_mouse_button_active(MouseButton::Right)
-        && (pointer_in_viewport || state.is_looking)
+        && allow_viewport_look_input
+        && right_mouse_down
+        && (pointer_in_viewport || pointer_over_active_viewport || state.is_looking)
     {
         if !state.is_looking {
-            state.last_cursor_position = input_manager.cursor_position;
+            state.last_cursor_position = cursor_position;
             state.is_looking = true;
         } else {
-            let cursor_delta = input_manager.cursor_position - state.last_cursor_position;
-            state.last_cursor_position = input_manager.cursor_position;
+            let cursor_delta = cursor_position - state.last_cursor_position;
+            state.last_cursor_position = cursor_position;
 
             yaw_delta -= cursor_delta.x as f32 * state.sensitivity / 100.0;
             pitch_delta += cursor_delta.y as f32 * state.sensitivity / 100.0;
@@ -3405,7 +3379,7 @@ pub fn freecam_system(
                 state.active_entity = Some(entity);
                 state.current_fov_multiplier = 1.0;
                 state.is_looking = false;
-                state.last_cursor_position = input_manager.cursor_position;
+                state.last_cursor_position = cursor_position;
             }
 
             let transform = &mut transform.0;
@@ -3469,21 +3443,40 @@ pub fn freecam_system(
             camera.fov_y_rad = base_fov * state.current_fov_multiplier;
         };
 
+    let active_camera_entity = hovered_pane_request
+        .map(|pane| pane.camera_entity)
+        .or(viewport_runtime.active_camera_entity)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.camera_entity)
+        });
+    if let Some(active_entity) = active_camera_entity {
+        if let Ok((entity, mut transform, mut camera)) = viewport_query.get_mut(active_entity) {
+            apply_freecam(entity, &mut transform, &mut camera);
+            return;
+        }
+        if let Ok((entity, mut transform, mut camera)) = play_query.get_mut(active_entity) {
+            apply_freecam(entity, &mut transform, &mut camera);
+            return;
+        }
+    }
+
     match scene_state.world_state {
         WorldState::Edit => {
-            for (entity, mut transform, mut camera) in viewport_query.iter_mut() {
+            if let Some((entity, mut transform, mut camera)) = viewport_query.iter_mut().next() {
                 apply_freecam(entity, &mut transform, &mut camera);
             }
         }
         WorldState::Play => {
             if viewport_state.play_mode_view == PlayViewportKind::Editor {
-                for (entity, mut transform, mut camera) in viewport_query.iter_mut() {
+                if let Some((entity, mut transform, mut camera)) = viewport_query.iter_mut().next()
+                {
                     apply_freecam(entity, &mut transform, &mut camera);
                 }
-            } else {
-                for (entity, mut transform, mut camera) in play_query.iter_mut() {
-                    apply_freecam(entity, &mut transform, &mut camera);
-                }
+            } else if let Some((entity, mut transform, mut camera)) = play_query.iter_mut().next() {
+                apply_freecam(entity, &mut transform, &mut camera);
             }
         }
     }

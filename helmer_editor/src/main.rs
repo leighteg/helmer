@@ -9,23 +9,23 @@ use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_b
 use helmer_editor::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
     EditorCommand, EditorCommandQueue, EditorGizmoSettings, EditorGizmoState,
-    EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneVisibility,
-    EditorProject, EditorRenderRefresh, EditorSceneState, EditorSelectionState, EditorSplineState,
-    EditorTimelineState, EditorUiState, EditorUndoState, EditorViewportRuntime,
-    EditorViewportState, EditorViewportTextures, EditorWorkspaceState, EntityDragState,
-    FileWatchState, HierarchyUiState, InspectorNameEditState, InspectorPinnedEntityResource,
-    MaterialEditorCache, MiddleDragUiState, PendingSceneChildAnimations,
-    PendingSceneChildPoseOverrides, PoseEditorState, ScriptEditModeState, ScriptInputState,
-    ScriptRegistry, ScriptRunState, ScriptRuntime, activate_viewport_camera,
-    apply_scene_child_animations_system, apply_scene_child_pose_overrides_system,
-    asset_scan_system, drag_drop_system, editor_command_system, editor_layout_apply_system,
-    editor_layout_save_system, editor_layout_update_system, editor_physics_state_system,
-    editor_render_refresh_system, editor_shortcut_system, editor_ui_system,
-    editor_undo_request_system, editor_viewport_camera_mode_system,
-    editor_viewport_render_requests_system, file_watch_system, freecam_system, gizmo_system,
-    load_layout_state, load_recent_projects, pane_manager_toggle_system,
-    pending_scene_child_renderer_system, pending_skinned_mesh_system, scene_dirty_system,
-    script_execution_system, script_registry_system, selection_system,
+    EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneViewportState,
+    EditorPaneVisibility, EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh,
+    EditorSceneState, EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState,
+    EditorUndoState, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
+    EditorWorkspaceState, EntityDragState, FileWatchState, HierarchyUiState,
+    InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
+    PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
+    ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
+    activate_viewport_camera, apply_scene_child_animations_system,
+    apply_scene_child_pose_overrides_system, asset_scan_system, drag_drop_system,
+    editor_command_system, editor_layout_apply_system, editor_layout_save_system,
+    editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
+    editor_shortcut_system, editor_ui_system, editor_undo_request_system,
+    editor_viewport_camera_mode_system, editor_viewport_render_requests_system, file_watch_system,
+    freecam_system, gizmo_system, load_layout_state, load_recent_projects,
+    pane_manager_toggle_system, pending_scene_child_renderer_system, pending_skinned_mesh_system,
+    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
     set_viewport_audio_listener_enabled, timeline_playback_system,
 };
 
@@ -95,6 +95,8 @@ fn editor_init(
     world.insert_resource(EditorPaneVisibility::default());
     world.insert_resource(EditorPaneManagerState::default());
     world.insert_resource(EditorPaneAutoState::default());
+    world.insert_resource(EditorPaneViewportState::default());
+    world.insert_resource(EditorPaneWorkspaceState::default());
     world.insert_resource(EditorAudioDeviceCache::default());
 
     if let Some(audio) = world.get_resource::<AudioBackendResource>() {

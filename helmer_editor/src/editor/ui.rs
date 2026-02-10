@@ -1,8 +1,10 @@
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 use bevy_ecs::name::Name;
@@ -13,7 +15,7 @@ use egui::{
     PointerButton, PopupCloseBehavior, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind,
     TextStyle, Ui, Vec2,
 };
-use glam::{EulerRot, Mat3, Quat, Vec3};
+use glam::{DVec2, EulerRot, Mat3, Quat, Vec3};
 use helmer::animation::{AnimationClip, Pose, Skeleton};
 use helmer::audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
 use helmer::graphics::common::config::SkinningMode;
@@ -62,7 +64,8 @@ use crate::editor::{
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue, DynamicValueKind},
-    end_material_undo_group, end_undo_group, enforce_undo_cap,
+    end_material_undo_group, end_undo_group, enforce_undo_cap, ensure_play_camera,
+    ensure_viewport_camera_for_pane,
     gizmos::{EditorGizmoSettings, EditorGizmoState},
     project::{
         EditorProject, ProjectConfig, default_rust_script_template_full,
@@ -147,6 +150,181 @@ impl Default for EditorPaneAutoState {
             last_project_open: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorPaneKind {
+    Toolbar,
+    Viewport,
+    PlayViewport,
+    Project,
+    Hierarchy,
+    Inspector,
+    History,
+    Timeline,
+    ContentBrowser,
+    AudioMixer,
+}
+
+impl EditorPaneKind {
+    pub const ALL: [Self; 10] = [
+        Self::Toolbar,
+        Self::Viewport,
+        Self::PlayViewport,
+        Self::Project,
+        Self::Hierarchy,
+        Self::Inspector,
+        Self::History,
+        Self::Timeline,
+        Self::ContentBrowser,
+        Self::AudioMixer,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Toolbar => "Toolbar",
+            Self::Viewport => "Viewport",
+            Self::PlayViewport => "Play Viewport",
+            Self::Project => "Project",
+            Self::Hierarchy => "Hierarchy",
+            Self::Inspector => "Inspector",
+            Self::History => "History",
+            Self::Timeline => "Timeline",
+            Self::ContentBrowser => "Content Browser",
+            Self::AudioMixer => "Audio Mixer",
+        }
+    }
+
+    pub fn default_layout_window_id(self) -> Option<&'static str> {
+        match self {
+            Self::Toolbar => Some("Toolbar"),
+            Self::Viewport => Some("Viewport"),
+            Self::PlayViewport => Some("Viewport"),
+            Self::Project => Some("Project"),
+            Self::Hierarchy => Some("Hierarchy"),
+            Self::Inspector => Some("Inspector"),
+            Self::History => Some("History"),
+            Self::ContentBrowser => Some("Content Browser"),
+            Self::Timeline | Self::AudioMixer => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorPaneWorkspaceState {
+    pub initialized: bool,
+    pub next_window_id: u64,
+    pub next_tab_id: u64,
+    pub next_area_id: u64,
+    pub windows: Vec<EditorPaneWindow>,
+    pub last_focused_window: Option<String>,
+    pub last_focused_area: Option<u64>,
+    pub dragging: Option<EditorPaneTabDrag>,
+    pub drop_handled: bool,
+}
+
+impl Default for EditorPaneWorkspaceState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            next_window_id: 1,
+            next_tab_id: 1,
+            next_area_id: 1,
+            windows: Vec::new(),
+            last_focused_window: None,
+            last_focused_area: None,
+            dragging: None,
+            drop_handled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource, Default)]
+pub struct EditorPaneViewportState {
+    pub resolutions: HashMap<u64, ViewportResolutionPreset>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorPaneWindow {
+    pub id: String,
+    pub title: String,
+    pub areas: Vec<EditorPaneArea>,
+    pub layout_managed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorPaneArea {
+    pub id: u64,
+    pub rect: EditorPaneAreaRect,
+    pub tabs: Vec<EditorPaneTab>,
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EditorPaneAreaRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl EditorPaneAreaRect {
+    pub fn full() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        }
+    }
+
+    pub fn to_rect(self, host: Rect) -> Rect {
+        let width = host.width().max(1.0);
+        let height = host.height().max(1.0);
+        Rect::from_min_size(
+            Pos2::new(host.min.x + self.x * width, host.min.y + self.y * height),
+            Vec2::new(self.w * width, self.h * height),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneDropZone {
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl PaneDropZone {
+    fn from_split_axis(axis: SplitAxis) -> Self {
+        match axis {
+            SplitAxis::Vertical => Self::Right,
+            SplitAxis::Horizontal => Self::Bottom,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorPaneTab {
+    pub id: u64,
+    pub title: String,
+    pub kind: EditorPaneKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditorPaneTabDrag {
+    pub tab: EditorPaneTab,
+    pub source_window_id: String,
+    pub source_area_id: u64,
+    pub source_was_single_tab: bool,
 }
 
 #[derive(Debug, Clone, Resource)]
@@ -372,8 +550,6 @@ impl Default for PoseEditorState {
 }
 
 pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Toolbar");
     draw_entity_drag_indicator(ui, world);
 
     let (scene_name, scene_dirty, world_state) = {
@@ -638,9 +814,6 @@ fn draw_layout_menu(ui: &mut Ui, world: &mut World) {
 }
 
 pub fn draw_history_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "History");
-
     with_middle_drag_blocked(ui, world, |ui, world| {
         ui.heading("History");
 
@@ -730,9 +903,6 @@ fn align_output_buffer_frames_ui(frames: u32) -> u32 {
 }
 
 pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Audio Mixer");
-
     with_middle_drag_blocked(ui, world, |ui, world| {
         let audio = match world
             .get_resource::<AudioBackendResource>()
@@ -1109,72 +1279,53 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
 }
 
 pub fn draw_pane_manager_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-
     with_middle_drag_blocked(ui, world, |ui, world| {
-        let mut project_toggled = false;
-        if let Some(mut panes) = world.get_resource_mut::<EditorPaneVisibility>() {
-            ui.horizontal(|ui| {
-                if ui.button("Default").clicked() {
-                    panes.toolbar = true;
-                    panes.viewport = true;
-                    panes.project = false;
-                    panes.hierarchy = true;
-                    panes.inspector = true;
-                    panes.history = false;
-                    panes.timeline = false;
-                    panes.content_browser = true;
-                    panes.audio_mixer = false;
-                    project_toggled = true;
+        ui.horizontal(|ui| {
+            if ui.button("Reset To Default").clicked() {
+                reset_pane_workspace(world);
+            }
+            if ui.button("Close").clicked() {
+                if let Some(mut state) = world.get_resource_mut::<EditorPaneManagerState>() {
+                    state.open = false;
                 }
-                if ui.button("All").clicked() {
-                    panes.toolbar = true;
-                    panes.viewport = true;
-                    panes.project = true;
-                    panes.hierarchy = true;
-                    panes.inspector = true;
-                    panes.history = true;
-                    panes.timeline = true;
-                    panes.content_browser = true;
-                    panes.audio_mixer = true;
-                    project_toggled = true;
-                }
-                if ui.button("None").clicked() {
-                    panes.toolbar = false;
-                    panes.viewport = false;
-                    panes.project = false;
-                    panes.hierarchy = false;
-                    panes.inspector = false;
-                    panes.history = false;
-                    panes.timeline = false;
-                    panes.content_browser = false;
-                    panes.audio_mixer = false;
-                    project_toggled = true;
-                }
-            });
-            ui.separator();
+            }
+        });
+        ui.separator();
 
-            ui.checkbox(&mut panes.toolbar, "Toolbar");
-            ui.checkbox(&mut panes.viewport, "Viewport");
-            {
-                let before = panes.project;
-                if ui.checkbox(&mut panes.project, "Project").changed() && panes.project != before {
-                    project_toggled = true;
+        ui.label("Create Pane");
+        ui.horizontal_wrapped(|ui| {
+            for kind in EditorPaneKind::ALL {
+                if ui.button(kind.label()).clicked() {
+                    spawn_pane_workspace_tab(world, kind);
                 }
             }
-            ui.checkbox(&mut panes.hierarchy, "Hierarchy");
-            ui.checkbox(&mut panes.inspector, "Inspector");
-            ui.checkbox(&mut panes.history, "History");
-            ui.checkbox(&mut panes.timeline, "Timeline");
-            ui.checkbox(&mut panes.content_browser, "Content Browser");
-            ui.checkbox(&mut panes.audio_mixer, "Audio Mixer");
-        } else {
-            ui.label("Pane manager state missing.");
-        }
-        if project_toggled {
-            if let Some(mut auto_state) = world.get_resource_mut::<EditorPaneAutoState>() {
-                auto_state.project_auto_hide = false;
-            }
+        });
+        ui.separator();
+
+        if let Some(workspace) = world.get_resource::<EditorPaneWorkspaceState>() {
+            ui.separator();
+            ui.label(format!("Windows: {}", workspace.windows.len()));
+            egui::ScrollArea::vertical()
+                .id_salt("pane_manager_window_list")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    for window in workspace.windows.iter() {
+                        let tab_count: usize =
+                            window.areas.iter().map(|area| area.tabs.len()).sum();
+                        let kind = if window.layout_managed {
+                            "Layout"
+                        } else {
+                            "Detached"
+                        };
+                        ui.label(format!(
+                            "{} [{}] - {} tabs in {} areas",
+                            window.id,
+                            kind,
+                            tab_count,
+                            window.areas.len()
+                        ));
+                    }
+                });
         }
     });
 }
@@ -1310,10 +1461,231 @@ fn resolve_preview_camera_for_viewport(world: &mut World) -> Option<Entity> {
     })
 }
 
-pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Viewport");
+fn ensure_pane_viewport_texture_id(
+    ui: &Ui,
+    world: &mut World,
+    pane_id: u64,
+) -> Option<egui::TextureId> {
+    let mut textures = world.get_resource_mut::<EditorViewportTextures>()?;
+    let placeholder = egui::ColorImage::filled([1, 1], Color32::BLACK);
+    let options = egui::TextureOptions::LINEAR;
+    let id = textures
+        .pane_textures
+        .entry(pane_id)
+        .or_insert_with(|| {
+            ui.ctx().load_texture(
+                format!("helmer_editor/viewport/pane_{}", pane_id),
+                placeholder,
+                options,
+            )
+        })
+        .id();
+    Some(id)
+}
 
+pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_viewport: bool) {
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        let world_state = world
+            .get_resource::<EditorSceneState>()
+            .map(|state| state.world_state)
+            .unwrap_or(WorldState::Edit);
+        let fallback_resolution = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.render_resolution)
+            .unwrap_or_default();
+        let mut render_resolution =
+            if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+                if let Some(existing) = pane_state.resolutions.get(&pane_id).copied() {
+                    existing
+                } else {
+                    pane_state.resolutions.insert(pane_id, fallback_resolution);
+                    fallback_resolution
+                }
+            } else {
+                fallback_resolution
+            };
+        let previous_render_resolution = render_resolution;
+
+        let Some(texture_id) = ensure_pane_viewport_texture_id(ui, world, pane_id) else {
+            ui.label("Viewport texture allocation failed.");
+            return;
+        };
+
+        let editor_camera_entity = ensure_viewport_camera_for_pane(world, pane_id);
+        let play_camera_entity = if play_viewport && world_state == WorldState::Play {
+            ensure_play_camera(world)
+        } else {
+            None
+        };
+        let camera_entity = if play_viewport {
+            play_camera_entity.unwrap_or(editor_camera_entity)
+        } else {
+            editor_camera_entity
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            if play_viewport {
+                ui.label("Play Viewport");
+            } else {
+                ui.label("Viewport");
+            }
+            ui.separator();
+            ComboBox::from_id_salt(("pane_viewport_resolution_preset", pane_id, play_viewport))
+                .selected_text(render_resolution.label())
+                .show_ui(ui, |ui| {
+                    for preset in ViewportResolutionPreset::ALL {
+                        ui.selectable_value(&mut render_resolution, preset, preset.label());
+                    }
+                });
+            ui.separator();
+            ui.label(format!("Pane {}", pane_id));
+            ui.separator();
+            ui.label(format!("Cam {:?}", camera_entity));
+        });
+        ui.separator();
+        let resolution_preset_changed = render_resolution != previous_render_resolution;
+
+        let available = ui.available_size_before_wrap();
+        let viewport_size = Vec2::new(available.x.max(128.0), available.y.max(128.0));
+        let (main_rect, main_response) =
+            ui.allocate_exact_size(viewport_size, Sense::click_and_drag());
+
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let canvas_target_size = [
+            (main_rect.width() * pixels_per_point).round().max(1.0) as u32,
+            (main_rect.height() * pixels_per_point).round().max(1.0) as u32,
+        ];
+        let target_size = render_resolution.target_size(canvas_target_size);
+        let target_aspect = (target_size[0] as f32 / target_size[1].max(1) as f32).max(0.1);
+        let scene_rect = fit_rect_to_aspect(main_rect, target_aspect);
+
+        ui.painter()
+            .rect_filled(main_rect, 6.0, Color32::from_rgb(8, 10, 12));
+        ui.painter()
+            .image(texture_id, scene_rect, uv, Color32::WHITE);
+        if play_viewport && world_state != WorldState::Play {
+            ui.painter().text(
+                scene_rect.center(),
+                Align2::CENTER_CENTER,
+                "play mode inactive",
+                FontId::proportional(13.0),
+                Color32::from_gray(210),
+            );
+        }
+
+        let pointer_over = ui
+            .ctx()
+            .input(|input| {
+                input
+                    .pointer
+                    .interact_pos()
+                    .or_else(|| input.pointer.hover_pos())
+            })
+            .is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
+            && main_response.hovered()
+            && ui
+                .ctx()
+                .input(|input| {
+                    input
+                        .pointer
+                        .interact_pos()
+                        .or_else(|| input.pointer.hover_pos())
+                })
+                .and_then(|pos| ui.ctx().layer_id_at(pos))
+                .map_or(true, |layer| layer == ui.layer_id());
+
+        let rect_pixels = viewport_rect_pixels_from_ui_rect(scene_rect, pixels_per_point);
+        if let Some(rect_pixels) = rect_pixels {
+            let should_render = !play_viewport || world_state == WorldState::Play;
+            if should_render {
+                if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+                    runtime
+                        .pane_requests
+                        .push(crate::editor::EditorViewportPaneRequest {
+                            pane_id,
+                            camera_entity,
+                            texture_id,
+                            viewport_rect: rect_pixels,
+                            target_size,
+                            temporal_history: true,
+                            immediate_resize: resolution_preset_changed,
+                        });
+
+                    let secondary_pressed_here = ui.ctx().input(|input| {
+                        input.pointer.button_pressed(PointerButton::Secondary)
+                            && input
+                                .pointer
+                                .interact_pos()
+                                .or_else(|| input.pointer.hover_pos())
+                                .is_some_and(|pos| scene_rect.contains(pos))
+                    });
+                    let clicked_here = (main_response.clicked_by(PointerButton::Primary)
+                        || main_response.clicked_by(PointerButton::Secondary)
+                        || secondary_pressed_here)
+                        && pointer_over;
+                    if clicked_here {
+                        runtime.active_pane_id = Some(pane_id);
+                        runtime.keyboard_focus = true;
+                    }
+                    let right_down_here = ui.ctx().input(|input| {
+                        input.pointer.button_down(PointerButton::Secondary)
+                            && input
+                                .pointer
+                                .interact_pos()
+                                .or_else(|| input.pointer.hover_pos())
+                                .is_some_and(|pos| scene_rect.contains(pos))
+                    });
+                    if right_down_here {
+                        runtime.active_pane_id = Some(pane_id);
+                        runtime.keyboard_focus = true;
+                        runtime.active_camera_entity = Some(camera_entity);
+                        runtime.main_rect_pixels = Some(rect_pixels);
+                        runtime.pointer_over_main = true;
+                    }
+                    if runtime.active_pane_id.is_none() {
+                        runtime.active_pane_id = Some(pane_id);
+                        runtime.keyboard_focus = false;
+                    }
+                    if runtime.active_pane_id == Some(pane_id) {
+                        runtime.active_camera_entity = Some(camera_entity);
+                        runtime.main_rect_pixels = Some(rect_pixels);
+                        runtime.pointer_over_main = pointer_over;
+                        if ui.ctx().input(|input| input.pointer.any_pressed()) && !pointer_over {
+                            runtime.keyboard_focus = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        let (active_pane, keyboard_focus) = world
+            .get_resource::<EditorViewportRuntime>()
+            .map(|runtime| {
+                (
+                    runtime.active_pane_id == Some(pane_id),
+                    runtime.keyboard_focus,
+                )
+            })
+            .unwrap_or((false, false));
+        let pointer_passthrough = pointer_over;
+        let keyboard_passthrough = active_pane && keyboard_focus;
+        if pointer_passthrough || keyboard_passthrough {
+            if let Some(mut passthrough) = world.get_resource_mut::<EguiInputPassthrough>() {
+                passthrough.pointer |= pointer_passthrough;
+                passthrough.keyboard |= keyboard_passthrough;
+            }
+        }
+
+        if resolution_preset_changed {
+            if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+                pane_state.resolutions.insert(pane_id, render_resolution);
+            }
+        }
+    });
+}
+
+pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
     with_middle_drag_blocked(ui, world, |ui, world| {
         let world_state = world
             .get_resource::<EditorSceneState>()
@@ -2302,9 +2674,6 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
 }
 
 pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Project");
-
     let project_snapshot = world.get_resource::<EditorProject>().cloned();
     let project_loaded = project_snapshot
         .as_ref()
@@ -2480,9 +2849,6 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
 }
 
 pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Hierarchy");
-
     with_middle_drag_blocked(ui, world, |ui, world| {
         let entries = collect_hierarchy_entries(world);
 
@@ -2620,9 +2986,6 @@ pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
 }
 
 pub fn draw_inspector_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Inspector");
-
     with_middle_drag_blocked(ui, world, |ui, world| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(6, 0))
@@ -2679,6 +3042,2013 @@ pub fn draw_inspector_window(ui: &mut Ui, world: &mut World) {
     });
 }
 
+fn default_pane_kind_for_window(window_id: &str) -> Option<EditorPaneKind> {
+    match window_id {
+        "Toolbar" => Some(EditorPaneKind::Toolbar),
+        "Viewport" => Some(EditorPaneKind::Viewport),
+        "Project" => Some(EditorPaneKind::Project),
+        "Hierarchy" => Some(EditorPaneKind::Hierarchy),
+        "Inspector" => Some(EditorPaneKind::Inspector),
+        "History" => Some(EditorPaneKind::History),
+        "Content Browser" => Some(EditorPaneKind::ContentBrowser),
+        _ => None,
+    }
+}
+
+fn make_pane_tab(workspace: &mut EditorPaneWorkspaceState, kind: EditorPaneKind) -> EditorPaneTab {
+    let tab = EditorPaneTab {
+        id: workspace.next_tab_id,
+        title: kind.label().to_string(),
+        kind,
+    };
+    workspace.next_tab_id += 1;
+    tab
+}
+
+fn next_pane_area_id(workspace: &mut EditorPaneWorkspaceState) -> u64 {
+    let id = workspace.next_area_id;
+    workspace.next_area_id += 1;
+    id
+}
+
+fn make_pane_area(
+    workspace: &mut EditorPaneWorkspaceState,
+    rect: EditorPaneAreaRect,
+    tabs: Vec<EditorPaneTab>,
+) -> EditorPaneArea {
+    EditorPaneArea {
+        id: next_pane_area_id(workspace),
+        rect,
+        tabs,
+        active: 0,
+    }
+}
+
+fn normalize_pane_area_rect(rect: &mut EditorPaneAreaRect) {
+    const MIN_SPAN: f32 = 0.04;
+    if !rect.x.is_finite() || !rect.y.is_finite() || !rect.w.is_finite() || !rect.h.is_finite() {
+        *rect = EditorPaneAreaRect::full();
+        return;
+    }
+
+    rect.w = rect.w.max(MIN_SPAN);
+    rect.h = rect.h.max(MIN_SPAN);
+    rect.x = rect.x.clamp(0.0, (1.0 - MIN_SPAN).max(0.0));
+    rect.y = rect.y.clamp(0.0, (1.0 - MIN_SPAN).max(0.0));
+    if rect.x + rect.w > 1.0 {
+        rect.w = (1.0 - rect.x).max(MIN_SPAN);
+    }
+    if rect.y + rect.h > 1.0 {
+        rect.h = (1.0 - rect.y).max(MIN_SPAN);
+    }
+}
+
+fn split_pane_area_rect(
+    rect: EditorPaneAreaRect,
+    zone: PaneDropZone,
+) -> Option<(EditorPaneAreaRect, EditorPaneAreaRect)> {
+    const SPLIT_RATIO: f32 = 0.5;
+    const MIN_SPAN: f32 = 0.06;
+    let mut rect = rect;
+    normalize_pane_area_rect(&mut rect);
+    match zone {
+        PaneDropZone::Center => None,
+        PaneDropZone::Left | PaneDropZone::Right => {
+            if rect.w < MIN_SPAN * 2.0 {
+                return None;
+            }
+            let inserted_width = (rect.w * SPLIT_RATIO).clamp(MIN_SPAN, rect.w - MIN_SPAN);
+            let existing_width = rect.w - inserted_width;
+            if inserted_width <= 0.0 || existing_width <= 0.0 {
+                return None;
+            }
+            let existing = if zone == PaneDropZone::Right {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: existing_width,
+                    h: rect.h,
+                }
+            } else {
+                EditorPaneAreaRect {
+                    x: rect.x + inserted_width,
+                    y: rect.y,
+                    w: existing_width,
+                    h: rect.h,
+                }
+            };
+            let inserted = if zone == PaneDropZone::Right {
+                EditorPaneAreaRect {
+                    x: rect.x + existing_width,
+                    y: rect.y,
+                    w: inserted_width,
+                    h: rect.h,
+                }
+            } else {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: inserted_width,
+                    h: rect.h,
+                }
+            };
+            let mut existing = existing;
+            let mut inserted = inserted;
+            normalize_pane_area_rect(&mut existing);
+            normalize_pane_area_rect(&mut inserted);
+            Some((existing, inserted))
+        }
+        PaneDropZone::Top | PaneDropZone::Bottom => {
+            if rect.h < MIN_SPAN * 2.0 {
+                return None;
+            }
+            let inserted_height = (rect.h * SPLIT_RATIO).clamp(MIN_SPAN, rect.h - MIN_SPAN);
+            let existing_height = rect.h - inserted_height;
+            if inserted_height <= 0.0 || existing_height <= 0.0 {
+                return None;
+            }
+            let existing = if zone == PaneDropZone::Bottom {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: existing_height,
+                }
+            } else {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y + inserted_height,
+                    w: rect.w,
+                    h: existing_height,
+                }
+            };
+            let inserted = if zone == PaneDropZone::Bottom {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y + existing_height,
+                    w: rect.w,
+                    h: inserted_height,
+                }
+            } else {
+                EditorPaneAreaRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: inserted_height,
+                }
+            };
+            let mut existing = existing;
+            let mut inserted = inserted;
+            normalize_pane_area_rect(&mut existing);
+            normalize_pane_area_rect(&mut inserted);
+            Some((existing, inserted))
+        }
+    }
+}
+
+fn split_pane_area_with_tab(
+    workspace: &mut EditorPaneWorkspaceState,
+    window_index: usize,
+    area_index: usize,
+    zone: PaneDropZone,
+    tab: EditorPaneTab,
+) -> Option<u64> {
+    let rect = workspace
+        .windows
+        .get(window_index)?
+        .areas
+        .get(area_index)?
+        .rect;
+    let (existing_rect, inserted_rect) = split_pane_area_rect(rect, zone)?;
+    workspace.windows[window_index].areas[area_index].rect = existing_rect;
+    let area = make_pane_area(workspace, inserted_rect, vec![tab]);
+    let area_id = area.id;
+    workspace.windows[window_index].areas.push(area);
+    Some(area_id)
+}
+
+fn pane_rect_nearly_eq(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 0.0005
+}
+
+fn pane_rects_share_vertical_edge(a: EditorPaneAreaRect, b: EditorPaneAreaRect) -> bool {
+    pane_rect_nearly_eq(a.y, b.y)
+        && pane_rect_nearly_eq(a.h, b.h)
+        && (pane_rect_nearly_eq(a.x + a.w, b.x) || pane_rect_nearly_eq(b.x + b.w, a.x))
+}
+
+fn pane_rects_share_horizontal_edge(a: EditorPaneAreaRect, b: EditorPaneAreaRect) -> bool {
+    pane_rect_nearly_eq(a.x, b.x)
+        && pane_rect_nearly_eq(a.w, b.w)
+        && (pane_rect_nearly_eq(a.y + a.h, b.y) || pane_rect_nearly_eq(b.y + b.h, a.y))
+}
+
+fn pane_rects_match(a: EditorPaneAreaRect, b: EditorPaneAreaRect) -> bool {
+    pane_rect_nearly_eq(a.x, b.x)
+        && pane_rect_nearly_eq(a.y, b.y)
+        && pane_rect_nearly_eq(a.w, b.w)
+        && pane_rect_nearly_eq(a.h, b.h)
+}
+
+fn pane_rect_union(a: EditorPaneAreaRect, b: EditorPaneAreaRect) -> EditorPaneAreaRect {
+    let min_x = a.x.min(b.x);
+    let min_y = a.y.min(b.y);
+    let max_x = (a.x + a.w).max(b.x + b.w);
+    let max_y = (a.y + a.h).max(b.y + b.h);
+    EditorPaneAreaRect {
+        x: min_x,
+        y: min_y,
+        w: (max_x - min_x).max(0.0),
+        h: (max_y - min_y).max(0.0),
+    }
+}
+
+fn compact_pane_window_areas(window: &mut EditorPaneWindow) {
+    for area in window.areas.iter_mut() {
+        normalize_pane_area_rect(&mut area.rect);
+    }
+
+    for area in window.areas.iter_mut() {
+        if area.active >= area.tabs.len() {
+            area.active = area.tabs.len().saturating_sub(1);
+        }
+    }
+
+    let mut cursor = 0usize;
+    while cursor < window.areas.len() {
+        if !window.areas[cursor].tabs.is_empty() {
+            cursor += 1;
+            continue;
+        }
+
+        let empty_rect = window.areas[cursor].rect;
+        let merge_target = window
+            .areas
+            .iter()
+            .enumerate()
+            .filter(|(index, area)| *index != cursor && !area.tabs.is_empty())
+            .find_map(|(index, area)| {
+                if pane_rects_share_vertical_edge(empty_rect, area.rect)
+                    || pane_rects_share_horizontal_edge(empty_rect, area.rect)
+                {
+                    Some((index, pane_rect_union(area.rect, empty_rect)))
+                } else {
+                    None
+                }
+            });
+
+        if let Some((target_index, union_rect)) = merge_target {
+            window.areas[target_index].rect = union_rect;
+        }
+        window.areas.remove(cursor);
+    }
+
+    // If rects became identical due drag/drop edge-cases, collapse them into tabs.
+    let mut i = 0usize;
+    while i < window.areas.len() {
+        let mut j = i + 1;
+        while j < window.areas.len() {
+            if pane_rects_match(window.areas[i].rect, window.areas[j].rect) {
+                let source_active = window.areas[j].active;
+                let insert_at = window.areas[i].tabs.len();
+                let mut moved_tabs = std::mem::take(&mut window.areas[j].tabs);
+                window.areas[i].tabs.append(&mut moved_tabs);
+                if insert_at < window.areas[i].tabs.len() {
+                    let active_offset =
+                        source_active.min(window.areas[i].tabs.len() - insert_at - 1);
+                    window.areas[i].active = insert_at + active_offset;
+                } else if window.areas[i].active >= window.areas[i].tabs.len() {
+                    window.areas[i].active = window.areas[i].tabs.len().saturating_sub(1);
+                }
+                window.areas.remove(j);
+                continue;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    for area in window.areas.iter_mut() {
+        normalize_pane_area_rect(&mut area.rect);
+    }
+}
+
+fn compact_pane_workspace(workspace: &mut EditorPaneWorkspaceState) {
+    let mut index = 0usize;
+    while index < workspace.windows.len() {
+        compact_pane_window_areas(&mut workspace.windows[index]);
+
+        let all_empty = workspace.windows[index]
+            .areas
+            .iter()
+            .all(|area| area.tabs.is_empty());
+
+        if all_empty {
+            if workspace.windows[index].layout_managed {
+                workspace.windows[index].areas.clear();
+                let area_id = next_pane_area_id(workspace);
+                workspace.windows[index].areas.push(EditorPaneArea {
+                    id: area_id,
+                    rect: EditorPaneAreaRect::full(),
+                    tabs: Vec::new(),
+                    active: 0,
+                });
+                index += 1;
+            } else {
+                let removed_window_id = workspace.windows[index].id.clone();
+                workspace.windows.remove(index);
+                if workspace
+                    .last_focused_window
+                    .as_deref()
+                    .is_some_and(|focused| focused == removed_window_id)
+                {
+                    workspace.last_focused_window = None;
+                    workspace.last_focused_area = None;
+                }
+            }
+        } else {
+            index += 1;
+        }
+    }
+
+    if let Some(focused_window_id) = workspace.last_focused_window.clone() {
+        if let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == focused_window_id)
+        {
+            let focused_area_valid = workspace.last_focused_area.is_some_and(|area_id| {
+                workspace.windows[window_index]
+                    .areas
+                    .iter()
+                    .any(|area| area.id == area_id)
+            });
+            if !focused_area_valid {
+                workspace.last_focused_area = workspace.windows[window_index]
+                    .areas
+                    .first()
+                    .map(|area| area.id);
+            }
+        } else {
+            workspace.last_focused_window =
+                workspace.windows.first().map(|window| window.id.clone());
+            workspace.last_focused_area = workspace
+                .windows
+                .first()
+                .and_then(|window| window.areas.first())
+                .map(|area| area.id);
+        }
+    } else {
+        workspace.last_focused_window = workspace.windows.first().map(|window| window.id.clone());
+        workspace.last_focused_area = workspace
+            .windows
+            .first()
+            .and_then(|window| window.areas.first())
+            .map(|area| area.id);
+    }
+}
+
+fn next_pane_window_id(workspace: &mut EditorPaneWorkspaceState) -> String {
+    let id = workspace.next_window_id;
+    workspace.next_window_id += 1;
+    format!("pane_window_{}", id)
+}
+
+fn refresh_pane_window_titles(workspace: &mut EditorPaneWorkspaceState) {
+    for (index, window) in workspace.windows.iter_mut().enumerate() {
+        if window.layout_managed {
+            window.title = window.id.clone();
+            continue;
+        }
+        if window.areas.is_empty() {
+            window.title = format!("Pane {}", index + 1);
+            continue;
+        }
+        let mut best_title: Option<String> = None;
+        for area in window.areas.iter_mut() {
+            if area.tabs.is_empty() {
+                continue;
+            }
+            if area.active >= area.tabs.len() {
+                area.active = area.tabs.len().saturating_sub(1);
+            }
+            best_title = Some(area.tabs[area.active].title.clone());
+            break;
+        }
+        window.title = best_title.unwrap_or_else(|| format!("Pane {}", index + 1));
+    }
+}
+
+pub fn ensure_default_pane_workspace(world: &mut World) {
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        if workspace.initialized {
+            return;
+        }
+        if !workspace.windows.is_empty() {
+            workspace.initialized = true;
+            return;
+        }
+
+        for window_id in crate::editor::layout_window_ids() {
+            let mut tabs = Vec::new();
+            if let Some(kind) = default_pane_kind_for_window(window_id) {
+                tabs.push(make_pane_tab(&mut workspace, kind));
+            }
+            let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), tabs);
+            workspace.windows.push(EditorPaneWindow {
+                id: (*window_id).to_string(),
+                title: (*window_id).to_string(),
+                areas: vec![area],
+                layout_managed: true,
+            });
+        }
+
+        workspace.initialized = true;
+        workspace.last_focused_window = Some("Viewport".to_string());
+        workspace.last_focused_area = workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "Viewport")
+            .and_then(|window| window.areas.first())
+            .map(|area| area.id);
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn reset_pane_workspace(world: &mut World) {
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        workspace.initialized = false;
+        workspace.windows.clear();
+        workspace.last_focused_window = None;
+        workspace.last_focused_area = None;
+        workspace.dragging = None;
+        workspace.drop_handled = false;
+    });
+    ensure_default_pane_workspace(world);
+}
+
+pub fn spawn_pane_workspace_tab(world: &mut World, kind: EditorPaneKind) {
+    open_pane_workspace_tab(world, kind, None, None, None);
+}
+
+pub fn spawn_play_viewport_pane(world: &mut World) {
+    ensure_default_pane_workspace(world);
+    let reused_existing =
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            let mut found: Option<(usize, usize, usize)> = None;
+            for (window_index, window) in workspace.windows.iter().enumerate() {
+                for (area_index, area) in window.areas.iter().enumerate() {
+                    if let Some(tab_index) = area
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.kind == EditorPaneKind::PlayViewport)
+                    {
+                        found = Some((window_index, area_index, tab_index));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+
+            if let Some((window_index, area_index, tab_index)) = found {
+                workspace.windows[window_index].areas[area_index].active = tab_index;
+                workspace.last_focused_window = Some(workspace.windows[window_index].id.clone());
+                workspace.last_focused_area =
+                    Some(workspace.windows[window_index].areas[area_index].id);
+                refresh_pane_window_titles(&mut workspace);
+                true
+            } else {
+                false
+            }
+        });
+    if !reused_existing {
+        open_pane_workspace_tab(world, EditorPaneKind::PlayViewport, None, None, None);
+    }
+}
+
+pub(crate) fn close_pane_workspace_window(world: &mut World, window_id: &str) {
+    let removed_tab_ids =
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            let mut removed_tab_ids = Vec::new();
+            if let Some(index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == window_id)
+            {
+                removed_tab_ids.extend(
+                    workspace.windows[index]
+                        .areas
+                        .iter()
+                        .flat_map(|area| area.tabs.iter().map(|tab| tab.id)),
+                );
+                workspace.windows.remove(index);
+            }
+
+            if workspace
+                .dragging
+                .as_ref()
+                .map(|dragging| dragging.source_window_id == window_id)
+                .unwrap_or(false)
+            {
+                workspace.dragging = None;
+                workspace.drop_handled = false;
+            }
+
+            if workspace
+                .last_focused_window
+                .as_deref()
+                .is_some_and(|focused| focused == window_id)
+            {
+                workspace.last_focused_window = None;
+                workspace.last_focused_area = None;
+            }
+
+            compact_pane_workspace(&mut workspace);
+            refresh_pane_window_titles(&mut workspace);
+            removed_tab_ids
+        });
+    if let Some(mut pane_viewport_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+        for tab_id in removed_tab_ids {
+            pane_viewport_state.resolutions.remove(&tab_id);
+        }
+    }
+}
+
+fn open_pane_workspace_tab(
+    world: &mut World,
+    kind: EditorPaneKind,
+    target_window_id: Option<&str>,
+    target_area_id: Option<u64>,
+    split_axis: Option<SplitAxis>,
+) {
+    ensure_default_pane_workspace(world);
+
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let tab = make_pane_tab(&mut workspace, kind);
+        let preferred_layout_window = target_window_id
+            .map(|id| id.to_string())
+            .or_else(|| kind.default_layout_window_id().map(|id| id.to_string()));
+        let target_id = preferred_layout_window
+            .or_else(|| workspace.last_focused_window.clone())
+            .or_else(|| workspace.windows.first().map(|window| window.id.clone()));
+
+        if let Some(target_id) = target_id {
+            if let Some(window_index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == target_id)
+            {
+                let preferred_area = target_area_id.or_else(|| {
+                    let focused = workspace.last_focused_area?;
+                    workspace.windows[window_index]
+                        .areas
+                        .iter()
+                        .any(|area| area.id == focused)
+                        .then_some(focused)
+                });
+
+                let area_index = preferred_area
+                    .and_then(|area_id| {
+                        workspace.windows[window_index]
+                            .areas
+                            .iter()
+                            .position(|area| area.id == area_id)
+                    })
+                    .or_else(|| {
+                        (!workspace.windows[window_index].areas.is_empty()).then_some(0usize)
+                    });
+
+                let area_index = if let Some(area_index) = area_index {
+                    area_index
+                } else {
+                    let area =
+                        make_pane_area(&mut workspace, EditorPaneAreaRect::full(), Vec::new());
+                    workspace.windows[window_index].areas.push(area);
+                    workspace.windows[window_index]
+                        .areas
+                        .len()
+                        .saturating_sub(1)
+                };
+
+                if let Some(axis) = split_axis {
+                    if workspace.windows[window_index].areas[area_index]
+                        .tabs
+                        .is_empty()
+                    {
+                        workspace.windows[window_index].areas[area_index]
+                            .tabs
+                            .push(tab);
+                        let new_index = workspace.windows[window_index].areas[area_index]
+                            .tabs
+                            .len()
+                            .saturating_sub(1);
+                        workspace.windows[window_index].areas[area_index].active = new_index;
+                        workspace.last_focused_window =
+                            Some(workspace.windows[window_index].id.clone());
+                        workspace.last_focused_area =
+                            Some(workspace.windows[window_index].areas[area_index].id);
+                        compact_pane_workspace(&mut workspace);
+                        refresh_pane_window_titles(&mut workspace);
+                        return;
+                    }
+
+                    let zone = PaneDropZone::from_split_axis(axis);
+                    if let Some(new_area_id) = split_pane_area_with_tab(
+                        &mut workspace,
+                        window_index,
+                        area_index,
+                        zone,
+                        tab.clone(),
+                    ) {
+                        workspace.last_focused_window =
+                            Some(workspace.windows[window_index].id.clone());
+                        workspace.last_focused_area = Some(new_area_id);
+                    } else {
+                        workspace.windows[window_index].areas[area_index]
+                            .tabs
+                            .push(tab);
+                        let new_index = workspace.windows[window_index].areas[area_index]
+                            .tabs
+                            .len()
+                            .saturating_sub(1);
+                        workspace.windows[window_index].areas[area_index].active = new_index;
+                        workspace.last_focused_window =
+                            Some(workspace.windows[window_index].id.clone());
+                        workspace.last_focused_area =
+                            Some(workspace.windows[window_index].areas[area_index].id);
+                    }
+                } else {
+                    workspace.windows[window_index].areas[area_index]
+                        .tabs
+                        .push(tab);
+                    let new_index = workspace.windows[window_index].areas[area_index]
+                        .tabs
+                        .len()
+                        .saturating_sub(1);
+                    workspace.windows[window_index].areas[area_index].active = new_index;
+                    workspace.last_focused_window =
+                        Some(workspace.windows[window_index].id.clone());
+                    workspace.last_focused_area =
+                        Some(workspace.windows[window_index].areas[area_index].id);
+                }
+                compact_pane_workspace(&mut workspace);
+                refresh_pane_window_titles(&mut workspace);
+                return;
+            }
+        }
+
+        let window_id = next_pane_window_id(&mut workspace);
+        let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), vec![tab]);
+        let area_id = area.id;
+        workspace.windows.push(EditorPaneWindow {
+            id: window_id.clone(),
+            title: "Pane".to_string(),
+            areas: vec![area],
+            layout_managed: false,
+        });
+        workspace.last_focused_window = Some(window_id);
+        workspace.last_focused_area = Some(area_id);
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn spawn_pane_workspace_window(world: &mut World, kind: EditorPaneKind, pointer_pos: Option<Pos2>) {
+    let mut spawned_window_id: Option<String> = None;
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        workspace.initialized = true;
+        let tab = make_pane_tab(&mut workspace, kind);
+        let window_id = next_pane_window_id(&mut workspace);
+        let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), vec![tab]);
+        let area_id = area.id;
+        workspace.windows.push(EditorPaneWindow {
+            id: window_id.clone(),
+            title: "Pane".to_string(),
+            areas: vec![area],
+            layout_managed: false,
+        });
+        workspace.last_focused_window = Some(window_id.clone());
+        workspace.last_focused_area = Some(area_id);
+        spawned_window_id = Some(window_id);
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+
+    if let (Some(window_id), Some(pointer_pos)) = (spawned_window_id, pointer_pos) {
+        if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+            egui_res
+                .window_positions
+                .insert(window_id, pointer_pos - Vec2::new(120.0, 14.0));
+        }
+    }
+}
+
+fn draw_pane_spawn_new_window_menu(ui: &mut Ui, world: &mut World, pointer_pos: Option<Pos2>) {
+    ui.menu_button("New Window", |ui| {
+        for kind in EditorPaneKind::ALL {
+            if ui.button(kind.label()).clicked() {
+                spawn_pane_workspace_window(world, kind, pointer_pos);
+                ui.close_menu();
+            }
+        }
+    });
+}
+
+fn draw_pane_area_context_menu(ui: &mut Ui, world: &mut World, window_id: &str, area_id: u64) {
+    let spawn_pos = ui.ctx().input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .or_else(|| input.pointer.interact_pos())
+    });
+    draw_pane_spawn_menu(ui, world, window_id, Some(area_id), None);
+    ui.separator();
+    draw_pane_spawn_menu(
+        ui,
+        world,
+        window_id,
+        Some(area_id),
+        Some(SplitAxis::Vertical),
+    );
+    draw_pane_spawn_menu(
+        ui,
+        world,
+        window_id,
+        Some(area_id),
+        Some(SplitAxis::Horizontal),
+    );
+    ui.separator();
+    draw_pane_spawn_new_window_menu(ui, world, spawn_pos);
+}
+
+fn pointer_over_viewport_scene_at(ui: &Ui, world: &World, pointer_pos: Option<Pos2>) -> bool {
+    pointer_pos.is_some_and(|pointer_pos| {
+        let pixels_per_point = ui.ctx().pixels_per_point().max(0.0001) as f64;
+        let pointer_pixels = DVec2::new(
+            pointer_pos.x as f64 * pixels_per_point,
+            pointer_pos.y as f64 * pixels_per_point,
+        );
+        world
+            .get_resource::<EditorViewportRuntime>()
+            .is_some_and(|runtime| {
+                runtime
+                    .pane_requests
+                    .iter()
+                    .any(|request| request.viewport_rect.contains(pointer_pixels))
+            })
+    })
+}
+
+fn pointer_over_any_pane_window(ctx: &egui::Context, world: &World, pointer_pos: Pos2) -> bool {
+    world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .is_some_and(|workspace| {
+            workspace.windows.iter().any(|window| {
+                ctx.memory(|mem| mem.area_rect(Id::new(window.id.clone())))
+                    .is_some_and(|rect| rect.contains(pointer_pos))
+            })
+        })
+}
+
+fn draw_pane_workspace_background_context_menu(ui: &mut Ui, world: &mut World) {
+    let screen_rect = ui.ctx().viewport_rect();
+    let area_id = Id::new("pane_workspace_background_menu_area");
+    egui::Area::new(area_id)
+        .order(Order::Background)
+        .fixed_pos(screen_rect.min)
+        .interactable(true)
+        .show(ui.ctx(), |ui| {
+            ui.set_min_size(screen_rect.size());
+            let background_rect = ui.max_rect();
+            let response = ui.interact(background_rect, area_id.with("response"), Sense::click());
+            let pointer_pos = response.interact_pointer_pos().or_else(|| {
+                ui.ctx().input(|input| {
+                    input
+                        .pointer
+                        .hover_pos()
+                        .or_else(|| input.pointer.interact_pos())
+                })
+            });
+            response.context_menu(|ui| {
+                draw_pane_spawn_new_window_menu(ui, world, pointer_pos);
+            });
+        });
+}
+
+pub fn draw_pane_workspace_window(ui: &mut Ui, world: &mut World, window_id: &str) {
+    let middle_drag_active = world
+        .get_resource::<MiddleDragUiState>()
+        .map(|state| state.active)
+        .unwrap_or(false);
+    if middle_drag_active {
+        ui.add_enabled_ui(false, |ui| {
+            draw_pane_workspace_window_contents(ui, world, window_id);
+        });
+    } else {
+        draw_pane_workspace_window_contents(ui, world, window_id);
+    }
+}
+
+fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id: &str) {
+    let (areas_snapshot, window_index, layout_managed) = {
+        let Some(state) = world.get_resource::<EditorPaneWorkspaceState>() else {
+            ui.label("Pane workspace missing");
+            return;
+        };
+        let Some((index, window)) = state
+            .windows
+            .iter()
+            .enumerate()
+            .find(|(_, window)| window.id == window_id)
+        else {
+            ui.label("Pane window missing");
+            return;
+        };
+        (window.areas.clone(), index, window.layout_managed)
+    };
+
+    let available = ui.available_size_before_wrap();
+    let min_size = Vec2::new(180.0, 120.0);
+    let host_size = Vec2::new(available.x.max(min_size.x), available.y.max(min_size.y));
+    let (host_rect, host_response) = ui.allocate_exact_size(host_size, Sense::click());
+    ui.painter()
+        .rect_filled(host_rect, 4.0, Color32::from_rgb(22, 24, 28));
+    ui.painter().rect_stroke(
+        host_rect,
+        4.0,
+        Stroke::new(1.0, Color32::from_gray(56)),
+        StrokeKind::Inside,
+    );
+    if window_index == 0 {
+        draw_pane_workspace_background_context_menu(ui, world);
+    }
+
+    if areas_snapshot.is_empty() {
+        open_pane_workspace_tab(world, EditorPaneKind::Viewport, Some(window_id), None, None);
+    }
+
+    for area in areas_snapshot.iter().cloned() {
+        let area_rect = area.rect.to_rect(host_rect).shrink2(Vec2::new(2.0, 2.0));
+        if area_rect.width() < 24.0 || area_rect.height() < 24.0 {
+            continue;
+        }
+        draw_pane_area(ui, world, window_id, area, area_rect);
+    }
+
+    let pointer_over_viewport_scene = pointer_over_viewport_scene_at(
+        ui,
+        world,
+        ui.ctx().input(|input| {
+            input
+                .pointer
+                .hover_pos()
+                .or_else(|| input.pointer.interact_pos())
+        }),
+    );
+    if !pointer_over_viewport_scene {
+        let spawn_pos = host_response.interact_pointer_pos().or_else(|| {
+            ui.ctx().input(|input| {
+                input
+                    .pointer
+                    .hover_pos()
+                    .or_else(|| input.pointer.interact_pos())
+            })
+        });
+        host_response.context_menu(|ui| {
+            draw_pane_spawn_menu(ui, world, window_id, None, None);
+            ui.separator();
+            draw_pane_spawn_new_window_menu(ui, world, spawn_pos);
+        });
+    }
+
+    if let Some(dragging) = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .and_then(|state| state.dragging.clone())
+    {
+        if let Some(pointer_pos) = ui.ctx().input(|input| input.pointer.hover_pos()) {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                Order::Tooltip,
+                ui.id().with("pane_tab_drag"),
+            ));
+            painter.rect_filled(
+                Rect::from_min_size(pointer_pos + Vec2::new(12.0, 12.0), Vec2::new(180.0, 28.0)),
+                6.0,
+                ui.visuals().widgets.active.bg_fill,
+            );
+            painter.text(
+                pointer_pos + Vec2::new(20.0, 26.0),
+                Align2::LEFT_CENTER,
+                dragging.tab.title,
+                FontId::proportional(13.0),
+                ui.visuals().text_color(),
+            );
+        }
+    }
+
+    if world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .map(|state| state.dragging.is_some() && !state.drop_handled)
+        .unwrap_or(false)
+        && ui.ctx().input(|input| input.pointer.any_released())
+    {
+        let pointer_pos = ui.ctx().input(|input| input.pointer.hover_pos());
+        let pointer_over_this_layer = pointer_pos
+            .and_then(|pos| ui.ctx().layer_id_at(pos))
+            .is_some_and(|layer_id| layer_id == ui.layer_id());
+        let window_outer_rect = ui.ctx().memory(|mem| mem.area_rect(Id::new(window_id)));
+        let target = pointer_pos
+            .filter(|pos| host_rect.contains(*pos))
+            .and_then(|pos| {
+                areas_snapshot
+                    .iter()
+                    .filter_map(|area| {
+                        let area_rect = area.rect.to_rect(host_rect).shrink2(Vec2::new(2.0, 2.0));
+                        if area_rect.width() <= 0.0 || area_rect.height() <= 0.0 {
+                            return None;
+                        }
+
+                        let clamped = Pos2::new(
+                            pos.x.clamp(area_rect.left(), area_rect.right()),
+                            pos.y.clamp(area_rect.top(), area_rect.bottom()),
+                        );
+                        let dx = pos.x - clamped.x;
+                        let dy = pos.y - clamped.y;
+                        let distance_sq = dx * dx + dy * dy;
+                        let empty_penalty = if area.tabs.is_empty() {
+                            1_000_000.0
+                        } else {
+                            0.0
+                        };
+                        let probe_pos = if area_rect.contains(pos) {
+                            pos
+                        } else {
+                            clamped
+                        };
+                        let zone = pane_drop_zone_for_pointer(area_rect, probe_pos);
+                        Some((area.id, zone, distance_sq + empty_penalty))
+                    })
+                    .min_by(|a, b| a.2.total_cmp(&b.2))
+                    .map(|(area_id, zone, _)| (area_id, zone))
+            })
+            .or_else(|| {
+                match (pointer_pos, window_outer_rect) {
+                    (Some(pos), Some(window_rect))
+                        if pointer_over_this_layer && window_rect.contains(pos) =>
+                    {
+                        // dropping on a pane window title bar/border should dock as tab in that window
+                        areas_snapshot
+                            .first()
+                            .map(|area| (area.id, PaneDropZone::Center))
+                    }
+                    _ => None,
+                }
+            });
+
+        if let Some((target_area, zone)) = target {
+            if zone == PaneDropZone::Center {
+                accept_pane_tab_drop(world, window_id, target_area, None);
+            } else {
+                accept_pane_tab_split_drop(world, window_id, target_area, zone);
+            }
+        } else {
+            let pointer_over_any_window =
+                pointer_pos.is_some_and(|pos| pointer_over_any_pane_window(ui.ctx(), world, pos));
+            if !pointer_over_any_window {
+                drop_pane_tab_into_new_window(world, pointer_pos);
+            }
+        }
+    }
+
+    if layout_managed {
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            if let Some(window_index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == window_id)
+            {
+                if workspace.windows[window_index].areas.is_empty() {
+                    let area =
+                        make_pane_area(&mut workspace, EditorPaneAreaRect::full(), Vec::new());
+                    workspace.windows[window_index].areas.push(area);
+                }
+            }
+        });
+    }
+}
+
+#[derive(Clone)]
+struct PaneTabDragPayload;
+
+fn begin_pane_tab_drag(world: &mut World, window_id: &str, area_id: u64, tab_index: usize) {
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        else {
+            return;
+        };
+
+        let Some(area_index) = workspace.windows[window_index]
+            .areas
+            .iter()
+            .position(|area| area.id == area_id)
+        else {
+            return;
+        };
+
+        let (tab, source_was_single_tab) = {
+            let area = &mut workspace.windows[window_index].areas[area_index];
+            if tab_index >= area.tabs.len() {
+                return;
+            }
+            if area.tabs.len() == 1 {
+                (area.tabs[tab_index].clone(), true)
+            } else {
+                let tab = area.tabs.remove(tab_index);
+                if area.active >= area.tabs.len() {
+                    area.active = area.tabs.len().saturating_sub(1);
+                }
+                (tab, false)
+            }
+        };
+
+        workspace.dragging = Some(EditorPaneTabDrag {
+            tab,
+            source_window_id: window_id.to_string(),
+            source_area_id: area_id,
+            source_was_single_tab,
+        });
+        workspace.drop_handled = false;
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn detach_pane_tab_to_new_window(
+    world: &mut World,
+    window_id: &str,
+    area_id: u64,
+    tab_index: usize,
+) {
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == window_id)
+        else {
+            return;
+        };
+
+        let Some(area_index) = workspace.windows[window_index]
+            .areas
+            .iter()
+            .position(|area| area.id == area_id)
+        else {
+            return;
+        };
+
+        let tab = {
+            let area = &mut workspace.windows[window_index].areas[area_index];
+            if tab_index >= area.tabs.len() {
+                return;
+            }
+            let tab = area.tabs.remove(tab_index);
+            if area.active >= area.tabs.len() {
+                area.active = area.tabs.len().saturating_sub(1);
+            }
+            tab
+        };
+
+        let new_window_id = next_pane_window_id(&mut workspace);
+        let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), vec![tab]);
+        let new_area_id = area.id;
+        workspace.windows.push(EditorPaneWindow {
+            id: new_window_id.clone(),
+            title: "Pane".to_string(),
+            areas: vec![area],
+            layout_managed: false,
+        });
+        workspace.last_focused_window = Some(new_window_id);
+        workspace.last_focused_area = Some(new_area_id);
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn close_pane_tab_in_window(world: &mut World, window_id: &str, area_id: u64, tab_index: usize) {
+    let removed_tab_id =
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            let Some(window_index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == window_id)
+            else {
+                return None;
+            };
+
+            let Some(area_index) = workspace.windows[window_index]
+                .areas
+                .iter()
+                .position(|area| area.id == area_id)
+            else {
+                return None;
+            };
+
+            let mut removed_tab_id = None;
+            if tab_index < workspace.windows[window_index].areas[area_index].tabs.len() {
+                removed_tab_id = workspace.windows[window_index].areas[area_index]
+                    .tabs
+                    .get(tab_index)
+                    .map(|tab| tab.id);
+                workspace.windows[window_index].areas[area_index]
+                    .tabs
+                    .remove(tab_index);
+            }
+
+            if workspace.windows[window_index].areas[area_index].active
+                >= workspace.windows[window_index].areas[area_index].tabs.len()
+            {
+                workspace.windows[window_index].areas[area_index].active =
+                    workspace.windows[window_index].areas[area_index]
+                        .tabs
+                        .len()
+                        .saturating_sub(1);
+            }
+
+            compact_pane_workspace(&mut workspace);
+            refresh_pane_window_titles(&mut workspace);
+            removed_tab_id
+        });
+    if let Some(tab_id) = removed_tab_id {
+        if let Some(mut pane_viewport_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+            pane_viewport_state.resolutions.remove(&tab_id);
+        }
+    }
+}
+
+fn accept_pane_tab_drop(
+    world: &mut World,
+    target_window_id: &str,
+    target_area_id: u64,
+    insert_index: Option<usize>,
+) {
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let Some(dragging) = workspace.dragging.take() else {
+            return;
+        };
+
+        if dragging.source_was_single_tab
+            && dragging.source_window_id == target_window_id
+            && dragging.source_area_id == target_area_id
+        {
+            workspace.last_focused_window = Some(target_window_id.to_string());
+            workspace.last_focused_area = Some(target_area_id);
+            workspace.drop_handled = true;
+            compact_pane_workspace(&mut workspace);
+            refresh_pane_window_titles(&mut workspace);
+            return;
+        }
+
+        if dragging.source_was_single_tab {
+            remove_pane_tab_from_window_by_id(
+                &mut workspace,
+                &dragging.source_window_id,
+                dragging.source_area_id,
+                dragging.tab.id,
+            );
+        }
+
+        let mut placed_window_id = target_window_id.to_string();
+        let mut placed_area_id = target_area_id;
+        if let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == target_window_id)
+        {
+            if let Some(area_index) = workspace.windows[window_index]
+                .areas
+                .iter()
+                .position(|area| area.id == target_area_id)
+            {
+                let area = &mut workspace.windows[window_index].areas[area_index];
+                let index = insert_index.unwrap_or(area.tabs.len()).min(area.tabs.len());
+                area.tabs.insert(index, dragging.tab);
+                area.active = index;
+            } else {
+                if let Some(area) = workspace.windows[window_index].areas.first_mut() {
+                    let index = insert_index.unwrap_or(area.tabs.len()).min(area.tabs.len());
+                    area.tabs.insert(index, dragging.tab);
+                    area.active = index;
+                    placed_area_id = area.id;
+                } else {
+                    let area = make_pane_area(
+                        &mut workspace,
+                        EditorPaneAreaRect::full(),
+                        vec![dragging.tab],
+                    );
+                    placed_area_id = area.id;
+                    workspace.windows[window_index].areas.push(area);
+                }
+            }
+        } else {
+            let new_window_id = next_pane_window_id(&mut workspace);
+            let area = make_pane_area(
+                &mut workspace,
+                EditorPaneAreaRect::full(),
+                vec![dragging.tab],
+            );
+            placed_area_id = area.id;
+            workspace.windows.push(EditorPaneWindow {
+                id: new_window_id.clone(),
+                title: "Pane".to_string(),
+                areas: vec![area],
+                layout_managed: false,
+            });
+            placed_window_id = new_window_id;
+        }
+
+        workspace.last_focused_window = Some(placed_window_id);
+        workspace.last_focused_area = Some(placed_area_id);
+        workspace.drop_handled = true;
+
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn accept_pane_tab_split_drop(
+    world: &mut World,
+    target_window_id: &str,
+    target_area_id: u64,
+    zone: PaneDropZone,
+) {
+    if zone == PaneDropZone::Center {
+        accept_pane_tab_drop(world, target_window_id, target_area_id, None);
+        return;
+    }
+
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let Some(dragging) = workspace.dragging.take() else {
+            return;
+        };
+
+        let splitting_source_area = dragging.source_was_single_tab
+            && dragging.source_window_id == target_window_id
+            && dragging.source_area_id == target_area_id;
+        if splitting_source_area {
+            if let Some(window_index) = workspace
+                .windows
+                .iter()
+                .position(|window| window.id == target_window_id)
+            {
+                if let Some(area_index) = workspace.windows[window_index]
+                    .areas
+                    .iter()
+                    .position(|area| area.id == target_area_id)
+                {
+                    let duplicate_tab = make_pane_tab(&mut workspace, dragging.tab.kind);
+                    if let Some(new_area_id) = split_pane_area_with_tab(
+                        &mut workspace,
+                        window_index,
+                        area_index,
+                        zone,
+                        duplicate_tab,
+                    ) {
+                        workspace.last_focused_window = Some(target_window_id.to_string());
+                        workspace.last_focused_area = Some(new_area_id);
+                    } else {
+                        workspace.last_focused_window = Some(target_window_id.to_string());
+                        workspace.last_focused_area = Some(target_area_id);
+                    }
+                    workspace.drop_handled = true;
+                    compact_pane_workspace(&mut workspace);
+                    refresh_pane_window_titles(&mut workspace);
+                    return;
+                }
+            }
+        }
+
+        if dragging.source_was_single_tab {
+            remove_pane_tab_from_window_by_id(
+                &mut workspace,
+                &dragging.source_window_id,
+                dragging.source_area_id,
+                dragging.tab.id,
+            );
+        }
+
+        let mut placed_window_id = target_window_id.to_string();
+        let mut placed_area_id = target_area_id;
+        if let Some(window_index) = workspace
+            .windows
+            .iter()
+            .position(|window| window.id == target_window_id)
+        {
+            if let Some(area_index) = workspace.windows[window_index]
+                .areas
+                .iter()
+                .position(|area| area.id == target_area_id)
+            {
+                if workspace.windows[window_index].areas[area_index]
+                    .tabs
+                    .is_empty()
+                {
+                    let area = &mut workspace.windows[window_index].areas[area_index];
+                    area.tabs.push(dragging.tab);
+                    area.active = area.tabs.len().saturating_sub(1);
+                    placed_area_id = area.id;
+                } else if let Some(new_area_id) = split_pane_area_with_tab(
+                    &mut workspace,
+                    window_index,
+                    area_index,
+                    zone,
+                    dragging.tab.clone(),
+                ) {
+                    placed_area_id = new_area_id;
+                } else {
+                    let area = &mut workspace.windows[window_index].areas[area_index];
+                    area.tabs.push(dragging.tab);
+                    area.active = area.tabs.len().saturating_sub(1);
+                    placed_area_id = area.id;
+                }
+            } else {
+                if let Some(area_index) =
+                    (!workspace.windows[window_index].areas.is_empty()).then_some(0usize)
+                {
+                    if workspace.windows[window_index].areas[area_index]
+                        .tabs
+                        .is_empty()
+                    {
+                        let area = &mut workspace.windows[window_index].areas[area_index];
+                        area.tabs.push(dragging.tab);
+                        area.active = area.tabs.len().saturating_sub(1);
+                        placed_area_id = area.id;
+                    } else if let Some(new_area_id) = split_pane_area_with_tab(
+                        &mut workspace,
+                        window_index,
+                        area_index,
+                        zone,
+                        dragging.tab.clone(),
+                    ) {
+                        placed_area_id = new_area_id;
+                    } else {
+                        let area = &mut workspace.windows[window_index].areas[area_index];
+                        area.tabs.push(dragging.tab);
+                        area.active = area.tabs.len().saturating_sub(1);
+                        placed_area_id = area.id;
+                    }
+                } else {
+                    let area = make_pane_area(
+                        &mut workspace,
+                        EditorPaneAreaRect::full(),
+                        vec![dragging.tab],
+                    );
+                    placed_area_id = area.id;
+                    workspace.windows[window_index].areas.push(area);
+                }
+            }
+        } else {
+            let new_window_id = next_pane_window_id(&mut workspace);
+            let area = make_pane_area(
+                &mut workspace,
+                EditorPaneAreaRect::full(),
+                vec![dragging.tab],
+            );
+            placed_area_id = area.id;
+            workspace.windows.push(EditorPaneWindow {
+                id: new_window_id.clone(),
+                title: "Pane".to_string(),
+                areas: vec![area],
+                layout_managed: false,
+            });
+            placed_window_id = new_window_id;
+        }
+
+        workspace.last_focused_window = Some(placed_window_id);
+        workspace.last_focused_area = Some(placed_area_id);
+        workspace.drop_handled = true;
+
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+}
+
+fn drop_pane_tab_into_new_window(world: &mut World, pointer_pos: Option<Pos2>) {
+    let mut spawned_window_id: Option<String> = None;
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        let Some(dragging) = workspace.dragging.take() else {
+            return;
+        };
+        workspace.initialized = true;
+
+        if dragging.source_was_single_tab {
+            remove_pane_tab_from_window_by_id(
+                &mut workspace,
+                &dragging.source_window_id,
+                dragging.source_area_id,
+                dragging.tab.id,
+            );
+        }
+
+        let new_window_id = next_pane_window_id(&mut workspace);
+        let area = make_pane_area(
+            &mut workspace,
+            EditorPaneAreaRect::full(),
+            vec![dragging.tab],
+        );
+        let new_area_id = area.id;
+        workspace.windows.push(EditorPaneWindow {
+            id: new_window_id.clone(),
+            title: "Pane".to_string(),
+            areas: vec![area],
+            layout_managed: false,
+        });
+        workspace.last_focused_window = Some(new_window_id.clone());
+        workspace.last_focused_area = Some(new_area_id);
+        workspace.drop_handled = true;
+        spawned_window_id = Some(new_window_id);
+
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+
+    if let (Some(window_id), Some(pointer_pos)) = (spawned_window_id, pointer_pos) {
+        if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+            // bias the window origin up/left so the dropped tab stays under the cursor
+            egui_res
+                .window_positions
+                .insert(window_id, pointer_pos - Vec2::new(120.0, 14.0));
+        }
+    }
+}
+
+fn remove_pane_tab_from_window_by_id(
+    workspace: &mut EditorPaneWorkspaceState,
+    window_id: &str,
+    area_id: u64,
+    tab_id: u64,
+) {
+    let Some(window_index) = workspace
+        .windows
+        .iter()
+        .position(|window| window.id == window_id)
+    else {
+        return;
+    };
+
+    let Some(area_index) = workspace.windows[window_index]
+        .areas
+        .iter()
+        .position(|area| area.id == area_id)
+    else {
+        return;
+    };
+
+    if let Some(index) = workspace.windows[window_index].areas[area_index]
+        .tabs
+        .iter()
+        .position(|tab| tab.id == tab_id)
+    {
+        workspace.windows[window_index].areas[area_index]
+            .tabs
+            .remove(index);
+        if workspace.windows[window_index].areas[area_index].active
+            >= workspace.windows[window_index].areas[area_index].tabs.len()
+        {
+            workspace.windows[window_index].areas[area_index].active =
+                workspace.windows[window_index].areas[area_index]
+                    .tabs
+                    .len()
+                    .saturating_sub(1);
+        }
+    }
+    compact_pane_workspace(workspace);
+}
+
+fn pane_drop_zone_geometry(area_rect: Rect) -> (Rect, f32, f32) {
+    let inset = area_rect.shrink(6.0);
+    let edge_x = (inset.width() * 0.20)
+        .clamp(16.0, 64.0)
+        .min(inset.width() * 0.40);
+    let edge_y = (inset.height() * 0.20)
+        .clamp(16.0, 64.0)
+        .min(inset.height() * 0.40);
+    (inset, edge_x, edge_y)
+}
+
+fn pane_drop_zone_rects(area_rect: Rect) -> [(PaneDropZone, Rect); 5] {
+    let (inset, edge_x, edge_y) = pane_drop_zone_geometry(area_rect);
+
+    let left = Rect::from_min_max(
+        Pos2::new(inset.min.x, inset.min.y),
+        Pos2::new(inset.min.x + edge_x, inset.max.y),
+    );
+    let right = Rect::from_min_max(
+        Pos2::new(inset.max.x - edge_x, inset.min.y),
+        Pos2::new(inset.max.x, inset.max.y),
+    );
+    let top = Rect::from_min_max(
+        Pos2::new(inset.min.x + edge_x, inset.min.y),
+        Pos2::new(inset.max.x - edge_x, inset.min.y + edge_y),
+    );
+    let bottom = Rect::from_min_max(
+        Pos2::new(inset.min.x + edge_x, inset.max.y - edge_y),
+        Pos2::new(inset.max.x - edge_x, inset.max.y),
+    );
+    let center = Rect::from_min_max(
+        Pos2::new(inset.min.x + edge_x, inset.min.y + edge_y),
+        Pos2::new(inset.max.x - edge_x, inset.max.y - edge_y),
+    );
+
+    [
+        (PaneDropZone::Left, left),
+        (PaneDropZone::Right, right),
+        (PaneDropZone::Top, top),
+        (PaneDropZone::Bottom, bottom),
+        (PaneDropZone::Center, center),
+    ]
+}
+
+fn pane_drop_zone_for_pointer(area_rect: Rect, pointer_pos: Pos2) -> PaneDropZone {
+    let (inset, edge_x, edge_y) = pane_drop_zone_geometry(area_rect);
+    if !inset.contains(pointer_pos) {
+        return PaneDropZone::Center;
+    }
+
+    let left_dist = (pointer_pos.x - inset.left()).max(0.0);
+    let right_dist = (inset.right() - pointer_pos.x).max(0.0);
+    let top_dist = (pointer_pos.y - inset.top()).max(0.0);
+    let bottom_dist = (inset.bottom() - pointer_pos.y).max(0.0);
+
+    let mut candidates: [(PaneDropZone, f32); 4] = [
+        (PaneDropZone::Left, f32::INFINITY),
+        (PaneDropZone::Right, f32::INFINITY),
+        (PaneDropZone::Top, f32::INFINITY),
+        (PaneDropZone::Bottom, f32::INFINITY),
+    ];
+    if left_dist <= edge_x {
+        candidates[0].1 = left_dist;
+    }
+    if right_dist <= edge_x {
+        candidates[1].1 = right_dist;
+    }
+    if top_dist <= edge_y {
+        candidates[2].1 = top_dist;
+    }
+    if bottom_dist <= edge_y {
+        candidates[3].1 = bottom_dist;
+    }
+
+    let (zone, distance) = candidates
+        .into_iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((PaneDropZone::Center, f32::INFINITY));
+
+    if distance.is_finite() {
+        zone
+    } else {
+        PaneDropZone::Center
+    }
+}
+
+fn paint_pane_drop_targets(ui: &Ui, area_rect: Rect, hovered_zone: PaneDropZone) {
+    for (zone, rect) in pane_drop_zone_rects(area_rect) {
+        let is_hovered = zone == hovered_zone;
+        let fill = if is_hovered {
+            Color32::from_rgba_premultiplied(90, 140, 220, 120)
+        } else {
+            Color32::from_rgba_premultiplied(60, 75, 100, 80)
+        };
+        let stroke = if is_hovered {
+            Stroke::new(1.5, Color32::from_rgb(155, 205, 255))
+        } else {
+            Stroke::new(1.0, Color32::from_gray(120))
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        ui.painter()
+            .rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
+    }
+}
+
+fn draw_pane_area(
+    ui: &mut Ui,
+    world: &mut World,
+    window_id: &str,
+    area: EditorPaneArea,
+    area_rect: Rect,
+) {
+    let frame = egui::Frame::none()
+        .fill(Color32::from_rgb(17, 18, 22))
+        .stroke(Stroke::new(1.0, Color32::from_gray(62)))
+        .inner_margin(egui::Margin::same(4));
+    ui.allocate_ui_at_rect(area_rect, |ui| {
+        frame.show(ui, |ui| {
+            let pane_clip_rect = ui.max_rect();
+            ui.set_clip_rect(ui.clip_rect().intersect(pane_clip_rect));
+            let area_response = ui.interact(
+                ui.max_rect(),
+                ui.id().with(("pane_area_bg", window_id, area.id)),
+                Sense::click(),
+            );
+            let empty_area_full_response = if area.tabs.is_empty() {
+                Some(
+                    ui.interact(
+                        ui.max_rect(),
+                        ui.id()
+                            .with(("pane_area_empty_full_context", window_id, area.id)),
+                        Sense::click_and_drag(),
+                    ),
+                )
+            } else {
+                None
+            };
+
+            if area_response.clicked_by(PointerButton::Primary) {
+                world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+                    workspace.last_focused_window = Some(window_id.to_string());
+                    workspace.last_focused_area = Some(area.id);
+                });
+            }
+
+            let active_kind = area
+                .tabs
+                .get(area.active.min(area.tabs.len().saturating_sub(1)))
+                .map(|tab| tab.kind);
+
+            let mut activate_tab: Option<usize> = None;
+            let mut close_tab: Option<usize> = None;
+            let mut detach_tab: Option<usize> = None;
+            let mut drag_tab: Option<usize> = None;
+            let mut drop_on_tab: Option<usize> = None;
+            let mut did_interact = false;
+            let mut tab_row_bottom = area_response.rect.min.y;
+            let mut tab_rects: Vec<Rect> = Vec::new();
+
+            let tab_bar = egui::Frame::none().show(ui, |ui| {
+                let old_spacing = ui.spacing().item_spacing;
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, old_spacing.y);
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    for (index, tab) in area.tabs.iter().enumerate() {
+                        let selected = index == area.active;
+                        let visuals = ui.visuals().clone();
+                        let text_color = if selected {
+                            visuals.selection.stroke.color
+                        } else {
+                            visuals.text_color()
+                        };
+                        let galley = ui.painter().layout_no_wrap(
+                            tab.title.clone(),
+                            FontId::proportional(13.0),
+                            text_color,
+                        );
+
+                        let padding = Vec2::new(10.0, 4.0);
+                        let close_width = 24.0;
+                        let tab_height = ui
+                            .spacing()
+                            .interact_size
+                            .y
+                            .max(galley.size().y + padding.y * 2.0);
+                        let tab_width = galley.size().x + padding.x * 2.0 + close_width;
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(tab_width, tab_height),
+                            Sense::click_and_drag(),
+                        );
+                        tab_rects.push(rect);
+                        tab_row_bottom = tab_row_bottom.max(rect.max.y);
+
+                        let base_fill = if selected {
+                            visuals.selection.bg_fill
+                        } else if response.hovered() {
+                            visuals.widgets.hovered.bg_fill
+                        } else {
+                            visuals.widgets.inactive.bg_fill
+                        };
+                        let stroke = if selected {
+                            visuals.selection.stroke
+                        } else {
+                            visuals.widgets.inactive.bg_stroke
+                        };
+                        ui.painter().rect_filled(rect, 6.0, base_fill);
+                        ui.painter()
+                            .rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
+
+                        ui.painter().galley(rect.min + padding, galley, text_color);
+
+                        let close_rect = Rect::from_min_size(
+                            Pos2::new(rect.max.x - close_width, rect.min.y),
+                            Vec2::new(close_width, rect.height()),
+                        );
+                        let close_color = if response.hovered() {
+                            visuals.strong_text_color()
+                        } else {
+                            visuals.text_color()
+                        };
+                        ui.painter().text(
+                            close_rect.center(),
+                            Align2::CENTER_CENTER,
+                            "x",
+                            FontId::proportional(12.0),
+                            close_color,
+                        );
+                        if response.clicked() {
+                            if let Some(pointer_pos) = response.interact_pointer_pos() {
+                                if close_rect.contains(pointer_pos) {
+                                    close_tab = Some(index);
+                                } else {
+                                    activate_tab = Some(index);
+                                }
+                            } else {
+                                activate_tab = Some(index);
+                            }
+                            did_interact = true;
+                        }
+                        if response.drag_started() {
+                            drag_tab = Some(index);
+                            did_interact = true;
+                        }
+                        response.dnd_set_drag_payload(PaneTabDragPayload);
+                        if typed_dnd_release_payload::<PaneTabDragPayload>(&response).is_some() {
+                            drop_on_tab = Some(index);
+                            did_interact = true;
+                        }
+                        response.context_menu(|ui| {
+                            let spawn_pos = ui.ctx().input(|input| {
+                                input
+                                    .pointer
+                                    .hover_pos()
+                                    .or_else(|| input.pointer.interact_pos())
+                            });
+                            if ui.button("Close").clicked() {
+                                close_tab = Some(index);
+                                did_interact = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Detach").clicked() {
+                                detach_tab = Some(index);
+                                did_interact = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            draw_pane_spawn_menu(ui, world, window_id, Some(area.id), None);
+                            ui.separator();
+                            draw_pane_spawn_new_window_menu(ui, world, spawn_pos);
+                        });
+                    }
+                });
+                ui.spacing_mut().item_spacing = old_spacing;
+            });
+
+            tab_row_bottom = tab_row_bottom.max(tab_bar.response.rect.max.y);
+            let tab_bar_rect = Rect::from_min_max(
+                Pos2::new(area_response.rect.min.x, area_response.rect.min.y),
+                Pos2::new(
+                    area_response.rect.max.x,
+                    tab_row_bottom.min(area_response.rect.max.y),
+                ),
+            );
+            if tab_bar_rect.width() > 1.0 && tab_bar_rect.height() > 1.0 {
+                let mut tab_rects_sorted = tab_rects.clone();
+                tab_rects_sorted.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+
+                let mut blank_rects: Vec<Rect> = Vec::new();
+                if tab_rects_sorted.is_empty() {
+                    blank_rects.push(tab_bar_rect);
+                } else {
+                    let mut cursor_x = tab_bar_rect.left();
+                    for tab_rect in tab_rects_sorted {
+                        let gap_left = cursor_x.max(tab_bar_rect.left());
+                        let gap_right = tab_rect.left().min(tab_bar_rect.right());
+                        if gap_right - gap_left > 1.0 {
+                            blank_rects.push(Rect::from_min_max(
+                                Pos2::new(gap_left, tab_bar_rect.top()),
+                                Pos2::new(gap_right, tab_bar_rect.bottom()),
+                            ));
+                        }
+                        cursor_x = cursor_x.max(tab_rect.right().min(tab_bar_rect.right()));
+                    }
+                    if tab_bar_rect.right() - cursor_x > 1.0 {
+                        blank_rects.push(Rect::from_min_max(
+                            Pos2::new(cursor_x, tab_bar_rect.top()),
+                            Pos2::new(tab_bar_rect.right(), tab_bar_rect.bottom()),
+                        ));
+                    }
+                }
+
+                for (blank_index, blank_rect) in blank_rects.into_iter().enumerate() {
+                    let blank_response = ui.interact(
+                        blank_rect,
+                        ui.id().with((
+                            "pane_tab_bar_blank_context",
+                            window_id,
+                            area.id,
+                            blank_index,
+                        )),
+                        Sense::click(),
+                    );
+                    blank_response.context_menu(|ui| {
+                        draw_pane_area_context_menu(ui, world, window_id, area.id);
+                    });
+                }
+            }
+
+            if let Some(kind) = active_kind {
+                if !matches!(
+                    kind,
+                    EditorPaneKind::Viewport | EditorPaneKind::PlayViewport
+                ) {
+                    let content_context_rect = Rect::from_min_max(
+                        Pos2::new(
+                            area_response.rect.min.x,
+                            (tab_row_bottom + 1.0).min(area_response.rect.max.y),
+                        ),
+                        area_response.rect.max,
+                    );
+                    let content_context_response = ui.interact(
+                        content_context_rect,
+                        ui.id()
+                            .with(("pane_area_content_context", window_id, area.id)),
+                        Sense::click_and_drag(),
+                    );
+                    content_context_response.context_menu(|ui| {
+                        draw_pane_area_context_menu(ui, world, window_id, area.id);
+                    });
+                }
+            }
+
+            let split_target_rect = Rect::from_min_max(
+                Pos2::new(
+                    area_response.rect.min.x,
+                    (tab_row_bottom + 4.0).min(area_response.rect.max.y),
+                ),
+                area_response.rect.max,
+            );
+            let pane_drop_zone = world
+                .get_resource::<EditorPaneWorkspaceState>()
+                .and_then(|workspace| workspace.dragging.as_ref())
+                .and_then(|_| ui.ctx().input(|input| input.pointer.hover_pos()))
+                .filter(|pos| split_target_rect.contains(*pos))
+                .map(|pos| pane_drop_zone_for_pointer(split_target_rect, pos));
+
+            if let Some(index) = drag_tab {
+                begin_pane_tab_drag(world, window_id, area.id, index);
+            }
+            if let Some(index) = detach_tab {
+                detach_pane_tab_to_new_window(world, window_id, area.id, index);
+            }
+            if let Some(index) = close_tab {
+                close_pane_tab_in_window(world, window_id, area.id, index);
+            }
+            if let Some(index) = activate_tab {
+                world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+                    let mut focused_area = None;
+                    if let Some(window_index) =
+                        workspace.windows.iter().position(|w| w.id == window_id)
+                    {
+                        if let Some(area_index) = workspace.windows[window_index]
+                            .areas
+                            .iter()
+                            .position(|a| a.id == area.id)
+                        {
+                            let area = &mut workspace.windows[window_index].areas[area_index];
+                            if index < area.tabs.len() {
+                                area.active = index;
+                            }
+                            focused_area = Some(area.id);
+                        }
+                    }
+                    if let Some(area_id) = focused_area {
+                        workspace.last_focused_window = Some(window_id.to_string());
+                        workspace.last_focused_area = Some(area_id);
+                    }
+                    refresh_pane_window_titles(&mut workspace);
+                });
+            }
+            if did_interact {
+                world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+                    workspace.last_focused_window = Some(window_id.to_string());
+                    workspace.last_focused_area = Some(area.id);
+                });
+            }
+
+            if let Some(index) = drop_on_tab {
+                accept_pane_tab_drop(world, window_id, area.id, Some(index));
+            } else {
+                let released_on_tab_bar =
+                    typed_dnd_release_payload::<PaneTabDragPayload>(&tab_bar.response).is_some();
+                let released_on_area =
+                    typed_dnd_release_payload::<PaneTabDragPayload>(&area_response).is_some();
+                if released_on_tab_bar || released_on_area {
+                    if let Some(zone) = pane_drop_zone {
+                        let effective_zone = if area.tabs.is_empty() {
+                            PaneDropZone::Center
+                        } else {
+                            zone
+                        };
+                        match effective_zone {
+                            PaneDropZone::Center => {
+                                accept_pane_tab_drop(world, window_id, area.id, None);
+                            }
+                            split_zone => {
+                                accept_pane_tab_split_drop(world, window_id, area.id, split_zone);
+                            }
+                        }
+                    } else {
+                        accept_pane_tab_drop(world, window_id, area.id, None);
+                    }
+                }
+            }
+
+            ui.separator();
+
+            let active_tab =
+                world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+                    let window = workspace
+                        .windows
+                        .iter_mut()
+                        .find(|window| window.id == window_id)?;
+                    let area = window
+                        .areas
+                        .iter_mut()
+                        .find(|target| target.id == area.id)?;
+                    if area.tabs.is_empty() {
+                        return None;
+                    }
+                    if area.active >= area.tabs.len() {
+                        area.active = area.tabs.len().saturating_sub(1);
+                    }
+                    Some(area.tabs[area.active].clone())
+                });
+
+            if let Some(active_tab) = active_tab {
+                ui.push_id((window_id, area.id, active_tab.id), |ui| {
+                    match active_tab.kind {
+                        EditorPaneKind::Toolbar => draw_toolbar(ui, world),
+                        EditorPaneKind::Viewport => {
+                            draw_viewport_pane(ui, world, active_tab.id, false)
+                        }
+                        EditorPaneKind::PlayViewport => {
+                            draw_viewport_pane(ui, world, active_tab.id, true)
+                        }
+                        EditorPaneKind::Project => draw_project_window(ui, world),
+                        EditorPaneKind::Hierarchy => draw_scene_window(ui, world),
+                        EditorPaneKind::Inspector => draw_inspector_window(ui, world),
+                        EditorPaneKind::History => draw_history_window(ui, world),
+                        EditorPaneKind::Timeline => draw_timeline_window(ui, world),
+                        EditorPaneKind::ContentBrowser => draw_assets_window(ui, world),
+                        EditorPaneKind::AudioMixer => draw_audio_mixer_window(ui, world),
+                    }
+                });
+            } else {
+                if let Some(empty_response) = empty_area_full_response {
+                    empty_response.context_menu(|ui| {
+                        draw_pane_area_context_menu(ui, world, window_id, area.id);
+                    });
+                } else {
+                    area_response.context_menu(|ui| {
+                        draw_pane_area_context_menu(ui, world, window_id, area.id);
+                    });
+                }
+                ui.with_layout(
+                    Layout::centered_and_justified(egui::Direction::TopDown),
+                    |ui| {
+                        ui.label("Right-click to add panes");
+                    },
+                );
+            }
+
+            if let Some(zone) = pane_drop_zone {
+                paint_pane_drop_targets(ui, split_target_rect, zone);
+            }
+        });
+    });
+}
+
+fn draw_pane_spawn_menu(
+    ui: &mut Ui,
+    world: &mut World,
+    window_id: &str,
+    area_id: Option<u64>,
+    split_axis: Option<SplitAxis>,
+) {
+    let label = match split_axis {
+        Some(SplitAxis::Vertical) => "Split Right",
+        Some(SplitAxis::Horizontal) => "Split Down",
+        None => "New Pane",
+    };
+    ui.menu_button(label, |ui| {
+        for kind in EditorPaneKind::ALL {
+            if ui.button(kind.label()).clicked() {
+                open_pane_workspace_tab(world, kind, Some(window_id), area_id, split_axis);
+                ui.close_menu();
+            }
+        }
+    });
+}
+
 pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
     bring_window_to_front_if_dragging(ui, world);
     drag_egui_window_on_middle_click(ui, world, &format!("editor_window_{}", window_id));
@@ -2718,6 +5088,13 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
             state.windows.len(),
         )
     };
+    let pane_window_count = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .map(|state| state.windows.len())
+        .unwrap_or(0);
+    if window_index == 0 && pane_window_count == 0 {
+        draw_pane_workspace_background_context_menu(ui, world);
+    }
 
     if tabs_snapshot.is_empty() {
         world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
@@ -2848,7 +5225,7 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
                     interacted = true;
                 }
 
-                if response.dnd_release_payload::<TabDragPayload>().is_some() {
+                if typed_dnd_release_payload::<TabDragPayload>(&response).is_some() {
                     drop_on_tab = Some(index);
                     interacted = true;
                 }
@@ -2873,11 +5250,7 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
     if drop_on_tab.is_some() {
         accept_tab_drop(world, window_id, drop_on_tab);
         interacted = true;
-    } else if tab_bar
-        .response
-        .dnd_release_payload::<TabDragPayload>()
-        .is_some()
-    {
+    } else if typed_dnd_release_payload::<TabDragPayload>(&tab_bar.response).is_some() {
         accept_tab_drop(world, window_id, None);
         interacted = true;
     }
@@ -2957,7 +5330,7 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
         if let Some(pointer_pos) = ui.ctx().input(|input| input.pointer.hover_pos()) {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(
                 Order::Tooltip,
-                Id::new("editor_tab_drag"),
+                ui.id().with("editor_tab_drag"),
             ));
             painter.rect_filled(
                 Rect::from_min_size(pointer_pos + Vec2::new(12.0, 12.0), Vec2::new(160.0, 28.0)),
@@ -3157,11 +5530,13 @@ fn draw_hierarchy_panel(ui: &mut Ui, world: &mut World, data: &HierarchyData) {
             let drop_rect = ui.max_rect();
             let drop_response = ui.interact(
                 drop_rect,
-                Id::new("hierarchy_background_drop"),
+                ui.id().with("hierarchy_background_drop"),
                 Sense::hover(),
             );
             if !drop_handled {
-                if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+                if let Some(payload) =
+                    typed_dnd_release_payload::<EntityDragPayload>(&drop_response)
+                {
                     reparent_entity_in_hierarchy(world, payload.entity, None);
                 }
             }
@@ -3301,7 +5676,7 @@ fn draw_hierarchy_row(
                 }
             });
 
-            if let Some(payload) = response.dnd_release_payload::<EntityDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&response) {
                 *drop_handled = true;
                 if payload.entity != entity {
                     reparent_entity_in_hierarchy(world, payload.entity, Some(entity));
@@ -3856,7 +6231,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     push_undo_snapshot(world, "Audio Clip");
                 }
             }
-            if let Some(payload) = clip_button.dnd_release_payload::<AssetDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&clip_button) {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_audio_file(path) {
                         apply_audio_emitter_from_asset(
@@ -4136,9 +6511,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
             });
 
-            if let Some(payload) = mesh_source_button
-                .response
-                .dnd_release_payload::<AssetDragPayload>()
+            if let Some(payload) =
+                typed_dnd_release_payload::<AssetDragPayload>(&mesh_source_button.response)
             {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_model_file(path) {
@@ -4218,9 +6592,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
             }
 
-            if let Some(payload) = material_button
-                .response
-                .dnd_release_payload::<AssetDragPayload>()
+            if let Some(payload) =
+                typed_dnd_release_payload::<AssetDragPayload>(&material_button.response)
             {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_material_file(path) {
@@ -4359,9 +6732,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
             });
 
-            if let Some(payload) = skinned_source_button
-                .response
-                .dnd_release_payload::<AssetDragPayload>()
+            if let Some(payload) =
+                typed_dnd_release_payload::<AssetDragPayload>(&skinned_source_button.response)
             {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_model_file(path) {
@@ -4446,7 +6818,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         apply_animation_asset_to_entity(world, entity, &path);
                     }
                 }
-                if let Some(payload) = apply_button.dnd_release_payload::<AssetDragPayload>() {
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&apply_button)
+                {
                     if let Some(path) = payload_primary_path(&payload) {
                         if is_animation_file(path) {
                             apply_animation_asset_to_entity(world, entity, path);
@@ -5191,7 +7564,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
                 drop_hint = Some(world.get::<BevySpline>(payload.entity).is_some());
             }
-            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
             }
             if let Some(valid) = drop_hint {
@@ -5328,7 +7701,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
                 drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
             }
-            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
             }
             if let Some(valid) = drop_hint {
@@ -5460,7 +7833,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
                 drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
             }
-            if let Some(payload) = drop_response.dnd_release_payload::<EntityDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
             }
             if let Some(valid) = drop_hint {
@@ -6582,9 +8955,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                 });
 
-                if let Some(payload) = mesh_source_button
-                    .response
-                    .dnd_release_payload::<AssetDragPayload>()
+                if let Some(payload) =
+                    typed_dnd_release_payload::<AssetDragPayload>(&mesh_source_button.response)
                 {
                     if let Some(path) = payload_primary_path(&payload) {
                         if let Some(id) = collider_mesh_id_from_asset(world, &project, path) {
@@ -7192,9 +9564,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
             });
 
-            if let Some(payload) = scene_asset_button
-                .response
-                .dnd_release_payload::<AssetDragPayload>()
+            if let Some(payload) =
+                typed_dnd_release_payload::<AssetDragPayload>(&scene_asset_button.response)
             {
                 if let Some(path) = payload_primary_path(&payload) {
                     if try_apply_scene_asset_path(world, entity, path) {
@@ -7272,7 +9643,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
                 script_edit_response.merge(edit_response);
 
-                if let Some(payload) = path_response.dnd_release_payload::<AssetDragPayload>() {
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&path_response)
+                {
                     if let Some(path) = payload_primary_path(&payload) {
                         if is_script_file(path) {
                             updated_path = Some(path.clone());
@@ -7471,9 +9843,6 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 }
 
 pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
-    drag_egui_window_on_middle_click(ui, world, "Content Browser");
-
     let root = match world
         .get_resource::<AssetBrowserState>()
         .and_then(|state| state.root.clone())
@@ -7584,6 +9953,17 @@ struct AssetDragPayload {
 #[derive(Clone)]
 struct EntityDragPayload {
     entity: Entity,
+}
+
+fn typed_dnd_release_payload<Payload>(response: &Response) -> Option<Arc<Payload>>
+where
+    Payload: Any + Send + Sync,
+{
+    if response.dnd_hover_payload::<Payload>().is_some() {
+        response.dnd_release_payload::<Payload>()
+    } else {
+        None
+    }
 }
 
 fn highlight_drop_target(ui: &Ui, response: &Response) {
@@ -7836,7 +10216,8 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                         toggle_expand(world, entry.path.clone());
                     }
 
-                    if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>() {
+                    if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&response)
+                    {
                         move_assets(world, &payload.paths, &entry.path);
                     }
 
@@ -7886,7 +10267,7 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
         .id_salt("asset_grid_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let background_id = Id::new("asset_grid_background");
+            let background_id = ui.id().with("asset_grid_background");
             let background_rect = ui.available_rect_before_wrap();
             let background_response =
                 ui.interact(background_rect, background_id, Sense::click_and_drag());
@@ -8085,7 +10466,7 @@ fn draw_asset_tile(
     }
 
     if entry.is_dir {
-        if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>() {
+        if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&response) {
             move_assets(world, &payload.paths, &entry.path);
         }
     }
@@ -9655,7 +12036,7 @@ fn draw_add_component_menu(
                 push_undo_snapshot(world, "Add Audio Emitter");
                 ui.close_menu();
             }
-            if let Some(payload) = audio_button.dnd_release_payload::<AssetDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&audio_button) {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_audio_file(path) {
                         ensure_transform(world, entity);
@@ -9719,7 +12100,7 @@ fn draw_add_component_menu(
                 push_undo_snapshot(world, "Add Skinned Mesh");
                 ui.close_menu();
             }
-            if let Some(payload) = skinned_button.dnd_release_payload::<AssetDragPayload>() {
+            if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&skinned_button) {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_model_file(path) {
                         ensure_transform(world, entity);
@@ -9781,7 +12162,9 @@ fn draw_add_component_menu(
                 push_undo_snapshot(world, "Add Scene Asset");
                 ui.close_menu();
             }
-            if let Some(payload) = scene_asset_button.dnd_release_payload::<AssetDragPayload>() {
+            if let Some(payload) =
+                typed_dnd_release_payload::<AssetDragPayload>(&scene_asset_button)
+            {
                 if let Some(path) = payload_primary_path(&payload) {
                     if try_apply_scene_asset_path(world, entity, path) {
                         push_undo_snapshot(world, "Add Scene Asset");
@@ -11558,7 +13941,6 @@ fn toggle_expand(world: &mut World, path: PathBuf) {
 }
 
 pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
-    bring_window_to_front_if_dragging(ui, world);
     ui.heading("Timeline");
 
     let pinned = world

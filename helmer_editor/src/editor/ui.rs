@@ -3907,7 +3907,17 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
                 .or_else(|| input.pointer.interact_pos())
         }),
     );
-    if !pointer_over_viewport_scene {
+    let window_has_active_viewport = areas_snapshot.iter().any(|area| {
+        area.tabs
+            .get(area.active.min(area.tabs.len().saturating_sub(1)))
+            .is_some_and(|tab| {
+                matches!(
+                    tab.kind,
+                    EditorPaneKind::Viewport | EditorPaneKind::PlayViewport
+                )
+            })
+    });
+    if !pointer_over_viewport_scene || !window_has_active_viewport {
         let spawn_pos = host_response.interact_pointer_pos().or_else(|| {
             ui.ctx().input(|input| {
                 input
@@ -4652,18 +4662,6 @@ fn draw_pane_area(
                 ui.id().with(("pane_area_bg", window_id, area.id)),
                 Sense::click(),
             );
-            let empty_area_full_response = if area.tabs.is_empty() {
-                Some(
-                    ui.interact(
-                        ui.max_rect(),
-                        ui.id()
-                            .with(("pane_area_empty_full_context", window_id, area.id)),
-                        Sense::click_and_drag(),
-                    ),
-                )
-            } else {
-                None
-            };
 
             if area_response.clicked_by(PointerButton::Primary) {
                 world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
@@ -5003,21 +5001,37 @@ fn draw_pane_area(
                     }
                 });
             } else {
-                if let Some(empty_response) = empty_area_full_response {
-                    empty_response.context_menu(|ui| {
-                        draw_pane_area_context_menu(ui, world, window_id, area.id);
+                let empty_body_rect = Rect::from_min_max(
+                    Pos2::new(
+                        area_response.rect.min.x,
+                        (tab_row_bottom + 1.0).min(area_response.rect.max.y),
+                    ),
+                    area_response.rect.max,
+                );
+                if empty_body_rect.width() > 1.0 && empty_body_rect.height() > 1.0 {
+                    ui.allocate_ui_at_rect(empty_body_rect, |ui| {
+                        let empty_body_response = ui.allocate_rect(ui.max_rect(), Sense::click());
+                        empty_body_response.context_menu(|ui| {
+                            draw_pane_area_context_menu(ui, world, window_id, area.id);
+                        });
+                        ui.with_layout(
+                            Layout::centered_and_justified(egui::Direction::TopDown),
+                            |ui| {
+                                ui.label("Right-click to add panes");
+                            },
+                        );
                     });
                 } else {
                     area_response.context_menu(|ui| {
                         draw_pane_area_context_menu(ui, world, window_id, area.id);
                     });
+                    ui.with_layout(
+                        Layout::centered_and_justified(egui::Direction::TopDown),
+                        |ui| {
+                            ui.label("Right-click to add panes");
+                        },
+                    );
                 }
-                ui.with_layout(
-                    Layout::centered_and_justified(egui::Direction::TopDown),
-                    |ui| {
-                        ui.label("Right-click to add panes");
-                    },
-                );
             }
 
             if let Some(zone) = pane_drop_zone {

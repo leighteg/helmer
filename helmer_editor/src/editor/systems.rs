@@ -2785,6 +2785,19 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
         .unwrap_or_default();
     if !runtime.pane_requests.is_empty() {
         let mut requests = Vec::new();
+        let main_display_entity = runtime
+            .active_pane_id
+            .and_then(|pane_id| {
+                runtime
+                    .pane_requests
+                    .iter()
+                    .find(|pane| pane.pane_id == pane_id)
+                    .map(|pane| pane.camera_entity)
+            })
+            .or_else(|| runtime.pane_requests.first().map(|pane| pane.camera_entity));
+        let preview_entity = runtime.preview_camera_entity;
+        let preview_texture_id = runtime.preview_texture_id;
+        let preview_rect = runtime.preview_rect_pixels;
         for pane in runtime.pane_requests {
             if let Some(request) = viewport_request_for_entity(
                 world,
@@ -2797,6 +2810,24 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                 pane.immediate_resize,
             ) {
                 requests.push(request);
+            }
+        }
+        if let (Some(preview_entity), Some(texture_id), Some(preview_rect)) =
+            (preview_entity, preview_texture_id, preview_rect)
+        {
+            if Some(preview_entity) != main_display_entity && has_camera(world, preview_entity) {
+                if let Some(request) = viewport_request_for_entity(
+                    world,
+                    preview_entity,
+                    VIEWPORT_ID_PREVIEW,
+                    texture_id,
+                    preview_rect,
+                    None,
+                    false,
+                    false,
+                ) {
+                    requests.push(request);
+                }
             }
         }
         if let Some(mut viewport_requests) = world.get_resource_mut::<RenderViewportRequests>() {

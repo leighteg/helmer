@@ -1619,6 +1619,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                     .unwrap_or_else(|| "default-graph".to_string())
             });
         let previous_graph_template = graph_template.clone();
+        let mut pinned_camera = world
+            .get_resource::<EditorViewportState>()
+            .and_then(|state| state.pinned_camera);
         let mut gizmos_in_play = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.gizmos_in_play)
@@ -1655,6 +1658,14 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
             .unwrap_or(GizmoMode::None);
+        let mut preview_position_norm = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.preview_position_norm)
+            .unwrap_or([0.03, 0.74]);
+        let mut preview_width_norm = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.preview_width_norm)
+            .unwrap_or(0.28);
         let script_registry_status = world
             .get_resource::<ScriptRegistry>()
             .and_then(|registry| registry.status.clone());
@@ -1678,11 +1689,16 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let advanced_menu_config =
             MenuConfig::new().close_behavior(PopupCloseBehavior::IgnoreClicks);
         let mut graph_selection_changed = false;
+        let selected_camera = world
+            .get_resource::<InspectorSelectedEntityResource>()
+            .and_then(|selection| selection.0)
+            .filter(|entity| world.get::<BevyCamera>(*entity).is_some());
 
         let Some(texture_id) = ensure_pane_viewport_texture_id(ui, world, pane_id) else {
             ui.label("Viewport texture allocation failed.");
             return;
         };
+        let preview_texture_id = ensure_viewport_texture_ids(ui, world).map(|(_, _, id)| id);
 
         let editor_camera_entity = ensure_viewport_camera_for_pane(world, pane_id);
         let play_camera_entity = if play_viewport && world_state == WorldState::Play {
@@ -2312,6 +2328,22 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             });
                         });
                 });
+            ui.separator();
+            if let Some(selected_camera) = selected_camera {
+                if ui
+                    .button("P")
+                    .on_hover_text("Pin selected camera")
+                    .clicked()
+                {
+                    pinned_camera = Some(selected_camera);
+                }
+            }
+            if pinned_camera.is_some() && ui.button("U").on_hover_text("Unpin camera").clicked() {
+                pinned_camera = None;
+            }
+            if let Some(entity) = pinned_camera {
+                ui.label(format!("Pinned: {}", entity_display_name(world, entity)));
+            }
         });
         ui.separator();
         let resolution_preset_changed = render_resolution != previous_render_resolution;
@@ -2345,24 +2377,153 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             );
         }
 
-        let pointer_over = ui
-            .ctx()
-            .input(|input| {
-                input
-                    .pointer
-                    .interact_pos()
-                    .or_else(|| input.pointer.hover_pos())
-            })
-            .is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
+        let mut preview_rect_pixels = None;
+        let mut shown_preview_camera = None;
+        let mut preview_pointer_blocked = false;
+        let preview_host_active = world
+            .get_resource::<EditorViewportRuntime>()
+            .is_some_and(|runtime| runtime.active_pane_id == Some(pane_id));
+        if preview_host_active {
+            if let (Some(preview_texture_id), Some(preview_entity)) = (
+                preview_texture_id,
+                resolve_preview_camera_for_viewport(world),
+            ) {
+                if camera_entity != preview_entity {
+                    let preview_aspect = world
+                        .get::<BevyCamera>(preview_entity)
+                        .map(|camera| camera.0.aspect_ratio)
+                        .unwrap_or(16.0 / 9.0)
+                        .max(0.1);
+                    let scene_w = scene_rect.width().max(1.0);
+                    let scene_h = scene_rect.height().max(1.0);
+                    let min_preview_w = scene_w.min(120.0).max(72.0);
+                    let mut preview_w = (scene_w * preview_width_norm).max(min_preview_w);
+                    let mut preview_h = (preview_w / preview_aspect).max(48.0);
+                    let max_preview_h = scene_h.max(48.0);
+                    if preview_h > max_preview_h {
+                        preview_h = max_preview_h;
+                        preview_w = (preview_h * preview_aspect).max(min_preview_w);
+                    }
+                    preview_w = preview_w.min(scene_w);
+                    preview_h = preview_h.min(scene_h);
+
+                    let max_offset_x = (scene_w - preview_w).max(0.0);
+                    let max_offset_y = (scene_h - preview_h).max(0.0);
+                    let mut preview_x =
+                        scene_rect.min.x + preview_position_norm[0].clamp(0.0, 1.0) * max_offset_x;
+                    let mut preview_y =
+                        scene_rect.min.y + preview_position_norm[1].clamp(0.0, 1.0) * max_offset_y;
+                    if !preview_x.is_finite() || !preview_y.is_finite() {
+                        preview_x = scene_rect.min.x;
+                        preview_y = scene_rect.min.y;
+                    }
+                    preview_x = preview_x.clamp(scene_rect.min.x, scene_rect.max.x - preview_w);
+                    preview_y = preview_y.clamp(scene_rect.min.y, scene_rect.max.y - preview_h);
+
+                    let mut preview_rect = Rect::from_min_size(
+                        Pos2::new(preview_x, preview_y),
+                        Vec2::new(preview_w, preview_h),
+                    );
+                    let preview_move_id = ui.id().with(("pane_viewport_preview_move", pane_id));
+                    let preview_resize_id = ui.id().with(("pane_viewport_preview_resize", pane_id));
+                    let resize_handle = 14.0;
+                    let resize_rect = Rect::from_min_max(
+                        Pos2::new(
+                            preview_rect.max.x - resize_handle,
+                            preview_rect.max.y - resize_handle,
+                        ),
+                        preview_rect.max,
+                    );
+                    let move_response =
+                        ui.interact(preview_rect, preview_move_id, Sense::click_and_drag());
+                    let resize_response = ui.interact(
+                        resize_rect.expand(2.0),
+                        preview_resize_id,
+                        Sense::click_and_drag(),
+                    );
+                    preview_pointer_blocked = move_response.hovered() || resize_response.hovered();
+                    let pointer_delta = ui.ctx().input(|input| input.pointer.delta());
+
+                    if resize_response.dragged_by(PointerButton::Primary) {
+                        let resize_delta = pointer_delta.x + pointer_delta.y * preview_aspect;
+                        let min_w = scene_w.min(96.0).max(48.0);
+                        let max_w_from_pos = (scene_rect.max.x - preview_rect.min.x)
+                            .min((scene_rect.max.y - preview_rect.min.y).max(1.0) * preview_aspect);
+                        preview_w = (preview_rect.width() + resize_delta * 0.5)
+                            .clamp(min_w.min(max_w_from_pos), max_w_from_pos.max(min_w));
+                        preview_h = (preview_w / preview_aspect).max(1.0);
+                        preview_rect =
+                            Rect::from_min_size(preview_rect.min, Vec2::new(preview_w, preview_h));
+                    } else if move_response.dragged_by(PointerButton::Primary) {
+                        let mut min = preview_rect.min + pointer_delta;
+                        min.x = min
+                            .x
+                            .clamp(scene_rect.min.x, scene_rect.max.x - preview_rect.width());
+                        min.y = min
+                            .y
+                            .clamp(scene_rect.min.y, scene_rect.max.y - preview_rect.height());
+                        preview_rect = Rect::from_min_size(min, preview_rect.size());
+                    }
+
+                    let offset_x_den = (scene_w - preview_rect.width()).max(1.0);
+                    let offset_y_den = (scene_h - preview_rect.height()).max(1.0);
+                    preview_position_norm = [
+                        ((preview_rect.min.x - scene_rect.min.x) / offset_x_den).clamp(0.0, 1.0),
+                        ((preview_rect.min.y - scene_rect.min.y) / offset_y_den).clamp(0.0, 1.0),
+                    ];
+                    preview_width_norm = (preview_rect.width() / scene_w).clamp(0.05, 0.95);
+
+                    ui.painter().rect_filled(
+                        preview_rect.expand(2.0),
+                        4.0,
+                        Color32::from_black_alpha(200),
+                    );
+                    ui.painter()
+                        .image(preview_texture_id, preview_rect, uv, Color32::WHITE);
+                    ui.painter().text(
+                        preview_rect.min + Vec2::new(6.0, 6.0),
+                        Align2::LEFT_TOP,
+                        entity_display_name(world, preview_entity),
+                        FontId::proportional(11.0),
+                        Color32::from_rgb(235, 235, 235),
+                    );
+                    let handle_color = if resize_response.hovered()
+                        || resize_response.dragged_by(PointerButton::Primary)
+                    {
+                        Color32::from_rgb(220, 220, 220)
+                    } else {
+                        Color32::from_gray(180)
+                    };
+                    ui.painter().rect_filled(
+                        resize_rect.shrink(1.0),
+                        2.0,
+                        Color32::from_black_alpha(150),
+                    );
+                    ui.painter().line_segment(
+                        [
+                            resize_rect.left_bottom() + Vec2::new(3.0, -3.0),
+                            resize_rect.right_top() + Vec2::new(-3.0, 3.0),
+                        ],
+                        Stroke::new(1.5, handle_color),
+                    );
+
+                    preview_rect_pixels =
+                        viewport_rect_pixels_from_ui_rect(preview_rect, pixels_per_point);
+                    shown_preview_camera = Some(preview_entity);
+                }
+            }
+        }
+
+        let pointer_pos = ui.ctx().input(|input| {
+            input
+                .pointer
+                .interact_pos()
+                .or_else(|| input.pointer.hover_pos())
+        });
+        let pointer_over = pointer_pos.is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
             && main_response.hovered()
-            && ui
-                .ctx()
-                .input(|input| {
-                    input
-                        .pointer
-                        .interact_pos()
-                        .or_else(|| input.pointer.hover_pos())
-                })
+            && !preview_pointer_blocked
+            && pointer_pos
                 .and_then(|pos| ui.ctx().layer_id_at(pos))
                 .map_or(true, |layer| layer == ui.layer_id());
 
@@ -2423,6 +2584,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                         runtime.active_camera_entity = Some(camera_entity);
                         runtime.main_rect_pixels = Some(rect_pixels);
                         runtime.pointer_over_main = pointer_over;
+                        runtime.preview_texture_id = preview_texture_id;
+                        runtime.preview_rect_pixels = preview_rect_pixels;
+                        runtime.preview_camera_entity = shown_preview_camera;
                         if ui.ctx().input(|input| input.pointer.any_pressed()) && !pointer_over {
                             runtime.keyboard_focus = false;
                         }
@@ -2457,6 +2621,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
+            viewport_state.pinned_camera = pinned_camera;
+            viewport_state.preview_position_norm = preview_position_norm;
+            viewport_state.preview_width_norm = preview_width_norm;
             viewport_state.gizmos_in_play = gizmos_in_play;
             viewport_state.execute_scripts_in_edit_mode = execute_scripts_in_edit_mode;
             viewport_state.show_camera_gizmos = show_camera_gizmos;

@@ -245,9 +245,37 @@ impl Default for EditorPaneWorkspaceState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorPaneViewportSettings {
+    pub graph_template: String,
+    pub gizmos_in_play: bool,
+    pub show_camera_gizmos: bool,
+    pub show_directional_light_gizmos: bool,
+    pub show_point_light_gizmos: bool,
+    pub show_spot_light_gizmos: bool,
+    pub show_spline_paths: bool,
+    pub show_spline_points: bool,
+}
+
+impl EditorPaneViewportSettings {
+    pub fn from_viewport_state(state: &EditorViewportState) -> Self {
+        Self {
+            graph_template: state.graph_template.clone(),
+            gizmos_in_play: state.gizmos_in_play,
+            show_camera_gizmos: state.show_camera_gizmos,
+            show_directional_light_gizmos: state.show_directional_light_gizmos,
+            show_point_light_gizmos: state.show_point_light_gizmos,
+            show_spot_light_gizmos: state.show_spot_light_gizmos,
+            show_spline_paths: state.show_spline_paths,
+            show_spline_points: state.show_spline_points,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Resource, Default)]
 pub struct EditorPaneViewportState {
     pub resolutions: HashMap<u64, ViewportResolutionPreset>,
+    pub settings: HashMap<u64, EditorPaneViewportSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -1592,68 +1620,54 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             .map(|state| state.play_mode_view)
             .unwrap_or_default();
         let show_options_panel = false;
-        let fallback_resolution = world
+        let fallback_viewport_state = world
             .get_resource::<EditorViewportState>()
-            .map(|state| state.render_resolution)
+            .cloned()
             .unwrap_or_default();
-        let mut render_resolution =
+        let fallback_resolution = fallback_viewport_state.render_resolution;
+        let fallback_pane_settings =
+            EditorPaneViewportSettings::from_viewport_state(&fallback_viewport_state);
+        let (mut render_resolution, pane_settings) =
             if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
-                if let Some(existing) = pane_state.resolutions.get(&pane_id).copied() {
-                    existing
-                } else {
-                    pane_state.resolutions.insert(pane_id, fallback_resolution);
-                    fallback_resolution
-                }
+                let render_resolution = pane_state
+                    .resolutions
+                    .entry(pane_id)
+                    .or_insert(fallback_resolution)
+                    .to_owned();
+                let pane_settings = pane_state
+                    .settings
+                    .entry(pane_id)
+                    .or_insert_with(|| fallback_pane_settings.clone())
+                    .clone();
+                (render_resolution, pane_settings)
             } else {
-                fallback_resolution
+                (fallback_resolution, fallback_pane_settings)
             };
         let previous_render_resolution = render_resolution;
         let templates = graph_templates();
-        let mut graph_template = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.graph_template.clone())
-            .unwrap_or_else(|| {
-                templates
-                    .first()
-                    .map(|template| template.name.to_string())
-                    .unwrap_or_else(|| "default-graph".to_string())
-            });
+        let mut graph_template = if pane_settings.graph_template.is_empty() {
+            templates
+                .first()
+                .map(|template| template.name.to_string())
+                .unwrap_or_else(|| "default-graph".to_string())
+        } else {
+            pane_settings.graph_template.clone()
+        };
         let previous_graph_template = graph_template.clone();
         let mut pinned_camera = world
             .get_resource::<EditorViewportState>()
             .and_then(|state| state.pinned_camera);
-        let mut gizmos_in_play = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.gizmos_in_play)
-            .unwrap_or(false);
+        let mut gizmos_in_play = pane_settings.gizmos_in_play;
         let mut execute_scripts_in_edit_mode = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.execute_scripts_in_edit_mode)
             .unwrap_or(false);
-        let mut show_camera_gizmos = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_camera_gizmos)
-            .unwrap_or(true);
-        let mut show_directional_light_gizmos = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_directional_light_gizmos)
-            .unwrap_or(true);
-        let mut show_point_light_gizmos = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_point_light_gizmos)
-            .unwrap_or(true);
-        let mut show_spot_light_gizmos = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_spot_light_gizmos)
-            .unwrap_or(true);
-        let mut show_spline_paths = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_spline_paths)
-            .unwrap_or(true);
-        let mut show_spline_points = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.show_spline_points)
-            .unwrap_or(true);
+        let mut show_camera_gizmos = pane_settings.show_camera_gizmos;
+        let mut show_directional_light_gizmos = pane_settings.show_directional_light_gizmos;
+        let mut show_point_light_gizmos = pane_settings.show_point_light_gizmos;
+        let mut show_spot_light_gizmos = pane_settings.show_spot_light_gizmos;
+        let mut show_spline_paths = pane_settings.show_spline_paths;
+        let mut show_spline_points = pane_settings.show_spline_points;
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -2543,6 +2557,14 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             target_size,
                             temporal_history: true,
                             immediate_resize: resolution_preset_changed,
+                            graph_template: graph_template.clone(),
+                            gizmos_in_play,
+                            show_camera_gizmos,
+                            show_directional_light_gizmos,
+                            show_point_light_gizmos,
+                            show_spot_light_gizmos,
+                            show_spline_paths,
+                            show_spline_points,
                         });
 
                     let secondary_pressed_here = ui.ctx().input(|input| {
@@ -2657,10 +2679,23 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             }
         }
 
-        if resolution_preset_changed {
-            if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+        if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+            if resolution_preset_changed {
                 pane_state.resolutions.insert(pane_id, render_resolution);
             }
+            pane_state.settings.insert(
+                pane_id,
+                EditorPaneViewportSettings {
+                    graph_template: graph_template.clone(),
+                    gizmos_in_play,
+                    show_camera_gizmos,
+                    show_directional_light_gizmos,
+                    show_point_light_gizmos,
+                    show_spot_light_gizmos,
+                    show_spline_paths,
+                    show_spline_points,
+                },
+            );
         }
     });
 }
@@ -4555,6 +4590,7 @@ pub(crate) fn close_pane_workspace_window(world: &mut World, window_id: &str) {
     if let Some(mut pane_viewport_state) = world.get_resource_mut::<EditorPaneViewportState>() {
         for tab_id in removed_tab_ids {
             pane_viewport_state.resolutions.remove(&tab_id);
+            pane_viewport_state.settings.remove(&tab_id);
         }
     }
 }
@@ -5182,6 +5218,7 @@ fn close_pane_tab_in_window(world: &mut World, window_id: &str, area_id: u64, ta
     if let Some(tab_id) = removed_tab_id {
         if let Some(mut pane_viewport_state) = world.get_resource_mut::<EditorPaneViewportState>() {
             pane_viewport_state.resolutions.remove(&tab_id);
+            pane_viewport_state.settings.remove(&tab_id);
         }
     }
 }

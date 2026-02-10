@@ -13,7 +13,7 @@ use crate::graphics::{
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RenderGraphConfigSignature {
     pub ssgi_pass: bool,
     pub ssgi_denoise_pass: bool,

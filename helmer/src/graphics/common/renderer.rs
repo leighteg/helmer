@@ -544,6 +544,29 @@ pub struct RenderViewportRequest {
     pub target_size: [u32; 2],
     pub temporal_history: bool,
     pub immediate_resize: bool,
+    pub graph_template: Option<String>,
+    pub gizmo_options: RenderViewportGizmoOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderViewportGizmoOptions {
+    pub show_gizmos: bool,
+    pub show_camera_gizmos: bool,
+    pub show_directional_light_gizmos: bool,
+    pub show_point_light_gizmos: bool,
+    pub show_spot_light_gizmos: bool,
+}
+
+impl Default for RenderViewportGizmoOptions {
+    fn default() -> Self {
+        Self {
+            show_gizmos: true,
+            show_camera_gizmos: true,
+            show_directional_light_gizmos: true,
+            show_point_light_gizmos: true,
+            show_spot_light_gizmos: true,
+        }
+    }
 }
 
 #[repr(u32)]

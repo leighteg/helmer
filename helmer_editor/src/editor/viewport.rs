@@ -192,7 +192,7 @@ impl EditorViewportRuntime {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EditorViewportPaneRequest {
     pub pane_id: u64,
     pub camera_entity: Entity,
@@ -202,6 +202,14 @@ pub struct EditorViewportPaneRequest {
     pub target_size: [u32; 2],
     pub temporal_history: bool,
     pub immediate_resize: bool,
+    pub graph_template: String,
+    pub gizmos_in_play: bool,
+    pub show_camera_gizmos: bool,
+    pub show_directional_light_gizmos: bool,
+    pub show_point_light_gizmos: bool,
+    pub show_spot_light_gizmos: bool,
+    pub show_spline_paths: bool,
+    pub show_spline_points: bool,
 }
 
 #[derive(Resource, Default)]

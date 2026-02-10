@@ -36,14 +36,15 @@ use crate::graphics::{
         renderer::{
             Aabb, AlphaMode, AssetStreamKind, AssetStreamingRequest, CameraUniforms,
             CascadeUniform, DdgiGridConstants, EguiNativeTextureBinding, EguiNativeTextures,
-            EguiRenderData, EguiTextureCache, GizmoIcon, GizmoMode, InstanceRaw, LightData,
-            MaterialShaderData, MeshLodPayload, MeshletDesc, MeshletLodData,
-            OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
-            OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
-            RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
-            RenderObject, RenderObjectDelta, RenderPassTiming, RenderViewportRequest,
-            RendererStats, ShaderConstants, ShadowUniforms, SkyUniforms, StreamingTuning, Vertex,
-            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            EguiRenderData, EguiTextureCache, GizmoData, GizmoIcon, GizmoIconKind, GizmoMode,
+            InstanceRaw, LightData, MaterialShaderData, MeshLodPayload, MeshletDesc,
+            MeshletLodData, OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER,
+            OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
+            RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
+            RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
+            RenderViewportGizmoOptions, RenderViewportRequest, RendererStats, ShaderConstants,
+            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
+            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -65,7 +66,7 @@ use crate::graphics::{
         GizmoLineParams, GizmoParams, IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput,
         RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput, TransparentDrawBatch,
     },
-    render_graphs::default_graph_spec,
+    render_graphs::{default_graph_spec, template_for_graph},
 };
 use crate::graphics::{common::constants::MAX_SHADOW_CASCADES, passes::gbuffer::GBufferPass};
 use crate::provided::components::{Camera, LightType, Transform};
@@ -1279,6 +1280,7 @@ struct StreamingState {
 }
 
 struct ActiveGraph {
+    cache_key: GraphCacheKey,
     spec_version: u64,
     surface_size: PhysicalSize<u32>,
     surface_format: wgpu::TextureFormat,
@@ -1287,6 +1289,16 @@ struct ActiveGraph {
     hiz_id: Option<ResourceId>,
     graph: RenderGraph,
     compiled: RenderGraphCompilation,
+    config_signature: RenderGraphConfigSignature,
+    transient_aliases: Arc<[(ResourceId, ResourceId)]>,
+    uses_transient_aliasing: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GraphCacheKey {
+    spec_version: u64,
+    surface_width: u32,
+    surface_height: u32,
     config_signature: RenderGraphConfigSignature,
 }
 
@@ -1606,6 +1618,8 @@ pub struct GraphRenderer {
     force_bindgroups_backend: bool,
     pool: GpuResourcePool,
     active_graph: Option<ActiveGraph>,
+    cached_graphs: HashMap<GraphCacheKey, ActiveGraph>,
+    graph_template_specs: HashMap<String, RenderGraphSpec>,
     shared_stats: Arc<RendererStats>,
     pass_overrides: HashMap<String, bool>,
     pass_timings: Vec<RenderPassTiming>,
@@ -2621,6 +2635,8 @@ impl GraphRenderer {
             force_bindgroups_backend,
             pool,
             active_graph: None,
+            cached_graphs: HashMap::new(),
+            graph_template_specs: HashMap::new(),
             shared_stats,
             pass_overrides: HashMap::new(),
             pass_timings: Vec::new(),
@@ -2842,7 +2858,8 @@ impl GraphRenderer {
             return Ok(());
         };
 
-        let graph_spec = scene.data.render_graph.clone();
+        let main_graph_spec = scene.data.render_graph.clone();
+        let main_gizmo = scene.data.gizmo.clone();
 
         let streaming_start = if profiling_enabled {
             Some(Instant::now())
@@ -2871,27 +2888,15 @@ impl GraphRenderer {
             allow_graph_resize_debounce,
         );
         let graph_sig = RenderGraphConfigSignature::from_render_config(&main_render_config);
-        let tracing_active_for_config = |config: &RenderConfig| {
-            graph_spec.name == "traced-graph"
-                || (graph_spec.name == "hybrid-graph"
-                    && (config.ddgi_pass || config.rt_reflections))
+        let tracing_active_for_config = |graph_name: &str, config: &RenderConfig| {
+            graph_name == "traced-graph"
+                || (graph_name == "hybrid-graph" && (config.ddgi_pass || config.rt_reflections))
         };
 
-        if let Err(err) = self.ensure_graph_ready(&graph_spec, graph_sig, graph_surface_size) {
+        if let Err(err) = self.ensure_graph_ready(&main_graph_spec, graph_sig, graph_surface_size) {
             self.current_render_data = Some(scene);
             return Err(err);
         }
-
-        let swapchain_id = match self.active_graph.as_ref() {
-            Some(active) => active.swapchain_id,
-            None => {
-                warn!("Render graph missing; skipping frame");
-                self.current_render_data = Some(scene);
-                self.clear_and_present(&output_view, output_frame);
-                self.frame_index = self.frame_index.wrapping_add(1);
-                return Ok(());
-            }
-        };
 
         self.backend
             .begin_frame(&self.device, &self.queue, &self.pool, self.frame_index);
@@ -2899,6 +2904,8 @@ impl GraphRenderer {
         let pressure = self.update_streaming_pressure();
         if self.active_graph.is_none() {
             warn!("Render graph missing compilation; skipping frame");
+            self.current_render_data = Some(scene);
+            self.clear_and_present(&output_view, output_frame);
             self.frame_index = self.frame_index.wrapping_add(1);
             return Ok(());
         }
@@ -2940,6 +2947,8 @@ impl GraphRenderer {
             let saved_needs_atmosphere_precompute = self.needs_atmosphere_precompute;
             let saved_occlusion_stable_frames = self.occlusion_stable_frames;
             let saved_viewport_render_config = scene.data.render_config;
+            let saved_viewport_graph = scene.data.render_graph.clone();
+            let saved_viewport_gizmo = scene.data.gizmo.clone();
             let viewport_prev_view_proj = self
                 .offscreen_viewport_prev_view_proj
                 .get(&viewport.id)
@@ -2962,8 +2971,30 @@ impl GraphRenderer {
                 viewport_render_config =
                     Self::viewport_non_temporal_render_config(viewport_render_config);
             }
-            let viewport_tracing_active = tracing_active_for_config(&viewport_render_config);
+            let viewport_graph_spec = self
+                .resolve_viewport_graph_spec(&main_graph_spec, viewport.graph_template.as_deref());
+            let viewport_graph_sig =
+                RenderGraphConfigSignature::from_render_config(&viewport_render_config);
+            if let Err(err) = self.ensure_graph_ready(
+                &viewport_graph_spec,
+                viewport_graph_sig,
+                graph_surface_size,
+            ) {
+                self.current_render_data = Some(scene);
+                return Err(err);
+            }
+            let viewport_swapchain_id = match self.active_graph.as_ref() {
+                Some(active) => active.swapchain_id,
+                None => {
+                    warn!("Render graph missing during offscreen viewport render setup");
+                    break;
+                }
+            };
+            let viewport_tracing_active =
+                tracing_active_for_config(viewport_graph_spec.name, &viewport_render_config);
             scene.data.render_config = viewport_render_config;
+            scene.data.render_graph = viewport_graph_spec.clone();
+            scene.data.gizmo = Self::viewport_gizmo_data(&main_gizmo, viewport.gizmo_options);
             self.prev_view_proj = viewport_prev_view_proj;
 
             if let Some(globals) = self.prepare_frame_globals(&scene) {
@@ -2983,7 +3014,7 @@ impl GraphRenderer {
                 } else {
                     self.frame_inputs.remove::<RayTracingFrameInput>();
                 }
-                self.update_swapchain_entry(swapchain_id, target_view.clone());
+                self.update_swapchain_entry(viewport_swapchain_id, target_view.clone());
                 self.frame_inputs.set(globals);
                 self.frame_inputs.set(SwapchainFrameInput {
                     view: target_view.clone(),
@@ -3028,6 +3059,8 @@ impl GraphRenderer {
             scene.data.previous_camera_transform = main_prev_camera_transform;
             scene.data.camera_component = main_camera_component;
             scene.data.render_config = saved_viewport_render_config;
+            scene.data.render_graph = saved_viewport_graph;
+            scene.data.gizmo = saved_viewport_gizmo;
             self.prev_view_proj = saved_prev_view_proj;
             self.prev_sky_uniforms = saved_prev_sky_uniforms;
             self.prev_shader_constants = saved_prev_shader_constants;
@@ -3035,6 +3068,8 @@ impl GraphRenderer {
             self.occlusion_stable_frames = saved_occlusion_stable_frames;
         }
         self.prune_offscreen_viewports(&active_offscreen_ids);
+        scene.data.render_graph = main_graph_spec.clone();
+        scene.data.gizmo = main_gizmo.clone();
 
         if let Some(data) = cached_egui_data {
             self.frame_inputs.set_arc(data);
@@ -3047,6 +3082,24 @@ impl GraphRenderer {
         if !scene.data.render_main_scene_to_swapchain {
             scene.data.render_config = Self::ui_only_main_render_config(main_saved_render_config);
         }
+        scene.data.render_graph = main_graph_spec.clone();
+        scene.data.gizmo = main_gizmo.clone();
+        if let Err(err) = self.ensure_graph_ready(&main_graph_spec, graph_sig, graph_surface_size) {
+            scene.data.render_config = main_saved_render_config;
+            self.current_render_data = Some(scene);
+            return Err(err);
+        }
+        let swapchain_id = match self.active_graph.as_ref() {
+            Some(active) => active.swapchain_id,
+            None => {
+                scene.data.render_config = main_saved_render_config;
+                warn!("Render graph missing before main render pass");
+                self.current_render_data = Some(scene);
+                self.clear_and_present(&output_view, output_frame);
+                self.frame_index = self.frame_index.wrapping_add(1);
+                return Ok(());
+            }
+        };
 
         let globals_start = if profiling_enabled {
             Some(Instant::now())
@@ -3089,7 +3142,7 @@ impl GraphRenderer {
         }
         self.run_atmosphere_precompute(&globals);
         let tracing_active_for_main = scene.data.render_main_scene_to_swapchain
-            && tracing_active_for_config(&globals.render_config);
+            && tracing_active_for_config(main_graph_spec.name, &globals.render_config);
         if tracing_active_for_main {
             if let Some(rt_inputs) = self.prepare_ray_tracing_inputs(&scene, &globals) {
                 self.frame_inputs.set(rt_inputs);
@@ -4555,7 +4608,38 @@ impl GraphRenderer {
         if let Some(active) = self.active_graph.take() {
             self.evict_graph_resources(&active);
         }
+        let cached_graphs: Vec<ActiveGraph> =
+            self.cached_graphs.drain().map(|(_, graph)| graph).collect();
+        for graph in cached_graphs {
+            self.evict_graph_resources(&graph);
+        }
         self.pool.clear_transient_aliases();
+    }
+
+    fn graph_cache_key(
+        spec: &RenderGraphSpec,
+        config_sig: RenderGraphConfigSignature,
+        graph_surface_size: PhysicalSize<u32>,
+    ) -> GraphCacheKey {
+        GraphCacheKey {
+            spec_version: spec.version,
+            surface_width: graph_surface_size.width,
+            surface_height: graph_surface_size.height,
+            config_signature: config_sig,
+        }
+    }
+
+    fn apply_active_graph_aliases(&mut self) {
+        let alias_state = self.active_graph.as_ref().map(|active| {
+            (
+                active.uses_transient_aliasing,
+                Arc::clone(&active.transient_aliases),
+            )
+        });
+        match alias_state {
+            Some((true, aliases)) => self.pool.apply_transient_aliases(aliases.as_ref()),
+            _ => self.pool.clear_transient_aliases(),
+        }
     }
 
     fn ensure_graph_ready(
@@ -4564,67 +4648,87 @@ impl GraphRenderer {
         config_sig: RenderGraphConfigSignature,
         graph_surface_size: PhysicalSize<u32>,
     ) -> Result<(), RendererError> {
-        let needs_rebuild = match &self.active_graph {
-            None => true,
-            Some(active) => {
-                active.spec_version != spec.version
-                    || active.surface_size != graph_surface_size
-                    || active.surface_format != self.surface_config.format
-                    || active.config_signature != config_sig
+        let requested_key = Self::graph_cache_key(spec, config_sig, graph_surface_size);
+        let active_matches = self
+            .active_graph
+            .as_ref()
+            .map(|active| {
+                active.cache_key == requested_key
+                    && active.surface_format == self.surface_config.format
+            })
+            .unwrap_or(false);
+        if active_matches {
+            self.apply_active_graph_aliases();
+            return Ok(());
+        }
+
+        if let Some(active) = self.active_graph.take() {
+            if let Some(previous) = self.cached_graphs.insert(active.cache_key, active) {
+                self.evict_graph_resources(&previous);
             }
+        }
+
+        if let Some(cached) = self.cached_graphs.remove(&requested_key) {
+            if cached.surface_format == self.surface_config.format {
+                self.active_graph = Some(cached);
+                self.apply_active_graph_aliases();
+                return Ok(());
+            }
+            self.evict_graph_resources(&cached);
+        }
+
+        let params = RenderGraphBuildParams {
+            surface_size: graph_surface_size,
+            surface_format: self.surface_config.format,
+            shadow_format: self.shadow_format,
+            hdr_format: self.hdr_format,
+            depth_format: self.depth_format,
+            depth_copy_format: self.depth_copy_format,
+            max_color_attachments: self.max_color_attachments,
+            force_low_color_formats: self.force_low_color_formats,
+            supports_fragment_storage_buffers: !self.use_uniform_lights,
+            device_caps: Arc::clone(&self.device_caps),
+            blue_noise_view: Arc::new(self.blue_noise_view.clone()),
+            blue_noise_sampler: Arc::new(self.blue_noise_sampler.clone()),
+            config: config_sig,
+            shadow_map_resolution: config_sig.shadow_map_resolution,
+            shadow_cascade_count: config_sig.shadow_cascade_count,
         };
 
-        if needs_rebuild {
-            self.clear_active_graph();
+        let build = spec.build(&params, &mut self.pool);
+        let graph = build.graph;
+        let compiled = graph
+            .compile(&self.pool)
+            .map_err(|e| RendererError::ResourceCreation(format!("Graph compile failed: {e:?}")))?;
 
-            let params = RenderGraphBuildParams {
-                surface_size: graph_surface_size,
-                surface_format: self.surface_config.format,
-                shadow_format: self.shadow_format,
-                hdr_format: self.hdr_format,
-                depth_format: self.depth_format,
-                depth_copy_format: self.depth_copy_format,
-                max_color_attachments: self.max_color_attachments,
-                force_low_color_formats: self.force_low_color_formats,
-                supports_fragment_storage_buffers: !self.use_uniform_lights,
-                device_caps: Arc::clone(&self.device_caps),
-                blue_noise_view: Arc::new(self.blue_noise_view.clone()),
-                blue_noise_sampler: Arc::new(self.blue_noise_sampler.clone()),
-                config: config_sig,
-                shadow_map_resolution: config_sig.shadow_map_resolution,
-                shadow_cascade_count: config_sig.shadow_cascade_count,
-            };
-
-            let build = spec.build(&params, &mut self.pool);
-            let graph = build.graph;
-            let compiled = graph.compile(&self.pool).map_err(|e| {
-                RendererError::ResourceCreation(format!("Graph compile failed: {e:?}"))
-            })?;
-
-            let alias_pairs: Vec<(ResourceId, ResourceId)> = compiled
+        let alias_pairs: Arc<[(ResourceId, ResourceId)]> = Arc::from(
+            compiled
                 .transient_aliases
                 .iter()
                 .map(|alias| (alias.alias, alias.root))
-                .collect();
-            if config_sig.use_transient_aliasing {
-                self.pool.apply_transient_aliases(&alias_pairs);
-            } else {
-                self.pool.clear_transient_aliases();
-            }
-
-            self.active_graph = Some(ActiveGraph {
-                spec_version: spec.version,
-                surface_size: graph_surface_size,
-                surface_format: self.surface_config.format,
-                swapchain_id: build.swapchain_id,
-                resource_ids: build.resource_ids,
-                hiz_id: build.hiz_id,
-                graph,
-                compiled,
-                config_signature: config_sig,
-            });
-            self.sync_pass_overrides();
+                .collect::<Vec<_>>(),
+        );
+        if config_sig.use_transient_aliasing {
+            self.pool.apply_transient_aliases(alias_pairs.as_ref());
+        } else {
+            self.pool.clear_transient_aliases();
         }
+
+        self.active_graph = Some(ActiveGraph {
+            cache_key: requested_key,
+            spec_version: spec.version,
+            surface_size: graph_surface_size,
+            surface_format: self.surface_config.format,
+            swapchain_id: build.swapchain_id,
+            resource_ids: build.resource_ids,
+            hiz_id: build.hiz_id,
+            graph,
+            compiled,
+            config_signature: config_sig,
+            transient_aliases: alias_pairs,
+            uses_transient_aliasing: config_sig.use_transient_aliasing,
+        });
+        self.sync_pass_overrides();
 
         Ok(())
     }
@@ -4696,6 +4800,56 @@ impl GraphRenderer {
         config.rt_reflection_accumulation = false;
         config.rt_reflection_history_weight = 0.0;
         config
+    }
+
+    fn resolve_viewport_graph_spec(
+        &mut self,
+        main_graph_spec: &RenderGraphSpec,
+        graph_template: Option<&str>,
+    ) -> RenderGraphSpec {
+        let Some(template_name) = graph_template else {
+            return main_graph_spec.clone();
+        };
+        if template_name.is_empty() || template_name == main_graph_spec.name {
+            return main_graph_spec.clone();
+        }
+        if let Some(spec) = self.graph_template_specs.get(template_name) {
+            return spec.clone();
+        }
+        let Some(template) = template_for_graph(template_name) else {
+            return main_graph_spec.clone();
+        };
+        let spec = (template.build)();
+        self.graph_template_specs
+            .insert(template_name.to_string(), spec.clone());
+        spec
+    }
+
+    fn viewport_gizmo_data(gizmo: &GizmoData, options: RenderViewportGizmoOptions) -> GizmoData {
+        if !options.show_gizmos {
+            return GizmoData {
+                style: gizmo.style,
+                ..GizmoData::default()
+            };
+        }
+
+        if options.show_camera_gizmos
+            && options.show_directional_light_gizmos
+            && options.show_point_light_gizmos
+            && options.show_spot_light_gizmos
+        {
+            return gizmo.clone();
+        }
+
+        let mut filtered = gizmo.clone();
+        filtered.icons.retain(|icon| match icon.kind {
+            GizmoIconKind::Camera => options.show_camera_gizmos,
+            GizmoIconKind::LightDirectional => options.show_directional_light_gizmos,
+            GizmoIconKind::LightPoint => options.show_point_light_gizmos,
+            GizmoIconKind::LightSpot => options.show_spot_light_gizmos,
+        });
+        filtered.icons_revision = 0;
+        filtered
     }
 
     fn debounced_graph_surface_size(

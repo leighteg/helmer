@@ -9,7 +9,7 @@ use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
 use bevy_ecs::{component::Component, name::Name};
 use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
-use helmer::graphics::common::renderer::RenderViewportRequest;
+use helmer::graphics::common::renderer::{RenderViewportGizmoOptions, RenderViewportRequest};
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::provided::components::{
     Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
@@ -2695,6 +2695,37 @@ fn has_camera(world: &World, entity: Entity) -> bool {
     world.get::<BevyCamera>(entity).is_some() && world.get::<BevyTransform>(entity).is_some()
 }
 
+fn viewport_gizmo_options(
+    world_state: WorldState,
+    gizmos_in_play: bool,
+    show_camera_gizmos: bool,
+    show_directional_light_gizmos: bool,
+    show_point_light_gizmos: bool,
+    show_spot_light_gizmos: bool,
+) -> RenderViewportGizmoOptions {
+    RenderViewportGizmoOptions {
+        show_gizmos: world_state == WorldState::Edit || gizmos_in_play,
+        show_camera_gizmos,
+        show_directional_light_gizmos,
+        show_point_light_gizmos,
+        show_spot_light_gizmos,
+    }
+}
+
+fn viewport_gizmo_options_from_state(
+    world_state: WorldState,
+    viewport_state: &EditorViewportState,
+) -> RenderViewportGizmoOptions {
+    viewport_gizmo_options(
+        world_state,
+        viewport_state.gizmos_in_play,
+        viewport_state.show_camera_gizmos,
+        viewport_state.show_directional_light_gizmos,
+        viewport_state.show_point_light_gizmos,
+        viewport_state.show_spot_light_gizmos,
+    )
+}
+
 fn viewport_request_for_entity(
     world: &World,
     entity: Entity,
@@ -2704,6 +2735,8 @@ fn viewport_request_for_entity(
     target_size_override: Option<[u32; 2]>,
     temporal_history: bool,
     immediate_resize: bool,
+    graph_template: Option<String>,
+    gizmo_options: RenderViewportGizmoOptions,
 ) -> Option<RenderViewportRequest> {
     let transform = world.get::<BevyTransform>(entity)?.0;
     let mut camera = world.get::<BevyCamera>(entity)?.0;
@@ -2720,6 +2753,8 @@ fn viewport_request_for_entity(
         target_size,
         temporal_history,
         immediate_resize,
+        graph_template,
+        gizmo_options,
     })
 }
 
@@ -2783,22 +2818,62 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
         .get_resource::<EditorViewportRuntime>()
         .cloned()
         .unwrap_or_default();
+    let world_state = world
+        .get_resource::<EditorSceneState>()
+        .map(|scene| scene.world_state)
+        .unwrap_or(WorldState::Edit);
+    let viewport_state = world
+        .get_resource::<EditorViewportState>()
+        .cloned()
+        .unwrap_or_default();
+    let default_graph_template = (!viewport_state.graph_template.is_empty())
+        .then_some(viewport_state.graph_template.clone());
+    let default_gizmo_options = viewport_gizmo_options_from_state(world_state, &viewport_state);
+
     if !runtime.pane_requests.is_empty() {
         let mut requests = Vec::new();
-        let main_display_entity = runtime
+        let active_pane_request = runtime
             .active_pane_id
             .and_then(|pane_id| {
                 runtime
                     .pane_requests
                     .iter()
                     .find(|pane| pane.pane_id == pane_id)
-                    .map(|pane| pane.camera_entity)
             })
+            .or_else(|| runtime.pane_requests.first());
+        let main_display_entity = active_pane_request
+            .map(|pane| pane.camera_entity)
             .or_else(|| runtime.pane_requests.first().map(|pane| pane.camera_entity));
+        let preview_graph_template = active_pane_request
+            .and_then(|pane| {
+                (!pane.graph_template.is_empty()).then_some(pane.graph_template.clone())
+            })
+            .or_else(|| default_graph_template.clone());
+        let preview_gizmo_options = active_pane_request
+            .map(|pane| {
+                viewport_gizmo_options(
+                    world_state,
+                    pane.gizmos_in_play,
+                    pane.show_camera_gizmos,
+                    pane.show_directional_light_gizmos,
+                    pane.show_point_light_gizmos,
+                    pane.show_spot_light_gizmos,
+                )
+            })
+            .unwrap_or(default_gizmo_options);
         let preview_entity = runtime.preview_camera_entity;
         let preview_texture_id = runtime.preview_texture_id;
         let preview_rect = runtime.preview_rect_pixels;
         for pane in runtime.pane_requests {
+            let graph_template = (!pane.graph_template.is_empty()).then_some(pane.graph_template);
+            let gizmo_options = viewport_gizmo_options(
+                world_state,
+                pane.gizmos_in_play,
+                pane.show_camera_gizmos,
+                pane.show_directional_light_gizmos,
+                pane.show_point_light_gizmos,
+                pane.show_spot_light_gizmos,
+            );
             if let Some(request) = viewport_request_for_entity(
                 world,
                 pane.camera_entity,
@@ -2808,6 +2883,8 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                 Some(pane.target_size),
                 pane.temporal_history,
                 pane.immediate_resize,
+                graph_template,
+                gizmo_options,
             ) {
                 requests.push(request);
             }
@@ -2825,6 +2902,8 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                     None,
                     false,
                     false,
+                    preview_graph_template,
+                    preview_gizmo_options,
                 ) {
                     requests.push(request);
                 }
@@ -2836,14 +2915,7 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
         return;
     }
 
-    let world_state = world
-        .get_resource::<EditorSceneState>()
-        .map(|scene| scene.world_state)
-        .unwrap_or(WorldState::Edit);
-    let play_mode = world
-        .get_resource::<EditorViewportState>()
-        .map(|state| state.play_mode_view)
-        .unwrap_or(PlayViewportKind::Editor);
+    let play_mode = viewport_state.play_mode_view;
 
     let mut requests = Vec::new();
     let main_rect = runtime.main_rect_pixels;
@@ -2897,6 +2969,8 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                 Some(main_target_size),
                 true,
                 runtime.main_resize_immediate,
+                default_graph_template.clone(),
+                default_gizmo_options,
             ) {
                 requests.push(request);
             }
@@ -2920,6 +2994,8 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
                     None,
                     false,
                     false,
+                    default_graph_template.clone(),
+                    default_gizmo_options,
                 ) {
                     requests.push(request);
                 }

@@ -456,6 +456,12 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     } = params;
 
     state.suppress_selection = false;
+    let input_manager = input.0.read();
+    let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
+        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
+    let viewport_state_changed = viewport_state.is_changed();
+    let viewport_state =
+        effective_viewport_state_for_pane(&viewport_state, &viewport_runtime, interaction_pane_id);
 
     let show_gizmos = scene_state.world_state == WorldState::Edit || viewport_state.gizmos_in_play;
     if !show_gizmos {
@@ -485,10 +491,6 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         }
     }
 
-    let input_manager = input.0.read();
-    let (viewport_rect, runtime_camera_entity) =
-        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
-
     let Some((camera_entity, camera)) = runtime_camera_entity
         .and_then(|entity| camera_component_query.get(entity).ok())
         .or_else(|| active_camera_query.iter().next())
@@ -516,7 +518,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         let camera_transform = camera_transform.0;
 
         let mut icons_dirty =
-            settings.is_changed() || viewport_state.is_changed() || camera_transform_changed;
+            settings.is_changed() || viewport_state_changed || camera_transform_changed;
         let icons = collect_icon_gizmos(
             &viewport_state,
             &settings,
@@ -1451,6 +1453,12 @@ pub fn selection_system(params: SelectionSystemParams) {
         active_camera_query,
         camera_query,
     } = params;
+    let input_manager = input.0.read();
+    let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
+        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
+    let viewport_state =
+        effective_viewport_state_for_pane(&viewport_state, &viewport_runtime, interaction_pane_id);
+
     if scene_state.world_state != WorldState::Edit && !viewport_state.gizmos_in_play {
         return;
     }
@@ -1471,9 +1479,6 @@ pub fn selection_system(params: SelectionSystemParams) {
         return;
     }
 
-    let input_manager = input.0.read();
-    let (viewport_rect, runtime_camera_entity) =
-        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
     let pointer_in_viewport = viewport_rect
         .map(|rect| rect.contains(input_manager.cursor_position))
         .unwrap_or(false);
@@ -1998,7 +2003,7 @@ fn selection_bounds(
 fn pick_viewport_interaction_target(
     cursor: glam::DVec2,
     viewport_runtime: &EditorViewportRuntime,
-) -> (Option<ViewportRectPixels>, Option<Entity>) {
+) -> (Option<ViewportRectPixels>, Option<Entity>, Option<u64>) {
     let hovered_pane = viewport_runtime
         .pane_requests
         .iter()
@@ -2036,8 +2041,45 @@ fn pick_viewport_interaction_target(
                 .first()
                 .map(|pane| pane.camera_entity)
         });
+    let pane_id = hovered_pane
+        .map(|pane| pane.pane_id)
+        .or_else(|| active_pane.map(|pane| pane.pane_id))
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.pane_id)
+        });
 
-    (viewport_rect, camera_entity)
+    (viewport_rect, camera_entity, pane_id)
+}
+
+fn effective_viewport_state_for_pane(
+    base: &EditorViewportState,
+    viewport_runtime: &EditorViewportRuntime,
+    pane_id: Option<u64>,
+) -> EditorViewportState {
+    let mut effective = base.clone();
+    let Some(pane_id) = pane_id else {
+        return effective;
+    };
+    let Some(pane) = viewport_runtime
+        .pane_requests
+        .iter()
+        .find(|pane| pane.pane_id == pane_id)
+    else {
+        return effective;
+    };
+
+    effective.graph_template = pane.graph_template.clone();
+    effective.gizmos_in_play = pane.gizmos_in_play;
+    effective.show_camera_gizmos = pane.show_camera_gizmos;
+    effective.show_directional_light_gizmos = pane.show_directional_light_gizmos;
+    effective.show_point_light_gizmos = pane.show_point_light_gizmos;
+    effective.show_spot_light_gizmos = pane.show_spot_light_gizmos;
+    effective.show_spline_paths = pane.show_spline_paths;
+    effective.show_spline_points = pane.show_spline_points;
+    effective
 }
 
 fn camera_inv_view_proj(

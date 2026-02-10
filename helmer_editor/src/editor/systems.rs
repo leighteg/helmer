@@ -89,6 +89,8 @@ pub fn editor_ui_system(world: &mut World) {
     if let Some(mut passthrough) = world.get_resource_mut::<EguiInputPassthrough>() {
         *passthrough = EguiInputPassthrough::default();
     }
+    crate::editor::drain_runtime_log_queue(world);
+    crate::editor::sync_console_diagnostics(world);
 
     ensure_default_pane_workspace(world);
 
@@ -3195,8 +3197,9 @@ fn scene_display_name(path: &Path) -> String {
 
 fn set_status(world: &mut World, message: String) {
     if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
-        state.status = Some(message);
+        state.status = Some(message.clone());
     }
+    crate::editor::push_console_status(world, message);
 }
 
 //================================================================================

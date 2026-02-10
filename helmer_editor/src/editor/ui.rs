@@ -113,6 +113,7 @@ pub struct EditorPaneVisibility {
     pub history: bool,
     pub timeline: bool,
     pub content_browser: bool,
+    pub console: bool,
     pub audio_mixer: bool,
 }
 
@@ -127,6 +128,7 @@ impl Default for EditorPaneVisibility {
             history: false,
             timeline: false,
             content_browser: true,
+            console: true,
             audio_mixer: false,
         }
     }
@@ -163,11 +165,12 @@ pub enum EditorPaneKind {
     History,
     Timeline,
     ContentBrowser,
+    Console,
     AudioMixer,
 }
 
 impl EditorPaneKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Toolbar,
         Self::Viewport,
         Self::PlayViewport,
@@ -177,6 +180,7 @@ impl EditorPaneKind {
         Self::History,
         Self::Timeline,
         Self::ContentBrowser,
+        Self::Console,
         Self::AudioMixer,
     ];
 
@@ -191,6 +195,7 @@ impl EditorPaneKind {
             Self::History => "History",
             Self::Timeline => "Timeline",
             Self::ContentBrowser => "Content Browser",
+            Self::Console => "Console",
             Self::AudioMixer => "Audio Mixer",
         }
     }
@@ -205,6 +210,7 @@ impl EditorPaneKind {
             Self::Inspector => Some("Inspector"),
             Self::History => Some("History"),
             Self::ContentBrowser => Some("Content Browser"),
+            Self::Console => Some("Content Browser"),
             Self::Timeline | Self::AudioMixer => None,
         }
     }
@@ -891,6 +897,98 @@ pub fn draw_history_window(ui: &mut Ui, world: &mut World) {
                     let _ = ui.selectable_label(is_current, label);
                 }
             });
+    });
+}
+
+fn console_level_color(level: crate::editor::EditorConsoleLevel) -> Color32 {
+    match level {
+        crate::editor::EditorConsoleLevel::Trace => Color32::from_rgb(130, 130, 130),
+        crate::editor::EditorConsoleLevel::Debug => Color32::from_rgb(145, 155, 175),
+        crate::editor::EditorConsoleLevel::Log => Color32::from_rgb(170, 170, 170),
+        crate::editor::EditorConsoleLevel::Info => Color32::from_rgb(145, 175, 235),
+        crate::editor::EditorConsoleLevel::Warn => Color32::from_rgb(235, 185, 90),
+        crate::editor::EditorConsoleLevel::Error => Color32::from_rgb(225, 95, 95),
+    }
+}
+
+pub fn draw_console_window(ui: &mut Ui, world: &mut World) {
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        let mut clear_requested = false;
+        if let Some(mut state) = world.get_resource_mut::<crate::editor::EditorConsoleState>() {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Clear").clicked() {
+                    clear_requested = true;
+                }
+                ui.checkbox(&mut state.auto_scroll, "Auto-scroll");
+                ui.separator();
+                ui.label("Level:");
+                ui.checkbox(&mut state.show_log, "Log");
+                ui.checkbox(&mut state.show_debug, "Debug");
+                ui.checkbox(&mut state.show_info, "Info");
+                ui.checkbox(&mut state.show_warn, "Warn");
+                ui.checkbox(&mut state.show_error, "Error");
+                ui.checkbox(&mut state.show_trace, "Trace");
+                ui.separator();
+                ui.label("Search");
+                ui.text_edit_singleline(&mut state.search);
+            });
+            ui.separator();
+
+            let search = state.search.trim().to_ascii_lowercase();
+            let has_search = !search.is_empty();
+            let entries = state.entries.iter().cloned().collect::<Vec<_>>();
+            let auto_scroll = state.auto_scroll;
+            egui::ScrollArea::vertical()
+                .id_salt("editor_console_entries")
+                .auto_shrink([false, false])
+                .stick_to_bottom(auto_scroll)
+                .show(ui, |ui| {
+                    let mut shown = 0usize;
+                    for entry in entries.iter() {
+                        if !state.level_enabled(entry.level) {
+                            continue;
+                        }
+                        if has_search {
+                            let target = entry.target.to_ascii_lowercase();
+                            let message = entry.message.to_ascii_lowercase();
+                            if !target.contains(&search) && !message.contains(&search) {
+                                continue;
+                            }
+                        }
+                        shown += 1;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("#{:06}", entry.sequence))
+                                    .small()
+                                    .color(Color32::from_gray(110)),
+                            );
+                            ui.colored_label(
+                                console_level_color(entry.level),
+                                format!("[{}]", entry.level.label()),
+                            );
+                            if !entry.target.is_empty() {
+                                ui.label(
+                                    RichText::new(format!("[{}]", entry.target))
+                                        .small()
+                                        .color(Color32::from_gray(140)),
+                                );
+                            }
+                            ui.label(RichText::new(&entry.message).small().monospace());
+                        });
+                    }
+                    if shown == 0 {
+                        ui.label(RichText::new("No console output").small());
+                    }
+                });
+        } else {
+            ui.label("Console state missing");
+        }
+
+        if clear_requested {
+            if let Some(mut state) = world.get_resource_mut::<crate::editor::EditorConsoleState>() {
+                state.clear();
+            }
+        }
     });
 }
 
@@ -3454,6 +3552,9 @@ pub fn ensure_default_pane_workspace(world: &mut World) {
             if let Some(kind) = default_pane_kind_for_window(window_id) {
                 tabs.push(make_pane_tab(&mut workspace, kind));
             }
+            if *window_id == "Content Browser" {
+                tabs.push(make_pane_tab(&mut workspace, EditorPaneKind::Console));
+            }
             let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), tabs);
             workspace.windows.push(EditorPaneWindow {
                 id: (*window_id).to_string(),
@@ -4997,6 +5098,7 @@ fn draw_pane_area(
                         EditorPaneKind::History => draw_history_window(ui, world),
                         EditorPaneKind::Timeline => draw_timeline_window(ui, world),
                         EditorPaneKind::ContentBrowser => draw_assets_window(ui, world),
+                        EditorPaneKind::Console => draw_console_window(ui, world),
                         EditorPaneKind::AudioMixer => draw_audio_mixer_window(ui, world),
                     }
                 });
@@ -13736,8 +13838,9 @@ fn push_command(world: &mut World, command: EditorCommand) {
 
 fn set_status(world: &mut World, message: String) {
     if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
-        state.status = Some(message);
+        state.status = Some(message.clone());
     }
+    crate::editor::push_console_status(world, message);
 }
 
 fn set_selection(world: &mut World, entity: Option<Entity>) {

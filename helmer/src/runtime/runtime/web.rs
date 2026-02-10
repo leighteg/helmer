@@ -25,7 +25,10 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use super::common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning};
+use super::{
+    RuntimeLogLayer,
+    common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning},
+};
 use crate::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
@@ -42,6 +45,9 @@ use crate::{
         input_manager::{InputEvent, InputManager},
     },
 };
+
+const DEFAULT_RUNTIME_LOG_FILTER: &str = "info,helmer=trace,helmer_becs=trace,helmer_editor=trace,script=trace,audio=trace,\
+     wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,notify=info,mio=info,polling=info";
 
 struct RenderInit {
     instance: wgpu::Instance,
@@ -488,9 +494,12 @@ impl<T: 'static> Runtime<T> {
         dropped_file_callback: impl Fn(PathBuf, &mut T) + 'static,
     ) -> Self {
         let console_layer = ConsoleLayer;
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_RUNTIME_LOG_FILTER));
         tracing_subscriber::registry()
+            .with(RuntimeLogLayer)
             .with(console_layer)
-            .with(tracing_subscriber::EnvFilter::new("helmer"))
+            .with(env_filter)
             .try_init()
             .ok();
 

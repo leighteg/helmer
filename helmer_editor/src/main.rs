@@ -8,7 +8,7 @@ use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_b
 
 use helmer_editor::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
-    EditorCommand, EditorCommandQueue, EditorGizmoSettings, EditorGizmoState,
+    EditorCommand, EditorCommandQueue, EditorConsoleState, EditorGizmoSettings, EditorGizmoState,
     EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneViewportState,
     EditorPaneVisibility, EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh,
     EditorSceneState, EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState,
@@ -23,10 +23,11 @@ use helmer_editor::editor::{
     editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
     editor_shortcut_system, editor_ui_system, editor_undo_request_system,
     editor_viewport_camera_mode_system, editor_viewport_render_requests_system, file_watch_system,
-    freecam_system, gizmo_system, load_layout_state, load_recent_projects,
-    pane_manager_toggle_system, pending_scene_child_renderer_system, pending_skinned_mesh_system,
-    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
-    set_viewport_audio_listener_enabled, timeline_playback_system,
+    freecam_system, gizmo_system, install_runtime_log_listener, load_layout_state,
+    load_recent_projects, pane_manager_toggle_system, pending_scene_child_renderer_system,
+    pending_skinned_mesh_system, scene_dirty_system, script_execution_system,
+    script_registry_system, selection_system, set_viewport_audio_listener_enabled,
+    timeline_playback_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -47,6 +48,7 @@ fn main() {
     let _ = PROJECT_ARG.set(project_arg);
     let _ = DEFAULT_PROJECTS_ROOT.set(default_projects_root);
 
+    install_runtime_log_listener();
     helmer_becs_init(editor_init);
 }
 
@@ -62,6 +64,7 @@ fn editor_init(
     world.insert_resource(PendingSceneChildAnimations::default());
     world.insert_resource(PendingSceneChildPoseOverrides::default());
     world.insert_resource(EditorAssetCache::default());
+    world.insert_resource(EditorConsoleState::default());
     world.insert_resource(AssetBrowserState::default());
     world.insert_resource(AssetDragState::default());
     world.insert_resource(EntityDragState::default());

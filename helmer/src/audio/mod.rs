@@ -1442,7 +1442,8 @@ impl AudioEngine {
                     let clip_meta_rate = emitter.clip.sample_rate();
                     let frame_count = emitter.clip.frame_count().unwrap_or(0);
                     let duration = emitter.clip.duration_seconds;
-                    eprintln!(
+                    tracing::debug!(
+                        target: "audio.debug_rates",
                         "audio_debug_rates: '{}' decoded={} channels={} engine_rate={} source_rate={} pitch={} clip_rate={:?} meta_rate={:?} stream_rate={:?} frames={} duration={:?}",
                         emitter.clip.name,
                         decoded,
@@ -3844,7 +3845,7 @@ fn configure_stream(
         .unwrap_or(false);
 
     let err_fn = |err| {
-        eprintln!("Audio stream error: {}", err);
+        tracing::error!(target: "audio.stream", "Audio stream error: {}", err);
     };
 
     let (render_handle, stream_result): (AudioRenderHandle, Result<cpal::Stream, String>) =

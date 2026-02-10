@@ -693,6 +693,14 @@ pub fn script_execution_system(world: &mut World) {
         let completed_builds = runtime.take_rust_build_results();
         for result in completed_builds {
             runtime.rust_inflight_builds.remove(&result.manifest_path);
+            for warning in rust_build_warning_lines(&result.output) {
+                tracing::warn!(
+                    target: "script.rust.build",
+                    "{}: {}",
+                    result.manifest_path.to_string_lossy(),
+                    warning
+                );
+            }
 
             if let Some(error) = result.error {
                 let mut message = error;
@@ -700,6 +708,12 @@ pub fn script_execution_system(world: &mut World) {
                     message.push('\n');
                     message.push_str(&truncate_diagnostic(&result.output));
                 }
+                tracing::error!(
+                    target: "script.rust.build",
+                    "{}: {}",
+                    result.manifest_path.to_string_lossy(),
+                    message
+                );
                 runtime
                     .rust_build_errors
                     .insert(result.manifest_path.clone(), message);
@@ -715,6 +729,7 @@ pub fn script_execution_system(world: &mut World) {
                     "No build artifact produced for {}",
                     result.manifest_path.to_string_lossy()
                 );
+                tracing::error!(target: "script.rust.build", "{message}");
                 runtime
                     .rust_build_errors
                     .insert(result.manifest_path.clone(), message.clone());
@@ -735,6 +750,11 @@ pub fn script_execution_system(world: &mut World) {
                         .rust_plugins
                         .insert(result.manifest_path.clone(), Arc::new(plugin));
                     runtime.rust_build_errors.remove(&result.manifest_path);
+                    tracing::info!(
+                        target: "script.rust.build",
+                        "Rust script loaded: {}",
+                        result.manifest_path.to_string_lossy()
+                    );
                     runtime.rust_status = Some(format!(
                         "Rust script loaded: {}",
                         result.manifest_path.to_string_lossy()
@@ -742,6 +762,12 @@ pub fn script_execution_system(world: &mut World) {
                 }
                 Err(err) => {
                     let message = format!("Failed to load Rust script plugin: {}", err);
+                    tracing::error!(
+                        target: "script.rust.build",
+                        "{}: {}",
+                        result.manifest_path.to_string_lossy(),
+                        message
+                    );
                     runtime
                         .rust_build_errors
                         .insert(result.manifest_path.clone(), message.clone());
@@ -805,9 +831,10 @@ pub fn script_execution_system(world: &mut World) {
                 if let Some(old_instance) = runtime.rust_instances.remove(&key) {
                     stop_rust_script_instance(world, key, old_instance);
                 }
-                runtime
-                    .errors
-                    .push(format!("{}: {}", script_path_label(script), error));
+                push_script_runtime_error(
+                    &mut runtime,
+                    format!("{}: {}", script_path_label(script), error),
+                );
                 continue;
             }
 
@@ -832,9 +859,10 @@ pub fn script_execution_system(world: &mut World) {
                 let plugin = runtime.rust_plugins.get(&manifest_path).cloned();
                 let Some(plugin) = plugin else {
                     if let Some(error) = runtime.rust_build_errors.get(&manifest_path).cloned() {
-                        runtime
-                            .errors
-                            .push(format!("{}: {}", script_path_label(script), error));
+                        push_script_runtime_error(
+                            &mut runtime,
+                            format!("{}: {}", script_path_label(script), error),
+                        );
                     }
                     continue;
                 };
@@ -859,7 +887,7 @@ pub fn script_execution_system(world: &mut World) {
                         if plugin_changed && same_script && !force_reload.contains(&key) {
                             match take_rust_script_state(&mut old_instance) {
                                 Ok(state) => carry_state = state,
-                                Err(err) => runtime.errors.push(err),
+                                Err(err) => push_script_runtime_error(&mut runtime, err),
                             }
                         }
                         stop_rust_script_instance(world, key, old_instance);
@@ -873,22 +901,25 @@ pub fn script_execution_system(world: &mut World) {
                     ) {
                         Ok(mut instance) => {
                             if let Err(err) = call_rust_script_start(&mut instance) {
-                                runtime.errors.push(err);
+                                push_script_runtime_error(&mut runtime, err);
                             }
                             if let Some(state) = carry_state.as_deref() {
                                 match call_rust_script_load_state(&mut instance, state) {
                                     Ok(true) => {}
-                                    Ok(false) => runtime.errors.push(format!(
-                                        "Rust script rejected carried state: {}",
-                                        manifest_path.to_string_lossy()
-                                    )),
-                                    Err(err) => runtime.errors.push(err),
+                                    Ok(false) => push_script_runtime_error(
+                                        &mut runtime,
+                                        format!(
+                                            "Rust script rejected carried state: {}",
+                                            manifest_path.to_string_lossy()
+                                        ),
+                                    ),
+                                    Err(err) => push_script_runtime_error(&mut runtime, err),
                                 }
                             }
                             runtime.rust_instances.insert(key, instance);
                         }
                         Err(err) => {
-                            runtime.errors.push(err);
+                            push_script_runtime_error(&mut runtime, err);
                             continue;
                         }
                     }
@@ -897,7 +928,7 @@ pub fn script_execution_system(world: &mut World) {
                 if let Some(instance) = runtime.rust_instances.get_mut(&key) {
                     instance.host_context.world_ptr = world_ptr;
                     if let Err(err) = call_rust_script_update(instance, dt) {
-                        runtime.errors.push(err);
+                        push_script_runtime_error(&mut runtime, err);
                     }
                 }
 
@@ -936,12 +967,12 @@ pub fn script_execution_system(world: &mut World) {
                         runtime.instances.insert(key, instance);
                         if let Some(instance) = runtime.instances.get(&key) {
                             if let Err(err) = call_script_function0(&lua, instance, "on_start") {
-                                runtime.errors.push(err);
+                                push_script_runtime_error(&mut runtime, err);
                             }
                         }
                     }
                     Err(err) => {
-                        runtime.errors.push(err);
+                        push_script_runtime_error(&mut runtime, err);
                         continue;
                     }
                 }
@@ -949,7 +980,7 @@ pub fn script_execution_system(world: &mut World) {
 
             if let Some(instance) = runtime.instances.get(&key) {
                 if let Err(err) = call_script_function1(&lua, instance, "on_update", dt) {
-                    runtime.errors.push(err);
+                    push_script_runtime_error(&mut runtime, err);
                 }
             }
         }
@@ -1009,6 +1040,12 @@ fn script_path_label(script: &ScriptEntry) -> String {
         .as_ref()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|| "<unassigned>".to_string())
+}
+
+fn push_script_runtime_error(runtime: &mut ScriptRuntime, message: impl Into<String>) {
+    let message = message.into();
+    tracing::error!(target: "script", "{message}");
+    runtime.errors.push(message);
 }
 
 fn script_needs_reload(
@@ -1359,6 +1396,29 @@ fn truncate_diagnostic(value: &str) -> String {
     out
 }
 
+fn rust_build_warning_lines(output: &str) -> Vec<String> {
+    const MAX_WARNINGS: usize = 24;
+    let mut warnings = Vec::new();
+    let mut seen = HashSet::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.to_ascii_lowercase().contains("warning:") {
+            continue;
+        }
+        let entry = trimmed.to_string();
+        if seen.insert(entry.clone()) {
+            warnings.push(entry);
+            if warnings.len() >= MAX_WARNINGS {
+                break;
+            }
+        }
+    }
+    warnings
+}
+
 fn create_rust_script_instance(
     world_ptr: usize,
     owner: Entity,
@@ -1511,6 +1571,64 @@ unsafe fn rust_world_from_context<'a>(context: &RustScriptHostContext) -> Option
     Some(unsafe { &mut *(context.world_ptr as *mut World) })
 }
 
+#[derive(Clone, Copy)]
+enum ScriptLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+fn script_log_level_from_message(message: &str) -> ScriptLogLevel {
+    let lower = message.trim_start().to_ascii_lowercase();
+    if lower.starts_with("error:")
+        || lower.starts_with("err:")
+        || lower.starts_with("[error]")
+        || lower.starts_with("[err]")
+    {
+        ScriptLogLevel::Error
+    } else if lower.starts_with("warning:")
+        || lower.starts_with("warn:")
+        || lower.starts_with("[warning]")
+        || lower.starts_with("[warn]")
+    {
+        ScriptLogLevel::Warn
+    } else if lower.starts_with("debug:") || lower.starts_with("[debug]") {
+        ScriptLogLevel::Debug
+    } else if lower.starts_with("trace:") || lower.starts_with("[trace]") {
+        ScriptLogLevel::Trace
+    } else {
+        ScriptLogLevel::Info
+    }
+}
+
+fn emit_rust_script_log(owner: Entity, script_index: usize, message: &str) {
+    let formatted = format!(
+        "[rust-script {}:{}] {}",
+        owner.index(),
+        script_index,
+        message
+    );
+    match script_log_level_from_message(message) {
+        ScriptLogLevel::Trace => tracing::trace!(target: "script.rust", "{formatted}"),
+        ScriptLogLevel::Debug => tracing::debug!(target: "script.rust", "{formatted}"),
+        ScriptLogLevel::Info => tracing::info!(target: "script.rust", "{formatted}"),
+        ScriptLogLevel::Warn => tracing::warn!(target: "script.rust", "{formatted}"),
+        ScriptLogLevel::Error => tracing::error!(target: "script.rust", "{formatted}"),
+    }
+}
+
+fn emit_lua_script_log(message: &str) {
+    match script_log_level_from_message(message) {
+        ScriptLogLevel::Trace => tracing::trace!(target: "script.lua", "{message}"),
+        ScriptLogLevel::Debug => tracing::debug!(target: "script.lua", "{message}"),
+        ScriptLogLevel::Info => tracing::info!(target: "script.lua", "{message}"),
+        ScriptLogLevel::Warn => tracing::warn!(target: "script.lua", "{message}"),
+        ScriptLogLevel::Error => tracing::error!(target: "script.lua", "{message}"),
+    }
+}
+
 unsafe extern "C" fn rust_api_log(user_data: *mut c_void, message: *const c_char) {
     if message.is_null() {
         return;
@@ -1521,12 +1639,7 @@ unsafe extern "C" fn rust_api_log(user_data: *mut c_void, message: *const c_char
     let text = unsafe { CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    tracing::info!(
-        "[rust-script {}:{}] {}",
-        context.owner.index(),
-        context.script_index,
-        text
-    );
+    emit_rust_script_log(context.owner, context.script_index, &text);
 }
 
 unsafe extern "C" fn rust_api_spawn_entity(
@@ -2001,7 +2114,7 @@ fn register_script_api(
         for value in args {
             parts.push(lua_value_to_string(value));
         }
-        tracing::info!("{}", parts.join(" "));
+        emit_lua_script_log(&parts.join(" "));
         Ok(())
     })?;
     env.set("print", print_fn)?;

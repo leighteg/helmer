@@ -28,7 +28,10 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-use super::common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning};
+use super::{
+    RuntimeLogLayer,
+    common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning},
+};
 use crate::{
     graphics::{
         backend::binding_backend::BindingBackendChoice,
@@ -47,6 +50,8 @@ use crate::{
 
 const MACOS_RETINA_SCALE_FIX_MIN_X: u32 = 3840;
 const MACOS_RETINA_SCALE_FIX_MIN_Y: u32 = 2160;
+const DEFAULT_RUNTIME_LOG_FILTER: &str = "info,helmer=trace,helmer_becs=trace,helmer_editor=trace,script=trace,audio=trace,\
+     wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,notify=info,mio=info,polling=info";
 
 pub struct RuntimeCallbacks<T: Send + 'static> {
     init: Option<Box<dyn FnOnce(&mut Runtime<T>, &mut T) + Send>>,
@@ -290,9 +295,12 @@ impl<T: Send + 'static> Runtime<T> {
         #[cfg(windows)]
         colored::control::set_virtual_terminal(true).ok();
 
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_RUNTIME_LOG_FILTER));
         tracing_subscriber::registry()
+            .with(RuntimeLogLayer)
             .with(tracing_subscriber::fmt::layer())
-            .with(tracing_subscriber::EnvFilter::new("helmer"))
+            .with(env_filter)
             .try_init()
             .unwrap();
 

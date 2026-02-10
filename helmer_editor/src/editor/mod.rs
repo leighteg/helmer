@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod commands;
+pub mod console;
 pub mod dynamic;
 pub mod gizmos;
 pub mod layout;
@@ -15,6 +16,7 @@ pub mod watch;
 
 pub use assets::*;
 pub use commands::*;
+pub use console::*;
 pub use dynamic::*;
 pub use gizmos::*;
 pub use layout::*;

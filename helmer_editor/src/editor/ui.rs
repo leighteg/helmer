@@ -635,19 +635,19 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
             }
 
             draw_layout_menu(ui, world);
+
+            ui.separator();
+
+            let dirty_marker = if scene_dirty { "*" } else { "" };
+            ui.label(format!("Scene: {}{}", scene_name, dirty_marker));
+
+            if let Some(status) = world
+                .get_resource::<EditorUiState>()
+                .and_then(|state| state.status.clone())
+            {
+                ui.label(RichText::new(status).small());
+            }
         });
-
-        ui.separator();
-
-        let dirty_marker = if scene_dirty { "*" } else { "" };
-        ui.label(format!("Scene: {}{}", scene_name, dirty_marker));
-
-        if let Some(status) = world
-            .get_resource::<EditorUiState>()
-            .and_then(|state| state.status.clone())
-        {
-            ui.label(RichText::new(status).small());
-        }
     });
 }
 
@@ -3971,14 +3971,19 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
     };
 
     let available = ui.available_size_before_wrap();
-    let min_size = Vec2::new(180.0, 120.0);
+    let min_size = Vec2::new(180.0, 70.0);
     let host_size = Vec2::new(available.x.max(min_size.x), available.y.max(min_size.y));
     let (host_rect, host_response) = ui.allocate_exact_size(host_size, Sense::click());
+    if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
+        egui_res
+            .window_content_rects
+            .insert(window_id.to_string(), host_rect);
+    }
     ui.painter()
-        .rect_filled(host_rect, 4.0, Color32::from_rgb(22, 24, 28));
+        .rect_filled(host_rect, 0.0, Color32::from_rgb(22, 24, 28));
     ui.painter().rect_stroke(
         host_rect,
-        4.0,
+        0.0,
         Stroke::new(1.0, Color32::from_gray(56)),
         StrokeKind::Inside,
     );
@@ -3991,7 +3996,7 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
     }
 
     for area in areas_snapshot.iter().cloned() {
-        let area_rect = area.rect.to_rect(host_rect).shrink2(Vec2::new(2.0, 2.0));
+        let area_rect = area.rect.to_rect(host_rect);
         if area_rect.width() < 24.0 || area_rect.height() < 24.0 {
             continue;
         }
@@ -4075,7 +4080,7 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
                 areas_snapshot
                     .iter()
                     .filter_map(|area| {
-                        let area_rect = area.rect.to_rect(host_rect).shrink2(Vec2::new(2.0, 2.0));
+                        let area_rect = area.rect.to_rect(host_rect);
                         if area_rect.width() <= 0.0 || area_rect.height() <= 0.0 {
                             return None;
                         }

@@ -15,7 +15,9 @@ use helmer::provided::components::{
     Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
-use helmer_becs::egui_integration::{EguiInputPassthrough, EguiResource, EguiWindowSpec};
+use helmer_becs::egui_integration::{
+    EguiInputPassthrough, EguiResource, EguiWindowChrome, EguiWindowSpec,
+};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
@@ -139,6 +141,9 @@ pub fn editor_ui_system(world: &mut World) {
     egui_res.inspector_ui = false;
     egui_res.disable_window_drag = editor_tab_dragging || pane_tab_dragging;
     for (window_id, _layout_managed) in pane_windows {
+        egui_res
+            .window_chrome_overrides
+            .insert(window_id.clone(), EguiWindowChrome::pane_dock());
         let close_id = window_id.clone();
         egui_res.close_actions.insert(
             window_id.clone(),
@@ -489,6 +494,7 @@ pub fn editor_layout_update_system(world: &mut World) {
         screen_rect,
         pixels_per_point,
         window_rects,
+        window_content_rects,
         window_collapsed,
         pointer_down,
         pointer_pressed,
@@ -504,6 +510,7 @@ pub fn editor_layout_update_system(world: &mut World) {
             return;
         };
         let window_rects = egui_res.window_rects.clone();
+        let window_content_rects = egui_res.window_content_rects.clone();
         let window_collapsed = egui_res.window_collapsed.clone();
         let (pointer_down, pointer_pressed, pointer_released, pointer_pos) =
             egui_res.ctx.input(|input| {
@@ -526,6 +533,7 @@ pub fn editor_layout_update_system(world: &mut World) {
             screen_rect,
             pixels_per_point,
             window_rects,
+            window_content_rects,
             window_collapsed,
             pointer_down,
             pointer_pressed,
@@ -551,6 +559,9 @@ pub fn editor_layout_update_system(world: &mut World) {
         .get_resource::<MiddleDragUiState>()
         .map(|state| state.active)
         .unwrap_or(false);
+    let pane_tab_drag_active = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .is_some_and(|workspace| workspace.dragging.is_some());
 
     let mut state = world
         .get_resource_mut::<EditorLayoutState>()
@@ -647,6 +658,17 @@ pub fn editor_layout_update_system(world: &mut World) {
     };
 
     let layout_rects = layout_rects_for_screen(&layout, screen_rect, pixels_per_point);
+    if pane_tab_drag_active {
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    }
+
     let external_drag_active = ctx.dragged_id().is_some()
         || gizmo_drag_active
         || asset_drag_active
@@ -700,6 +722,7 @@ pub fn editor_layout_update_system(world: &mut World) {
             if let Some((id, mode, edges)) = pick_layout_drag_target(
                 &ctx,
                 &window_rects,
+                &window_content_rects,
                 &window_collapsed,
                 pos,
                 grab_radius,
@@ -997,26 +1020,44 @@ fn drag_edges_for_pos(rect: Rect, pos: Pos2, grab_radius: f32) -> LayoutDragEdge
 fn hit_test_layout_window(
     ctx: &egui::Context,
     rect: Rect,
+    content_rect: Option<Rect>,
     collapsed: bool,
     pos: Pos2,
     grab_radius: f32,
 ) -> Option<(LayoutDragMode, LayoutDragEdges)> {
     let edges = drag_edges_for_pos(rect, pos, grab_radius);
+    let in_rect = rect.contains(pos);
+    let in_content = content_rect.is_some_and(|content| content.contains(pos));
+    let title_bar_height = layout_title_bar_height(ctx, collapsed);
+
     if edges.any() {
-        return Some((LayoutDragMode::Resize, edges));
+        if edges.top && in_rect && pos.y <= rect.min.y + title_bar_height {
+            // keep title-bar move dominant except when truly on the top edge
+            let top_resize_band = (grab_radius * 0.35).clamp(1.0, 3.0);
+            if (pos.y - rect.min.y).abs() <= top_resize_band {
+                return Some((LayoutDragMode::Resize, edges));
+            }
+        } else {
+            return Some((LayoutDragMode::Resize, edges));
+        }
     }
+
     if rect.contains(pos) {
-        let title_bar_height = layout_title_bar_height(ctx, collapsed);
+        if in_content {
+            return None;
+        }
         if pos.y <= rect.min.y + title_bar_height {
             return Some((LayoutDragMode::Move, LayoutDragEdges::default()));
         }
     }
+
     None
 }
 
 fn pick_layout_drag_target(
     ctx: &egui::Context,
     window_rects: &HashMap<String, Rect>,
+    window_content_rects: &HashMap<String, Rect>,
     window_collapsed: &HashMap<String, bool>,
     pos: Pos2,
     grab_radius: f32,
@@ -1024,9 +1065,15 @@ fn pick_layout_drag_target(
 ) -> Option<(String, LayoutDragMode, LayoutDragEdges)> {
     if let Some(id) = preferred_id {
         if let Some(rect) = window_rects.get(id) {
+            let content_rect = window_content_rects.get(id).copied();
             let collapsed = window_collapsed.get(id).copied().unwrap_or(false);
-            if let Some(hit) = hit_test_layout_window(ctx, *rect, collapsed, pos, grab_radius) {
+            if let Some(hit) =
+                hit_test_layout_window(ctx, *rect, content_rect, collapsed, pos, grab_radius)
+            {
                 return Some((id.to_string(), hit.0, hit.1));
+            }
+            if rect.contains(pos) || content_rect.is_some_and(|content| content.contains(pos)) {
+                return None;
             }
         }
     }
@@ -1035,8 +1082,11 @@ fn pick_layout_drag_target(
         let Some(rect) = window_rects.get(*id) else {
             continue;
         };
+        let content_rect = window_content_rects.get(*id).copied();
         let collapsed = window_collapsed.get(*id).copied().unwrap_or(false);
-        if let Some(hit) = hit_test_layout_window(ctx, *rect, collapsed, pos, grab_radius) {
+        if let Some(hit) =
+            hit_test_layout_window(ctx, *rect, content_rect, collapsed, pos, grab_radius)
+        {
             return Some(((*id).to_string(), hit.0, hit.1));
         }
     }

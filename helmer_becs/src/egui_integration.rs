@@ -17,6 +17,27 @@ use crate::{
     provided::ui::{inspector::InspectorUI, stats::StatsUI},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EguiWindowChrome {
+    pub compact_title_bar: bool,
+    pub square_corners: bool,
+    pub disable_native_drag: bool,
+}
+
+impl EguiWindowChrome {
+    pub const fn pane_dock() -> Self {
+        Self {
+            compact_title_bar: true,
+            square_corners: true,
+            disable_native_drag: true,
+        }
+    }
+
+    fn is_default(self) -> bool {
+        !self.compact_title_bar && !self.square_corners && !self.disable_native_drag
+    }
+}
+
 pub struct EguiWindowSpec {
     pub id: String,
     pub title: String,
@@ -43,10 +64,12 @@ pub struct EguiResource {
     pub render_graph_passes_state: RenderGraphPassesUiState,
     pub window_positions: HashMap<String, Pos2>,
     pub window_rects: HashMap<String, Rect>,
+    pub window_content_rects: HashMap<String, Rect>,
     pub window_rect_overrides: HashMap<String, Rect>,
     pub window_collapsed: HashMap<String, bool>,
     pub window_collapsed_overrides: HashMap<String, bool>,
     pub window_order_overrides: HashMap<String, Order>,
+    pub window_chrome_overrides: HashMap<String, EguiWindowChrome>,
     pub window_dragging: HashSet<String>,
     pub last_screen_rect: Option<Rect>,
     pub snap_enabled: bool,
@@ -77,12 +100,12 @@ impl Default for RenderGraphPassesUiState {
 
 fn content_size_for_outer_rect(
     ctx: &Context,
+    style: &egui::Style,
     frame: &Frame,
     collapsed: bool,
     outer_rect: Rect,
 ) -> Vec2 {
-    let style = ctx.style();
-    let font_id = TextStyle::Heading.resolve(style.as_ref());
+    let font_id = TextStyle::Heading.resolve(style);
     let title_height = ctx
         .fonts_mut(|fonts| fonts.row_height(&font_id))
         .max(style.spacing.interact_size.y);
@@ -98,6 +121,41 @@ fn content_size_for_outer_rect(
         size.y = 1.0;
     }
     size
+}
+
+fn compact_title_bar_style(ctx: &Context, chrome: EguiWindowChrome) -> Option<Arc<egui::Style>> {
+    if !chrome.compact_title_bar {
+        return None;
+    }
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.interact_size.y = style.spacing.interact_size.y.min(10.0);
+    if let Some(heading_font) = style.text_styles.get_mut(&TextStyle::Heading) {
+        heading_font.size = heading_font.size.min(11.0);
+    }
+    Some(Arc::new(style))
+}
+
+fn window_frame_for_chrome(
+    ctx: &Context,
+    layout_active: bool,
+    chrome: EguiWindowChrome,
+) -> Option<Frame> {
+    if !layout_active && chrome.is_default() {
+        return None;
+    }
+
+    let mut frame = Frame::window(&ctx.style());
+    if layout_active {
+        frame.shadow = Shadow::NONE;
+    }
+    if chrome.square_corners {
+        frame.corner_radius = egui::CornerRadius::ZERO;
+    }
+    if chrome.compact_title_bar {
+        frame.inner_margin = egui::Margin::ZERO;
+    }
+    Some(frame)
 }
 
 pub fn egui_system(world: &mut World) {
@@ -181,6 +239,7 @@ pub fn egui_system(world: &mut World) {
         let window_rect_overrides = std::mem::take(&mut egui_res.window_rect_overrides);
         let window_collapsed_overrides = std::mem::take(&mut egui_res.window_collapsed_overrides);
         let window_order_overrides = std::mem::take(&mut egui_res.window_order_overrides);
+        let window_chrome_overrides = std::mem::take(&mut egui_res.window_chrome_overrides);
         let snap_enabled = egui_res.snap_enabled;
         let snap_distance = egui_res.snap_distance;
         let suppress_snap = egui_res.suppress_snap;
@@ -195,19 +254,18 @@ pub fn egui_system(world: &mut World) {
         last_screen_rect = Some(screen_rect);
         let mut window_rects = HashMap::new();
         let mut window_collapsed = HashMap::new();
-        let layout_frame = if layout_active {
-            let mut frame = Frame::window(&ctx.style());
-            frame.shadow = Shadow::NONE;
-            Some(frame)
-        } else {
-            None
-        };
 
         for (mut elements, spec) in windows {
             let window_id = egui::Id::new(spec.id.clone());
             let mut open = true;
             let has_close = close_actions.get_mut(&spec.id).is_some();
             let is_layout_window = layout_active && window_rect_overrides.contains_key(&spec.id);
+            let chrome = window_chrome_overrides
+                .get(&spec.id)
+                .copied()
+                .unwrap_or_default();
+            let title_style_override = compact_title_bar_style(ctx, chrome);
+            let frame_override = window_frame_for_chrome(ctx, layout_active, chrome);
 
             let collapsed = window_collapsed_overrides
                 .get(&spec.id)
@@ -232,7 +290,7 @@ pub fn egui_system(world: &mut World) {
                 window = window.order(*order);
             }
 
-            if disable_window_drag {
+            if disable_window_drag || chrome.disable_native_drag {
                 window = window.movable(false);
             }
 
@@ -240,16 +298,29 @@ pub fn egui_system(world: &mut World) {
                 window = window.movable(false).resizable(false);
             }
 
-            if let Some(frame) = layout_frame {
+            if let Some(frame) = frame_override {
                 window = window.frame(frame);
             }
 
             if let Some(rect) = window_rect_overrides.get(&spec.id) {
-                let frame = layout_frame.unwrap_or_else(|| Frame::window(&ctx.style()));
-                let content_size = content_size_for_outer_rect(&ctx, &frame, collapsed, *rect);
+                let frame = frame_override.unwrap_or_else(|| Frame::window(&ctx.style()));
+                let default_style = ctx.style();
+                let title_style = title_style_override
+                    .as_deref()
+                    .unwrap_or(default_style.as_ref());
+                let content_size =
+                    content_size_for_outer_rect(&ctx, title_style, &frame, collapsed, *rect);
                 window = window.current_pos(rect.min).fixed_size(content_size);
                 if layout_force_positions {
                     window_positions.insert(spec.id.clone(), rect.min);
+                }
+            } else if chrome.disable_native_drag {
+                let locked_pos = window_positions
+                    .get(&spec.id)
+                    .copied()
+                    .or_else(|| window_rects_prev.get(&spec.id).map(|rect| rect.min));
+                if let Some(pos) = locked_pos {
+                    window = window.fixed_pos(pos);
                 }
             } else if let Some(pos) = window_positions.get(&spec.id).copied() {
                 window = window.current_pos(pos);
@@ -259,13 +330,34 @@ pub fn egui_system(world: &mut World) {
                 window = window.open(&mut open);
             }
 
-            if let Some(inner) = window.show(ctx, |ui| {
+            let restore_style = title_style_override.as_ref().map(|_| ctx.style());
+            let content_style = restore_style.clone();
+            if let Some(style) = title_style_override {
+                ctx.set_style(style);
+            }
+
+            let shown = window.show(ctx, |ui| {
+                if let Some(style) = &content_style {
+                    ui.set_style(style.clone());
+                }
                 elements(ui, world, &input_arc);
-            }) {
+            });
+
+            if let Some(style) = restore_style {
+                ctx.set_style(style);
+            }
+
+            if let Some(inner) = shown {
                 window_collapsed.insert(spec.id.clone(), inner.inner.is_none());
                 window_rects.insert(spec.id.clone(), inner.response.rect);
                 if let Some(egui_res) = world.get_resource::<EguiResource>() {
-                    if !egui_res.window_dragging.contains(&spec.id) {
+                    if egui_res.window_dragging.contains(&spec.id) {
+                        // keep the explicit position set by editor-side drag logic
+                    } else if chrome.disable_native_drag {
+                        window_positions
+                            .entry(spec.id.clone())
+                            .or_insert(inner.response.rect.min);
+                    } else {
                         window_positions.insert(spec.id.clone(), inner.response.rect.min);
                     }
                 }
@@ -303,6 +395,7 @@ pub fn egui_system(world: &mut World) {
             egui_res.window_positions = window_positions;
             egui_res.window_rects = window_rects;
             egui_res.window_collapsed = window_collapsed;
+            egui_res.window_chrome_overrides = window_chrome_overrides;
             egui_res.last_screen_rect = last_screen_rect;
         }
     });

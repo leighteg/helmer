@@ -198,6 +198,7 @@ pub struct EditorViewportPaneRequest {
     pub camera_entity: Entity,
     pub texture_id: TextureId,
     pub viewport_rect: ViewportRectPixels,
+    pub pointer_over: bool,
     pub target_size: [u32; 2],
     pub temporal_history: bool,
     pub immediate_resize: bool,

@@ -140,10 +140,15 @@ pub fn editor_ui_system(world: &mut World) {
 
     egui_res.inspector_ui = false;
     egui_res.disable_window_drag = editor_tab_dragging || pane_tab_dragging;
-    for (window_id, _layout_managed) in pane_windows {
+    for (window_id, layout_managed) in pane_windows {
+        let mut chrome = EguiWindowChrome::pane_dock();
+        // detached pane windows should keep compact chrome, but still allow native title-bar drag
+        if !layout_managed {
+            chrome.disable_native_drag = false;
+        }
         egui_res
             .window_chrome_overrides
-            .insert(window_id.clone(), EguiWindowChrome::pane_dock());
+            .insert(window_id.clone(), chrome);
         let close_id = window_id.clone();
         egui_res.close_actions.insert(
             window_id.clone(),
@@ -3327,9 +3332,22 @@ pub fn freecam_system(
     let hovered_pane_request = viewport_runtime
         .pane_requests
         .iter()
-        .find(|pane| pane.viewport_rect.contains(cursor_position));
+        .find(|pane| pane.pointer_over)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .iter()
+                .find(|pane| pane.viewport_rect.contains(cursor_position))
+        });
+    let active_pane_request = viewport_runtime.active_pane_id.and_then(|pane_id| {
+        viewport_runtime
+            .pane_requests
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+    });
     let pointer_rect = hovered_pane_request
         .map(|pane| pane.viewport_rect)
+        .or_else(|| active_pane_request.map(|pane| pane.viewport_rect))
         .or(viewport_runtime.main_rect_pixels)
         .or_else(|| {
             viewport_runtime
@@ -3340,7 +3358,9 @@ pub fn freecam_system(
     let pointer_in_viewport = pointer_rect
         .map(|rect| rect.contains(cursor_position))
         .unwrap_or(false);
-    let pointer_over_active_viewport = viewport_runtime.pointer_over_main;
+    let pointer_over_active_viewport = hovered_pane_request
+        .map(|pane| pane.pointer_over)
+        .unwrap_or(viewport_runtime.pointer_over_main);
     let allow_viewport_look_input = !wants_pointer
         || viewport_runtime.keyboard_focus
         || pointer_over_active_viewport
@@ -3498,6 +3518,7 @@ pub fn freecam_system(
 
     let active_camera_entity = hovered_pane_request
         .map(|pane| pane.camera_entity)
+        .or_else(|| active_pane_request.map(|pane| pane.camera_entity))
         .or(viewport_runtime.active_camera_entity)
         .or_else(|| {
             viewport_runtime

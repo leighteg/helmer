@@ -1705,6 +1705,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             camera_entity,
                             texture_id,
                             viewport_rect: rect_pixels,
+                            pointer_over,
                             target_size,
                             temporal_history: true,
                             immediate_resize: resolution_preset_changed,

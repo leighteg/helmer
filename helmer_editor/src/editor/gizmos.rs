@@ -410,7 +410,8 @@ pub struct GizmoSystemParams<'w, 's> {
             >,
         ),
     >,
-    camera_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>), With<BevyActiveCamera>>,
+    active_camera_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>), With<BevyActiveCamera>>,
+    camera_component_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>)>,
     camera_icon_query: Query<
         'w,
         's,
@@ -448,7 +449,8 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         skinned_query,
         mut pose_override_query,
         mut spatial_queries,
-        camera_query,
+        active_camera_query,
+        camera_component_query,
         camera_icon_query,
         light_icon_query,
     } = params;
@@ -483,7 +485,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         }
     }
 
-    let Some((camera_entity, camera)) = camera_query.iter().next() else {
+    let input_manager = input.0.read();
+    let (viewport_rect, runtime_camera_entity) =
+        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
+
+    let Some((camera_entity, camera)) = runtime_camera_entity
+        .and_then(|entity| camera_component_query.get(entity).ok())
+        .or_else(|| active_camera_query.iter().next())
+    else {
         if state.drag.is_some() && allow_undo {
             request_end_undo_group(&mut undo_state);
         }
@@ -630,8 +639,6 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         spline_state.point_drag = None;
     }
 
-    let input_manager = input.0.read();
-    let viewport_rect = viewport_runtime.main_rect_pixels;
     let pointer_in_viewport = viewport_rect
         .map(|rect| rect.contains(input_manager.cursor_position))
         .unwrap_or(false);
@@ -643,7 +650,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let left_released = !left_down && state.last_mouse_down;
     state.last_mouse_down = left_down;
 
-    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform);
+    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform, viewport_rect);
     let allow_ui_raycast = pointer_in_viewport
         || state.drag.is_some()
         || state.key_drag_active
@@ -1413,8 +1420,13 @@ pub struct SelectionSystemParams<'w, 's> {
     >,
     light_icon_query:
         Query<'w, 's, (Entity, &'static BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
-    camera_query:
-        Query<'w, 's, (&'static BevyCamera, &'static BevyTransform), With<BevyActiveCamera>>,
+    active_camera_query: Query<
+        'w,
+        's,
+        (Entity, &'static BevyCamera, &'static BevyTransform),
+        With<BevyActiveCamera>,
+    >,
+    camera_query: Query<'w, 's, (Entity, &'static BevyCamera, &'static BevyTransform)>,
 }
 
 pub fn selection_system(params: SelectionSystemParams) {
@@ -1436,6 +1448,7 @@ pub fn selection_system(params: SelectionSystemParams) {
         transform_query,
         camera_icon_query,
         light_icon_query,
+        active_camera_query,
         camera_query,
     } = params;
     if scene_state.world_state != WorldState::Edit && !viewport_state.gizmos_in_play {
@@ -1459,7 +1472,8 @@ pub fn selection_system(params: SelectionSystemParams) {
     }
 
     let input_manager = input.0.read();
-    let viewport_rect = viewport_runtime.main_rect_pixels;
+    let (viewport_rect, runtime_camera_entity) =
+        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
     let pointer_in_viewport = viewport_rect
         .map(|rect| rect.contains(input_manager.cursor_position))
         .unwrap_or(false);
@@ -1479,11 +1493,14 @@ pub fn selection_system(params: SelectionSystemParams) {
         return;
     }
 
-    let Some((camera, camera_transform)) = camera_query.iter().next() else {
+    let Some((_, camera, camera_transform)) = runtime_camera_entity
+        .and_then(|entity| camera_query.get(entity).ok())
+        .or_else(|| active_camera_query.iter().next())
+    else {
         return;
     };
 
-    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform.0);
+    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform.0, viewport_rect);
     let Some((ray_origin, ray_dir)) = screen_ray(
         input_manager.cursor_position,
         viewport_rect,
@@ -1978,13 +1995,66 @@ fn selection_bounds(
     mesh_aabb_map.0.get(&renderer.0.mesh_id).copied()
 }
 
-fn camera_inv_view_proj(camera: &Camera, transform: &Transform) -> Mat4 {
+fn pick_viewport_interaction_target(
+    cursor: glam::DVec2,
+    viewport_runtime: &EditorViewportRuntime,
+) -> (Option<ViewportRectPixels>, Option<Entity>) {
+    let hovered_pane = viewport_runtime
+        .pane_requests
+        .iter()
+        .find(|pane| pane.pointer_over)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .iter()
+                .find(|pane| pane.viewport_rect.contains(cursor))
+        });
+    let active_pane = viewport_runtime.active_pane_id.and_then(|pane_id| {
+        viewport_runtime
+            .pane_requests
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+    });
+
+    let viewport_rect = hovered_pane
+        .map(|pane| pane.viewport_rect)
+        .or_else(|| active_pane.map(|pane| pane.viewport_rect))
+        .or(viewport_runtime.main_rect_pixels)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.viewport_rect)
+        });
+    let camera_entity = hovered_pane
+        .map(|pane| pane.camera_entity)
+        .or_else(|| active_pane.map(|pane| pane.camera_entity))
+        .or(viewport_runtime.active_camera_entity)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.camera_entity)
+        });
+
+    (viewport_rect, camera_entity)
+}
+
+fn camera_inv_view_proj(
+    camera: &Camera,
+    transform: &Transform,
+    viewport_rect: Option<ViewportRectPixels>,
+) -> Mat4 {
     let forward = transform.forward().normalize_or_zero();
     let up = transform.up().normalize_or_zero();
     let view = Mat4::look_at_rh(transform.position, transform.position + forward, up);
+    let aspect = viewport_rect
+        .map(|rect| rect.aspect_ratio())
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+        .unwrap_or(camera.aspect_ratio.max(0.001));
     let projection = Mat4::perspective_infinite_reverse_rh(
         camera.fov_y_rad.max(0.001),
-        camera.aspect_ratio.max(0.001),
+        aspect,
         camera.near_plane.max(0.001),
     );
     let view_proj = projection * view;

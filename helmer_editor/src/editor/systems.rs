@@ -81,6 +81,7 @@ use crate::editor::{
         spawn_play_viewport_pane,
     },
     undo_action,
+    visual_scripting::default_visual_script_template_full,
     watch::configure_file_watcher,
 };
 
@@ -149,6 +150,14 @@ pub fn editor_ui_system(world: &mut World) {
         egui_res
             .window_chrome_overrides
             .insert(window_id.clone(), chrome);
+        egui_res.window_order_overrides.insert(
+            window_id.clone(),
+            if layout_managed {
+                Order::Middle
+            } else {
+                Order::Foreground
+            },
+        );
         let close_id = window_id.clone();
         egui_res.close_actions.insert(
             window_id.clone(),
@@ -200,6 +209,17 @@ pub fn editor_ui_system(world: &mut World) {
 
     for (window_id, title) in editor_windows {
         let window_key = format!("editor_window_{}", window_id);
+        let is_layout_window = layout_window_ids()
+            .iter()
+            .any(|layout_id| *layout_id == title.as_str());
+        egui_res.window_order_overrides.insert(
+            window_key.clone(),
+            if is_layout_window {
+                Order::Middle
+            } else {
+                Order::Foreground
+            },
+        );
         egui_res.close_actions.insert(
             window_key.clone(),
             Box::new(move |world: &mut World| {
@@ -2594,6 +2614,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Scene => directory.join(format!("{}.hscene.ron", name)),
         AssetCreateKind::Material => directory.join(format!("{}.ron", name)),
         AssetCreateKind::Script => directory.join(format!("{}.luau", name)),
+        AssetCreateKind::VisualScript => directory.join(format!("{}.hvs", name)),
         AssetCreateKind::RustScript => directory.join(name),
         AssetCreateKind::Animation => directory.join(format!("{}.hanim.ron", name)),
     };
@@ -2610,6 +2631,10 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         }
         AssetCreateKind::Script => {
             fs::write(&target_path, default_script_template_full()).map_err(|err| err.to_string())
+        }
+        AssetCreateKind::VisualScript => {
+            fs::write(&target_path, default_visual_script_template_full())
+                .map_err(|err| err.to_string())
         }
         AssetCreateKind::RustScript => (|| -> Result<(), String> {
             let crate_name = sanitize_rust_crate_name(name);
@@ -3308,7 +3333,7 @@ fn guess_import_dir(project: &EditorProject, root: &Path, source: &Path) -> Opti
     let target = match ext.as_str() {
         "glb" | "gltf" => config.models_root(root),
         "ktx2" | "png" | "jpg" | "jpeg" | "tga" => config.textures_root(root),
-        "lua" | "luau" | "rs" => config.scripts_root(root),
+        "lua" | "luau" | "hvs" | "rs" => config.scripts_root(root),
         "toml" if file_name == "cargo.toml" => config.scripts_root(root),
         "ron" => config.materials_root(root),
         _ => config.assets_root(root),
@@ -3467,11 +3492,10 @@ pub fn freecam_system(
         .unwrap_or(false);
     let pointer_over_active_viewport = hovered_pane_request
         .map(|pane| pane.pointer_over)
-        .unwrap_or(viewport_runtime.pointer_over_main);
-    let allow_viewport_look_input = !wants_pointer
-        || viewport_runtime.keyboard_focus
-        || pointer_over_active_viewport
-        || pointer_in_viewport;
+        .unwrap_or(false)
+        || viewport_runtime.pointer_over_main;
+    let allow_viewport_look_input =
+        pointer_over_active_viewport || (!wants_pointer && pointer_in_viewport);
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;

@@ -92,6 +92,10 @@ use crate::editor::{
         build_clip_from_clip_track, build_clip_from_pose_track, build_pose_track_from_clip,
         build_pose_track_from_clip_segment,
     },
+    visual_scripting::{
+        default_visual_script_template_full, draw_visual_script_editor_tab, is_visual_script_path,
+        open_visual_script_editor,
+    },
 };
 
 #[derive(Default, Debug, Clone, Resource)]
@@ -438,6 +442,7 @@ pub struct EditorTab {
 #[derive(Debug, Clone)]
 pub enum EditorTabContent {
     Material { path: PathBuf },
+    VisualScript { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -6411,6 +6416,9 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
         EditorTabContent::Material { path } => {
             draw_material_editor_tab(ui, world, &project, &path);
         }
+        EditorTabContent::VisualScript { path } => {
+            draw_visual_script_editor_tab(ui, world, &path);
+        }
     }
 }
 
@@ -10707,7 +10715,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
                 if ui.button("Browse...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Script", &["lua", "luau", "rs", "toml"])
+                        .add_filter("Script", &["lua", "luau", "hvs", "rs", "toml"])
                         .pick_file()
                     {
                         if is_script_file(&path) {
@@ -10754,9 +10762,29 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             set_status(world, "Open a project before creating scripts".to_string());
                         }
                     }
+                    if ui.button("Create Visual Script").clicked() {
+                        if let Some(project) = project.as_ref() {
+                            if let Some(path) = create_visual_script_asset(world, project) {
+                                script.path = Some(path.clone());
+                                script.language = script_language_from_path(&path);
+                                scripts_changed = true;
+                            }
+                        } else {
+                            set_status(world, "Open a project before creating scripts".to_string());
+                        }
+                    }
                 });
 
                 ui.label(format!("Language: {}", script.language));
+                if let Some(path) = script.path.as_ref() {
+                    if is_visual_script_path(path)
+                        && ui.button("Open Visual Script Editor").clicked()
+                    {
+                        if let Err(err) = open_visual_script_editor_tab(world, path.to_path_buf()) {
+                            set_status(world, format!("Failed to open visual script: {}", err));
+                        }
+                    }
+                }
 
                 let script_key = ScriptInstanceKey {
                     entity,
@@ -11675,10 +11703,10 @@ fn asset_tag_for(entry: &AssetEntry) -> &'static str {
     }
 
     if is_script_file(&entry.path) {
-        return if script_language_from_path(&entry.path) == "rust" {
-            "[RSCRIPT]"
-        } else {
-            "[SCRIPT]"
+        return match script_language_from_path(&entry.path).as_str() {
+            "rust" => "[RSCRIPT]",
+            "visual" => "[VSCRIPT]",
+            _ => "[SCRIPT]",
         };
     }
 
@@ -11717,6 +11745,7 @@ fn asset_thumbnail_tag(entry: &AssetEntry) -> &'static str {
         "[ANIM]" => "ANIM",
         "[SCRIPT]" => "LUA",
         "[RSCRIPT]" => "RUST",
+        "[VSCRIPT]" => "VIZ",
         "[MODEL]" => "MOD",
         "[TEX]" => "TEX",
         "[CFG]" => "CFG",
@@ -11734,10 +11763,10 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
     };
 
     if is_script_file(&entry.path) {
-        return if script_language_from_path(&entry.path) == "rust" {
-            Color32::from_rgb(165, 92, 48)
-        } else {
-            Color32::from_rgb(60, 110, 70)
+        return match script_language_from_path(&entry.path).as_str() {
+            "rust" => Color32::from_rgb(165, 92, 48),
+            "visual" => Color32::from_rgb(76, 122, 176),
+            _ => Color32::from_rgb(60, 110, 70),
         };
     }
 
@@ -11821,7 +11850,13 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
     }
 
     if is_script_file(path) && ui.button("Open in Editor").clicked() {
-        open_in_external_editor(world, path);
+        if is_visual_script_path(path) {
+            if let Err(err) = open_visual_script_editor_tab(world, path.to_path_buf()) {
+                set_status(world, format!("Failed to open visual script: {}", err));
+            }
+        } else {
+            open_in_external_editor(world, path);
+        }
         ui.close_menu();
     }
 
@@ -11901,6 +11936,17 @@ fn asset_create_menu(world: &mut World, ui: &mut Ui, path: &Path) {
                 directory: path.to_path_buf(),
                 name: "new_rust_script".to_string(),
                 kind: AssetCreateKind::RustScript,
+            },
+        );
+        ui.close_menu();
+    }
+    if ui.button("New Visual Script").clicked() {
+        push_command(
+            world,
+            EditorCommand::CreateAsset {
+                directory: path.to_path_buf(),
+                name: "new_visual_script".to_string(),
+                kind: AssetCreateKind::VisualScript,
             },
         );
         ui.close_menu();
@@ -12036,7 +12082,13 @@ fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
     } else if is_animation_file(&entry.path) {
         open_in_external_editor(world, &entry.path);
     } else if is_script_file(&entry.path) {
-        open_in_external_editor(world, &entry.path);
+        if is_visual_script_path(&entry.path) {
+            if let Err(err) = open_visual_script_editor_tab(world, entry.path.clone()) {
+                set_status(world, format!("Failed to open visual script: {}", err));
+            }
+        } else {
+            open_in_external_editor(world, &entry.path);
+        }
     }
 }
 
@@ -12088,6 +12140,58 @@ fn open_material_editor_tab(world: &mut World, path: PathBuf) {
         refresh_editor_window_titles(&mut workspace);
         workspace.last_focused_window = Some(window_id);
     });
+}
+
+fn open_visual_script_editor_tab(world: &mut World, path: PathBuf) -> Result<(), String> {
+    open_visual_script_editor(world, &path)?;
+    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
+        for window in workspace.windows.iter_mut() {
+            if let Some((index, _)) = window.tabs.iter().enumerate().find(|(_, tab)| {
+                matches!(
+                    &tab.content,
+                    EditorTabContent::VisualScript { path: tab_path } if tab_path == &path
+                )
+            }) {
+                window.active = index;
+                workspace.last_focused_window = Some(window.id);
+                return;
+            }
+        }
+
+        let title = asset_display_name(&path);
+        let tab = EditorTab {
+            id: workspace.next_tab_id,
+            title,
+            content: EditorTabContent::VisualScript { path },
+        };
+        workspace.next_tab_id += 1;
+
+        let target_window_id = workspace.windows.last().map(|window| window.id);
+        if let Some(target_window_id) = target_window_id {
+            if let Some(window) = workspace
+                .windows
+                .iter_mut()
+                .find(|window| window.id == target_window_id)
+            {
+                window.tabs.push(tab);
+                window.active = window.tabs.len().saturating_sub(1);
+                workspace.last_focused_window = Some(window.id);
+                return;
+            }
+        }
+
+        let window_id = workspace.next_window_id;
+        workspace.next_window_id += 1;
+        workspace.windows.push(EditorTabWindow {
+            id: window_id,
+            title: format!("Editor {}", window_id),
+            tabs: vec![tab],
+            active: 0,
+        });
+        refresh_editor_window_titles(&mut workspace);
+        workspace.last_focused_window = Some(window_id);
+    });
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -14435,6 +14539,30 @@ fn create_script_asset(world: &mut World, project: &EditorProject) -> Option<Pat
     let path = unique_path(&candidate);
     if let Err(err) = fs::write(&path, default_script_template_full()) {
         set_status(world, format!("Failed to write script: {}", err));
+        return None;
+    }
+
+    if let Some(mut assets) = world.get_resource_mut::<AssetBrowserState>() {
+        assets.refresh_requested = true;
+    }
+
+    Some(path)
+}
+
+fn create_visual_script_asset(world: &mut World, project: &EditorProject) -> Option<PathBuf> {
+    let root = project.root.as_ref()?;
+    let config = project.config.as_ref()?;
+    let scripts_root = config.scripts_root(root);
+
+    if let Err(err) = fs::create_dir_all(&scripts_root) {
+        set_status(world, format!("Failed to create scripts dir: {}", err));
+        return None;
+    }
+
+    let candidate = scripts_root.join("visual_script.hvs");
+    let path = unique_path(&candidate);
+    if let Err(err) = fs::write(&path, default_visual_script_template_full()) {
+        set_status(world, format!("Failed to write visual script: {}", err));
         return None;
     }
 

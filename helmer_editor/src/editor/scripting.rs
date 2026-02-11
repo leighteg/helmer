@@ -65,6 +65,10 @@ use crate::editor::{
     scene::{EditorEntity, EditorSceneState, WorldState},
     set_play_camera,
     viewport::{EditorViewportState, PlayViewportKind},
+    visual_scripting::{
+        VisualScriptApiTable, VisualScriptEvent, VisualScriptHost, VisualScriptProgram,
+        VisualScriptRuntimeState, compile_visual_script_runtime_source, is_visual_script_path,
+    },
 };
 
 const RUST_SCRIPT_PLUGIN_SYMBOL: &[u8] = b"helmer_get_script_plugin\0";
@@ -160,6 +164,9 @@ pub fn is_script_path(path: &Path) -> bool {
     if is_lua_script_path(path) {
         return true;
     }
+    if is_visual_script_path(path) {
+        return true;
+    }
     is_rust_script_path(path)
 }
 
@@ -222,7 +229,7 @@ pub fn resolve_rust_script_manifest(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn script_registry_key_for_path(path: &Path) -> Option<PathBuf> {
-    if is_lua_script_path(path) {
+    if is_lua_script_path(path) || is_visual_script_path(path) {
         return Some(path.to_path_buf());
     }
     resolve_rust_script_manifest(path)
@@ -240,6 +247,10 @@ pub fn script_language_from_path(path: &Path) -> String {
         };
     }
 
+    if is_visual_script_path(path) {
+        return "visual".to_string();
+    }
+
     if resolve_rust_script_manifest(path).is_some() {
         return "rust".to_string();
     }
@@ -249,7 +260,8 @@ pub fn script_language_from_path(path: &Path) -> String {
 
 pub fn normalize_script_language(language: &str, path: Option<&Path>) -> String {
     let normalized = language.trim().to_ascii_lowercase();
-    if normalized == "lua" || normalized == "luau" || normalized == "rust" {
+    if normalized == "lua" || normalized == "luau" || normalized == "visual" || normalized == "rust"
+    {
         return normalized;
     }
     if let Some(path) = path {
@@ -294,7 +306,30 @@ fn rust_script_modified_time(manifest_path: &Path) -> SystemTime {
 
 pub fn load_script_asset(path: &Path) -> ScriptAsset {
     let language = script_language_from_path(path);
-    if language == "rust" {
+    if language == "visual" {
+        let modified = fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or_else(|_| SystemTime::now());
+
+        match fs::read_to_string(path) {
+            Ok(source) => {
+                let error =
+                    compile_visual_script_runtime_source(&source, &path.to_string_lossy()).err();
+                ScriptAsset {
+                    language,
+                    source,
+                    modified,
+                    error,
+                }
+            }
+            Err(err) => ScriptAsset {
+                language,
+                source: String::new(),
+                modified,
+                error: Some(err.to_string()),
+            },
+        }
+    } else if language == "rust" {
         let Some(manifest_path) = resolve_rust_script_manifest(path) else {
             return ScriptAsset {
                 language,
@@ -405,10 +440,19 @@ unsafe impl Send for RustScriptInstance {}
 // SAFETY: Script instances are only created, updated, and destroyed on the main ECS thread
 unsafe impl Sync for RustScriptInstance {}
 
+#[derive(Debug)]
+pub struct VisualScriptInstance {
+    pub path: PathBuf,
+    pub program: VisualScriptProgram,
+    pub state: VisualScriptRuntimeState,
+    pub modified: SystemTime,
+}
+
 #[derive(Resource)]
 pub struct ScriptRuntime {
     pub lua: Arc<Mutex<Lua>>,
     pub instances: HashMap<ScriptInstanceKey, ScriptInstance>,
+    pub visual_instances: HashMap<ScriptInstanceKey, VisualScriptInstance>,
     pub rust_instances: HashMap<ScriptInstanceKey, RustScriptInstance>,
     rust_plugins: HashMap<PathBuf, Arc<RustLoadedPlugin>>,
     rust_inflight_builds: HashSet<PathBuf>,
@@ -426,6 +470,7 @@ impl Default for ScriptRuntime {
         Self {
             lua: Arc::new(Mutex::new(Lua::new())),
             instances: HashMap::new(),
+            visual_instances: HashMap::new(),
             rust_instances: HashMap::new(),
             rust_plugins: HashMap::new(),
             rust_inflight_builds: HashSet::new(),
@@ -442,6 +487,7 @@ impl Default for ScriptRuntime {
 impl ScriptRuntime {
     pub fn clear_all(&mut self) {
         self.instances.clear();
+        self.visual_instances.clear();
         self.rust_instances.clear();
         self.rust_plugins.clear();
         self.rust_inflight_builds.clear();
@@ -451,7 +497,9 @@ impl ScriptRuntime {
     }
 
     pub fn contains_instance(&self, key: ScriptInstanceKey) -> bool {
-        self.instances.contains_key(&key) || self.rust_instances.contains_key(&key)
+        self.instances.contains_key(&key)
+            || self.visual_instances.contains_key(&key)
+            || self.rust_instances.contains_key(&key)
     }
 
     fn request_rust_build(&mut self, manifest_path: &Path) {
@@ -813,6 +861,11 @@ pub fn script_execution_system(world: &mut World) {
             for (key, instance) in drained_rust {
                 stop_rust_script_instance(world, key, instance);
             }
+
+            let drained_visual = runtime.visual_instances.drain().collect::<Vec<_>>();
+            for (key, instance) in drained_visual {
+                stop_visual_script_instance(world, world_ptr, key, instance);
+            }
         }
 
         let mut active_scripts = HashSet::new();
@@ -827,6 +880,9 @@ pub fn script_execution_system(world: &mut World) {
                     let _ = call_script_function0(&lua, &old_instance, "on_stop");
                     let _ = lua.remove_registry_value(old_instance.env_key);
                     despawn_script_owned(world, key.entity, key.script_index);
+                }
+                if let Some(old_instance) = runtime.visual_instances.remove(&key) {
+                    stop_visual_script_instance(world, world_ptr, key, old_instance);
                 }
                 if let Some(old_instance) = runtime.rust_instances.remove(&key) {
                     stop_rust_script_instance(world, key, old_instance);
@@ -844,6 +900,9 @@ pub fn script_execution_system(world: &mut World) {
                     let _ = call_script_function0(&lua, &old_instance, "on_stop");
                     let _ = lua.remove_registry_value(old_instance.env_key);
                     despawn_script_owned(world, key.entity, key.script_index);
+                }
+                if let Some(old_instance) = runtime.visual_instances.remove(&key) {
+                    stop_visual_script_instance(world, world_ptr, key, old_instance);
                 }
 
                 let manifest_path = runtime_path.clone();
@@ -935,8 +994,79 @@ pub fn script_execution_system(world: &mut World) {
                 continue;
             }
 
+            if language == "visual" {
+                if let Some(old_instance) = runtime.instances.remove(&key) {
+                    let _ = call_script_function0(&lua, &old_instance, "on_stop");
+                    let _ = lua.remove_registry_value(old_instance.env_key);
+                    despawn_script_owned(world, key.entity, key.script_index);
+                }
+                if let Some(old_instance) = runtime.rust_instances.remove(&key) {
+                    stop_rust_script_instance(world, key, old_instance);
+                }
+
+                let reload = if force_reload.contains(&key) {
+                    true
+                } else {
+                    match runtime.visual_instances.get(&key) {
+                        Some(instance) => visual_script_needs_reload(instance, runtime_path, asset),
+                        None => true,
+                    }
+                };
+
+                if reload {
+                    if let Some(old_instance) = runtime.visual_instances.remove(&key) {
+                        stop_visual_script_instance(world, world_ptr, key, old_instance);
+                    }
+
+                    match load_visual_script_instance(runtime_path, asset) {
+                        Ok(mut instance) => {
+                            if let Err(err) = run_visual_script_event(
+                                world_ptr,
+                                key,
+                                &mut instance,
+                                VisualScriptEvent::Start,
+                                0.0,
+                            ) {
+                                push_script_runtime_error(
+                                    &mut runtime,
+                                    format!("{}: {}", script_path_label(script), err),
+                                );
+                            }
+                            runtime.visual_instances.insert(key, instance);
+                        }
+                        Err(err) => {
+                            push_script_runtime_error(
+                                &mut runtime,
+                                format!("{}: {}", script_path_label(script), err),
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(instance) = runtime.visual_instances.get_mut(&key) {
+                    if let Err(err) = run_visual_script_event(
+                        world_ptr,
+                        key,
+                        instance,
+                        VisualScriptEvent::Update,
+                        dt,
+                    ) {
+                        push_script_runtime_error(
+                            &mut runtime,
+                            format!("{}: {}", script_path_label(script), err),
+                        );
+                    }
+                }
+
+                continue;
+            }
+
             if let Some(old_instance) = runtime.rust_instances.remove(&key) {
                 stop_rust_script_instance(world, key, old_instance);
+            }
+            if let Some(old_instance) = runtime.visual_instances.remove(&key) {
+                stop_visual_script_instance(world, world_ptr, key, old_instance);
             }
 
             let reload = if force_reload.contains(&key) {
@@ -1011,6 +1141,18 @@ pub fn script_execution_system(world: &mut World) {
             }
         }
 
+        let inactive_visual = runtime
+            .visual_instances
+            .keys()
+            .copied()
+            .filter(|key| !active_scripts.contains(key))
+            .collect::<Vec<_>>();
+        for key in inactive_visual {
+            if let Some(instance) = runtime.visual_instances.remove(&key) {
+                stop_visual_script_instance(world, world_ptr, key, instance);
+            }
+        }
+
         if let Some(mut run_state) = world.get_resource_mut::<ScriptRunState>() {
             run_state.last_state = current_state;
             run_state.last_executing = is_executing;
@@ -1058,6 +1200,95 @@ fn script_needs_reload(
     }
 
     asset.modified > instance.modified
+}
+
+fn visual_script_needs_reload(
+    instance: &VisualScriptInstance,
+    runtime_path: &Path,
+    asset: &ScriptAsset,
+) -> bool {
+    if instance.path != runtime_path {
+        return true;
+    }
+
+    asset.modified > instance.modified
+}
+
+struct VisualScriptExecutionHost {
+    context: RustScriptHostContext,
+}
+
+impl VisualScriptExecutionHost {
+    fn new(world_ptr: usize, owner: Entity, script_index: usize) -> Self {
+        Self {
+            context: RustScriptHostContext {
+                world_ptr,
+                owner,
+                script_index,
+            },
+        }
+    }
+}
+
+impl VisualScriptHost for VisualScriptExecutionHost {
+    fn invoke_api(
+        &mut self,
+        table: VisualScriptApiTable,
+        function: &str,
+        args: &[JsonValue],
+    ) -> Result<JsonValue, String> {
+        let args_json = serde_json::to_string(args).map_err(|err| err.to_string())?;
+        invoke_json_with_context(&self.context, table.as_str(), function, &args_json)
+    }
+
+    fn log(&mut self, message: &str) {
+        emit_visual_script_log(self.context.owner, self.context.script_index, message);
+    }
+}
+
+fn load_visual_script_instance(
+    runtime_path: &Path,
+    asset: &ScriptAsset,
+) -> Result<VisualScriptInstance, String> {
+    if let Some(error) = asset.error.as_ref() {
+        return Err(format!("{}: {}", runtime_path.to_string_lossy(), error));
+    }
+
+    let program =
+        compile_visual_script_runtime_source(&asset.source, &runtime_path.to_string_lossy())?;
+    Ok(VisualScriptInstance {
+        path: runtime_path.to_path_buf(),
+        program,
+        state: VisualScriptRuntimeState::default(),
+        modified: asset.modified,
+    })
+}
+
+fn run_visual_script_event(
+    world_ptr: usize,
+    key: ScriptInstanceKey,
+    instance: &mut VisualScriptInstance,
+    event: VisualScriptEvent,
+    dt: f32,
+) -> Result<(), String> {
+    let mut host = VisualScriptExecutionHost::new(world_ptr, key.entity, key.script_index);
+    instance.program.execute_event(
+        event,
+        key.entity.to_bits(),
+        dt,
+        &mut instance.state,
+        &mut host,
+    )
+}
+
+fn stop_visual_script_instance(
+    world: &mut World,
+    world_ptr: usize,
+    key: ScriptInstanceKey,
+    mut instance: VisualScriptInstance,
+) {
+    let _ = run_visual_script_event(world_ptr, key, &mut instance, VisualScriptEvent::Stop, 0.0);
+    despawn_script_owned(world, key.entity, key.script_index);
 }
 
 fn load_script_instance(
@@ -1629,6 +1860,22 @@ fn emit_lua_script_log(message: &str) {
     }
 }
 
+fn emit_visual_script_log(owner: Entity, script_index: usize, message: &str) {
+    let formatted = format!(
+        "[visual-script {}:{}] {}",
+        owner.index(),
+        script_index,
+        message
+    );
+    match script_log_level_from_message(message) {
+        ScriptLogLevel::Trace => tracing::trace!(target: "script.visual", "{formatted}"),
+        ScriptLogLevel::Debug => tracing::debug!(target: "script.visual", "{formatted}"),
+        ScriptLogLevel::Info => tracing::info!(target: "script.visual", "{formatted}"),
+        ScriptLogLevel::Warn => tracing::warn!(target: "script.visual", "{formatted}"),
+        ScriptLogLevel::Error => tracing::error!(target: "script.visual", "{formatted}"),
+    }
+}
+
 unsafe extern "C" fn rust_api_log(user_data: *mut c_void, message: *const c_char) {
     if message.is_null() {
         return;
@@ -1838,16 +2085,10 @@ unsafe fn rust_invoke_json(
 
     let table_name = unsafe { CStr::from_ptr(table_name) }
         .to_string_lossy()
-        .trim()
-        .to_ascii_lowercase();
+        .to_string();
     let function_name = unsafe { CStr::from_ptr(function_name) }
         .to_string_lossy()
-        .trim()
         .to_string();
-    if function_name.is_empty() {
-        return Err("Function name cannot be empty".to_string());
-    }
-
     let args_json = if args_json.is_null() {
         "[]".to_string()
     } else {
@@ -1855,6 +2096,21 @@ unsafe fn rust_invoke_json(
             .to_string_lossy()
             .to_string()
     };
+
+    invoke_json_with_context(context, &table_name, &function_name, &args_json)
+}
+
+fn invoke_json_with_context(
+    context: &RustScriptHostContext,
+    table_name: &str,
+    function_name: &str,
+    args_json: &str,
+) -> Result<JsonValue, String> {
+    let table_name = table_name.trim().to_ascii_lowercase();
+    let function_name = function_name.trim();
+    if function_name.is_empty() {
+        return Err("Function name cannot be empty".to_string());
+    }
 
     let lua = Lua::new();
     let api_table = match table_name.as_str() {
@@ -1869,9 +2125,9 @@ unsafe fn rust_invoke_json(
         }
     };
 
-    let args = rust_json_args_to_lua_multivalue(&lua, &args_json)?;
+    let args = rust_json_args_to_lua_multivalue(&lua, args_json)?;
     let value: Value = api_table
-        .get(function_name.as_str())
+        .get(function_name)
         .map_err(|err| err.to_string())?;
 
     match value {

@@ -12,6 +12,7 @@ pub mod timeline;
 pub mod ui;
 pub mod undo;
 pub mod viewport;
+pub mod visual_scripting;
 pub mod watch;
 
 pub use assets::*;
@@ -28,4 +29,5 @@ pub use timeline::*;
 pub use ui::*;
 pub use undo::*;
 pub use viewport::*;
+pub use visual_scripting::*;
 pub use watch::*;

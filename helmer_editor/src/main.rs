@@ -17,7 +17,7 @@ use helmer_editor::editor::{
     InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
     PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
     ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
-    activate_viewport_camera, apply_scene_child_animations_system,
+    VisualScriptEditorState, activate_viewport_camera, apply_scene_child_animations_system,
     apply_scene_child_pose_overrides_system, asset_scan_system, drag_drop_system,
     editor_command_system, editor_layout_apply_system, editor_layout_save_system,
     editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
@@ -76,6 +76,7 @@ fn editor_init(
     world.insert_resource(ScriptRunState::default());
     world.insert_resource(ScriptEditModeState::default());
     world.insert_resource(ScriptInputState::default());
+    world.insert_resource(VisualScriptEditorState::default());
     world.insert_resource(HierarchyUiState::default());
     world.insert_resource(AnimatorUiState::default());
     world.insert_resource(PoseEditorState::default());

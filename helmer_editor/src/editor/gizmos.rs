@@ -646,6 +646,16 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         .unwrap_or(false);
     let wants_pointer = input_manager.egui_wants_pointer;
     let wants_key = input_manager.egui_wants_key;
+    let pointer_over_active_viewport = interaction_pane_id
+        .and_then(|pane_id| {
+            viewport_runtime
+                .pane_requests
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .map(|pane| pane.pointer_over)
+        })
+        .unwrap_or(false)
+        || viewport_runtime.pointer_over_main;
     let freecam_looking = input_manager.is_mouse_button_active(MouseButton::Right);
     let left_down = input_manager.is_mouse_button_active(MouseButton::Left);
     let left_pressed = left_down && !state.last_mouse_down;
@@ -653,7 +663,8 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     state.last_mouse_down = left_down;
 
     let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform, viewport_rect);
-    let allow_ui_raycast = pointer_in_viewport
+    let allow_ui_raycast = pointer_over_active_viewport
+        || (!wants_pointer && pointer_in_viewport)
         || state.drag.is_some()
         || state.key_drag_active
         || spline_state.key_dragging;
@@ -1482,11 +1493,22 @@ pub fn selection_system(params: SelectionSystemParams) {
     let pointer_in_viewport = viewport_rect
         .map(|rect| rect.contains(input_manager.cursor_position))
         .unwrap_or(false);
+    let pointer_over_active_viewport = interaction_pane_id
+        .and_then(|pane_id| {
+            viewport_runtime
+                .pane_requests
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .map(|pane| pane.pointer_over)
+        })
+        .unwrap_or(false)
+        || viewport_runtime.pointer_over_main;
+    let wants_pointer = input_manager.egui_wants_pointer;
     let left_down = input_manager.is_mouse_button_active(MouseButton::Left);
     let left_pressed = left_down && !selection_state.last_mouse_down;
     selection_state.last_mouse_down = left_down;
 
-    if !pointer_in_viewport || !left_pressed {
+    if !(pointer_over_active_viewport || (!wants_pointer && pointer_in_viewport)) || !left_pressed {
         return;
     }
 

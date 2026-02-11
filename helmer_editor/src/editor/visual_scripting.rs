@@ -889,6 +889,16 @@ const API_INPUTS_46: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
     label: "Button",
     value_type: VisualValueType::String,
 }];
+const API_INPUTS_47: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::Transform,
+    },
+];
 
 const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
     VisualApiOperationSpec {
@@ -1049,7 +1059,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Create",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_9,
-        output_type: Some(VisualValueType::Bool),
+        output_type: Some(VisualValueType::Json),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsDeleteEntity,
@@ -1349,7 +1359,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetScript,
@@ -1379,7 +1389,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Transform),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetViewportMode,
@@ -1838,7 +1848,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Transform",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_47,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1938,8 +1948,8 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Gamepad Button",
         category: "Gamepad",
         flow: VisualApiFlow::Pure,
-        inputs: &API_INPUTS_43,
-        output_type: Some(VisualValueType::Bool),
+        inputs: &API_INPUTS_46,
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputGamepadButtonDown,
@@ -2009,7 +2019,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Keyboard",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_45,
-        output_type: Some(VisualValueType::Bool),
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputKeyDown,
@@ -2059,7 +2069,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Mouse",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_46,
-        output_type: Some(VisualValueType::Bool),
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputMouseDown,
@@ -3702,6 +3712,13 @@ fn vec3_json(x: f64, y: f64, z: f64) -> JsonValue {
     object.insert("x".to_string(), json_number(x));
     object.insert("y".to_string(), json_number(y));
     object.insert("z".to_string(), json_number(z));
+    JsonValue::Object(object)
+}
+
+fn vec2_json(x: f64, y: f64) -> JsonValue {
+    let mut object = JsonMap::new();
+    object.insert("x".to_string(), json_number(x));
+    object.insert("y".to_string(), json_number(y));
     JsonValue::Object(object)
 }
 
@@ -6460,12 +6477,203 @@ fn draw_typed_editor_with_width(
             }
             response.changed()
         }
-        VisualValueType::Vec2
-        | VisualValueType::Vec3
-        | VisualValueType::Quat
-        | VisualValueType::Transform
-        | VisualValueType::Json => ui
+        VisualValueType::Vec2 => {
+            let mut components = parse_vec2_literal(value);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("X");
+                changed |= ui
+                    .add(DragValue::new(&mut components.0).speed(0.1))
+                    .changed();
+                ui.label("Y");
+                changed |= ui
+                    .add(DragValue::new(&mut components.1).speed(0.1))
+                    .changed();
+            });
+            if changed {
+                *value = compact_json_string(&vec2_json(components.0, components.1));
+            }
+            changed
+        }
+        VisualValueType::Vec3 => {
+            let mut components = parse_vec3_literal(value);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("X");
+                changed |= ui
+                    .add(DragValue::new(&mut components.0).speed(0.1))
+                    .changed();
+                ui.label("Y");
+                changed |= ui
+                    .add(DragValue::new(&mut components.1).speed(0.1))
+                    .changed();
+                ui.label("Z");
+                changed |= ui
+                    .add(DragValue::new(&mut components.2).speed(0.1))
+                    .changed();
+            });
+            if changed {
+                *value = compact_json_string(&vec3_json(components.0, components.1, components.2));
+            }
+            changed
+        }
+        VisualValueType::Quat => {
+            let mut components = parse_quat_literal(value);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("X");
+                changed |= ui
+                    .add(DragValue::new(&mut components.0).speed(0.05))
+                    .changed();
+                ui.label("Y");
+                changed |= ui
+                    .add(DragValue::new(&mut components.1).speed(0.05))
+                    .changed();
+                ui.label("Z");
+                changed |= ui
+                    .add(DragValue::new(&mut components.2).speed(0.05))
+                    .changed();
+                ui.label("W");
+                changed |= ui
+                    .add(DragValue::new(&mut components.3).speed(0.05))
+                    .changed();
+            });
+            if changed {
+                *value = compact_json_string(&quat_json(
+                    components.0,
+                    components.1,
+                    components.2,
+                    components.3,
+                ));
+            }
+            changed
+        }
+        VisualValueType::Transform => {
+            let mut components = parse_transform_literal(value);
+            let mut changed = false;
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Pos");
+                    changed |= ui
+                        .add(DragValue::new(&mut components.position.0).speed(0.1))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.position.1).speed(0.1))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.position.2).speed(0.1))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Rot");
+                    changed |= ui
+                        .add(DragValue::new(&mut components.rotation.0).speed(0.05))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.rotation.1).speed(0.05))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.rotation.2).speed(0.05))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.rotation.3).speed(0.05))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Scl");
+                    changed |= ui
+                        .add(DragValue::new(&mut components.scale.0).speed(0.1))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.scale.1).speed(0.1))
+                        .changed();
+                    changed |= ui
+                        .add(DragValue::new(&mut components.scale.2).speed(0.1))
+                        .changed();
+                });
+            });
+            if changed {
+                let mut object = JsonMap::new();
+                object.insert(
+                    "position".to_string(),
+                    vec3_json(
+                        components.position.0,
+                        components.position.1,
+                        components.position.2,
+                    ),
+                );
+                object.insert(
+                    "rotation".to_string(),
+                    quat_json(
+                        components.rotation.0,
+                        components.rotation.1,
+                        components.rotation.2,
+                        components.rotation.3,
+                    ),
+                );
+                object.insert(
+                    "scale".to_string(),
+                    vec3_json(components.scale.0, components.scale.1, components.scale.2),
+                );
+                *value = compact_json_string(&JsonValue::Object(object));
+            }
+            changed
+        }
+        VisualValueType::Json => ui
             .add(TextEdit::singleline(value).desired_width(text_width))
             .changed(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransformLiteralComponents {
+    position: (f64, f64, f64),
+    rotation: (f64, f64, f64, f64),
+    scale: (f64, f64, f64),
+}
+
+fn compact_json_string(value: &JsonValue) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn parse_vec2_literal(value: &str) -> (f64, f64) {
+    let parsed = parse_loose_literal(value);
+    coerce_json_to_vec2_components(&parsed).unwrap_or((0.0, 0.0))
+}
+
+fn parse_vec3_literal(value: &str) -> (f64, f64, f64) {
+    let parsed = parse_loose_literal(value);
+    coerce_json_to_vec3_components(&parsed).unwrap_or((0.0, 0.0, 0.0))
+}
+
+fn parse_quat_literal(value: &str) -> (f64, f64, f64, f64) {
+    let parsed = parse_loose_literal(value);
+    coerce_json_to_quat_components(&parsed).unwrap_or((0.0, 0.0, 0.0, 1.0))
+}
+
+fn parse_transform_literal(value: &str) -> TransformLiteralComponents {
+    let parsed = parse_loose_literal(value);
+    let normalized = coerce_json_to_visual_type(&parsed, VisualValueType::Transform)
+        .unwrap_or_else(|_| {
+            parse_loose_literal(default_literal_for_type(VisualValueType::Transform))
+        });
+    let object = normalized.as_object();
+    let position_value = object
+        .and_then(|obj| obj.get("position"))
+        .cloned()
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let rotation_value = object
+        .and_then(|obj| obj.get("rotation"))
+        .cloned()
+        .unwrap_or_else(|| quat_json(0.0, 0.0, 0.0, 1.0));
+    let scale_value = object
+        .and_then(|obj| obj.get("scale"))
+        .cloned()
+        .unwrap_or_else(|| vec3_json(1.0, 1.0, 1.0));
+
+    TransformLiteralComponents {
+        position: coerce_json_to_vec3_components(&position_value).unwrap_or((0.0, 0.0, 0.0)),
+        rotation: coerce_json_to_quat_components(&rotation_value).unwrap_or((0.0, 0.0, 0.0, 1.0)),
+        scale: coerce_json_to_vec3_components(&scale_value).unwrap_or((1.0, 1.0, 1.0)),
     }
 }

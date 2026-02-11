@@ -2236,16 +2236,18 @@ fn rust_lua_value_to_json(value: Value) -> Result<JsonValue, String> {
         Value::String(value) => Ok(JsonValue::String(value.to_string_lossy().to_string())),
         Value::UserData(userdata) => {
             if let Ok(key) = userdata.borrow::<LuaKey>() {
-                return Ok(JsonValue::String(format!("{:?}", *key)));
+                return Ok(JsonValue::String(lua_key_to_handle_name(*key)));
             }
             if let Ok(button) = userdata.borrow::<LuaMouseButton>() {
-                return Ok(JsonValue::String(format!("{:?}", button.0)));
+                return Ok(JsonValue::String(lua_mouse_button_to_handle_name(button.0)));
             }
             if let Ok(button) = userdata.borrow::<LuaGamepadButton>() {
-                return Ok(JsonValue::String(format!("{:?}", button.0)));
+                return Ok(JsonValue::String(lua_gamepad_button_to_handle_name(
+                    button.0,
+                )));
             }
             if let Ok(axis) = userdata.borrow::<LuaGamepadAxis>() {
-                return Ok(JsonValue::String(format!("{:?}", axis.0)));
+                return Ok(JsonValue::String(lua_gamepad_axis_to_handle_name(axis.0)));
             }
             Ok(JsonValue::Null)
         }
@@ -2253,6 +2255,35 @@ fn rust_lua_value_to_json(value: Value) -> Result<JsonValue, String> {
         Value::Error(error) => Ok(JsonValue::String(error.to_string())),
         _ => Ok(JsonValue::Null),
     }
+}
+
+fn lua_key_to_handle_name(key: LuaKey) -> String {
+    match key {
+        LuaKey::AnyShift => "Shift".to_string(),
+        LuaKey::AnyCtrl => "Ctrl".to_string(),
+        LuaKey::AnyAlt => "Alt".to_string(),
+        LuaKey::AnySuper => "Super".to_string(),
+        LuaKey::Code(code) => format!("{:?}", code),
+    }
+}
+
+fn lua_mouse_button_to_handle_name(button: MouseButton) -> String {
+    match button {
+        MouseButton::Left => "Left".to_string(),
+        MouseButton::Right => "Right".to_string(),
+        MouseButton::Middle => "Middle".to_string(),
+        MouseButton::Back => "Back".to_string(),
+        MouseButton::Forward => "Forward".to_string(),
+        MouseButton::Other(value) => format!("Button{}", value),
+    }
+}
+
+fn lua_gamepad_button_to_handle_name(button: gilrs::Button) -> String {
+    format!("{:?}", button)
+}
+
+fn lua_gamepad_axis_to_handle_name(axis: gilrs::Axis) -> String {
+    format!("{:?}", axis)
 }
 
 fn rust_lua_table_to_json(table: Table) -> Result<JsonValue, String> {

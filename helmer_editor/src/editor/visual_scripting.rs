@@ -54,6 +54,18 @@ impl VisualValueType {
     }
 }
 
+const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 9] = [
+    VisualValueType::Bool,
+    VisualValueType::Number,
+    VisualValueType::String,
+    VisualValueType::Entity,
+    VisualValueType::Vec2,
+    VisualValueType::Vec3,
+    VisualValueType::Quat,
+    VisualValueType::Transform,
+    VisualValueType::Json,
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VisualVariableDefinition {
     #[serde(default)]
@@ -2323,6 +2335,7 @@ pub enum VisualScriptNodeKind {
         #[serde(default = "default_select_value_type")]
         value_type: VisualValueType,
     },
+    Vec2,
     Vec3,
     Quat,
     Transform,
@@ -2423,6 +2436,7 @@ impl VisualScriptNodeKind {
             Self::LogicalBinary { op } => format!("Logical: {}", op.title()),
             Self::Not => "Not".to_string(),
             Self::Select { .. } => "Select".to_string(),
+            Self::Vec2 => "Vec2".to_string(),
             Self::Vec3 => "Vec3".to_string(),
             Self::Quat => "Quat".to_string(),
             Self::Transform => "Transform".to_string(),
@@ -2449,6 +2463,7 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2
             | Self::Vec3
             | Self::Quat
             | Self::Transform => 0,
@@ -2489,6 +2504,7 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2
             | Self::Vec3
             | Self::Quat
             | Self::Transform => 0,
@@ -2506,6 +2522,7 @@ impl VisualScriptNodeKind {
                 operation.spec().inputs.len().min(MAX_API_ARGS)
             }
             Self::MathBinary { .. } | Self::Compare { .. } | Self::LogicalBinary { .. } => 2,
+            Self::Vec2 => 2,
             Self::Vec3 | Self::Select { .. } | Self::Transform => 3,
             Self::Quat => 4,
             Self::OnStart
@@ -2540,6 +2557,7 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2
             | Self::Vec3
             | Self::Quat
             | Self::Transform
@@ -2642,6 +2660,13 @@ impl VisualScriptNodeKind {
                     }
                 }
                 Self::Not => "Value".to_string(),
+                Self::Vec2 => {
+                    if slot.index == 0 {
+                        "X".to_string()
+                    } else {
+                        "Y".to_string()
+                    }
+                }
                 Self::Vec3 => match slot.index {
                     0 => "X".to_string(),
                     1 => "Y".to_string(),
@@ -2693,6 +2718,7 @@ impl VisualScriptNodeKind {
                     .output_type
                     .map(|value| value.title().to_string())
                     .unwrap_or_else(|| "Result".to_string()),
+                Self::Vec2 => "Vec2".to_string(),
                 Self::Vec3 => "Vec3".to_string(),
                 Self::Quat => "Quat".to_string(),
                 Self::Transform => "Transform".to_string(),
@@ -2776,6 +2802,128 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         }
         VisualValueType::Json => "null",
     }
+}
+
+fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType) -> String {
+    match value_type {
+        VisualValueType::Bool => {
+            if is_truthy(value) {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        VisualValueType::Number | VisualValueType::Entity => json_to_log_string(value),
+        VisualValueType::String => match value {
+            JsonValue::String(text) => text.clone(),
+            _ => json_to_log_string(value),
+        },
+        VisualValueType::Vec2
+        | VisualValueType::Vec3
+        | VisualValueType::Quat
+        | VisualValueType::Transform
+        | VisualValueType::Json => compact_json_string(value),
+    }
+}
+
+fn normalize_literal_for_type(value: &str, value_type: VisualValueType) -> String {
+    let parsed = parse_loose_literal(value);
+    let coerced = coerce_json_to_visual_type(&parsed, value_type)
+        .unwrap_or_else(|_| parse_loose_literal(default_literal_for_type(value_type)));
+    literal_string_for_value_type(&coerced, value_type)
+}
+
+fn infer_visual_value_type_from_literal(value: &str) -> VisualValueType {
+    infer_visual_value_type_from_json(&parse_loose_literal(value))
+}
+
+fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
+    match value {
+        JsonValue::Bool(_) => VisualValueType::Bool,
+        JsonValue::Number(_) => VisualValueType::Number,
+        JsonValue::String(_) => VisualValueType::String,
+        JsonValue::Array(array) => {
+            let numeric = |count: usize| {
+                array.len() == count && array.iter().all(|entry| coerce_json_to_f64(entry).is_ok())
+            };
+            if numeric(2) {
+                VisualValueType::Vec2
+            } else if numeric(3) {
+                VisualValueType::Vec3
+            } else if numeric(4) {
+                VisualValueType::Quat
+            } else {
+                VisualValueType::Json
+            }
+        }
+        JsonValue::Object(object) => {
+            let has_vec2 = object.contains_key("x")
+                && object.contains_key("y")
+                && !object.contains_key("z")
+                && !object.contains_key("w")
+                && coerce_json_to_f64(object.get("x").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("y").unwrap_or(&JsonValue::Null)).is_ok();
+            let has_vec3 = object.contains_key("x")
+                && object.contains_key("y")
+                && object.contains_key("z")
+                && !object.contains_key("w")
+                && coerce_json_to_f64(object.get("x").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("y").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("z").unwrap_or(&JsonValue::Null)).is_ok();
+            let has_quat = object.contains_key("x")
+                && object.contains_key("y")
+                && object.contains_key("z")
+                && object.contains_key("w")
+                && coerce_json_to_f64(object.get("x").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("y").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("z").unwrap_or(&JsonValue::Null)).is_ok()
+                && coerce_json_to_f64(object.get("w").unwrap_or(&JsonValue::Null)).is_ok();
+            let has_transform = (object.contains_key("position")
+                || object.contains_key("rotation")
+                || object.contains_key("scale"))
+                && object
+                    .get("position")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("rotation")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Quat).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("scale")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
+                    .unwrap_or(true);
+
+            if has_transform {
+                VisualValueType::Transform
+            } else if has_quat {
+                VisualValueType::Quat
+            } else if has_vec3 {
+                VisualValueType::Vec3
+            } else if has_vec2 {
+                VisualValueType::Vec2
+            } else {
+                VisualValueType::Json
+            }
+        }
+        JsonValue::Null => VisualValueType::Json,
+    }
+}
+
+fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueType) -> bool {
+    if from_type == to_type {
+        return true;
+    }
+
+    if matches!(from_type, VisualValueType::Json) || matches!(to_type, VisualValueType::Json) {
+        return true;
+    }
+
+    matches!(
+        (from_type, to_type),
+        (VisualValueType::Number, VisualValueType::Entity)
+            | (VisualValueType::Entity, VisualValueType::Number)
+    )
 }
 
 fn api_input_label(operation: VisualApiOperation, input_index: usize) -> String {
@@ -3049,6 +3197,7 @@ fn node_data_input_type(
                 Some(*value_type)
             }
         }
+        VisualScriptNodeKind::Vec2 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Number),
         VisualScriptNodeKind::Transform => match input_index {
@@ -3090,6 +3239,7 @@ fn node_data_output_type(
         VisualScriptNodeKind::JsonLiteral { .. } => Some(VisualValueType::Json),
         VisualScriptNodeKind::SelfEntity => Some(VisualValueType::Entity),
         VisualScriptNodeKind::Select { value_type } => Some(*value_type),
+        VisualScriptNodeKind::Vec2 => Some(VisualValueType::Vec2),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Vec3),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Quat),
         VisualScriptNodeKind::Transform => Some(VisualValueType::Transform),
@@ -3402,6 +3552,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::LogicalBinary { .. }
             | VisualScriptNodeKind::Not
             | VisualScriptNodeKind::Select { .. }
+            | VisualScriptNodeKind::Vec2
             | VisualScriptNodeKind::Vec3
             | VisualScriptNodeKind::Quat
             | VisualScriptNodeKind::Transform => {}
@@ -3625,14 +3776,20 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 let value = self.resolve_data_input_with_stack(node_id, 0, Some("false"), stack)?;
                 JsonValue::Bool(!is_truthy(&value))
             }
-            VisualScriptNodeKind::Select { .. } => {
+            VisualScriptNodeKind::Select { value_type } => {
                 let condition =
                     self.resolve_data_input_with_stack(node_id, 0, Some("false"), stack)?;
-                if is_truthy(&condition) {
+                let selected = if is_truthy(&condition) {
                     self.resolve_data_input_with_stack(node_id, 1, Some("null"), stack)?
                 } else {
                     self.resolve_data_input_with_stack(node_id, 2, Some("null"), stack)?
-                }
+                };
+                coerce_json_to_visual_type(&selected, *value_type)?
+            }
+            VisualScriptNodeKind::Vec2 => {
+                let x = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                let y = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                vec2_json(x, y)
             }
             VisualScriptNodeKind::Vec3 => {
                 let x = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
@@ -3666,6 +3823,9 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                     Some("{\"x\":1,\"y\":1,\"z\":1}"),
                     stack,
                 )?;
+                let position = coerce_json_to_visual_type(&position, VisualValueType::Vec3)?;
+                let rotation = coerce_json_to_visual_type(&rotation, VisualValueType::Quat)?;
+                let scale = coerce_json_to_visual_type(&scale, VisualValueType::Vec3)?;
                 let mut object = JsonMap::new();
                 object.insert("position".to_string(), position);
                 object.insert("rotation".to_string(), rotation);
@@ -4571,12 +4731,7 @@ pub fn compile_visual_script_program(
                     to_kind.title()
                 )
             })?;
-            if from_value_type != to_value_type {
-                let allow_log_any_input =
-                    matches!(to_kind, VisualScriptNodeKind::Log { .. }) && to_slot.index == 0;
-                if allow_log_any_input {
-                    continue;
-                }
+            if !are_data_types_compatible(from_value_type, to_value_type) {
                 let from_label = from_kind.output_label(from_slot);
                 let to_label = to_kind.input_label(to_slot);
                 return Err(format!(
@@ -4775,11 +4930,12 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         }
                         let new_id = next_id;
                         next_id = next_id.saturating_add(1);
+                        let value_type = infer_visual_value_type_from_literal(value);
                         document.variables.push(VisualVariableDefinition {
                             id: new_id,
                             name: trimmed.clone(),
-                            value_type: VisualValueType::Json,
-                            default_value: value.clone(),
+                            value_type,
+                            default_value: normalize_literal_for_type(value, value_type),
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -4809,11 +4965,12 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         }
                         let new_id = next_id;
                         next_id = next_id.saturating_add(1);
+                        let value_type = infer_visual_value_type_from_literal(default_value);
                         document.variables.push(VisualVariableDefinition {
                             id: new_id,
                             name: trimmed.clone(),
-                            value_type: VisualValueType::Json,
-                            default_value: default_value.clone(),
+                            value_type,
+                            default_value: normalize_literal_for_type(default_value, value_type),
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -5125,17 +5282,7 @@ fn draw_variable_definitions_panel(
                 ComboBox::from_id_salt(("visual_variable_type", index))
                     .selected_text(variable.value_type.title())
                     .show_ui(ui, |ui| {
-                        for value_type in [
-                            VisualValueType::Bool,
-                            VisualValueType::Number,
-                            VisualValueType::String,
-                            VisualValueType::Entity,
-                            VisualValueType::Vec2,
-                            VisualValueType::Vec3,
-                            VisualValueType::Quat,
-                            VisualValueType::Transform,
-                            VisualValueType::Json,
-                        ] {
+                        for value_type in VISUAL_VALUE_TYPE_CHOICES {
                             if ui
                                 .selectable_value(
                                     &mut variable.value_type,
@@ -5144,10 +5291,8 @@ fn draw_variable_definitions_panel(
                                 )
                                 .changed()
                             {
-                                if variable.default_value.trim().is_empty() {
-                                    variable.default_value =
-                                        default_literal_for_type(value_type).to_string();
-                                }
+                                variable.default_value =
+                                    normalize_literal_for_type(&variable.default_value, value_type);
                                 *changed = true;
                                 prune_wires = true;
                             }
@@ -5591,6 +5736,13 @@ impl VisualScriptViewer {
 
                 ui.separator();
                 ui.label(RichText::new("Structured Values").strong());
+                if add_node_search_matches_any(&search, &["vec2", "vector", "structured"]) {
+                    has_visible = true;
+                    if ui.button("Vec2").clicked() {
+                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Vec2));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
                 if add_node_search_matches_any(&search, &["vec3", "vector", "structured"]) {
                     has_visible = true;
                     if ui.button("Vec3").clicked() {
@@ -5782,6 +5934,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 | VisualScriptNodeKind::SelfEntity
                 | VisualScriptNodeKind::DeltaTime
                 | VisualScriptNodeKind::Not
+                | VisualScriptNodeKind::Vec2
                 | VisualScriptNodeKind::Vec3
                 | VisualScriptNodeKind::Quat
                 | VisualScriptNodeKind::Transform => {}
@@ -5847,6 +6000,11 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         name,
                         &self.variables,
                     ) {
+                        if let Some(variable) =
+                            find_variable_definition(&self.variables, *variable_id, name)
+                        {
+                            *value = normalize_literal_for_type(value, variable.value_type);
+                        }
                         self.mark_changed();
                         prune_wires = true;
                     }
@@ -5875,6 +6033,12 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         name,
                         &self.variables,
                     ) {
+                        if let Some(variable) =
+                            find_variable_definition(&self.variables, *variable_id, name)
+                        {
+                            *default_value =
+                                normalize_literal_for_type(default_value, variable.value_type);
+                        }
                         self.mark_changed();
                         prune_wires = true;
                     }
@@ -6009,17 +6173,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                     ComboBox::from_id_salt(("visual_select_type", node_id.0))
                         .selected_text(value_type.title())
                         .show_ui(ui, |ui| {
-                            for candidate in [
-                                VisualValueType::Bool,
-                                VisualValueType::Number,
-                                VisualValueType::String,
-                                VisualValueType::Entity,
-                                VisualValueType::Vec2,
-                                VisualValueType::Vec3,
-                                VisualValueType::Quat,
-                                VisualValueType::Transform,
-                                VisualValueType::Json,
-                            ] {
+                            for candidate in VISUAL_VALUE_TYPE_CHOICES {
                                 if ui
                                     .selectable_value(value_type, candidate, candidate.title())
                                     .changed()
@@ -6243,15 +6397,13 @@ fn can_connect_pins(
     }
 
     if matches!(from_slot.kind, PinKind::Data) {
-        let from_type = node_data_output_type(from_node, from_slot.index, variables);
-        let to_type = node_data_input_type(to_node, to_slot.index, variables);
-        if from_type.is_none() || to_type.is_none() || from_type != to_type {
-            let allow_log_any_input = matches!(to_node, VisualScriptNodeKind::Log { .. })
-                && to_slot.index == 0
-                && from_type.is_some();
-            if allow_log_any_input {
-                return true;
-            }
+        let Some(from_type) = node_data_output_type(from_node, from_slot.index, variables) else {
+            return false;
+        };
+        let Some(to_type) = node_data_input_type(to_node, to_slot.index, variables) else {
+            return false;
+        };
+        if !are_data_types_compatible(from_type, to_type) {
             return false;
         }
     }

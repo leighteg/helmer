@@ -1,6 +1,143 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use web_time::Instant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeCursorGrabMode {
+    #[default]
+    None,
+    Confined,
+    Locked,
+}
+
+impl RuntimeCursorGrabMode {
+    fn encode(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Confined => 1,
+            Self::Locked => 2,
+        }
+    }
+
+    fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::Confined,
+            2 => Self::Locked,
+            _ => Self::None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Confined => "confined",
+            Self::Locked => "locked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCursorStateSnapshot {
+    pub visible: bool,
+    pub grab_mode: RuntimeCursorGrabMode,
+}
+
+impl Default for RuntimeCursorStateSnapshot {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            grab_mode: RuntimeCursorGrabMode::None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RuntimeCursorState {
+    visible: AtomicBool,
+    grab_mode: AtomicU8,
+    warp_pending: AtomicBool,
+    warp_x_bits: AtomicU64,
+    warp_y_bits: AtomicU64,
+    dirty: AtomicBool,
+}
+
+impl Default for RuntimeCursorState {
+    fn default() -> Self {
+        Self {
+            visible: AtomicBool::new(true),
+            grab_mode: AtomicU8::new(RuntimeCursorGrabMode::None.encode()),
+            warp_pending: AtomicBool::new(false),
+            warp_x_bits: AtomicU64::new(0),
+            warp_y_bits: AtomicU64::new(0),
+            // force one initial application when a window becomes available
+            dirty: AtomicBool::new(true),
+        }
+    }
+}
+
+impl RuntimeCursorState {
+    pub fn snapshot(&self) -> RuntimeCursorStateSnapshot {
+        RuntimeCursorStateSnapshot {
+            visible: self.visible.load(Ordering::Relaxed),
+            grab_mode: RuntimeCursorGrabMode::decode(self.grab_mode.load(Ordering::Relaxed)),
+        }
+    }
+
+    pub fn set_visible(&self, visible: bool) -> bool {
+        let changed = self.visible.swap(visible, Ordering::AcqRel) != visible;
+        if changed {
+            self.dirty.store(true, Ordering::Release);
+        }
+        changed
+    }
+
+    pub fn set_grab_mode(&self, grab_mode: RuntimeCursorGrabMode) -> bool {
+        let mode = grab_mode.encode();
+        let changed = self.grab_mode.swap(mode, Ordering::AcqRel) != mode;
+        if changed {
+            self.dirty.store(true, Ordering::Release);
+        }
+        changed
+    }
+
+    pub fn set(&self, snapshot: RuntimeCursorStateSnapshot) -> bool {
+        let mut changed = false;
+        changed |= self.set_visible(snapshot.visible);
+        changed |= self.set_grab_mode(snapshot.grab_mode);
+        changed
+    }
+
+    pub fn reset(&self) -> bool {
+        self.set(RuntimeCursorStateSnapshot::default())
+    }
+
+    pub fn request_warp(&self, x: f64, y: f64) {
+        self.warp_x_bits.store(x.to_bits(), Ordering::Release);
+        self.warp_y_bits.store(y.to_bits(), Ordering::Release);
+        self.warp_pending.store(true, Ordering::Release);
+    }
+
+    pub fn take_warp_request(&self) -> Option<(f64, f64)> {
+        if !self.warp_pending.swap(false, Ordering::AcqRel) {
+            return None;
+        }
+        let x = f64::from_bits(self.warp_x_bits.load(Ordering::Acquire));
+        let y = f64::from_bits(self.warp_y_bits.load(Ordering::Acquire));
+        Some((x, y))
+    }
+
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn has_pending_update(&self) -> bool {
+        self.dirty.load(Ordering::Acquire) || self.warp_pending.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Default)]
 pub struct PerformanceMetrics {

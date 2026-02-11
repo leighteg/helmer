@@ -35,6 +35,7 @@ use helmer::provided::components::{
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
+use helmer::runtime::runtime::RuntimeCursorGrabMode;
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
     ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
@@ -64,7 +65,7 @@ use crate::editor::{
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
     set_play_camera,
-    viewport::{EditorViewportState, PlayViewportKind},
+    viewport::{EditorCursorControlState, EditorViewportState, PlayViewportKind},
     visual_scripting::{
         VisualScriptApiTable, VisualScriptEvent, VisualScriptHost, VisualScriptProgram,
         VisualScriptRuntimeState, compile_visual_script_runtime_source, is_visual_script_path,
@@ -1167,6 +1168,9 @@ pub fn script_execution_system(world: &mut World) {
             }
         }
     } else if lifecycle_changed {
+        if let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>() {
+            cursor_control.script_policy = None;
+        }
         if let Some(input_manager) = input_manager {
             let input_manager = input_manager.read();
             if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
@@ -7080,6 +7084,71 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         })?,
     )?;
 
+    let world_ptr_cursor_grab_mode = world_ptr;
+    input.set(
+        "cursor_grab_mode",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_cursor_grab_mode as *mut World) };
+            let Some(cursor_control) = world.get_resource::<EditorCursorControlState>() else {
+                return Ok(RuntimeCursorGrabMode::None.as_str().to_string());
+            };
+            Ok(cursor_control
+                .effective_policy()
+                .grab_mode
+                .as_str()
+                .to_string())
+        })?,
+    )?;
+
+    let world_ptr_set_cursor_visible = world_ptr;
+    input.set(
+        "set_cursor_visible",
+        lua.create_function(move |_, visible: bool| {
+            let world = unsafe { &mut *(world_ptr_set_cursor_visible as *mut World) };
+            let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>()
+            else {
+                return Ok(false);
+            };
+            let mut policy = cursor_control.script_policy.unwrap_or_default();
+            policy.visible = visible;
+            cursor_control.script_policy = Some(policy);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_cursor_grab = world_ptr;
+    input.set(
+        "set_cursor_grab",
+        lua.create_function(move |_, mode: Value| {
+            let world = unsafe { &mut *(world_ptr_set_cursor_grab as *mut World) };
+            let Some(grab_mode) = parse_cursor_grab_mode(mode) else {
+                return Ok(false);
+            };
+            let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>()
+            else {
+                return Ok(false);
+            };
+            let mut policy = cursor_control.script_policy.unwrap_or_default();
+            policy.grab_mode = grab_mode;
+            cursor_control.script_policy = Some(policy);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_reset_cursor_control = world_ptr;
+    input.set(
+        "reset_cursor_control",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_reset_cursor_control as *mut World) };
+            let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>()
+            else {
+                return Ok(false);
+            };
+            cursor_control.script_policy = None;
+            Ok(true)
+        })?,
+    )?;
+
     let world_ptr_gamepad_ids = world_ptr;
     input.set(
         "gamepad_ids",
@@ -7822,6 +7891,31 @@ fn parse_gamepad_axis_name(name: &str) -> Option<gilrs::Axis> {
         "rightz" | "rz" => Some(gilrs::Axis::RightZ),
         "dpadx" | "dx" => Some(gilrs::Axis::DPadX),
         "dpady" | "dy" => Some(gilrs::Axis::DPadY),
+        _ => None,
+    }
+}
+
+fn parse_cursor_grab_mode(value: Value) -> Option<RuntimeCursorGrabMode> {
+    match value {
+        Value::Nil => Some(RuntimeCursorGrabMode::None),
+        Value::Boolean(value) => Some(if value {
+            RuntimeCursorGrabMode::Locked
+        } else {
+            RuntimeCursorGrabMode::None
+        }),
+        Value::String(value) => {
+            let normalized = normalize_name(&value.to_string_lossy());
+            match normalized.as_str() {
+                "none" | "free" | "off" | "release" | "released" => {
+                    Some(RuntimeCursorGrabMode::None)
+                }
+                "confined" | "confine" | "clip" | "clipped" => {
+                    Some(RuntimeCursorGrabMode::Confined)
+                }
+                "locked" | "lock" | "capture" | "captured" => Some(RuntimeCursorGrabMode::Locked),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

@@ -22,12 +22,15 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     platform::web::WindowExtWebSys,
-    window::{Window, WindowAttributes, WindowId},
+    window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
 use super::{
     RuntimeLogLayer,
-    common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning},
+    common::{
+        LogicClock, PerformanceMetrics, RuntimeCursorGrabMode, RuntimeCursorState,
+        RuntimeProfiling, RuntimeTuning,
+    },
 };
 use crate::{
     graphics::{
@@ -461,6 +464,8 @@ pub struct Runtime<T: 'static = ()> {
 
     window: Option<Arc<Window>>,
     window_settings: WindowSettingsCache,
+    pub cursor_state: Arc<RuntimeCursorState>,
+    cursor_apply_pending: bool,
 
     user_state: Option<Arc<Mutex<T>>>,
     callbacks: RuntimeCallbacks<T>,
@@ -535,6 +540,8 @@ impl<T: 'static> Runtime<T> {
 
             window: None,
             window_settings: WindowSettingsCache::new("helmer engine"),
+            cursor_state: Arc::new(RuntimeCursorState::default()),
+            cursor_apply_pending: true,
 
             user_state: Some(Arc::new(Mutex::new(user_state))),
             callbacks: RuntimeCallbacks {
@@ -682,6 +689,8 @@ impl<T: 'static> Runtime<T> {
         self.resize_triggered = false;
         self.last_resize = Instant::now();
         self.logic_clock.reset(Instant::now());
+        self.cursor_apply_pending = true;
+        self.apply_cursor_state_to_window();
 
         new_size
     }
@@ -694,6 +703,76 @@ impl<T: 'static> Runtime<T> {
         );
         let size = self.attach_window(Arc::clone(&window));
         (window, size)
+    }
+
+    fn apply_cursor_state_to_window(&mut self) {
+        let warp_request = self.cursor_state.take_warp_request();
+        let dirty = self.cursor_state.take_dirty();
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if !dirty && !self.cursor_apply_pending {
+            if let Some((x, y)) = warp_request {
+                if let Err(err) = window.set_cursor_position(PhysicalPosition::new(x, y)) {
+                    warn!("failed to reposition cursor for freecam capture: {err}");
+                }
+            }
+            return;
+        }
+        self.cursor_apply_pending = false;
+
+        let snapshot = self.cursor_state.snapshot();
+        let candidates: &[RuntimeCursorGrabMode] = match snapshot.grab_mode {
+            RuntimeCursorGrabMode::Locked => &[
+                RuntimeCursorGrabMode::Locked,
+                RuntimeCursorGrabMode::Confined,
+                RuntimeCursorGrabMode::None,
+            ],
+            RuntimeCursorGrabMode::Confined => {
+                &[RuntimeCursorGrabMode::Confined, RuntimeCursorGrabMode::None]
+            }
+            RuntimeCursorGrabMode::None => &[RuntimeCursorGrabMode::None],
+        };
+
+        let mut applied_grab_mode = RuntimeCursorGrabMode::None;
+        let mut last_grab_error: Option<String> = None;
+        for candidate in candidates {
+            match window.set_cursor_grab(runtime_grab_mode_to_winit(*candidate)) {
+                Ok(()) => {
+                    applied_grab_mode = *candidate;
+                    last_grab_error = None;
+                    break;
+                }
+                Err(err) => {
+                    last_grab_error = Some(err.to_string());
+                }
+            }
+        }
+
+        if snapshot.grab_mode != applied_grab_mode {
+            if let Some(err) = last_grab_error {
+                warn!(
+                    "failed to apply cursor grab mode {} (fallback {}): {}",
+                    snapshot.grab_mode.as_str(),
+                    applied_grab_mode.as_str(),
+                    err
+                );
+            } else if snapshot.grab_mode != RuntimeCursorGrabMode::None {
+                warn!(
+                    "cursor grab mode {} unavailable, using {}",
+                    snapshot.grab_mode.as_str(),
+                    applied_grab_mode.as_str()
+                );
+            }
+        }
+
+        window.set_cursor_visible(snapshot.visible);
+
+        if let Some((x, y)) = warp_request {
+            if let Err(err) = window.set_cursor_position(PhysicalPosition::new(x, y)) {
+                warn!("failed to reposition cursor for freecam capture: {err}");
+            }
+        }
     }
 
     fn enqueue_renderer_init(&mut self, window: Arc<Window>, size: PhysicalSize<u32>) {
@@ -1052,9 +1131,16 @@ impl<T: 'static> ApplicationHandler for Runtime<T> {
             }
             WindowEvent::Focused(is_focused) => {
                 if !is_focused {
+                    if let Some(window) = self.window.as_ref() {
+                        let _ = window.set_cursor_grab(CursorGrabMode::None);
+                        window.set_cursor_visible(true);
+                    }
+                    self.cursor_apply_pending = true;
                     let mut input_manager_guard = self.input_manager.write();
                     input_manager_guard.clear_egui_state();
                     input_manager_guard.clear_queues();
+                } else {
+                    self.cursor_apply_pending = true;
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -1141,6 +1227,7 @@ impl<T: 'static> ApplicationHandler for Runtime<T> {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.handle_render_init();
+        self.apply_cursor_state_to_window();
 
         let profiling_enabled = self.profiling.enabled.load(Ordering::Relaxed);
         let update_start = if profiling_enabled {
@@ -1204,6 +1291,14 @@ impl<T: 'static> ApplicationHandler for Runtime<T> {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+fn runtime_grab_mode_to_winit(mode: RuntimeCursorGrabMode) -> CursorGrabMode {
+    match mode {
+        RuntimeCursorGrabMode::None => CursorGrabMode::None,
+        RuntimeCursorGrabMode::Confined => CursorGrabMode::Confined,
+        RuntimeCursorGrabMode::Locked => CursorGrabMode::Locked,
     }
 }
 

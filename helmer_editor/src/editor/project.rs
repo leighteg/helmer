@@ -969,6 +969,10 @@ type HelmerInput = {
     modifiers: () -> InputModifiers?,
     wants_keyboard: () -> boolean,
     wants_pointer: () -> boolean,
+    cursor_grab_mode: () -> string,
+    set_cursor_visible: (visible: boolean) -> boolean,
+    set_cursor_grab: (mode: "none" | "confined" | "locked" | boolean | nil) -> boolean,
+    reset_cursor_control: () -> boolean,
 
     gamepad_ids: () -> { number },
     gamepad_count: () -> number,
@@ -1048,6 +1052,10 @@ pub fn default_script_template_full() -> &'static str {
 --   input.modifiers() -> {shift, ctrl, alt, super}
 --   input.wants_keyboard() -> bool
 --   input.wants_pointer() -> bool
+--   input.cursor_grab_mode() -> "none"|"confined"|"locked"
+--   input.set_cursor_visible(visible) -> bool
+--   input.set_cursor_grab(mode) -> bool
+--   input.reset_cursor_control() -> bool
 --   input.gamepad_ids() -> {id, ...}
 --   input.gamepad_count() -> number
 --   input.gamepad_axis(axis, id?) -> number

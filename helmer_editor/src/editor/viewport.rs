@@ -6,6 +6,7 @@ use egui::{TextureHandle, TextureId};
 use glam::DVec2;
 
 use helmer::provided::components::{ActiveCamera, AudioListener};
+use helmer::runtime::runtime::{RuntimeCursorGrabMode, RuntimeCursorStateSnapshot};
 use helmer_becs::{BevyActiveCamera, BevyAudioListener, BevyCamera, BevyTransform, BevyWrapper};
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -159,6 +160,34 @@ impl ViewportRectPixels {
         let x = cursor.x as f32;
         let y = cursor.y as f32;
         x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct EditorCursorControlState {
+    pub freecam_capture_active: bool,
+    pub script_policy: Option<RuntimeCursorStateSnapshot>,
+}
+
+impl EditorCursorControlState {
+    pub fn effective_policy(&self) -> RuntimeCursorStateSnapshot {
+        if self.freecam_capture_active {
+            RuntimeCursorStateSnapshot {
+                visible: false,
+                grab_mode: RuntimeCursorGrabMode::Locked,
+            }
+        } else {
+            self.script_policy.unwrap_or_default()
+        }
+    }
+}
+
+impl Default for EditorCursorControlState {
+    fn default() -> Self {
+        Self {
+            freecam_capture_active: false,
+            script_policy: None,
+        }
     }
 }
 

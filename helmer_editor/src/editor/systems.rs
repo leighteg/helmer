@@ -30,18 +30,18 @@ use helmer_becs::systems::scene_system::{
 use helmer_becs::{
     AudioBackendResource, BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera,
     BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer,
-    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower, BevyTransform,
-    BevyWrapper, DeltaTime, DraggedFile,
+    BevyPoseOverride, BevyRuntimeCursorState, BevySkinnedMeshRenderer, BevySpline,
+    BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
 };
 use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
-    EditorLayout, EditorLayoutState, EditorPlayCamera, EditorTimelineState, EditorViewportCamera,
-    EditorViewportRuntime, EditorViewportState, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest,
-    NormalizedRect, PlayViewportKind, VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY,
-    VIEWPORT_ID_PREVIEW, ViewportRectPixels, activate_play_camera, activate_viewport_camera,
-    activate_viewport_camera_for_pane,
+    EditorCursorControlState, EditorLayout, EditorLayoutState, EditorPlayCamera,
+    EditorTimelineState, EditorViewportCamera, EditorViewportRuntime, EditorViewportState,
+    LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect, PlayViewportKind,
+    VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY, VIEWPORT_ID_PREVIEW, ViewportRectPixels,
+    activate_play_camera, activate_viewport_camera, activate_viewport_camera_for_pane,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
         MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
@@ -3399,6 +3399,8 @@ pub struct FreecamState {
     sensitivity: f32,
     fov_lerp_speed: f32,
     is_looking: bool,
+    look_start_cursor_position: Option<DVec2>,
+    lock_cursor_ready: bool,
     last_cursor_position: DVec2,
     current_fov_multiplier: f32,
     active_entity: Option<Entity>,
@@ -3416,6 +3418,8 @@ pub fn freecam_system(
     scene_state: Res<EditorSceneState>,
     viewport_state: Res<EditorViewportState>,
     viewport_runtime: Res<EditorViewportRuntime>,
+    runtime_cursor_state: Option<Res<BevyRuntimeCursorState>>,
+    mut cursor_control_state: ResMut<EditorCursorControlState>,
     mut viewport_query: bevy_ecs::prelude::Query<
         (Entity, &mut BevyTransform, &mut BevyCamera),
         (
@@ -3487,6 +3491,7 @@ pub fn freecam_system(
                 .first()
                 .map(|pane| pane.viewport_rect)
         });
+    let lock_cursor_position = pointer_rect.map(viewport_rect_center);
     let pointer_in_viewport = pointer_rect
         .map(|rect| rect.contains(cursor_position))
         .unwrap_or(false);
@@ -3502,6 +3507,7 @@ pub fn freecam_system(
     const CONTROLLER_SENSITIVITY: f32 = 2.0;
 
     let maybe_gamepad_id = input_manager.first_gamepad_id();
+    let was_looking = state.is_looking;
 
     let mut yaw_delta = 0.0;
     let mut pitch_delta = 0.0;
@@ -3512,22 +3518,49 @@ pub fn freecam_system(
         && (pointer_in_viewport || pointer_over_active_viewport || state.is_looking)
     {
         if !state.is_looking {
+            state.look_start_cursor_position = Some(cursor_position);
             state.last_cursor_position = cursor_position;
+            state.lock_cursor_ready = lock_cursor_position.is_none();
             state.is_looking = true;
         } else {
-            let cursor_delta = cursor_position - state.last_cursor_position;
-            state.last_cursor_position = cursor_position;
+            let cursor_delta = if let Some(lock_cursor_position) = lock_cursor_position {
+                state.last_cursor_position = cursor_position;
+                if !state.lock_cursor_ready {
+                    if cursor_positions_match(cursor_position, lock_cursor_position) {
+                        state.lock_cursor_ready = true;
+                    }
+                    DVec2::ZERO
+                } else {
+                    let delta = cursor_position - lock_cursor_position;
+                    if delta.length_squared() <= 0.25 {
+                        DVec2::ZERO
+                    } else {
+                        delta
+                    }
+                }
+            } else {
+                let delta = cursor_position - state.last_cursor_position;
+                state.last_cursor_position = cursor_position;
+                delta
+            };
 
             yaw_delta -= cursor_delta.x as f32 * state.sensitivity / 100.0;
             pitch_delta += cursor_delta.y as f32 * state.sensitivity / 100.0;
         }
     } else {
         state.is_looking = false;
+        state.lock_cursor_ready = false;
     }
 
     if gizmo_blocking {
         state.is_looking = false;
+        state.lock_cursor_ready = false;
     }
+    let restore_cursor_position = if was_looking && !state.is_looking {
+        state.look_start_cursor_position.take()
+    } else {
+        None
+    };
 
     let keyboard_active = state.is_looking && !gizmo_blocking;
 
@@ -3583,6 +3616,8 @@ pub fn freecam_system(
                 state.active_entity = Some(entity);
                 state.current_fov_multiplier = 1.0;
                 state.is_looking = false;
+                state.look_start_cursor_position = None;
+                state.lock_cursor_ready = false;
                 state.last_cursor_position = cursor_position;
             }
 
@@ -3660,10 +3695,24 @@ pub fn freecam_system(
     if let Some(active_entity) = active_camera_entity {
         if let Ok((entity, mut transform, mut camera)) = viewport_query.get_mut(active_entity) {
             apply_freecam(entity, &mut transform, &mut camera);
+            sync_editor_cursor_control(
+                &state,
+                &mut cursor_control_state,
+                runtime_cursor_state.as_deref(),
+                lock_cursor_position,
+                restore_cursor_position,
+            );
             return;
         }
         if let Ok((entity, mut transform, mut camera)) = play_query.get_mut(active_entity) {
             apply_freecam(entity, &mut transform, &mut camera);
+            sync_editor_cursor_control(
+                &state,
+                &mut cursor_control_state,
+                runtime_cursor_state.as_deref(),
+                lock_cursor_position,
+                restore_cursor_position,
+            );
             return;
         }
     }
@@ -3685,6 +3734,14 @@ pub fn freecam_system(
             }
         }
     }
+
+    sync_editor_cursor_control(
+        &state,
+        &mut cursor_control_state,
+        runtime_cursor_state.as_deref(),
+        lock_cursor_position,
+        restore_cursor_position,
+    );
 }
 
 fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
@@ -3692,4 +3749,42 @@ fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
     let yaw = forward.x.atan2(forward.z);
     let pitch = (-forward.y).asin();
     (yaw, pitch)
+}
+
+fn viewport_rect_center(rect: ViewportRectPixels) -> DVec2 {
+    DVec2::new(
+        ((rect.min_x + rect.max_x) * 0.5) as f64,
+        ((rect.min_y + rect.max_y) * 0.5) as f64,
+    )
+}
+
+fn cursor_positions_match(a: DVec2, b: DVec2) -> bool {
+    (a.x - b.x).abs() <= 0.5 && (a.y - b.y).abs() <= 0.5
+}
+
+fn sync_editor_cursor_control(
+    freecam_state: &FreecamState,
+    cursor_control_state: &mut EditorCursorControlState,
+    runtime_cursor_state: Option<&BevyRuntimeCursorState>,
+    lock_cursor_position: Option<DVec2>,
+    restore_cursor_position: Option<DVec2>,
+) {
+    cursor_control_state.freecam_capture_active = freecam_state.is_looking;
+
+    if let Some(runtime_cursor_state) = runtime_cursor_state {
+        runtime_cursor_state
+            .0
+            .set(cursor_control_state.effective_policy());
+        if freecam_state.is_looking {
+            if let Some(lock_cursor_position) = lock_cursor_position {
+                runtime_cursor_state
+                    .0
+                    .request_warp(lock_cursor_position.x, lock_cursor_position.y);
+            }
+        } else if let Some(restore_cursor_position) = restore_cursor_position {
+            runtime_cursor_state
+                .0
+                .request_warp(restore_cursor_position.x, restore_cursor_position.y);
+        }
+    }
 }

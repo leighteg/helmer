@@ -25,12 +25,15 @@ use winit::{
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
 use super::{
     RuntimeLogLayer,
-    common::{LogicClock, PerformanceMetrics, RuntimeProfiling, RuntimeTuning},
+    common::{
+        LogicClock, PerformanceMetrics, RuntimeCursorGrabMode, RuntimeCursorState,
+        RuntimeProfiling, RuntimeTuning,
+    },
 };
 use crate::{
     graphics::{
@@ -259,7 +262,10 @@ pub struct Runtime<T: Send + 'static = ()> {
 
     // Window management
     window: Option<Arc<Window>>,
+    logic_window: Arc<RwLock<Option<Arc<Window>>>>,
     window_settings: WindowSettingsCache,
+    pub cursor_state: Arc<RuntimeCursorState>,
+    cursor_apply_pending: bool,
 
     pub user_state: Option<Arc<Mutex<T>>>,
     callbacks: RuntimeCallbacks<T>,
@@ -337,7 +343,10 @@ impl<T: Send + 'static> Runtime<T> {
             egui_winit_state: None,
 
             window: None,
+            logic_window: Arc::new(RwLock::new(None)),
             window_settings: WindowSettingsCache::new("helmer engine"),
+            cursor_state: Arc::new(RuntimeCursorState::default()),
+            cursor_apply_pending: true,
 
             user_state: Some(Arc::new(Mutex::new(user_state))),
             callbacks: RuntimeCallbacks {
@@ -405,6 +414,8 @@ impl<T: Send + 'static> Runtime<T> {
         let state = Arc::clone(&self.logic_thread_state);
         let metrics = Arc::clone(&self.metrics);
         let profiling = Arc::clone(&self.profiling);
+        let logic_window = Arc::clone(&self.logic_window);
+        let cursor_state = Arc::clone(&self.cursor_state);
         let tick_callback = Arc::clone(&self.callbacks.tick);
         let user_state = Arc::clone(self.user_state.as_ref().unwrap());
         let has_init = Arc::clone(&self.has_init);
@@ -549,6 +560,12 @@ impl<T: Send + 'static> Runtime<T> {
                 }
 
                 input_manager.write().prepare_for_next_frame();
+
+                if cursor_state.has_pending_update() {
+                    if let Some(window) = logic_window.read().as_ref().map(Arc::clone) {
+                        window.request_redraw();
+                    }
+                }
 
                 // tick rate limiting
                 let logic_elapsed = frame_start.elapsed();
@@ -1019,6 +1036,7 @@ impl<T: Send + 'static> Runtime<T> {
     fn attach_window(&mut self, window: Arc<Window>) -> PhysicalSize<u32> {
         let new_size = window.inner_size();
         self.window = Some(Arc::clone(&window));
+        *self.logic_window.write() = Some(Arc::clone(&window));
         self.window_settings.sync_geometry_from_window(&window);
         self.draw_splash();
         self.window_settings.apply_post_create(&window);
@@ -1051,6 +1069,8 @@ impl<T: Send + 'static> Runtime<T> {
         self.new_window_size = None;
         self.resize_triggered = false;
         self.last_resize = Instant::now();
+        self.cursor_apply_pending = true;
+        self.apply_cursor_state_to_window();
 
         new_size
     }
@@ -1079,6 +1099,76 @@ impl<T: Send + 'static> Runtime<T> {
             })
         {
             warn!("failed to send window recreation to render thread: {}", err);
+        }
+    }
+
+    fn apply_cursor_state_to_window(&mut self) {
+        let warp_request = self.cursor_state.take_warp_request();
+        let dirty = self.cursor_state.take_dirty();
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if !dirty && !self.cursor_apply_pending {
+            if let Some((x, y)) = warp_request {
+                if let Err(err) = window.set_cursor_position(PhysicalPosition::new(x, y)) {
+                    warn!("failed to reposition cursor for freecam capture: {err}");
+                }
+            }
+            return;
+        }
+        self.cursor_apply_pending = false;
+
+        let snapshot = self.cursor_state.snapshot();
+        let candidates: &[RuntimeCursorGrabMode] = match snapshot.grab_mode {
+            RuntimeCursorGrabMode::Locked => &[
+                RuntimeCursorGrabMode::Locked,
+                RuntimeCursorGrabMode::Confined,
+                RuntimeCursorGrabMode::None,
+            ],
+            RuntimeCursorGrabMode::Confined => {
+                &[RuntimeCursorGrabMode::Confined, RuntimeCursorGrabMode::None]
+            }
+            RuntimeCursorGrabMode::None => &[RuntimeCursorGrabMode::None],
+        };
+
+        let mut applied_grab_mode = RuntimeCursorGrabMode::None;
+        let mut last_grab_error: Option<String> = None;
+        for candidate in candidates {
+            match window.set_cursor_grab(runtime_grab_mode_to_winit(*candidate)) {
+                Ok(()) => {
+                    applied_grab_mode = *candidate;
+                    last_grab_error = None;
+                    break;
+                }
+                Err(err) => {
+                    last_grab_error = Some(err.to_string());
+                }
+            }
+        }
+
+        if snapshot.grab_mode != applied_grab_mode {
+            if let Some(err) = last_grab_error {
+                warn!(
+                    "failed to apply cursor grab mode {} (fallback {}): {}",
+                    snapshot.grab_mode.as_str(),
+                    applied_grab_mode.as_str(),
+                    err
+                );
+            } else if snapshot.grab_mode != RuntimeCursorGrabMode::None {
+                warn!(
+                    "cursor grab mode {} unavailable, using {}",
+                    snapshot.grab_mode.as_str(),
+                    applied_grab_mode.as_str()
+                );
+            }
+        }
+
+        window.set_cursor_visible(snapshot.visible);
+
+        if let Some((x, y)) = warp_request {
+            if let Err(err) = window.set_cursor_position(PhysicalPosition::new(x, y)) {
+                warn!("failed to reposition cursor for freecam capture: {err}");
+            }
         }
     }
 
@@ -1272,11 +1362,18 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
 
             WindowEvent::Focused(is_focused) => {
                 if !is_focused {
+                    if let Some(window) = self.window.as_ref() {
+                        let _ = window.set_cursor_grab(CursorGrabMode::None);
+                        window.set_cursor_visible(true);
+                    }
+                    self.cursor_apply_pending = true;
                     // clear InputManager's state when we unfocus the window
                     let mut input_manager_guard = self.input_manager.write();
 
                     input_manager_guard.clear_egui_state();
                     input_manager_guard.clear_queues();
+                } else {
+                    self.cursor_apply_pending = true;
                 }
             }
 
@@ -1396,6 +1493,7 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                 warn!("failed to send render init: {}", err);
             }
         }
+        self.apply_cursor_state_to_window();
         let profiling_enabled = self.profiling.enabled.load(Ordering::Relaxed);
         let update_start = if profiling_enabled {
             Some(Instant::now())
@@ -1464,6 +1562,14 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                 .main_update_us
                 .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+    }
+}
+
+fn runtime_grab_mode_to_winit(mode: RuntimeCursorGrabMode) -> CursorGrabMode {
+    match mode {
+        RuntimeCursorGrabMode::None => CursorGrabMode::None,
+        RuntimeCursorGrabMode::Confined => CursorGrabMode::Confined,
+        RuntimeCursorGrabMode::Locked => CursorGrabMode::Locked,
     }
 }
 

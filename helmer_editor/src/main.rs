@@ -8,13 +8,14 @@ use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_b
 
 use helmer_editor::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
-    EditorCommand, EditorCommandQueue, EditorConsoleState, EditorGizmoSettings, EditorGizmoState,
-    EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneViewportState,
-    EditorPaneVisibility, EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh,
-    EditorSceneState, EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState,
-    EditorUndoState, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
-    EditorWorkspaceState, EntityDragState, FileWatchState, HierarchyUiState,
-    InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
+    EditorCommand, EditorCommandQueue, EditorConsoleState, EditorCursorControlState,
+    EditorGizmoSettings, EditorGizmoState, EditorMeshOutlineCache, EditorPaneAutoState,
+    EditorPaneManagerState, EditorPaneViewportState, EditorPaneVisibility,
+    EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh, EditorSceneState,
+    EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState, EditorUndoState,
+    EditorViewportRuntime, EditorViewportState, EditorViewportTextures, EditorWorkspaceState,
+    EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
+    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
     PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
     ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
     VisualScriptEditorState, activate_viewport_camera, apply_scene_child_animations_system,
@@ -93,6 +94,7 @@ fn editor_init(
     world.insert_resource(EditorTimelineState::default());
     world.insert_resource(EditorViewportState::default());
     world.insert_resource(EditorViewportRuntime::default());
+    world.insert_resource(EditorCursorControlState::default());
     world.insert_resource(EditorViewportTextures::default());
     world.insert_resource(RenderGizmoState::default());
     world.insert_resource(RenderMainSceneToSwapchain(false));

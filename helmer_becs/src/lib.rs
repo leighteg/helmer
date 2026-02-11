@@ -24,7 +24,9 @@ use helmer::{
         asset_server::AssetServer,
         config::RuntimeConfig,
         input_manager::InputManager,
-        runtime::{PerformanceMetrics, Runtime, RuntimeProfiling, RuntimeTuning},
+        runtime::{
+            PerformanceMetrics, Runtime, RuntimeCursorState, RuntimeProfiling, RuntimeTuning,
+        },
     },
 };
 use parking_lot::{Mutex, RwLock};
@@ -112,6 +114,8 @@ pub struct BevyRuntimeConfig(pub RuntimeConfig);
 pub struct BevyRuntimeTuning(pub Arc<RuntimeTuning>);
 #[derive(Resource)]
 pub struct BevyRuntimeProfiling(pub Arc<RuntimeProfiling>);
+#[derive(Resource)]
+pub struct BevyRuntimeCursorState(pub Arc<RuntimeCursorState>);
 #[derive(Resource)]
 pub struct BevyRendererStats(pub Arc<RendererStats>);
 #[derive(Resource)]
@@ -259,6 +263,9 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<BevyRuntimeTuning>(BevyRuntimeTuning(runtime.tuning.clone()));
             world.insert_resource::<BevyRuntimeProfiling>(BevyRuntimeProfiling(
                 runtime.profiling.clone(),
+            ));
+            world.insert_resource::<BevyRuntimeCursorState>(BevyRuntimeCursorState(
+                runtime.cursor_state.clone(),
             ));
             #[cfg(target_arch = "wasm32")]
             world.insert_non_send_resource::<BevyAssetServer>(BevyAssetServer(

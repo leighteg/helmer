@@ -11014,8 +11014,8 @@ pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
 }
 
 #[derive(Clone)]
-struct AssetDragPayload {
-    paths: Vec<PathBuf>,
+pub struct AssetDragPayload {
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Clone)]

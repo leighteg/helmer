@@ -1,7 +1,9 @@
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bevy_ecs::prelude::{Resource, World};
@@ -11,6 +13,8 @@ use egui_snarl::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+
+use crate::editor::AssetDragPayload;
 
 pub const VISUAL_SCRIPT_EXTENSION: &str = "hvs";
 const VISUAL_SCRIPT_VERSION: u32 = 1;
@@ -34,6 +38,19 @@ pub enum VisualValueType {
     Vec3,
     Quat,
     Transform,
+    Camera,
+    Light,
+    MeshRenderer,
+    AudioEmitter,
+    AudioListener,
+    Script,
+    Physics,
+    PhysicsVelocity,
+    PhysicsWorldDefaults,
+    CharacterControllerOutput,
+    PhysicsRayCastHit,
+    PhysicsPointProjectionHit,
+    PhysicsShapeCastHit,
     #[default]
     Json,
 }
@@ -49,12 +66,25 @@ impl VisualValueType {
             Self::Vec3 => "Vec3",
             Self::Quat => "Quat",
             Self::Transform => "Transform",
+            Self::Camera => "Camera",
+            Self::Light => "Light",
+            Self::MeshRenderer => "Mesh Renderer",
+            Self::AudioEmitter => "Audio Emitter",
+            Self::AudioListener => "Audio Listener",
+            Self::Script => "Script",
+            Self::Physics => "Physics",
+            Self::PhysicsVelocity => "Physics Velocity",
+            Self::PhysicsWorldDefaults => "Physics World Defaults",
+            Self::CharacterControllerOutput => "Character Output",
+            Self::PhysicsRayCastHit => "Ray Cast Hit",
+            Self::PhysicsPointProjectionHit => "Point Projection Hit",
+            Self::PhysicsShapeCastHit => "Shape Cast Hit",
             Self::Json => "Json",
         }
     }
 }
 
-const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 9] = [
+const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 22] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -63,6 +93,19 @@ const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 9] = [
     VisualValueType::Vec3,
     VisualValueType::Quat,
     VisualValueType::Transform,
+    VisualValueType::Camera,
+    VisualValueType::Light,
+    VisualValueType::MeshRenderer,
+    VisualValueType::AudioEmitter,
+    VisualValueType::AudioListener,
+    VisualValueType::Script,
+    VisualValueType::Physics,
+    VisualValueType::PhysicsVelocity,
+    VisualValueType::PhysicsWorldDefaults,
+    VisualValueType::CharacterControllerOutput,
+    VisualValueType::PhysicsRayCastHit,
+    VisualValueType::PhysicsPointProjectionHit,
+    VisualValueType::PhysicsShapeCastHit,
     VisualValueType::Json,
 ];
 
@@ -249,6 +292,7 @@ pub enum VisualApiOperation {
     EcsTriggerAnimator,
     InputCursor,
     InputCursorDelta,
+    InputCursorGrabMode,
     InputGamepadAxis,
     InputGamepadButton,
     InputGamepadButtonDown,
@@ -267,6 +311,9 @@ pub enum VisualApiOperation {
     InputMousePressed,
     InputMouseReleased,
     InputScaleFactor,
+    InputSetCursorVisible,
+    InputSetCursorGrab,
+    InputResetCursorControl,
     InputWantsKeyboard,
     InputWantsPointer,
     InputWheel,
@@ -324,7 +371,7 @@ impl VisualApiOperation {
 }
 
 #[allow(dead_code)]
-const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 125] = [
+const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsAddComponent,
     VisualApiOperation::EcsAddForce,
     VisualApiOperation::EcsAddForceAtPoint,
@@ -428,6 +475,7 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 125] = [
     VisualApiOperation::EcsTriggerAnimator,
     VisualApiOperation::InputCursor,
     VisualApiOperation::InputCursorDelta,
+    VisualApiOperation::InputCursorGrabMode,
     VisualApiOperation::InputGamepadAxis,
     VisualApiOperation::InputGamepadButton,
     VisualApiOperation::InputGamepadButtonDown,
@@ -446,6 +494,9 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 125] = [
     VisualApiOperation::InputMousePressed,
     VisualApiOperation::InputMouseReleased,
     VisualApiOperation::InputScaleFactor,
+    VisualApiOperation::InputSetCursorVisible,
+    VisualApiOperation::InputSetCursorGrab,
+    VisualApiOperation::InputResetCursorControl,
     VisualApiOperation::InputWantsKeyboard,
     VisualApiOperation::InputWantsPointer,
     VisualApiOperation::InputWheel,
@@ -911,8 +962,88 @@ const API_INPUTS_47: [VisualApiInputSpec; 2] = [
         value_type: VisualValueType::Transform,
     },
 ];
+const API_INPUTS_48: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::AudioEmitter,
+    },
+];
+const API_INPUTS_49: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::AudioListener,
+    },
+];
+const API_INPUTS_50: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::Camera,
+    },
+];
+const API_INPUTS_51: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::Light,
+    },
+];
+const API_INPUTS_52: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::MeshRenderer,
+    },
+];
+const API_INPUTS_53: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::Physics,
+    },
+];
+const API_INPUTS_54: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::PhysicsVelocity,
+    },
+];
+const API_INPUTS_55: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::PhysicsWorldDefaults,
+    },
+];
 
-const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
+const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsAddComponent,
         table: VisualScriptApiTable::Ecs,
@@ -1151,7 +1282,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::AudioEmitter),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetAudioEnabled,
@@ -1181,7 +1312,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::AudioListener),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetAudioSceneVolume,
@@ -1221,7 +1352,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Camera),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetCharacterControllerOutput,
@@ -1231,7 +1362,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::CharacterControllerOutput),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetDynamicComponent,
@@ -1271,7 +1402,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Light),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetMeshRenderer,
@@ -1281,7 +1412,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::MeshRenderer),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysics,
@@ -1291,7 +1422,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Physics),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsGravity,
@@ -1311,7 +1442,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::PhysicsPointProjectionHit),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsRayCastHit,
@@ -1321,7 +1452,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::PhysicsRayCastHit),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsRunning,
@@ -1341,7 +1472,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::PhysicsShapeCastHit),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsVelocity,
@@ -1351,7 +1482,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::PhysicsVelocity),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsWorldDefaults,
@@ -1361,7 +1492,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::PhysicsWorldDefaults),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetSceneAsset,
@@ -1380,8 +1511,8 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Get Script",
         category: "Get",
         flow: VisualApiFlow::Pure,
-        inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        inputs: &API_INPUTS_18,
+        output_type: Some(VisualValueType::Script),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetSpline,
@@ -1620,7 +1751,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Audio Emitter",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_48,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1650,7 +1781,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Audio Listener",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_49,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1690,7 +1821,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Camera",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_50,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1730,7 +1861,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Light",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_51,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1740,7 +1871,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Mesh Renderer",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_52,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1770,7 +1901,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Physics",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_53,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1800,7 +1931,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Physics Velocity",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_54,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1810,7 +1941,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         title: "Set Physics World Defaults",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_26,
+        inputs: &API_INPUTS_55,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1942,6 +2073,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
         output_type: Some(VisualValueType::Vec2),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputCursorGrabMode,
+        table: VisualScriptApiTable::Input,
+        function: "cursor_grab_mode",
+        title: "Cursor Grab Mode",
+        category: "Window",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputGamepadAxis,
@@ -2124,6 +2265,36 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 125] = [
         output_type: Some(VisualValueType::Number),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::InputSetCursorVisible,
+        table: VisualScriptApiTable::Input,
+        function: "set_cursor_visible",
+        title: "Set Cursor Visible",
+        category: "Window",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_27,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputSetCursorGrab,
+        table: VisualScriptApiTable::Input,
+        function: "set_cursor_grab",
+        title: "Set Cursor Grab",
+        category: "Window",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_39,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputResetCursorControl,
+        table: VisualScriptApiTable::Input,
+        function: "reset_cursor_control",
+        title: "Reset Cursor Control",
+        category: "Window",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::InputWantsKeyboard,
         table: VisualScriptApiTable::Input,
         function: "wants_keyboard",
@@ -2234,6 +2405,82 @@ impl VisualLogicalOp {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualVec2Component {
+    #[default]
+    X,
+    Y,
+}
+
+impl VisualVec2Component {
+    fn title(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualVec3Component {
+    #[default]
+    X,
+    Y,
+    Z,
+}
+
+impl VisualVec3Component {
+    fn title(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualQuatComponent {
+    #[default]
+    X,
+    Y,
+    Z,
+    W,
+}
+
+impl VisualQuatComponent {
+    fn title(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+            Self::W => "W",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualTransformComponent {
+    #[default]
+    Position,
+    Rotation,
+    Scale,
+}
+
+impl VisualTransformComponent {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Position => "Position",
+            Self::Rotation => "Rotation",
+            Self::Scale => "Scale",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VisualScriptNodeKind {
@@ -2334,6 +2581,38 @@ pub enum VisualScriptNodeKind {
     Select {
         #[serde(default = "default_select_value_type")]
         value_type: VisualValueType,
+    },
+    Vec2GetComponent {
+        #[serde(default)]
+        component: VisualVec2Component,
+    },
+    Vec2SetComponent {
+        #[serde(default)]
+        component: VisualVec2Component,
+    },
+    Vec3GetComponent {
+        #[serde(default)]
+        component: VisualVec3Component,
+    },
+    Vec3SetComponent {
+        #[serde(default)]
+        component: VisualVec3Component,
+    },
+    QuatGetComponent {
+        #[serde(default)]
+        component: VisualQuatComponent,
+    },
+    QuatSetComponent {
+        #[serde(default)]
+        component: VisualQuatComponent,
+    },
+    TransformGetComponent {
+        #[serde(default)]
+        component: VisualTransformComponent,
+    },
+    TransformSetComponent {
+        #[serde(default)]
+        component: VisualTransformComponent,
     },
     Vec2,
     Vec3,
@@ -2436,6 +2715,18 @@ impl VisualScriptNodeKind {
             Self::LogicalBinary { op } => format!("Logical: {}", op.title()),
             Self::Not => "Not".to_string(),
             Self::Select { .. } => "Select".to_string(),
+            Self::Vec2GetComponent { component } => format!("Vec2 Get {}", component.title()),
+            Self::Vec2SetComponent { component } => format!("Vec2 Set {}", component.title()),
+            Self::Vec3GetComponent { component } => format!("Vec3 Get {}", component.title()),
+            Self::Vec3SetComponent { component } => format!("Vec3 Set {}", component.title()),
+            Self::QuatGetComponent { component } => format!("Quat Get {}", component.title()),
+            Self::QuatSetComponent { component } => format!("Quat Set {}", component.title()),
+            Self::TransformGetComponent { component } => {
+                format!("Transform Get {}", component.title())
+            }
+            Self::TransformSetComponent { component } => {
+                format!("Transform Set {}", component.title())
+            }
             Self::Vec2 => "Vec2".to_string(),
             Self::Vec3 => "Vec3".to_string(),
             Self::Quat => "Quat".to_string(),
@@ -2463,6 +2754,14 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2GetComponent { .. }
+            | Self::Vec2SetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::TransformSetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
@@ -2504,6 +2803,14 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2GetComponent { .. }
+            | Self::Vec2SetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::TransformSetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
@@ -2522,6 +2829,14 @@ impl VisualScriptNodeKind {
                 operation.spec().inputs.len().min(MAX_API_ARGS)
             }
             Self::MathBinary { .. } | Self::Compare { .. } | Self::LogicalBinary { .. } => 2,
+            Self::Vec2GetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::TransformGetComponent { .. } => 1,
+            Self::Vec2SetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformSetComponent { .. } => 2,
             Self::Vec2 => 2,
             Self::Vec3 | Self::Select { .. } | Self::Transform => 3,
             Self::Quat => 4,
@@ -2557,6 +2872,14 @@ impl VisualScriptNodeKind {
             | Self::LogicalBinary { .. }
             | Self::Not
             | Self::Select { .. }
+            | Self::Vec2GetComponent { .. }
+            | Self::Vec2SetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::TransformSetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
@@ -2660,6 +2983,38 @@ impl VisualScriptNodeKind {
                     }
                 }
                 Self::Not => "Value".to_string(),
+                Self::Vec2GetComponent { .. } => "Vec2".to_string(),
+                Self::Vec2SetComponent { component } => {
+                    if slot.index == 0 {
+                        "Vec2".to_string()
+                    } else {
+                        component.title().to_string()
+                    }
+                }
+                Self::Vec3GetComponent { .. } => "Vec3".to_string(),
+                Self::Vec3SetComponent { component } => {
+                    if slot.index == 0 {
+                        "Vec3".to_string()
+                    } else {
+                        component.title().to_string()
+                    }
+                }
+                Self::QuatGetComponent { .. } => "Quat".to_string(),
+                Self::QuatSetComponent { component } => {
+                    if slot.index == 0 {
+                        "Quat".to_string()
+                    } else {
+                        component.title().to_string()
+                    }
+                }
+                Self::TransformGetComponent { .. } => "Transform".to_string(),
+                Self::TransformSetComponent { component } => {
+                    if slot.index == 0 {
+                        "Transform".to_string()
+                    } else {
+                        component.title().to_string()
+                    }
+                }
                 Self::Vec2 => {
                     if slot.index == 0 {
                         "X".to_string()
@@ -2718,6 +3073,14 @@ impl VisualScriptNodeKind {
                     .output_type
                     .map(|value| value.title().to_string())
                     .unwrap_or_else(|| "Result".to_string()),
+                Self::Vec2GetComponent { component } => component.title().to_string(),
+                Self::Vec2SetComponent { .. } => "Vec2".to_string(),
+                Self::Vec3GetComponent { component } => component.title().to_string(),
+                Self::Vec3SetComponent { .. } => "Vec3".to_string(),
+                Self::QuatGetComponent { component } => component.title().to_string(),
+                Self::QuatSetComponent { .. } => "Quat".to_string(),
+                Self::TransformGetComponent { component } => component.title().to_string(),
+                Self::TransformSetComponent { .. } => "Transform".to_string(),
                 Self::Vec2 => "Vec2".to_string(),
                 Self::Vec3 => "Vec3".to_string(),
                 Self::Quat => "Quat".to_string(),
@@ -2800,6 +3163,39 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         VisualValueType::Transform => {
             "{\"position\":{\"x\":0,\"y\":0,\"z\":0},\"rotation\":{\"x\":0,\"y\":0,\"z\":0,\"w\":1},\"scale\":{\"x\":1,\"y\":1,\"z\":1}}"
         }
+        VisualValueType::Camera => {
+            "{\"fov_y_rad\":1.0,\"aspect_ratio\":1.7777778,\"near_plane\":0.1,\"far_plane\":2000.0,\"active\":false}"
+        }
+        VisualValueType::Light => {
+            "{\"type\":\"Point\",\"color\":{\"x\":1,\"y\":1,\"z\":1},\"intensity\":10.0}"
+        }
+        VisualValueType::MeshRenderer => {
+            "{\"source\":\"Cube\",\"casts_shadow\":true,\"visible\":true}"
+        }
+        VisualValueType::AudioEmitter => {
+            "{\"path\":null,\"streaming\":false,\"bus\":\"Master\",\"volume\":1.0,\"pitch\":1.0,\"looping\":false,\"spatial\":true,\"min_distance\":1.0,\"max_distance\":30.0,\"rolloff\":1.0,\"spatial_blend\":1.0,\"play_on_spawn\":false,\"playback_state\":\"Stopped\"}"
+        }
+        VisualValueType::AudioListener => "{\"enabled\":true}",
+        VisualValueType::Script => "{\"path\":\"\",\"language\":\"lua\"}",
+        VisualValueType::Physics => {
+            "{\"body_kind\":{\"type\":\"Fixed\"},\"collider_shape\":{\"type\":\"Cuboid\"},\"rigid_body_properties\":{\"linear_damping\":0.0,\"angular_damping\":0.0,\"gravity_scale\":1.0,\"ccd_enabled\":false,\"can_sleep\":true,\"sleeping\":false,\"dominance_group\":0,\"lock_translation_x\":false,\"lock_translation_y\":false,\"lock_translation_z\":false,\"lock_rotation_x\":false,\"lock_rotation_y\":false,\"lock_rotation_z\":false,\"linear_velocity\":{\"x\":0,\"y\":0,\"z\":0},\"angular_velocity\":{\"x\":0,\"y\":0,\"z\":0}},\"collider_properties\":{\"friction\":0.5,\"restitution\":0.0,\"density\":1.0,\"enabled\":true,\"is_sensor\":false}}"
+        }
+        VisualValueType::PhysicsVelocity => {
+            "{\"linear\":{\"x\":0,\"y\":0,\"z\":0},\"angular\":{\"x\":0,\"y\":0,\"z\":0},\"wake_up\":true}"
+        }
+        VisualValueType::PhysicsWorldDefaults => "{\"gravity\":{\"x\":0,\"y\":-9.81,\"z\":0}}",
+        VisualValueType::CharacterControllerOutput => {
+            "{\"effective_translation\":{\"x\":0,\"y\":0,\"z\":0},\"grounded\":false,\"sliding_down_slope\":false,\"collision_count\":0}"
+        }
+        VisualValueType::PhysicsRayCastHit => {
+            "{\"has_hit\":false,\"hit_entity\":null,\"point\":{\"x\":0,\"y\":0,\"z\":0},\"normal\":{\"x\":0,\"y\":1,\"z\":0},\"toi\":0.0}"
+        }
+        VisualValueType::PhysicsPointProjectionHit => {
+            "{\"has_hit\":false,\"hit_entity\":null,\"projected_point\":{\"x\":0,\"y\":0,\"z\":0},\"is_inside\":false,\"distance\":0.0}"
+        }
+        VisualValueType::PhysicsShapeCastHit => {
+            "{\"has_hit\":false,\"hit_entity\":null,\"toi\":0.0,\"witness1\":{\"x\":0,\"y\":0,\"z\":0},\"witness2\":{\"x\":0,\"y\":0,\"z\":0},\"normal1\":{\"x\":0,\"y\":1,\"z\":0},\"normal2\":{\"x\":0,\"y\":1,\"z\":0},\"status\":\"Unknown\"}"
+        }
         VisualValueType::Json => "null",
     }
 }
@@ -2816,12 +3212,26 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
         VisualValueType::Number | VisualValueType::Entity => json_to_log_string(value),
         VisualValueType::String => match value {
             JsonValue::String(text) => text.clone(),
+            JsonValue::Null => String::new(),
             _ => json_to_log_string(value),
         },
         VisualValueType::Vec2
         | VisualValueType::Vec3
         | VisualValueType::Quat
         | VisualValueType::Transform
+        | VisualValueType::Camera
+        | VisualValueType::Light
+        | VisualValueType::MeshRenderer
+        | VisualValueType::AudioEmitter
+        | VisualValueType::AudioListener
+        | VisualValueType::Script
+        | VisualValueType::Physics
+        | VisualValueType::PhysicsVelocity
+        | VisualValueType::PhysicsWorldDefaults
+        | VisualValueType::CharacterControllerOutput
+        | VisualValueType::PhysicsRayCastHit
+        | VisualValueType::PhysicsPointProjectionHit
+        | VisualValueType::PhysicsShapeCastHit
         | VisualValueType::Json => compact_json_string(value),
     }
 }
@@ -2857,6 +3267,116 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
             }
         }
         JsonValue::Object(object) => {
+            let has_camera = (object.contains_key("fov_y_rad")
+                || object.contains_key("aspect_ratio")
+                || object.contains_key("near_plane")
+                || object.contains_key("far_plane")
+                || object.contains_key("active"))
+                && object
+                    .get("fov_y_rad")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("aspect_ratio")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("near_plane")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("far_plane")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true);
+            let has_light = (object.contains_key("type")
+                || object.contains_key("color")
+                || object.contains_key("intensity")
+                || object.contains_key("angle"))
+                && object
+                    .get("type")
+                    .map(|entry| matches!(entry, JsonValue::String(_) | JsonValue::Null))
+                    .unwrap_or(true)
+                && object
+                    .get("color")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("intensity")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("angle")
+                    .map(|entry| coerce_json_to_f64(entry).is_ok())
+                    .unwrap_or(true);
+            let has_mesh_renderer = object.contains_key("source")
+                || object.contains_key("material")
+                || object.contains_key("casts_shadow")
+                || object.contains_key("visible");
+            let has_audio_emitter = object.contains_key("path")
+                || object.contains_key("streaming")
+                || object.contains_key("bus")
+                || object.contains_key("volume")
+                || object.contains_key("pitch")
+                || object.contains_key("looping")
+                || object.contains_key("spatial")
+                || object.contains_key("min_distance")
+                || object.contains_key("max_distance")
+                || object.contains_key("rolloff")
+                || object.contains_key("spatial_blend")
+                || object.contains_key("play_on_spawn")
+                || object.contains_key("playback_state")
+                || object.contains_key("clip_id");
+            let has_audio_listener = object.contains_key("enabled") && object.len() == 1;
+            let has_script = object.contains_key("path") && object.contains_key("language");
+            let has_physics_velocity = (object.contains_key("linear")
+                || object.contains_key("angular")
+                || object.contains_key("wake_up"))
+                && object
+                    .get("linear")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
+                    .unwrap_or(true)
+                && object
+                    .get("angular")
+                    .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
+                    .unwrap_or(true);
+            let has_physics_world_defaults = (object.contains_key("gravity")
+                || object.contains_key("collider_properties")
+                || object.contains_key("rigid_body_properties"))
+                && !object.contains_key("body_kind")
+                && !object.contains_key("collider_shape")
+                && !object.contains_key("joint")
+                && !object.contains_key("character_controller")
+                && !object.contains_key("ray_cast")
+                && !object.contains_key("point_projection")
+                && !object.contains_key("shape_cast")
+                && !object.contains_key("world_defaults");
+            let has_character_output = object.contains_key("effective_translation")
+                || object.contains_key("grounded")
+                || object.contains_key("sliding_down_slope")
+                || object.contains_key("collision_count");
+            let has_ray_hit = object.contains_key("point")
+                && object.contains_key("normal")
+                && object.contains_key("toi");
+            let has_point_hit =
+                object.contains_key("projected_point") && object.contains_key("distance");
+            let has_shape_hit = object.contains_key("witness1")
+                && object.contains_key("witness2")
+                && object.contains_key("normal1")
+                && object.contains_key("normal2");
+            let has_physics = object.contains_key("body_kind")
+                || object.contains_key("collider_shape")
+                || object.contains_key("collider_properties")
+                || object.contains_key("collider_inheritance")
+                || object.contains_key("rigid_body_properties")
+                || object.contains_key("rigid_body_inheritance")
+                || object.contains_key("joint")
+                || object.contains_key("character_controller")
+                || object.contains_key("character_input")
+                || object.contains_key("ray_cast")
+                || object.contains_key("point_projection")
+                || object.contains_key("shape_cast")
+                || object.contains_key("world_defaults")
+                || object.contains_key("has_handle");
             let has_vec2 = object.contains_key("x")
                 && object.contains_key("y")
                 && !object.contains_key("z")
@@ -2894,7 +3414,33 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                     .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3).is_ok())
                     .unwrap_or(true);
 
-            if has_transform {
+            if has_shape_hit {
+                VisualValueType::PhysicsShapeCastHit
+            } else if has_point_hit {
+                VisualValueType::PhysicsPointProjectionHit
+            } else if has_ray_hit {
+                VisualValueType::PhysicsRayCastHit
+            } else if has_character_output {
+                VisualValueType::CharacterControllerOutput
+            } else if has_physics_velocity {
+                VisualValueType::PhysicsVelocity
+            } else if has_physics_world_defaults {
+                VisualValueType::PhysicsWorldDefaults
+            } else if has_physics {
+                VisualValueType::Physics
+            } else if has_script {
+                VisualValueType::Script
+            } else if has_audio_emitter {
+                VisualValueType::AudioEmitter
+            } else if has_audio_listener {
+                VisualValueType::AudioListener
+            } else if has_mesh_renderer {
+                VisualValueType::MeshRenderer
+            } else if has_camera {
+                VisualValueType::Camera
+            } else if has_light {
+                VisualValueType::Light
+            } else if has_transform {
                 VisualValueType::Transform
             } else if has_quat {
                 VisualValueType::Quat
@@ -2926,6 +3472,110 @@ fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueTyp
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisualAssetPathKind {
+    Scene,
+    Script,
+    Model,
+    Material,
+    Audio,
+}
+
+fn is_scene_asset_path(path: &Path) -> bool {
+    let is_ron = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("ron"))
+        .unwrap_or(false);
+    if !is_ron {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".hscene.ron"))
+        .unwrap_or(false)
+}
+
+fn is_model_asset_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "glb" | "gltf"))
+        .unwrap_or(false)
+}
+
+fn is_material_asset_path(path: &Path) -> bool {
+    let is_ron = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("ron"))
+        .unwrap_or(false);
+    if !is_ron {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    !(name.eq_ignore_ascii_case("helmer_project.ron")
+        || name.ends_with(".hscene.ron")
+        || name.ends_with(".hanim.ron"))
+}
+
+fn is_audio_asset_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "wav" | "ogg" | "flac" | "mp3" | "aiff" | "aif" | "aifc"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn asset_path_matches_kind(path: &Path, kind: VisualAssetPathKind) -> bool {
+    match kind {
+        VisualAssetPathKind::Scene => is_scene_asset_path(path) || is_model_asset_path(path),
+        VisualAssetPathKind::Script => crate::editor::is_script_path(path),
+        VisualAssetPathKind::Model => is_model_asset_path(path),
+        VisualAssetPathKind::Material => is_material_asset_path(path),
+        VisualAssetPathKind::Audio => is_audio_asset_path(path),
+    }
+}
+
+fn api_input_asset_path_kind(
+    operation: VisualApiOperation,
+    input_index: usize,
+) -> Option<VisualAssetPathKind> {
+    match operation {
+        VisualApiOperation::EcsOpenScene | VisualApiOperation::EcsSwitchScene
+            if input_index == 0 =>
+        {
+            Some(VisualAssetPathKind::Scene)
+        }
+        VisualApiOperation::EcsSetSceneAsset if input_index == 1 => {
+            Some(VisualAssetPathKind::Scene)
+        }
+        VisualApiOperation::EcsSetScript if input_index == 1 => Some(VisualAssetPathKind::Script),
+        _ => None,
+    }
+}
+
+fn path_to_visual_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn typed_dnd_release_payload<Payload>(response: &egui::Response) -> Option<Arc<Payload>>
+where
+    Payload: Any + Send + Sync,
+{
+    if response.dnd_hover_payload::<Payload>().is_some() {
+        response.dnd_release_payload::<Payload>()
+    } else {
+        None
+    }
+}
+
 fn api_input_label(operation: VisualApiOperation, input_index: usize) -> String {
     let spec = operation.spec();
     let Some(input) = spec.inputs.get(input_index) else {
@@ -2950,8 +3600,39 @@ fn api_input_label(operation: VisualApiOperation, input_index: usize) -> String 
         "Value" if operation == VisualApiOperation::EcsSetViewportPreviewCamera => {
             "Camera Entity Id".to_string()
         }
+        "Index" if operation == VisualApiOperation::EcsGetScript => "Script Index".to_string(),
         label => label.to_string(),
     }
+}
+
+fn has_structured_api_default_editor(operation: VisualApiOperation, input_index: usize) -> bool {
+    matches!(
+        (operation, input_index),
+        (VisualApiOperation::EcsSetCamera, 1)
+            | (VisualApiOperation::EcsSetLight, 1)
+            | (VisualApiOperation::EcsSetMeshRenderer, 1)
+            | (VisualApiOperation::EcsSetAudioEmitter, 1)
+            | (VisualApiOperation::EcsSetAudioListener, 1)
+            | (VisualApiOperation::EcsSetPhysics, 1)
+            | (VisualApiOperation::EcsSetPhysicsVelocity, 1)
+            | (VisualApiOperation::EcsSetPhysicsWorldDefaults, 1)
+            | (VisualApiOperation::EcsSetDynamicComponent, 2)
+            | (VisualApiOperation::EcsSetDynamicField, 3)
+    )
+}
+
+fn api_input_prefers_vertical_default_layout(
+    operation: VisualApiOperation,
+    input_index: usize,
+) -> bool {
+    matches!(
+        (operation, input_index),
+        (VisualApiOperation::EcsSetPhysics, 1)
+            | (VisualApiOperation::EcsSetMeshRenderer, 1)
+            | (VisualApiOperation::EcsSetLight, 1)
+            | (VisualApiOperation::EcsSetAudioEmitter, 1)
+            | (VisualApiOperation::EcsSetDynamicComponent, 2)
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3197,6 +3878,42 @@ fn node_data_input_type(
                 Some(*value_type)
             }
         }
+        VisualScriptNodeKind::Vec2GetComponent { .. } => Some(VisualValueType::Vec2),
+        VisualScriptNodeKind::Vec2SetComponent { .. } => {
+            if input_index == 0 {
+                Some(VisualValueType::Vec2)
+            } else {
+                Some(VisualValueType::Number)
+            }
+        }
+        VisualScriptNodeKind::Vec3GetComponent { .. } => Some(VisualValueType::Vec3),
+        VisualScriptNodeKind::Vec3SetComponent { .. } => {
+            if input_index == 0 {
+                Some(VisualValueType::Vec3)
+            } else {
+                Some(VisualValueType::Number)
+            }
+        }
+        VisualScriptNodeKind::QuatGetComponent { .. } => Some(VisualValueType::Quat),
+        VisualScriptNodeKind::QuatSetComponent { .. } => {
+            if input_index == 0 {
+                Some(VisualValueType::Quat)
+            } else {
+                Some(VisualValueType::Number)
+            }
+        }
+        VisualScriptNodeKind::TransformGetComponent { .. } => Some(VisualValueType::Transform),
+        VisualScriptNodeKind::TransformSetComponent { component } => {
+            if input_index == 0 {
+                Some(VisualValueType::Transform)
+            } else {
+                Some(match component {
+                    VisualTransformComponent::Position => VisualValueType::Vec3,
+                    VisualTransformComponent::Rotation => VisualValueType::Quat,
+                    VisualTransformComponent::Scale => VisualValueType::Vec3,
+                })
+            }
+        }
         VisualScriptNodeKind::Vec2 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Number),
@@ -3239,6 +3956,18 @@ fn node_data_output_type(
         VisualScriptNodeKind::JsonLiteral { .. } => Some(VisualValueType::Json),
         VisualScriptNodeKind::SelfEntity => Some(VisualValueType::Entity),
         VisualScriptNodeKind::Select { value_type } => Some(*value_type),
+        VisualScriptNodeKind::Vec2GetComponent { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::Vec2SetComponent { .. } => Some(VisualValueType::Vec2),
+        VisualScriptNodeKind::Vec3GetComponent { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::Vec3SetComponent { .. } => Some(VisualValueType::Vec3),
+        VisualScriptNodeKind::QuatGetComponent { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::QuatSetComponent { .. } => Some(VisualValueType::Quat),
+        VisualScriptNodeKind::TransformGetComponent { component } => Some(match component {
+            VisualTransformComponent::Position => VisualValueType::Vec3,
+            VisualTransformComponent::Rotation => VisualValueType::Quat,
+            VisualTransformComponent::Scale => VisualValueType::Vec3,
+        }),
+        VisualScriptNodeKind::TransformSetComponent { .. } => Some(VisualValueType::Transform),
         VisualScriptNodeKind::Vec2 => Some(VisualValueType::Vec2),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Vec3),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Quat),
@@ -3552,6 +4281,14 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::LogicalBinary { .. }
             | VisualScriptNodeKind::Not
             | VisualScriptNodeKind::Select { .. }
+            | VisualScriptNodeKind::Vec2GetComponent { .. }
+            | VisualScriptNodeKind::Vec2SetComponent { .. }
+            | VisualScriptNodeKind::Vec3GetComponent { .. }
+            | VisualScriptNodeKind::Vec3SetComponent { .. }
+            | VisualScriptNodeKind::QuatGetComponent { .. }
+            | VisualScriptNodeKind::QuatSetComponent { .. }
+            | VisualScriptNodeKind::TransformGetComponent { .. }
+            | VisualScriptNodeKind::TransformSetComponent { .. }
             | VisualScriptNodeKind::Vec2
             | VisualScriptNodeKind::Vec3
             | VisualScriptNodeKind::Quat
@@ -3786,6 +4523,177 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 };
                 coerce_json_to_visual_type(&selected, *value_type)?
             }
+            VisualScriptNodeKind::Vec2GetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0}"),
+                    stack,
+                )?;
+                let (x, y) = coerce_json_to_vec2_components(&value)?;
+                let number = match component {
+                    VisualVec2Component::X => x,
+                    VisualVec2Component::Y => y,
+                };
+                json_number(number)
+            }
+            VisualScriptNodeKind::Vec2SetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0}"),
+                    stack,
+                )?;
+                let (mut x, mut y) = coerce_json_to_vec2_components(&value)?;
+                let updated = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                match component {
+                    VisualVec2Component::X => x = updated,
+                    VisualVec2Component::Y => y = updated,
+                }
+                vec2_json(x, y)
+            }
+            VisualScriptNodeKind::Vec3GetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                    stack,
+                )?;
+                let (x, y, z) = coerce_json_to_vec3_components(&value)?;
+                let number = match component {
+                    VisualVec3Component::X => x,
+                    VisualVec3Component::Y => y,
+                    VisualVec3Component::Z => z,
+                };
+                json_number(number)
+            }
+            VisualScriptNodeKind::Vec3SetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                    stack,
+                )?;
+                let (mut x, mut y, mut z) = coerce_json_to_vec3_components(&value)?;
+                let updated = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                match component {
+                    VisualVec3Component::X => x = updated,
+                    VisualVec3Component::Y => y = updated,
+                    VisualVec3Component::Z => z = updated,
+                }
+                vec3_json(x, y, z)
+            }
+            VisualScriptNodeKind::QuatGetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0,\"w\":1}"),
+                    stack,
+                )?;
+                let (x, y, z, w) = coerce_json_to_quat_components(&value)?;
+                let number = match component {
+                    VisualQuatComponent::X => x,
+                    VisualQuatComponent::Y => y,
+                    VisualQuatComponent::Z => z,
+                    VisualQuatComponent::W => w,
+                };
+                json_number(number)
+            }
+            VisualScriptNodeKind::QuatSetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0,\"w\":1}"),
+                    stack,
+                )?;
+                let (mut x, mut y, mut z, mut w) = coerce_json_to_quat_components(&value)?;
+                let updated = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                match component {
+                    VisualQuatComponent::X => x = updated,
+                    VisualQuatComponent::Y => y = updated,
+                    VisualQuatComponent::Z => z = updated,
+                    VisualQuatComponent::W => w = updated,
+                }
+                quat_json(x, y, z, w)
+            }
+            VisualScriptNodeKind::TransformGetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some(default_literal_for_type(VisualValueType::Transform)),
+                    stack,
+                )?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Transform)?;
+                let object = normalized
+                    .as_object()
+                    .ok_or_else(|| "Transform values must be JSON objects".to_string())?;
+                match component {
+                    VisualTransformComponent::Position => object
+                        .get("position")
+                        .cloned()
+                        .ok_or_else(|| "Transform value missing position".to_string())?,
+                    VisualTransformComponent::Rotation => object
+                        .get("rotation")
+                        .cloned()
+                        .ok_or_else(|| "Transform value missing rotation".to_string())?,
+                    VisualTransformComponent::Scale => object
+                        .get("scale")
+                        .cloned()
+                        .ok_or_else(|| "Transform value missing scale".to_string())?,
+                }
+            }
+            VisualScriptNodeKind::TransformSetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some(default_literal_for_type(VisualValueType::Transform)),
+                    stack,
+                )?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Transform)?;
+                let mut object = normalized
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| "Transform values must be JSON objects".to_string())?;
+                let replacement = match component {
+                    VisualTransformComponent::Position => {
+                        let value = self.resolve_data_input_with_stack(
+                            node_id,
+                            1,
+                            Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                            stack,
+                        )?;
+                        coerce_json_to_visual_type(&value, VisualValueType::Vec3)?
+                    }
+                    VisualTransformComponent::Rotation => {
+                        let value = self.resolve_data_input_with_stack(
+                            node_id,
+                            1,
+                            Some("{\"x\":0,\"y\":0,\"z\":0,\"w\":1}"),
+                            stack,
+                        )?;
+                        coerce_json_to_visual_type(&value, VisualValueType::Quat)?
+                    }
+                    VisualTransformComponent::Scale => {
+                        let value = self.resolve_data_input_with_stack(
+                            node_id,
+                            1,
+                            Some("{\"x\":1,\"y\":1,\"z\":1}"),
+                            stack,
+                        )?;
+                        coerce_json_to_visual_type(&value, VisualValueType::Vec3)?
+                    }
+                };
+                object.insert(
+                    match component {
+                        VisualTransformComponent::Position => "position",
+                        VisualTransformComponent::Rotation => "rotation",
+                        VisualTransformComponent::Scale => "scale",
+                    }
+                    .to_string(),
+                    replacement,
+                );
+                JsonValue::Object(object)
+            }
             VisualScriptNodeKind::Vec2 => {
                 let x = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
                 let y = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
@@ -3936,6 +4844,7 @@ fn coerce_json_to_visual_type(
         VisualValueType::Number => Ok(json_number(coerce_json_to_f64(value)?)),
         VisualValueType::String => Ok(JsonValue::String(match value {
             JsonValue::String(text) => text.clone(),
+            JsonValue::Null => String::new(),
             _ => json_to_log_string(value),
         })),
         VisualValueType::Entity => {
@@ -3961,9 +4870,7 @@ fn coerce_json_to_visual_type(
             Ok(quat_json(x, y, z, w))
         }
         VisualValueType::Transform => {
-            let object = value
-                .as_object()
-                .ok_or_else(|| "Transform values must be JSON objects".to_string())?;
+            let object = coerce_json_to_loose_object(value, "Transform")?;
             let position = object
                 .get("position")
                 .cloned()
@@ -3991,7 +4898,499 @@ fn coerce_json_to_visual_type(
             );
             Ok(JsonValue::Object(out))
         }
+        VisualValueType::Camera => coerce_json_to_camera(value),
+        VisualValueType::Light => coerce_json_to_light(value),
+        VisualValueType::MeshRenderer => coerce_json_to_mesh_renderer(value),
+        VisualValueType::AudioEmitter => coerce_json_to_audio_emitter(value),
+        VisualValueType::AudioListener => coerce_json_to_audio_listener(value),
+        VisualValueType::Script => coerce_json_to_script_ref(value),
+        VisualValueType::Physics => {
+            coerce_json_to_default_object(value, "Physics", default_literal_for_type(value_type))
+        }
+        VisualValueType::PhysicsVelocity => coerce_json_to_physics_velocity(value),
+        VisualValueType::PhysicsWorldDefaults => coerce_json_to_physics_world_defaults(value),
+        VisualValueType::CharacterControllerOutput => coerce_json_to_character_output(value),
+        VisualValueType::PhysicsRayCastHit => coerce_json_to_ray_cast_hit(value),
+        VisualValueType::PhysicsPointProjectionHit => coerce_json_to_point_projection_hit(value),
+        VisualValueType::PhysicsShapeCastHit => coerce_json_to_shape_cast_hit(value),
     }
+}
+
+fn coerce_json_to_loose_object(
+    value: &JsonValue,
+    type_name: &str,
+) -> Result<JsonMap<String, JsonValue>, String> {
+    let parsed = match value {
+        JsonValue::String(text) => parse_loose_literal(text),
+        JsonValue::Null => JsonValue::Object(JsonMap::new()),
+        other => other.clone(),
+    };
+    match parsed {
+        JsonValue::Object(object) => Ok(object),
+        _ => Err(format!("{} values must be JSON objects", type_name)),
+    }
+}
+
+fn coerce_json_to_default_object(
+    value: &JsonValue,
+    type_name: &str,
+    default_literal: &str,
+) -> Result<JsonValue, String> {
+    let mut merged = parse_json_object_literal(default_literal);
+    let input = coerce_json_to_loose_object(value, type_name)?;
+    for (key, value) in input {
+        merged.insert(key, value);
+    }
+    Ok(JsonValue::Object(merged))
+}
+
+fn coerce_json_to_camera(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Camera")?;
+    let mut out = JsonMap::new();
+    let fov = object
+        .get("fov_y_rad")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0);
+    let aspect = object
+        .get("aspect_ratio")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(16.0 / 9.0);
+    let near = object
+        .get("near_plane")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.1)
+        .max(0.0001);
+    let far = object
+        .get("far_plane")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(2000.0)
+        .max(near);
+    let active = object.get("active").map(is_truthy).unwrap_or(false);
+    out.insert("fov_y_rad".to_string(), json_number(fov));
+    out.insert("aspect_ratio".to_string(), json_number(aspect));
+    out.insert("near_plane".to_string(), json_number(near));
+    out.insert("far_plane".to_string(), json_number(far));
+    out.insert("active".to_string(), JsonValue::Bool(active));
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_light(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Light")?;
+    let mut out = JsonMap::new();
+    let light_type = object
+        .get("type")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("Point")
+        .to_string();
+    let color = object
+        .get("color")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(1.0, 1.0, 1.0));
+    let intensity = object
+        .get("intensity")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(10.0)
+        .max(0.0);
+    let angle = object
+        .get("angle")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(45.0_f64.to_radians())
+        .max(0.0);
+    out.insert("type".to_string(), JsonValue::String(light_type.clone()));
+    out.insert("color".to_string(), color);
+    out.insert("intensity".to_string(), json_number(intensity));
+    if light_type.eq_ignore_ascii_case("spot") {
+        out.insert("angle".to_string(), json_number(angle));
+    }
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_mesh_renderer(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Mesh Renderer")?;
+    let mut out = JsonMap::new();
+    let source = object
+        .get("source")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("Cube")
+        .to_string();
+    let material = object
+        .get("material")
+        .and_then(JsonValue::as_str)
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+    let casts_shadow = object.get("casts_shadow").map(is_truthy).unwrap_or(true);
+    let visible = object.get("visible").map(is_truthy).unwrap_or(true);
+    out.insert("source".to_string(), JsonValue::String(source));
+    if !material.trim().is_empty() {
+        out.insert("material".to_string(), JsonValue::String(material));
+    }
+    out.insert("casts_shadow".to_string(), JsonValue::Bool(casts_shadow));
+    out.insert("visible".to_string(), JsonValue::Bool(visible));
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_audio_emitter(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Audio Emitter")?;
+    let mut out = JsonMap::new();
+    let path = object.get("path").cloned().unwrap_or(JsonValue::Null);
+    let streaming = object.get("streaming").map(is_truthy).unwrap_or(false);
+    let bus = object
+        .get("bus")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("Master")
+        .to_string();
+    let volume = object
+        .get("volume")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0)
+        .max(0.0);
+    let pitch = object
+        .get("pitch")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0)
+        .max(0.001);
+    let looping = object.get("looping").map(is_truthy).unwrap_or(false);
+    let spatial = object.get("spatial").map(is_truthy).unwrap_or(true);
+    let min_distance = object
+        .get("min_distance")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0)
+        .max(0.0);
+    let max_distance = object
+        .get("max_distance")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(30.0)
+        .max(min_distance);
+    let rolloff = object
+        .get("rolloff")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0)
+        .max(0.0);
+    let spatial_blend = object
+        .get("spatial_blend")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let playback_state = object
+        .get("playback_state")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("Stopped")
+        .to_string();
+    let play_on_spawn = object.get("play_on_spawn").map(is_truthy).unwrap_or(false);
+    out.insert(
+        "path".to_string(),
+        match path {
+            JsonValue::String(text) if !text.trim().is_empty() => JsonValue::String(text),
+            JsonValue::String(_) | JsonValue::Null => JsonValue::Null,
+            other => JsonValue::String(json_to_log_string(&other)),
+        },
+    );
+    out.insert("streaming".to_string(), JsonValue::Bool(streaming));
+    out.insert("bus".to_string(), JsonValue::String(bus));
+    out.insert("volume".to_string(), json_number(volume));
+    out.insert("pitch".to_string(), json_number(pitch));
+    out.insert("looping".to_string(), JsonValue::Bool(looping));
+    out.insert("spatial".to_string(), JsonValue::Bool(spatial));
+    out.insert("min_distance".to_string(), json_number(min_distance));
+    out.insert("max_distance".to_string(), json_number(max_distance));
+    out.insert("rolloff".to_string(), json_number(rolloff));
+    out.insert("spatial_blend".to_string(), json_number(spatial_blend));
+    out.insert("play_on_spawn".to_string(), JsonValue::Bool(play_on_spawn));
+    out.insert(
+        "playback_state".to_string(),
+        JsonValue::String(playback_state),
+    );
+    if let Some(clip_id) = object.get("clip_id") {
+        if let Ok(raw) = coerce_json_to_f64(clip_id) {
+            if raw.is_finite() && raw >= 0.0 {
+                out.insert(
+                    "clip_id".to_string(),
+                    JsonValue::Number(JsonNumber::from(raw as u64)),
+                );
+            }
+        }
+    }
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_audio_listener(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Audio Listener")?;
+    let mut out = JsonMap::new();
+    out.insert(
+        "enabled".to_string(),
+        JsonValue::Bool(object.get("enabled").map(is_truthy).unwrap_or(true)),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_script_ref(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Script")?;
+    let mut out = JsonMap::new();
+    let path = object
+        .get("path")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .to_string();
+    let language = object
+        .get("language")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("lua")
+        .to_string();
+    out.insert("path".to_string(), JsonValue::String(path));
+    out.insert("language".to_string(), JsonValue::String(language));
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_physics_velocity(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Physics Velocity")?;
+    let mut out = JsonMap::new();
+    let linear = object
+        .get("linear")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let angular = object
+        .get("angular")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let wake_up = object.get("wake_up").map(is_truthy).unwrap_or(true);
+    out.insert("linear".to_string(), linear);
+    out.insert("angular".to_string(), angular);
+    out.insert("wake_up".to_string(), JsonValue::Bool(wake_up));
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_physics_world_defaults(value: &JsonValue) -> Result<JsonValue, String> {
+    let mut merged = parse_json_object_literal(default_literal_for_type(
+        VisualValueType::PhysicsWorldDefaults,
+    ));
+    let input = coerce_json_to_loose_object(value, "Physics World Defaults")?;
+    if let Some(gravity) = input.get("gravity") {
+        merged.insert(
+            "gravity".to_string(),
+            coerce_json_to_visual_type(gravity, VisualValueType::Vec3)?,
+        );
+    }
+    if let Some(collider_properties) = input.get("collider_properties") {
+        merged.insert(
+            "collider_properties".to_string(),
+            collider_properties.clone(),
+        );
+    }
+    if let Some(rigid_body_properties) = input.get("rigid_body_properties") {
+        merged.insert(
+            "rigid_body_properties".to_string(),
+            rigid_body_properties.clone(),
+        );
+    }
+    Ok(JsonValue::Object(merged))
+}
+
+fn coerce_entity_or_null(value: Option<&JsonValue>) -> JsonValue {
+    let Some(value) = value else {
+        return JsonValue::Null;
+    };
+    if matches!(value, JsonValue::Null) {
+        return JsonValue::Null;
+    }
+    let Ok(raw) = coerce_json_to_f64(value) else {
+        return JsonValue::Null;
+    };
+    if !raw.is_finite() || raw < 0.0 {
+        return JsonValue::Null;
+    }
+    JsonValue::Number(JsonNumber::from(raw as u64))
+}
+
+fn coerce_json_to_character_output(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Character Output")?;
+    let mut out = JsonMap::new();
+    let effective_translation = object
+        .get("effective_translation")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let grounded = object.get("grounded").map(is_truthy).unwrap_or(false);
+    let sliding_down_slope = object
+        .get("sliding_down_slope")
+        .map(is_truthy)
+        .unwrap_or(false);
+    let collision_count = object
+        .get("collision_count")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+    out.insert("effective_translation".to_string(), effective_translation);
+    out.insert("grounded".to_string(), JsonValue::Bool(grounded));
+    out.insert(
+        "sliding_down_slope".to_string(),
+        JsonValue::Bool(sliding_down_slope),
+    );
+    out.insert(
+        "collision_count".to_string(),
+        JsonValue::Number(JsonNumber::from(collision_count.round() as u64)),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_ray_cast_hit(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Ray Cast Hit")?;
+    let mut out = JsonMap::new();
+    out.insert(
+        "has_hit".to_string(),
+        JsonValue::Bool(object.get("has_hit").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "hit_entity".to_string(),
+        coerce_entity_or_null(object.get("hit_entity")),
+    );
+    out.insert(
+        "point".to_string(),
+        object
+            .get("point")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0)),
+    );
+    out.insert(
+        "normal".to_string(),
+        object
+            .get("normal")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 1.0, 0.0)),
+    );
+    out.insert(
+        "toi".to_string(),
+        json_number(
+            object
+                .get("toi")
+                .map(coerce_json_to_f64)
+                .transpose()?
+                .unwrap_or(0.0)
+                .max(0.0),
+        ),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_point_projection_hit(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Point Projection Hit")?;
+    let mut out = JsonMap::new();
+    out.insert(
+        "has_hit".to_string(),
+        JsonValue::Bool(object.get("has_hit").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "hit_entity".to_string(),
+        coerce_entity_or_null(object.get("hit_entity")),
+    );
+    out.insert(
+        "projected_point".to_string(),
+        object
+            .get("projected_point")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0)),
+    );
+    out.insert(
+        "is_inside".to_string(),
+        JsonValue::Bool(object.get("is_inside").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "distance".to_string(),
+        json_number(
+            object
+                .get("distance")
+                .map(coerce_json_to_f64)
+                .transpose()?
+                .unwrap_or(0.0)
+                .max(0.0),
+        ),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_shape_cast_hit(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Shape Cast Hit")?;
+    let mut out = JsonMap::new();
+    out.insert(
+        "has_hit".to_string(),
+        JsonValue::Bool(object.get("has_hit").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "hit_entity".to_string(),
+        coerce_entity_or_null(object.get("hit_entity")),
+    );
+    out.insert(
+        "toi".to_string(),
+        json_number(
+            object
+                .get("toi")
+                .map(coerce_json_to_f64)
+                .transpose()?
+                .unwrap_or(0.0)
+                .max(0.0),
+        ),
+    );
+    out.insert(
+        "witness1".to_string(),
+        object
+            .get("witness1")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0)),
+    );
+    out.insert(
+        "witness2".to_string(),
+        object
+            .get("witness2")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0)),
+    );
+    out.insert(
+        "normal1".to_string(),
+        object
+            .get("normal1")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 1.0, 0.0)),
+    );
+    out.insert(
+        "normal2".to_string(),
+        object
+            .get("normal2")
+            .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+            .transpose()?
+            .unwrap_or_else(|| vec3_json(0.0, 1.0, 0.0)),
+    );
+    out.insert(
+        "status".to_string(),
+        JsonValue::String(
+            object
+                .get("status")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("Unknown")
+                .to_string(),
+        ),
+    );
+    Ok(JsonValue::Object(out))
 }
 
 fn coerce_json_to_vec2_components(value: &JsonValue) -> Result<(f64, f64), String> {
@@ -4439,6 +5838,40 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                     .id_salt(("visual_script_graph", &document.path))
                                     .min_size(min_size)
                                     .show(&mut document.snarl, &mut viewer, ui);
+
+                                if let Some(payload) =
+                                    typed_dnd_release_payload::<AssetDragPayload>(&snarl_response)
+                                {
+                                    if !viewer.consumed_asset_drop {
+                                        let drop_pos = snarl_response
+                                            .interact_pointer_pos()
+                                            .or_else(|| {
+                                                ui.ctx().input(|i| i.pointer.interact_pos())
+                                            })
+                                            .unwrap_or_else(|| ui.ctx().content_rect().center());
+                                        for (index, path) in payload.paths.iter().enumerate() {
+                                            viewer.pending_asset_drop_nodes.push((
+                                                path_to_visual_literal(path),
+                                                egui::pos2(
+                                                    drop_pos.x + index as f32 * 22.0,
+                                                    drop_pos.y + index as f32 * 18.0,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+
+                                if !viewer.pending_asset_drop_nodes.is_empty() {
+                                    for (value, pos) in
+                                        std::mem::take(&mut viewer.pending_asset_drop_nodes)
+                                    {
+                                        document.snarl.insert_node(
+                                            pos,
+                                            VisualScriptNodeKind::StringLiteral { value },
+                                        );
+                                    }
+                                    viewer.mark_changed();
+                                }
 
                                 if snarl_response.secondary_clicked() && !ui.ctx().is_popup_open() {
                                     let pointer_pos = ui
@@ -5402,6 +6835,8 @@ fn draw_variable_definitions_panel(
 #[derive(Default)]
 struct VisualScriptViewer {
     changed: bool,
+    consumed_asset_drop: bool,
+    pending_asset_drop_nodes: Vec<(String, egui::Pos2)>,
     variables: Vec<VisualVariableDefinition>,
 }
 
@@ -5409,6 +6844,8 @@ impl VisualScriptViewer {
     fn with_variables(variables: &[VisualVariableDefinition]) -> Self {
         Self {
             changed: false,
+            consumed_asset_drop: false,
+            pending_asset_drop_nodes: Vec::new(),
             variables: variables.to_vec(),
         }
     }
@@ -5743,10 +7180,58 @@ impl VisualScriptViewer {
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 }
+                if add_node_search_matches_any(&search, &["vec2", "component", "extract"]) {
+                    has_visible = true;
+                    if ui.button("Vec2 Get Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::Vec2GetComponent {
+                                component: VisualVec2Component::X,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["vec2", "component", "set", "mutate"]) {
+                    has_visible = true;
+                    if ui.button("Vec2 Set Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::Vec2SetComponent {
+                                component: VisualVec2Component::X,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
                 if add_node_search_matches_any(&search, &["vec3", "vector", "structured"]) {
                     has_visible = true;
                     if ui.button("Vec3").clicked() {
                         inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Vec3));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["vec3", "component", "extract"]) {
+                    has_visible = true;
+                    if ui.button("Vec3 Get Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::Vec3GetComponent {
+                                component: VisualVec3Component::X,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["vec3", "component", "set", "mutate"]) {
+                    has_visible = true;
+                    if ui.button("Vec3 Set Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::Vec3SetComponent {
+                                component: VisualVec3Component::X,
+                            },
+                        ));
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 }
@@ -5757,10 +7242,58 @@ impl VisualScriptViewer {
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 }
+                if add_node_search_matches_any(&search, &["quat", "component", "extract"]) {
+                    has_visible = true;
+                    if ui.button("Quat Get Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::QuatGetComponent {
+                                component: VisualQuatComponent::X,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["quat", "component", "set", "mutate"]) {
+                    has_visible = true;
+                    if ui.button("Quat Set Component").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::QuatSetComponent {
+                                component: VisualQuatComponent::X,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
                 if add_node_search_matches_any(&search, &["transform", "structured"]) {
                     has_visible = true;
                     if ui.button("Transform").clicked() {
                         inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Transform));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["transform", "extract", "part"]) {
+                    has_visible = true;
+                    if ui.button("Transform Get Part").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::TransformGetComponent {
+                                component: VisualTransformComponent::Position,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(&search, &["transform", "set", "part", "mutate"]) {
+                    has_visible = true;
+                    if ui.button("Transform Set Part").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::TransformSetComponent {
+                                component: VisualTransformComponent::Position,
+                            },
+                        ));
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 }
@@ -5847,44 +7380,128 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
         ui: &mut Ui,
         snarl: &mut Snarl<VisualScriptNodeKind>,
     ) -> PinInfo {
-        let Some((slot, label, color, value_type, allow_inline_default)) =
-            snarl.get_node(pin.id.node).and_then(|node| {
-                let slot = node.input_slot(pin.id.input)?;
-                let value_type = if matches!(slot.kind, PinKind::Data) {
-                    node_data_input_type(node, slot.index, &self.variables)
-                } else {
-                    None
-                };
-                let allow_inline_default = matches!(
-                    node,
-                    VisualScriptNodeKind::CallApi { .. } | VisualScriptNodeKind::QueryApi { .. }
-                ) && matches!(slot.kind, PinKind::Data);
-                Some((
-                    slot,
-                    node.input_label(slot),
-                    node.pin_color(slot, false),
-                    value_type,
-                    allow_inline_default,
-                ))
-            })
+        let Some((
+            slot,
+            label,
+            color,
+            value_type,
+            allow_inline_default,
+            asset_path_kind,
+            api_operation,
+        )) = snarl.get_node(pin.id.node).and_then(|node| {
+            let slot = node.input_slot(pin.id.input)?;
+            let value_type = if matches!(slot.kind, PinKind::Data) {
+                node_data_input_type(node, slot.index, &self.variables)
+            } else {
+                None
+            };
+            let allow_inline_default = matches!(
+                node,
+                VisualScriptNodeKind::CallApi { .. } | VisualScriptNodeKind::QueryApi { .. }
+            ) && matches!(slot.kind, PinKind::Data);
+            let (asset_path_kind, api_operation) = match node {
+                VisualScriptNodeKind::CallApi { operation, .. }
+                | VisualScriptNodeKind::QueryApi { operation, .. } => (
+                    api_input_asset_path_kind(*operation, slot.index),
+                    Some(*operation),
+                ),
+                _ => (None, None),
+            };
+            Some((
+                slot,
+                node.input_label(slot),
+                node.pin_color(slot, false),
+                value_type,
+                allow_inline_default,
+                asset_path_kind,
+                api_operation,
+            ))
+        })
         else {
             return PinInfo::square().with_fill(PIN_COLOR_EXEC);
         };
 
-        ui.horizontal(|ui| {
-            ui.small(label);
-            if allow_inline_default && pin.remotes.is_empty() {
-                if let Some(node) = snarl.get_node_mut(pin.id.node) {
-                    if let Some(default_literal) = api_input_default_literal_mut(node, slot.index) {
-                        ui.add_space(4.0);
-                        let input_type = value_type.unwrap_or(VisualValueType::Json);
-                        if draw_typed_pin_input_editor(ui, input_type, default_literal) {
-                            self.mark_changed();
-                        }
+        let has_structured_default = api_operation
+            .map(|operation| has_structured_api_default_editor(operation, slot.index))
+            .unwrap_or(false);
+        let prefers_vertical_layout = api_operation
+            .map(|operation| api_input_prefers_vertical_default_layout(operation, slot.index))
+            .unwrap_or(false);
+        let render_default =
+            |ui: &mut Ui,
+             this: &mut VisualScriptViewer,
+             snarl: &mut Snarl<VisualScriptNodeKind>| {
+                if !allow_inline_default || !pin.remotes.is_empty() {
+                    return;
+                }
+                let Some(node) = snarl.get_node_mut(pin.id.node) else {
+                    return;
+                };
+                let Some(default_literal) = api_input_default_literal_mut(node, slot.index) else {
+                    return;
+                };
+
+                ui.add_space(4.0);
+                let input_type = value_type.unwrap_or(VisualValueType::Json);
+                let mut changed = false;
+                let mut handled_by_structured = false;
+
+                if let Some(operation) = api_operation {
+                    if has_structured_api_default_editor(operation, slot.index) {
+                        handled_by_structured = true;
+                        changed |= draw_api_structured_default_editor(
+                            ui,
+                            operation,
+                            slot.index,
+                            default_literal,
+                            &mut this.pending_asset_drop_nodes,
+                            &mut this.consumed_asset_drop,
+                        );
                     }
                 }
-            }
-        });
+
+                if !handled_by_structured {
+                    if input_type == VisualValueType::String && asset_path_kind.is_some() {
+                        let response =
+                            ui.add(TextEdit::singleline(default_literal).desired_width(112.0));
+                        if response.changed() {
+                            changed = true;
+                        }
+                        if let Some(path_kind) = asset_path_kind {
+                            changed |= handle_asset_path_drop(
+                                ui,
+                                &response,
+                                path_kind,
+                                default_literal,
+                                &mut this.pending_asset_drop_nodes,
+                                &mut this.consumed_asset_drop,
+                            );
+                        }
+                    } else if draw_typed_pin_input_editor(ui, input_type, default_literal) {
+                        changed = true;
+                    }
+                }
+
+                if changed {
+                    this.mark_changed();
+                }
+            };
+
+        if has_structured_default
+            && prefers_vertical_layout
+            && allow_inline_default
+            && pin.remotes.is_empty()
+        {
+            ui.vertical(|ui| {
+                ui.small(label.as_str());
+                render_default(ui, self, snarl);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.small(label.as_str());
+                render_default(ui, self, snarl);
+            });
+        }
 
         PinInfo::square().with_fill(color)
     }
@@ -6176,6 +7793,146 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                             for candidate in VISUAL_VALUE_TYPE_CHOICES {
                                 if ui
                                     .selectable_value(value_type, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::Vec2GetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_vec2_get_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [VisualVec2Component::X, VisualVec2Component::Y] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::Vec2SetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_vec2_set_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [VisualVec2Component::X, VisualVec2Component::Y] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::Vec3GetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_vec3_get_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualVec3Component::X,
+                                VisualVec3Component::Y,
+                                VisualVec3Component::Z,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::Vec3SetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_vec3_set_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualVec3Component::X,
+                                VisualVec3Component::Y,
+                                VisualVec3Component::Z,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::QuatGetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_quat_get_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualQuatComponent::X,
+                                VisualQuatComponent::Y,
+                                VisualQuatComponent::Z,
+                                VisualQuatComponent::W,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::QuatSetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_quat_set_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualQuatComponent::X,
+                                VisualQuatComponent::Y,
+                                VisualQuatComponent::Z,
+                                VisualQuatComponent::W,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::TransformGetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_transform_get_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualTransformComponent::Position,
+                                VisualTransformComponent::Rotation,
+                                VisualTransformComponent::Scale,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::TransformSetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_transform_set_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualTransformComponent::Position,
+                                VisualTransformComponent::Rotation,
+                                VisualTransformComponent::Scale,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
                                     .changed()
                                 {
                                     self.mark_changed();
@@ -6579,6 +8336,1283 @@ fn draw_api_node_body(
     change
 }
 
+fn parse_json_object_literal(value: &str) -> JsonMap<String, JsonValue> {
+    match parse_loose_literal(value) {
+        JsonValue::Object(object) => object,
+        _ => JsonMap::new(),
+    }
+}
+
+fn json_object_field<'a>(
+    object: &'a JsonMap<String, JsonValue>,
+    key: &str,
+) -> Option<&'a JsonValue> {
+    object.get(key)
+}
+
+fn json_object_string(object: &JsonMap<String, JsonValue>, key: &str, default: &str) -> String {
+    json_object_field(object, key)
+        .and_then(|value| match value {
+            JsonValue::String(text) => Some(text.clone()),
+            JsonValue::Null => Some(String::new()),
+            _ => None,
+        })
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn json_object_bool(object: &JsonMap<String, JsonValue>, key: &str, default: bool) -> bool {
+    json_object_field(object, key)
+        .map(is_truthy)
+        .unwrap_or(default)
+}
+
+fn json_object_f64(object: &JsonMap<String, JsonValue>, key: &str, default: f64) -> f64 {
+    json_object_field(object, key)
+        .and_then(|value| coerce_json_to_f64(value).ok())
+        .unwrap_or(default)
+}
+
+fn json_object_i64(object: &JsonMap<String, JsonValue>, key: &str, default: i64) -> i64 {
+    json_object_field(object, key)
+        .and_then(|value| coerce_json_to_f64(value).ok())
+        .map(|value| value.round() as i64)
+        .unwrap_or(default)
+}
+
+fn json_object_vec3(
+    object: &JsonMap<String, JsonValue>,
+    key: &str,
+    default: (f64, f64, f64),
+) -> (f64, f64, f64) {
+    json_object_field(object, key)
+        .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or(default)
+}
+
+fn json_object_nested(
+    object: &JsonMap<String, JsonValue>,
+    key: &str,
+) -> JsonMap<String, JsonValue> {
+    json_object_field(object, key)
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn draw_vec3_row(ui: &mut Ui, label: &str, value: &mut (f64, f64, f64), speed: f64) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui.add(DragValue::new(&mut value.0).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.1).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.2).speed(speed)).changed();
+    });
+    changed
+}
+
+fn handle_asset_path_drop(
+    ui: &Ui,
+    response: &egui::Response,
+    kind: VisualAssetPathKind,
+    path_literal: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+) -> bool {
+    let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(response) else {
+        return false;
+    };
+
+    if let Some(path) = payload
+        .paths
+        .iter()
+        .find(|path| asset_path_matches_kind(path, kind))
+    {
+        *path_literal = path_to_visual_literal(path);
+        *consumed_asset_drop = true;
+        return true;
+    }
+
+    let drop_pos = response
+        .interact_pointer_pos()
+        .or_else(|| ui.ctx().input(|i| i.pointer.interact_pos()))
+        .unwrap_or_else(|| ui.ctx().content_rect().center());
+    for (index, path) in payload.paths.iter().enumerate() {
+        pending_asset_nodes.push((
+            path_to_visual_literal(path),
+            egui::pos2(
+                drop_pos.x + index as f32 * 22.0,
+                drop_pos.y + index as f32 * 18.0,
+            ),
+        ));
+    }
+    false
+}
+
+fn draw_camera_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut fov = json_object_f64(&object, "fov_y_rad", 1.0);
+    let mut aspect = json_object_f64(&object, "aspect_ratio", 16.0 / 9.0);
+    let mut near = json_object_f64(&object, "near_plane", 0.1);
+    let mut far = json_object_f64(&object, "far_plane", 2000.0);
+    let mut active = json_object_bool(&object, "active", false);
+
+    ui.horizontal(|ui| {
+        ui.label("FOV Y");
+        changed |= ui.add(DragValue::new(&mut fov).speed(0.01)).changed();
+        ui.label("Aspect");
+        changed |= ui.add(DragValue::new(&mut aspect).speed(0.01)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Near");
+        changed |= ui.add(DragValue::new(&mut near).speed(0.01)).changed();
+        ui.label("Far");
+        changed |= ui.add(DragValue::new(&mut far).speed(1.0)).changed();
+    });
+    changed |= ui.checkbox(&mut active, "Active camera").changed();
+
+    if changed {
+        object.insert("fov_y_rad".to_string(), json_number(fov));
+        object.insert("aspect_ratio".to_string(), json_number(aspect));
+        object.insert("near_plane".to_string(), json_number(near.max(0.0001)));
+        object.insert(
+            "far_plane".to_string(),
+            json_number(far.max(near.max(0.0001))),
+        );
+        object.insert("active".to_string(), JsonValue::Bool(active));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_light_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut light_type = json_object_string(&object, "type", "Point");
+    if light_type.is_empty() {
+        light_type = "Point".to_string();
+    }
+    let mut color = json_object_vec3(&object, "color", (1.0, 1.0, 1.0));
+    let mut intensity = json_object_f64(&object, "intensity", 10.0);
+    let mut angle = json_object_f64(&object, "angle", 45.0_f64.to_radians());
+
+    ui.horizontal(|ui| {
+        ui.label("Type");
+        ComboBox::from_id_salt(("visual_light_type_inline", ui.id()))
+            .selected_text(light_type.clone())
+            .show_ui(ui, |ui| {
+                for kind in ["Directional", "Point", "Spot"] {
+                    changed |= ui
+                        .selectable_value(&mut light_type, kind.to_string(), kind)
+                        .changed();
+                }
+            });
+    });
+    changed |= draw_vec3_row(ui, "Color", &mut color, 0.01);
+    ui.horizontal(|ui| {
+        ui.label("Intensity");
+        changed |= ui.add(DragValue::new(&mut intensity).speed(0.1)).changed();
+    });
+    if light_type.eq_ignore_ascii_case("spot") {
+        ui.horizontal(|ui| {
+            ui.label("Angle (rad)");
+            changed |= ui.add(DragValue::new(&mut angle).speed(0.01)).changed();
+        });
+    }
+
+    if changed {
+        object.insert("type".to_string(), JsonValue::String(light_type));
+        object.insert("color".to_string(), vec3_json(color.0, color.1, color.2));
+        object.insert("intensity".to_string(), json_number(intensity.max(0.0)));
+        if object
+            .get("type")
+            .and_then(JsonValue::as_str)
+            .map(|kind| kind.eq_ignore_ascii_case("spot"))
+            .unwrap_or(false)
+        {
+            object.insert("angle".to_string(), json_number(angle.max(0.0)));
+        } else {
+            object.remove("angle");
+        }
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_mesh_renderer_data_editor(
+    ui: &mut Ui,
+    value: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut source = json_object_string(&object, "source", "Cube");
+    if source.is_empty() {
+        source = "Cube".to_string();
+    }
+    let is_primitive = source.eq_ignore_ascii_case("cube")
+        || source.eq_ignore_ascii_case("uv sphere")
+        || source.eq_ignore_ascii_case("plane");
+    let mut source_mode_asset = !is_primitive;
+    let mut material = json_object_string(&object, "material", "");
+    let mut casts_shadow = json_object_bool(&object, "casts_shadow", true);
+    let mut visible = json_object_bool(&object, "visible", true);
+
+    ui.horizontal(|ui| {
+        ui.label("Source");
+        changed |= ui
+            .selectable_value(&mut source_mode_asset, false, "Primitive")
+            .changed();
+        changed |= ui
+            .selectable_value(&mut source_mode_asset, true, "Asset")
+            .changed();
+    });
+
+    if source_mode_asset {
+        ui.horizontal(|ui| {
+            ui.label("Mesh Path");
+            let response = ui.add(TextEdit::singleline(&mut source).desired_width(160.0));
+            changed |= response.changed();
+            changed |= handle_asset_path_drop(
+                ui,
+                &response,
+                VisualAssetPathKind::Model,
+                &mut source,
+                pending_asset_nodes,
+                consumed_asset_drop,
+            );
+        });
+    } else {
+        if !is_primitive {
+            source = "Cube".to_string();
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            ui.label("Primitive");
+            ComboBox::from_id_salt(("visual_mesh_source_primitive_inline", ui.id()))
+                .selected_text(source.clone())
+                .show_ui(ui, |ui| {
+                    for primitive in ["Cube", "UV Sphere", "Plane"] {
+                        changed |= ui
+                            .selectable_value(&mut source, primitive.to_string(), primitive)
+                            .changed();
+                    }
+                });
+        });
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Material");
+        let response = ui.add(TextEdit::singleline(&mut material).desired_width(160.0));
+        changed |= response.changed();
+        changed |= handle_asset_path_drop(
+            ui,
+            &response,
+            VisualAssetPathKind::Material,
+            &mut material,
+            pending_asset_nodes,
+            consumed_asset_drop,
+        );
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut casts_shadow, "Casts Shadow").changed();
+        changed |= ui.checkbox(&mut visible, "Visible").changed();
+    });
+
+    if changed {
+        object.insert("source".to_string(), JsonValue::String(source));
+        if material.trim().is_empty() {
+            object.remove("material");
+        } else {
+            object.insert("material".to_string(), JsonValue::String(material));
+        }
+        object.insert("casts_shadow".to_string(), JsonValue::Bool(casts_shadow));
+        object.insert("visible".to_string(), JsonValue::Bool(visible));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_audio_listener_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut enabled = json_object_bool(&object, "enabled", true);
+    let changed = ui.checkbox(&mut enabled, "Enabled").changed();
+    if changed {
+        object.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
+fn draw_audio_emitter_data_editor(
+    ui: &mut Ui,
+    value: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut path = json_object_string(&object, "path", "");
+    let mut streaming = json_object_bool(&object, "streaming", false);
+    let mut bus = json_object_string(&object, "bus", "Master");
+    if bus.is_empty() {
+        bus = "Master".to_string();
+    }
+    let mut volume = json_object_f64(&object, "volume", 1.0);
+    let mut pitch = json_object_f64(&object, "pitch", 1.0);
+    let mut looping = json_object_bool(&object, "looping", false);
+    let mut spatial = json_object_bool(&object, "spatial", true);
+    let mut min_distance = json_object_f64(&object, "min_distance", 1.0);
+    let mut max_distance = json_object_f64(&object, "max_distance", 30.0);
+    let mut rolloff = json_object_f64(&object, "rolloff", 1.0);
+    let mut spatial_blend = json_object_f64(&object, "spatial_blend", 1.0);
+    let mut play_on_spawn = json_object_bool(&object, "play_on_spawn", false);
+    let mut playback_state = json_object_string(&object, "playback_state", "Stopped");
+
+    ui.horizontal(|ui| {
+        ui.label("Audio Path");
+        let response = ui.add(TextEdit::singleline(&mut path).desired_width(180.0));
+        changed |= response.changed();
+        changed |= handle_asset_path_drop(
+            ui,
+            &response,
+            VisualAssetPathKind::Audio,
+            &mut path,
+            pending_asset_nodes,
+            consumed_asset_drop,
+        );
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut streaming, "Streaming").changed();
+        changed |= ui.checkbox(&mut looping, "Looping").changed();
+        changed |= ui.checkbox(&mut spatial, "Spatial").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Bus");
+        changed |= ui
+            .add(TextEdit::singleline(&mut bus).desired_width(110.0))
+            .changed();
+        ui.label("Playback");
+        ComboBox::from_id_salt(("visual_audio_playback_inline", ui.id()))
+            .selected_text(playback_state.clone())
+            .show_ui(ui, |ui| {
+                for state in ["Playing", "Paused", "Stopped"] {
+                    changed |= ui
+                        .selectable_value(&mut playback_state, state.to_string(), state)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Volume");
+        changed |= ui.add(DragValue::new(&mut volume).speed(0.05)).changed();
+        ui.label("Pitch");
+        changed |= ui.add(DragValue::new(&mut pitch).speed(0.05)).changed();
+        changed |= ui.checkbox(&mut play_on_spawn, "Play on spawn").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Min/Max");
+        changed |= ui
+            .add(DragValue::new(&mut min_distance).speed(0.1))
+            .changed();
+        changed |= ui
+            .add(DragValue::new(&mut max_distance).speed(0.1))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Rolloff");
+        changed |= ui.add(DragValue::new(&mut rolloff).speed(0.05)).changed();
+        ui.label("Spatial Blend");
+        changed |= ui
+            .add(DragValue::new(&mut spatial_blend).speed(0.05))
+            .changed();
+    });
+
+    if changed {
+        if path.trim().is_empty() {
+            object.insert("path".to_string(), JsonValue::Null);
+        } else {
+            object.insert("path".to_string(), JsonValue::String(path));
+        }
+        object.insert("streaming".to_string(), JsonValue::Bool(streaming));
+        object.insert("bus".to_string(), JsonValue::String(bus));
+        object.insert("volume".to_string(), json_number(volume.max(0.0)));
+        object.insert("pitch".to_string(), json_number(pitch.max(0.001)));
+        object.insert("looping".to_string(), JsonValue::Bool(looping));
+        object.insert("spatial".to_string(), JsonValue::Bool(spatial));
+        object.insert(
+            "min_distance".to_string(),
+            json_number(min_distance.max(0.0)),
+        );
+        object.insert(
+            "max_distance".to_string(),
+            json_number(max_distance.max(min_distance.max(0.0))),
+        );
+        object.insert("rolloff".to_string(), json_number(rolloff.max(0.0)));
+        object.insert(
+            "spatial_blend".to_string(),
+            json_number(spatial_blend.clamp(0.0, 1.0)),
+        );
+        object.insert("play_on_spawn".to_string(), JsonValue::Bool(play_on_spawn));
+        object.insert(
+            "playback_state".to_string(),
+            JsonValue::String(playback_state),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_physics_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut root = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut body_kind = json_object_nested(&root, "body_kind");
+    let mut body_type = json_object_string(&body_kind, "type", "Dynamic");
+    if body_type.is_empty() {
+        body_type = "Dynamic".to_string();
+    }
+    let mut dynamic_mass = json_object_f64(&body_kind, "mass", 1.0);
+    let mut kinematic_mode = json_object_string(&body_kind, "mode", "PositionBased");
+    if kinematic_mode.is_empty() {
+        kinematic_mode = "PositionBased".to_string();
+    }
+
+    ui.group(|ui| {
+        ui.label("Body");
+        ui.horizontal(|ui| {
+            ui.label("Kind");
+            ComboBox::from_id_salt(("visual_physics_body_type_inline", ui.id()))
+                .selected_text(body_type.clone())
+                .show_ui(ui, |ui| {
+                    for kind in ["Dynamic", "Kinematic", "Fixed"] {
+                        changed |= ui
+                            .selectable_value(&mut body_type, kind.to_string(), kind)
+                            .changed();
+                    }
+                });
+        });
+        if body_type.eq_ignore_ascii_case("dynamic") {
+            ui.horizontal(|ui| {
+                ui.label("Mass");
+                changed |= ui
+                    .add(DragValue::new(&mut dynamic_mass).speed(0.1))
+                    .changed();
+            });
+        }
+        if body_type.eq_ignore_ascii_case("kinematic") {
+            ui.horizontal(|ui| {
+                ui.label("Mode");
+                ComboBox::from_id_salt(("visual_physics_kinematic_mode_inline", ui.id()))
+                    .selected_text(kinematic_mode.clone())
+                    .show_ui(ui, |ui| {
+                        for mode in ["PositionBased", "VelocityBased"] {
+                            changed |= ui
+                                .selectable_value(&mut kinematic_mode, mode.to_string(), mode)
+                                .changed();
+                        }
+                    });
+            });
+        }
+    });
+
+    let mut collider_shape = json_object_nested(&root, "collider_shape");
+    let mut collider_type = json_object_string(&collider_shape, "type", "Cuboid");
+    if collider_type.is_empty() {
+        collider_type = "Cuboid".to_string();
+    }
+    let mut round_border = json_object_f64(&collider_shape, "border_radius", 0.05);
+    let mut mesh_id = json_object_i64(&collider_shape, "mesh_id", -1);
+    let mut mesh_lod = json_object_string(&collider_shape, "lod", "Lod0");
+    if mesh_lod.is_empty() {
+        mesh_lod = "Lod0".to_string();
+    }
+    let mut mesh_kind = json_object_string(&collider_shape, "kind", "TriMesh");
+    if mesh_kind.is_empty() {
+        mesh_kind = "TriMesh".to_string();
+    }
+
+    ui.group(|ui| {
+        ui.label("Collider");
+        ui.horizontal(|ui| {
+            ui.label("Shape");
+            ComboBox::from_id_salt(("visual_physics_shape_inline", ui.id()))
+                .selected_text(collider_type.clone())
+                .show_ui(ui, |ui| {
+                    for shape in [
+                        "Cuboid",
+                        "Sphere",
+                        "CapsuleY",
+                        "CylinderY",
+                        "ConeY",
+                        "RoundCuboid",
+                        "Mesh",
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut collider_type, shape.to_string(), shape)
+                            .changed();
+                    }
+                });
+        });
+        if collider_type.eq_ignore_ascii_case("roundcuboid") {
+            ui.horizontal(|ui| {
+                ui.label("Border Radius");
+                changed |= ui
+                    .add(DragValue::new(&mut round_border).speed(0.01))
+                    .changed();
+            });
+        }
+        if collider_type.eq_ignore_ascii_case("mesh") {
+            ui.horizontal(|ui| {
+                ui.label("Mesh Id");
+                changed |= ui.add(DragValue::new(&mut mesh_id).speed(1.0)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("LOD");
+                ComboBox::from_id_salt(("visual_physics_mesh_lod_inline", ui.id()))
+                    .selected_text(mesh_lod.clone())
+                    .show_ui(ui, |ui| {
+                        for lod in ["Lod0", "Lod1", "Lod2", "Lowest"] {
+                            changed |= ui
+                                .selectable_value(&mut mesh_lod, lod.to_string(), lod)
+                                .changed();
+                        }
+                    });
+                ui.label("Kind");
+                ComboBox::from_id_salt(("visual_physics_mesh_kind_inline", ui.id()))
+                    .selected_text(mesh_kind.clone())
+                    .show_ui(ui, |ui| {
+                        for kind in ["TriMesh", "ConvexHull"] {
+                            changed |= ui
+                                .selectable_value(&mut mesh_kind, kind.to_string(), kind)
+                                .changed();
+                        }
+                    });
+            });
+        }
+    });
+
+    let mut rigid_body_props = json_object_nested(&root, "rigid_body_properties");
+    let mut linear_damping = json_object_f64(&rigid_body_props, "linear_damping", 0.0);
+    let mut angular_damping = json_object_f64(&rigid_body_props, "angular_damping", 0.0);
+    let mut gravity_scale = json_object_f64(&rigid_body_props, "gravity_scale", 1.0);
+    let mut ccd_enabled = json_object_bool(&rigid_body_props, "ccd_enabled", false);
+    let mut can_sleep = json_object_bool(&rigid_body_props, "can_sleep", true);
+    let mut sleeping = json_object_bool(&rigid_body_props, "sleeping", false);
+    let mut dominance_group = json_object_f64(&rigid_body_props, "dominance_group", 0.0);
+    let mut lock_tx = json_object_bool(&rigid_body_props, "lock_translation_x", false);
+    let mut lock_ty = json_object_bool(&rigid_body_props, "lock_translation_y", false);
+    let mut lock_tz = json_object_bool(&rigid_body_props, "lock_translation_z", false);
+    let mut lock_rx = json_object_bool(&rigid_body_props, "lock_rotation_x", false);
+    let mut lock_ry = json_object_bool(&rigid_body_props, "lock_rotation_y", false);
+    let mut lock_rz = json_object_bool(&rigid_body_props, "lock_rotation_z", false);
+    let mut linear_velocity =
+        json_object_vec3(&rigid_body_props, "linear_velocity", (0.0, 0.0, 0.0));
+    let mut angular_velocity =
+        json_object_vec3(&rigid_body_props, "angular_velocity", (0.0, 0.0, 0.0));
+
+    ui.group(|ui| {
+        ui.label("Rigid Body");
+        ui.horizontal(|ui| {
+            ui.label("Linear Damp");
+            changed |= ui
+                .add(DragValue::new(&mut linear_damping).speed(0.01))
+                .changed();
+            ui.label("Angular Damp");
+            changed |= ui
+                .add(DragValue::new(&mut angular_damping).speed(0.01))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Gravity Scale");
+            changed |= ui
+                .add(DragValue::new(&mut gravity_scale).speed(0.05))
+                .changed();
+            ui.label("Dominance");
+            changed |= ui
+                .add(DragValue::new(&mut dominance_group).speed(1.0))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut ccd_enabled, "CCD").changed();
+            changed |= ui.checkbox(&mut can_sleep, "Can Sleep").changed();
+            changed |= ui.checkbox(&mut sleeping, "Sleeping").changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Lock T");
+            changed |= ui.checkbox(&mut lock_tx, "X").changed();
+            changed |= ui.checkbox(&mut lock_ty, "Y").changed();
+            changed |= ui.checkbox(&mut lock_tz, "Z").changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Lock R");
+            changed |= ui.checkbox(&mut lock_rx, "X").changed();
+            changed |= ui.checkbox(&mut lock_ry, "Y").changed();
+            changed |= ui.checkbox(&mut lock_rz, "Z").changed();
+        });
+        changed |= draw_vec3_row(ui, "Linear Vel", &mut linear_velocity, 0.05);
+        changed |= draw_vec3_row(ui, "Angular Vel", &mut angular_velocity, 0.05);
+    });
+
+    let mut collider_props = json_object_nested(&root, "collider_properties");
+    let mut friction = json_object_f64(&collider_props, "friction", 0.5);
+    let mut restitution = json_object_f64(&collider_props, "restitution", 0.0);
+    let mut density = json_object_f64(&collider_props, "density", 1.0);
+    let mut is_sensor = json_object_bool(&collider_props, "is_sensor", false);
+    let mut enabled = json_object_bool(&collider_props, "enabled", true);
+
+    ui.group(|ui| {
+        ui.label("Collider Properties");
+        ui.horizontal(|ui| {
+            ui.label("Friction");
+            changed |= ui.add(DragValue::new(&mut friction).speed(0.01)).changed();
+            ui.label("Restitution");
+            changed |= ui
+                .add(DragValue::new(&mut restitution).speed(0.01))
+                .changed();
+            ui.label("Density");
+            changed |= ui.add(DragValue::new(&mut density).speed(0.05)).changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut enabled, "Enabled").changed();
+            changed |= ui.checkbox(&mut is_sensor, "Sensor").changed();
+        });
+    });
+
+    if changed {
+        body_kind.insert("type".to_string(), JsonValue::String(body_type.clone()));
+        if body_type.eq_ignore_ascii_case("dynamic") {
+            body_kind.insert("mass".to_string(), json_number(dynamic_mass.max(0.0)));
+            body_kind.remove("mode");
+        } else if body_type.eq_ignore_ascii_case("kinematic") {
+            body_kind.insert(
+                "mode".to_string(),
+                JsonValue::String(kinematic_mode.clone()),
+            );
+            body_kind.remove("mass");
+        } else {
+            body_kind.remove("mass");
+            body_kind.remove("mode");
+        }
+        root.insert("body_kind".to_string(), JsonValue::Object(body_kind));
+
+        collider_shape.insert("type".to_string(), JsonValue::String(collider_type.clone()));
+        if collider_type.eq_ignore_ascii_case("roundcuboid") {
+            collider_shape.insert(
+                "border_radius".to_string(),
+                json_number(round_border.max(0.0)),
+            );
+        } else {
+            collider_shape.remove("border_radius");
+        }
+        if collider_type.eq_ignore_ascii_case("mesh") {
+            if mesh_id >= 0 {
+                collider_shape.insert(
+                    "mesh_id".to_string(),
+                    JsonValue::Number(JsonNumber::from(mesh_id)),
+                );
+            } else {
+                collider_shape.insert("mesh_id".to_string(), JsonValue::Null);
+            }
+            collider_shape.insert("lod".to_string(), JsonValue::String(mesh_lod));
+            collider_shape.insert("kind".to_string(), JsonValue::String(mesh_kind));
+        } else {
+            collider_shape.remove("mesh_id");
+            collider_shape.remove("lod");
+            collider_shape.remove("kind");
+        }
+        root.insert(
+            "collider_shape".to_string(),
+            JsonValue::Object(collider_shape),
+        );
+
+        rigid_body_props.insert(
+            "linear_damping".to_string(),
+            json_number(linear_damping.max(0.0)),
+        );
+        rigid_body_props.insert(
+            "angular_damping".to_string(),
+            json_number(angular_damping.max(0.0)),
+        );
+        rigid_body_props.insert("gravity_scale".to_string(), json_number(gravity_scale));
+        rigid_body_props.insert("ccd_enabled".to_string(), JsonValue::Bool(ccd_enabled));
+        rigid_body_props.insert("can_sleep".to_string(), JsonValue::Bool(can_sleep));
+        rigid_body_props.insert("sleeping".to_string(), JsonValue::Bool(sleeping));
+        rigid_body_props.insert(
+            "dominance_group".to_string(),
+            JsonValue::Number(JsonNumber::from(
+                dominance_group
+                    .round()
+                    .clamp(i8::MIN as f64, i8::MAX as f64) as i64,
+            )),
+        );
+        rigid_body_props.insert("lock_translation_x".to_string(), JsonValue::Bool(lock_tx));
+        rigid_body_props.insert("lock_translation_y".to_string(), JsonValue::Bool(lock_ty));
+        rigid_body_props.insert("lock_translation_z".to_string(), JsonValue::Bool(lock_tz));
+        rigid_body_props.insert("lock_rotation_x".to_string(), JsonValue::Bool(lock_rx));
+        rigid_body_props.insert("lock_rotation_y".to_string(), JsonValue::Bool(lock_ry));
+        rigid_body_props.insert("lock_rotation_z".to_string(), JsonValue::Bool(lock_rz));
+        rigid_body_props.insert(
+            "linear_velocity".to_string(),
+            vec3_json(linear_velocity.0, linear_velocity.1, linear_velocity.2),
+        );
+        rigid_body_props.insert(
+            "angular_velocity".to_string(),
+            vec3_json(angular_velocity.0, angular_velocity.1, angular_velocity.2),
+        );
+        root.insert(
+            "rigid_body_properties".to_string(),
+            JsonValue::Object(rigid_body_props),
+        );
+
+        collider_props.insert("friction".to_string(), json_number(friction.max(0.0)));
+        collider_props.insert("restitution".to_string(), json_number(restitution.max(0.0)));
+        collider_props.insert("density".to_string(), json_number(density.max(0.0)));
+        collider_props.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        collider_props.insert("is_sensor".to_string(), JsonValue::Bool(is_sensor));
+        root.insert(
+            "collider_properties".to_string(),
+            JsonValue::Object(collider_props),
+        );
+
+        *value = compact_json_string(&JsonValue::Object(root));
+    }
+
+    changed
+}
+
+fn draw_physics_world_defaults_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut gravity = json_object_vec3(&object, "gravity", (0.0, -9.81, 0.0));
+    changed |= draw_vec3_row(ui, "Gravity", &mut gravity, 0.05);
+    if changed {
+        object.insert(
+            "gravity".to_string(),
+            vec3_json(gravity.0, gravity.1, gravity.2),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
+fn draw_physics_velocity_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut linear = json_object_vec3(&object, "linear", (0.0, 0.0, 0.0));
+    let mut angular = json_object_vec3(&object, "angular", (0.0, 0.0, 0.0));
+    let mut wake_up = json_object_bool(&object, "wake_up", true);
+
+    changed |= draw_vec3_row(ui, "Linear", &mut linear, 0.05);
+    changed |= draw_vec3_row(ui, "Angular", &mut angular, 0.05);
+    changed |= ui.checkbox(&mut wake_up, "Wake Up").changed();
+
+    if changed {
+        object.insert(
+            "linear".to_string(),
+            vec3_json(linear.0, linear.1, linear.2),
+        );
+        object.insert(
+            "angular".to_string(),
+            vec3_json(angular.0, angular.1, angular.2),
+        );
+        object.insert("wake_up".to_string(), JsonValue::Bool(wake_up));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_dynamic_component_fields_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut remove_key: Option<String> = None;
+    let mut rename_ops: Vec<(String, String)> = Vec::new();
+    let mut insert_ops: Vec<(String, JsonValue)> = Vec::new();
+
+    let mut keys: Vec<String> = object.keys().cloned().collect();
+    keys.sort();
+
+    for key in keys {
+        let Some(current) = object.get(&key).cloned() else {
+            continue;
+        };
+        let mut field_name = key.clone();
+        let mut field_type = infer_visual_value_type_from_json(&current);
+        if !matches!(
+            field_type,
+            VisualValueType::Bool
+                | VisualValueType::Number
+                | VisualValueType::String
+                | VisualValueType::Vec3
+        ) {
+            field_type = VisualValueType::String;
+        }
+        let mut literal = literal_string_for_value_type(&current, field_type);
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Field");
+                if ui
+                    .add(TextEdit::singleline(&mut field_name).desired_width(96.0))
+                    .changed()
+                {
+                    changed = true;
+                }
+                ComboBox::from_id_salt(("visual_dynamic_component_field_type", ui.id(), &key))
+                    .selected_text(field_type.title())
+                    .show_ui(ui, |ui| {
+                        for candidate in [
+                            VisualValueType::Bool,
+                            VisualValueType::Number,
+                            VisualValueType::String,
+                            VisualValueType::Vec3,
+                        ] {
+                            if ui
+                                .selectable_value(&mut field_type, candidate, candidate.title())
+                                .changed()
+                            {
+                                literal = normalize_literal_for_type(&literal, candidate);
+                                changed = true;
+                            }
+                        }
+                    });
+                if ui.small_button("Remove").clicked() {
+                    remove_key = Some(key.clone());
+                    changed = true;
+                }
+            });
+            changed |= draw_typed_default_editor(ui, field_type, &mut literal);
+        });
+
+        if remove_key.as_ref() == Some(&key) {
+            continue;
+        }
+
+        if field_name.trim().is_empty() {
+            remove_key = Some(key.clone());
+            changed = true;
+            continue;
+        }
+
+        let normalized = coerce_json_to_visual_type(&parse_loose_literal(&literal), field_type)
+            .unwrap_or_else(|_| parse_loose_literal(default_literal_for_type(field_type)));
+        if field_name != key {
+            rename_ops.push((key.clone(), field_name.clone()));
+        }
+        insert_ops.push((field_name, normalized));
+    }
+
+    if let Some(key) = remove_key {
+        object.remove(&key);
+    }
+    for (old_key, new_key) in rename_ops {
+        if old_key != new_key {
+            object.remove(&old_key);
+        }
+    }
+    for (key, value) in insert_ops {
+        object.insert(key, value);
+    }
+
+    ui.horizontal(|ui| {
+        if ui.small_button("+ Bool Field").clicked() {
+            let mut candidate = "field_bool".to_string();
+            let mut suffix = 1usize;
+            while object.contains_key(&candidate) {
+                candidate = format!("field_bool_{}", suffix);
+                suffix += 1;
+            }
+            object.insert(candidate, JsonValue::Bool(false));
+            changed = true;
+        }
+        if ui.small_button("+ Number Field").clicked() {
+            let mut candidate = "field_number".to_string();
+            let mut suffix = 1usize;
+            while object.contains_key(&candidate) {
+                candidate = format!("field_number_{}", suffix);
+                suffix += 1;
+            }
+            object.insert(candidate, json_number(0.0));
+            changed = true;
+        }
+        if ui.small_button("+ String Field").clicked() {
+            let mut candidate = "field_string".to_string();
+            let mut suffix = 1usize;
+            while object.contains_key(&candidate) {
+                candidate = format!("field_string_{}", suffix);
+                suffix += 1;
+            }
+            object.insert(candidate, JsonValue::String(String::new()));
+            changed = true;
+        }
+        if ui.small_button("+ Vec3 Field").clicked() {
+            let mut candidate = "field_vec3".to_string();
+            let mut suffix = 1usize;
+            while object.contains_key(&candidate) {
+                candidate = format!("field_vec3_{}", suffix);
+                suffix += 1;
+            }
+            object.insert(candidate, vec3_json(0.0, 0.0, 0.0));
+            changed = true;
+        }
+    });
+
+    if changed {
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
+fn draw_dynamic_field_value_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut changed = false;
+    let mut value_type = infer_visual_value_type_from_literal(value);
+    if value_type == VisualValueType::Entity {
+        value_type = VisualValueType::Number;
+    } else if value_type == VisualValueType::Json {
+        value_type = VisualValueType::String;
+    } else if !matches!(
+        value_type,
+        VisualValueType::Bool
+            | VisualValueType::Number
+            | VisualValueType::String
+            | VisualValueType::Vec3
+    ) {
+        value_type = VisualValueType::String;
+    }
+    ui.horizontal(|ui| {
+        ui.label("Type");
+        ComboBox::from_id_salt(("visual_dynamic_field_type_inline", ui.id()))
+            .selected_text(value_type.title())
+            .show_ui(ui, |ui| {
+                for candidate in [
+                    VisualValueType::Bool,
+                    VisualValueType::Number,
+                    VisualValueType::String,
+                    VisualValueType::Vec3,
+                    VisualValueType::Json,
+                ] {
+                    if ui
+                        .selectable_value(&mut value_type, candidate, candidate.title())
+                        .changed()
+                    {
+                        *value = normalize_literal_for_type(value, candidate);
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed |= draw_typed_pin_input_editor(ui, value_type, value);
+    changed
+}
+
+fn draw_api_structured_default_editor(
+    ui: &mut Ui,
+    operation: VisualApiOperation,
+    input_index: usize,
+    default_literal: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+) -> bool {
+    match operation {
+        VisualApiOperation::EcsSetCamera if input_index == 1 => {
+            draw_camera_data_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetLight if input_index == 1 => {
+            draw_light_data_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetMeshRenderer if input_index == 1 => {
+            draw_mesh_renderer_data_editor(
+                ui,
+                default_literal,
+                pending_asset_nodes,
+                consumed_asset_drop,
+            )
+        }
+        VisualApiOperation::EcsSetAudioEmitter if input_index == 1 => {
+            draw_audio_emitter_data_editor(
+                ui,
+                default_literal,
+                pending_asset_nodes,
+                consumed_asset_drop,
+            )
+        }
+        VisualApiOperation::EcsSetAudioListener if input_index == 1 => {
+            draw_audio_listener_data_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetPhysics if input_index == 1 => {
+            draw_physics_data_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetPhysicsVelocity if input_index == 1 => {
+            draw_physics_velocity_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetPhysicsWorldDefaults if input_index == 1 => {
+            draw_physics_world_defaults_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetDynamicComponent if input_index == 2 => {
+            draw_dynamic_component_fields_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetDynamicField if input_index == 3 => {
+            draw_dynamic_field_value_editor(ui, default_literal)
+        }
+        _ => false,
+    }
+}
+
+fn draw_mesh_renderer_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
+    let mut pending = Vec::new();
+    let mut consumed = false;
+    draw_mesh_renderer_data_editor(ui, value, &mut pending, &mut consumed)
+}
+
+fn draw_audio_emitter_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
+    let mut pending = Vec::new();
+    let mut consumed = false;
+    draw_audio_emitter_data_editor(ui, value, &mut pending, &mut consumed)
+}
+
+fn draw_script_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut path = json_object_string(&object, "path", "");
+    let mut language = json_object_string(&object, "language", "lua");
+
+    ui.horizontal(|ui| {
+        ui.label("Path");
+        changed |= ui
+            .add(TextEdit::singleline(&mut path).desired_width(180.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Language");
+        changed |= ui
+            .add(TextEdit::singleline(&mut language).desired_width(120.0))
+            .changed();
+    });
+
+    if changed {
+        object.insert("path".to_string(), JsonValue::String(path));
+        object.insert("language".to_string(), JsonValue::String(language));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_character_output_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut effective_translation =
+        json_object_vec3(&object, "effective_translation", (0.0, 0.0, 0.0));
+    let mut grounded = json_object_bool(&object, "grounded", false);
+    let mut sliding_down_slope = json_object_bool(&object, "sliding_down_slope", false);
+    let mut collision_count = json_object_i64(&object, "collision_count", 0).max(0);
+
+    changed |= draw_vec3_row(
+        ui,
+        "Effective Translation",
+        &mut effective_translation,
+        0.05,
+    );
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut grounded, "Grounded").changed();
+        changed |= ui
+            .checkbox(&mut sliding_down_slope, "Sliding Down Slope")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Collision Count");
+        changed |= ui
+            .add(DragValue::new(&mut collision_count).speed(1.0))
+            .changed();
+    });
+
+    if changed {
+        object.insert(
+            "effective_translation".to_string(),
+            vec3_json(
+                effective_translation.0,
+                effective_translation.1,
+                effective_translation.2,
+            ),
+        );
+        object.insert("grounded".to_string(), JsonValue::Bool(grounded));
+        object.insert(
+            "sliding_down_slope".to_string(),
+            JsonValue::Bool(sliding_down_slope),
+        );
+        object.insert(
+            "collision_count".to_string(),
+            JsonValue::Number(JsonNumber::from(collision_count)),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_ray_cast_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut has_hit = json_object_bool(&object, "has_hit", false);
+    let mut hit_entity = json_object_i64(&object, "hit_entity", -1);
+    let mut point = json_object_vec3(&object, "point", (0.0, 0.0, 0.0));
+    let mut normal = json_object_vec3(&object, "normal", (0.0, 1.0, 0.0));
+    let mut toi = json_object_f64(&object, "toi", 0.0).max(0.0);
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut has_hit, "Has Hit").changed();
+        ui.label("Hit Entity");
+        changed |= ui.add(DragValue::new(&mut hit_entity).speed(1.0)).changed();
+    });
+    changed |= draw_vec3_row(ui, "Point", &mut point, 0.05);
+    changed |= draw_vec3_row(ui, "Normal", &mut normal, 0.05);
+    ui.horizontal(|ui| {
+        ui.label("TOI");
+        changed |= ui.add(DragValue::new(&mut toi).speed(0.05)).changed();
+    });
+
+    if changed {
+        object.insert("has_hit".to_string(), JsonValue::Bool(has_hit));
+        if hit_entity >= 0 {
+            object.insert(
+                "hit_entity".to_string(),
+                JsonValue::Number(JsonNumber::from(hit_entity)),
+            );
+        } else {
+            object.insert("hit_entity".to_string(), JsonValue::Null);
+        }
+        object.insert("point".to_string(), vec3_json(point.0, point.1, point.2));
+        object.insert(
+            "normal".to_string(),
+            vec3_json(normal.0, normal.1, normal.2),
+        );
+        object.insert("toi".to_string(), json_number(toi.max(0.0)));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_point_projection_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut has_hit = json_object_bool(&object, "has_hit", false);
+    let mut hit_entity = json_object_i64(&object, "hit_entity", -1);
+    let mut projected_point = json_object_vec3(&object, "projected_point", (0.0, 0.0, 0.0));
+    let mut is_inside = json_object_bool(&object, "is_inside", false);
+    let mut distance = json_object_f64(&object, "distance", 0.0).max(0.0);
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut has_hit, "Has Hit").changed();
+        ui.label("Hit Entity");
+        changed |= ui.add(DragValue::new(&mut hit_entity).speed(1.0)).changed();
+    });
+    changed |= draw_vec3_row(ui, "Projected Point", &mut projected_point, 0.05);
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut is_inside, "Inside").changed();
+        ui.label("Distance");
+        changed |= ui.add(DragValue::new(&mut distance).speed(0.05)).changed();
+    });
+
+    if changed {
+        object.insert("has_hit".to_string(), JsonValue::Bool(has_hit));
+        if hit_entity >= 0 {
+            object.insert(
+                "hit_entity".to_string(),
+                JsonValue::Number(JsonNumber::from(hit_entity)),
+            );
+        } else {
+            object.insert("hit_entity".to_string(), JsonValue::Null);
+        }
+        object.insert(
+            "projected_point".to_string(),
+            vec3_json(projected_point.0, projected_point.1, projected_point.2),
+        );
+        object.insert("is_inside".to_string(), JsonValue::Bool(is_inside));
+        object.insert("distance".to_string(), json_number(distance.max(0.0)));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_shape_cast_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut has_hit = json_object_bool(&object, "has_hit", false);
+    let mut hit_entity = json_object_i64(&object, "hit_entity", -1);
+    let mut toi = json_object_f64(&object, "toi", 0.0).max(0.0);
+    let mut witness1 = json_object_vec3(&object, "witness1", (0.0, 0.0, 0.0));
+    let mut witness2 = json_object_vec3(&object, "witness2", (0.0, 0.0, 0.0));
+    let mut normal1 = json_object_vec3(&object, "normal1", (0.0, 1.0, 0.0));
+    let mut normal2 = json_object_vec3(&object, "normal2", (0.0, 1.0, 0.0));
+    let mut status = json_object_string(&object, "status", "Unknown");
+    if status.is_empty() {
+        status = "Unknown".to_string();
+    }
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut has_hit, "Has Hit").changed();
+        ui.label("Hit Entity");
+        changed |= ui.add(DragValue::new(&mut hit_entity).speed(1.0)).changed();
+        ui.label("TOI");
+        changed |= ui.add(DragValue::new(&mut toi).speed(0.05)).changed();
+    });
+    changed |= draw_vec3_row(ui, "Witness 1", &mut witness1, 0.05);
+    changed |= draw_vec3_row(ui, "Witness 2", &mut witness2, 0.05);
+    changed |= draw_vec3_row(ui, "Normal 1", &mut normal1, 0.05);
+    changed |= draw_vec3_row(ui, "Normal 2", &mut normal2, 0.05);
+    ui.horizontal(|ui| {
+        ui.label("Status");
+        changed |= ui
+            .add(TextEdit::singleline(&mut status).desired_width(120.0))
+            .changed();
+    });
+
+    if changed {
+        object.insert("has_hit".to_string(), JsonValue::Bool(has_hit));
+        if hit_entity >= 0 {
+            object.insert(
+                "hit_entity".to_string(),
+                JsonValue::Number(JsonNumber::from(hit_entity)),
+            );
+        } else {
+            object.insert("hit_entity".to_string(), JsonValue::Null);
+        }
+        object.insert("toi".to_string(), json_number(toi.max(0.0)));
+        object.insert(
+            "witness1".to_string(),
+            vec3_json(witness1.0, witness1.1, witness1.2),
+        );
+        object.insert(
+            "witness2".to_string(),
+            vec3_json(witness2.0, witness2.1, witness2.2),
+        );
+        object.insert(
+            "normal1".to_string(),
+            vec3_json(normal1.0, normal1.1, normal1.2),
+        );
+        object.insert(
+            "normal2".to_string(),
+            vec3_json(normal2.0, normal2.1, normal2.2),
+        );
+        object.insert("status".to_string(), JsonValue::String(status));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
 fn draw_typed_default_editor(ui: &mut Ui, value_type: VisualValueType, value: &mut String) -> bool {
     draw_typed_editor_with_width(ui, value_type, value, 140.0)
 }
@@ -6771,6 +9805,19 @@ fn draw_typed_editor_with_width(
             }
             changed
         }
+        VisualValueType::Camera => draw_camera_data_editor(ui, value),
+        VisualValueType::Light => draw_light_data_editor(ui, value),
+        VisualValueType::MeshRenderer => draw_mesh_renderer_data_editor_plain(ui, value),
+        VisualValueType::AudioEmitter => draw_audio_emitter_data_editor_plain(ui, value),
+        VisualValueType::AudioListener => draw_audio_listener_data_editor(ui, value),
+        VisualValueType::Script => draw_script_data_editor(ui, value),
+        VisualValueType::Physics => draw_physics_data_editor(ui, value),
+        VisualValueType::PhysicsVelocity => draw_physics_velocity_editor(ui, value),
+        VisualValueType::PhysicsWorldDefaults => draw_physics_world_defaults_editor(ui, value),
+        VisualValueType::CharacterControllerOutput => draw_character_output_editor(ui, value),
+        VisualValueType::PhysicsRayCastHit => draw_ray_cast_hit_editor(ui, value),
+        VisualValueType::PhysicsPointProjectionHit => draw_point_projection_hit_editor(ui, value),
+        VisualValueType::PhysicsShapeCastHit => draw_shape_cast_hit_editor(ui, value),
         VisualValueType::Json => ui
             .add(TextEdit::singleline(value).desired_width(text_width))
             .changed(),

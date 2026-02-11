@@ -3592,6 +3592,38 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_get_mesh_source_path = world_ptr;
+    ecs.set(
+        "get_mesh_renderer_source_path",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_mesh_source_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(editor_mesh) = world.get::<EditorMesh>(entity) else {
+                return Ok(None);
+            };
+            match &editor_mesh.source {
+                MeshSource::Asset { path } => Ok(Some(path.clone())),
+                MeshSource::Primitive(_) => Ok(None),
+            }
+        })?,
+    )?;
+
+    let world_ptr_get_mesh_material_path = world_ptr;
+    ecs.set(
+        "get_mesh_renderer_material_path",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_mesh_material_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<EditorMesh>(entity)
+                .and_then(|mesh| mesh.material_path.clone()))
+        })?,
+    )?;
+
     let world_ptr_set_mesh = world_ptr;
     ecs.set(
         "set_mesh_renderer",
@@ -3633,6 +3665,93 @@ fn build_ecs_table(
             if let Ok(value) = data.get::<bool>("visible") {
                 visible = value;
             }
+
+            ensure_transform(world, entity);
+            Ok(apply_mesh_renderer(
+                world,
+                entity,
+                project.as_ref(),
+                source,
+                material_path,
+                casts_shadow,
+                visible,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_set_mesh_source_path = world_ptr;
+    ecs.set(
+        "set_mesh_renderer_source_path",
+        lua.create_function(move |_, (entity_id, path): (u64, String)| {
+            let world = unsafe { &mut *(world_ptr_set_mesh_source_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Ok(false);
+            }
+
+            let project = world.get_resource::<EditorProject>().cloned();
+            let source = MeshSource::Asset {
+                path: normalize_project_path(project.as_ref(), Path::new(trimmed)),
+            };
+            let material_path = world
+                .get::<EditorMesh>(entity)
+                .and_then(|mesh| mesh.material_path.clone());
+            let existing_renderer = world
+                .get::<BevyMeshRenderer>(entity)
+                .map(|renderer| renderer.0);
+            let casts_shadow = existing_renderer
+                .map(|renderer| renderer.casts_shadow)
+                .unwrap_or(true);
+            let visible = existing_renderer
+                .map(|renderer| renderer.visible)
+                .unwrap_or(true);
+
+            ensure_transform(world, entity);
+            Ok(apply_mesh_renderer(
+                world,
+                entity,
+                project.as_ref(),
+                source,
+                material_path,
+                casts_shadow,
+                visible,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_set_mesh_material_path = world_ptr;
+    ecs.set(
+        "set_mesh_renderer_material_path",
+        lua.create_function(move |_, (entity_id, path): (u64, String)| {
+            let world = unsafe { &mut *(world_ptr_set_mesh_material_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let project = world.get_resource::<EditorProject>().cloned();
+            let source = world
+                .get::<EditorMesh>(entity)
+                .map(|mesh| mesh.source.clone())
+                .unwrap_or(MeshSource::Primitive(PrimitiveKind::Cube));
+            let material_path = if path.trim().is_empty() {
+                None
+            } else {
+                Some(normalize_project_path(
+                    project.as_ref(),
+                    Path::new(path.trim()),
+                ))
+            };
+            let existing_renderer = world
+                .get::<BevyMeshRenderer>(entity)
+                .map(|renderer| renderer.0);
+            let casts_shadow = existing_renderer
+                .map(|renderer| renderer.casts_shadow)
+                .unwrap_or(true);
+            let visible = existing_renderer
+                .map(|renderer| renderer.visible)
+                .unwrap_or(true);
 
             ensure_transform(world, entity);
             Ok(apply_mesh_renderer(
@@ -3737,7 +3856,7 @@ fn build_ecs_table(
     let world_ptr_get_script = world_ptr;
     ecs.set(
         "get_script",
-        lua.create_function(move |lua, entity_id: u64| {
+        lua.create_function(move |lua, (entity_id, index): (u64, Option<Value>)| {
             let world = unsafe { &mut *(world_ptr_get_script as *mut World) };
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
@@ -3745,7 +3864,20 @@ fn build_ecs_table(
             let Some(scripts) = world.get::<ScriptComponent>(entity) else {
                 return Ok(None);
             };
-            let Some(script) = scripts.scripts.first() else {
+            let selected_index = match index {
+                Some(Value::Integer(raw)) => Some((raw.max(1) as usize).saturating_sub(1)),
+                Some(Value::Number(raw)) if raw.is_finite() => {
+                    Some((raw.round().max(1.0) as usize).saturating_sub(1))
+                }
+                Some(Value::Nil) | None => None,
+                _ => return Ok(None),
+            };
+            let script = if let Some(index) = selected_index {
+                scripts.scripts.get(index)
+            } else {
+                scripts.scripts.first()
+            };
+            let Some(script) = script else {
                 return Ok(None);
             };
             let Some(path) = script.path.as_ref() else {
@@ -3755,6 +3887,45 @@ fn build_ecs_table(
             table.set("path", path.to_string_lossy().to_string())?;
             table.set("language", script.language.clone())?;
             Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_get_script_path = world_ptr;
+    ecs.set(
+        "get_script_path",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_script_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(scripts) = world.get::<ScriptComponent>(entity) else {
+                return Ok(None);
+            };
+            let Some(script) = scripts.scripts.first() else {
+                return Ok(None);
+            };
+            Ok(script
+                .path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()))
+        })?,
+    )?;
+
+    let world_ptr_get_script_language = world_ptr;
+    ecs.set(
+        "get_script_language",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_script_language as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(scripts) = world.get::<ScriptComponent>(entity) else {
+                return Ok(None);
+            };
+            let Some(script) = scripts.scripts.first() else {
+                return Ok(None);
+            };
+            Ok(Some(script.language.clone()))
         })?,
     )?;
 
@@ -4025,6 +4196,20 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_get_audio_emitter_path = world_ptr;
+    ecs.set(
+        "get_audio_emitter_path",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_audio_emitter_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<EditorAudio>(entity)
+                .and_then(|audio| audio.path.clone()))
+        })?,
+    )?;
+
     let world_ptr_set_audio_emitter = world_ptr;
     ecs.set(
         "set_audio_emitter",
@@ -4112,6 +4297,50 @@ fn build_ecs_table(
                     _ => {}
                 }
             }
+
+            if !apply_audio_emitter_asset(world, project.as_ref(), &mut emitter, &editor_audio) {
+                emitter.clip_id = None;
+            }
+
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert((BevyWrapper(emitter), editor_audio));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_audio_emitter_path = world_ptr;
+    ecs.set(
+        "set_audio_emitter_path",
+        lua.create_function(move |_, (entity_id, path): (u64, String)| {
+            let world = unsafe { &mut *(world_ptr_set_audio_emitter_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+
+            let mut emitter = world
+                .get::<BevyAudioEmitter>(entity)
+                .map(|emitter| emitter.0)
+                .unwrap_or_default();
+            let mut editor_audio =
+                world
+                    .get::<EditorAudio>(entity)
+                    .cloned()
+                    .unwrap_or(EditorAudio {
+                        path: None,
+                        streaming: false,
+                    });
+            let project = world.get_resource::<EditorProject>().cloned();
+
+            editor_audio.path = if path.trim().is_empty() {
+                None
+            } else {
+                Some(normalize_project_path(
+                    project.as_ref(),
+                    Path::new(path.trim()),
+                ))
+            };
 
             if !apply_audio_emitter_asset(world, project.as_ref(), &mut emitter, &editor_audio) {
                 emitter.clip_id = None;

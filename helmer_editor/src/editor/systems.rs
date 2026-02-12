@@ -2795,8 +2795,15 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
     let runtime_camera = world
         .get_resource::<EditorViewportRuntime>()
         .map(|runtime| {
-            runtime
-                .active_camera_entity
+            let active_pane_camera = runtime.active_pane_id.and_then(|pane_id| {
+                runtime
+                    .pane_requests
+                    .iter()
+                    .find(|pane| pane.pane_id == pane_id)
+                    .map(|pane| pane.camera_entity)
+            });
+            active_pane_camera
+                .or(runtime.active_camera_entity)
                 .or_else(|| runtime.pane_requests.first().map(|pane| pane.camera_entity))
         })
         .flatten()
@@ -2856,19 +2863,22 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
     let default_gizmo_options = viewport_gizmo_options_from_state(world_state, &viewport_state);
 
     if !runtime.pane_requests.is_empty() {
+        let active_pane_id = runtime.active_pane_id;
+        let mut pane_requests = runtime.pane_requests;
+        if let Some(active_pane_id) = active_pane_id {
+            if let Some(index) = pane_requests
+                .iter()
+                .position(|pane| pane.pane_id == active_pane_id)
+            {
+                pane_requests.swap(0, index);
+            }
+        }
+
         let mut requests = Vec::new();
-        let active_pane_request = runtime
-            .active_pane_id
-            .and_then(|pane_id| {
-                runtime
-                    .pane_requests
-                    .iter()
-                    .find(|pane| pane.pane_id == pane_id)
-            })
-            .or_else(|| runtime.pane_requests.first());
+        let active_pane_request = pane_requests.first();
         let main_display_entity = active_pane_request
             .map(|pane| pane.camera_entity)
-            .or_else(|| runtime.pane_requests.first().map(|pane| pane.camera_entity));
+            .or_else(|| pane_requests.first().map(|pane| pane.camera_entity));
         let preview_graph_template = active_pane_request
             .and_then(|pane| {
                 (!pane.graph_template.is_empty()).then_some(pane.graph_template.clone())
@@ -2889,7 +2899,7 @@ pub fn editor_viewport_render_requests_system(world: &mut World) {
         let preview_entity = runtime.preview_camera_entity;
         let preview_texture_id = runtime.preview_texture_id;
         let preview_rect = runtime.preview_rect_pixels;
-        for pane in runtime.pane_requests {
+        for pane in pane_requests {
             let graph_template = (!pane.graph_template.is_empty()).then_some(pane.graph_template);
             let gizmo_options = viewport_gizmo_options(
                 world_state,
@@ -3401,8 +3411,6 @@ pub struct FreecamState {
     is_looking: bool,
     look_start_cursor_position: Option<DVec2>,
     look_pane_id: Option<u64>,
-    look_lock_cursor_position: Option<DVec2>,
-    lock_cursor_ready: bool,
     last_cursor_position: DVec2,
     current_fov_multiplier: f32,
     active_entity: Option<Entity>,
@@ -3431,6 +3439,21 @@ pub fn freecam_system(
     >,
     mut play_query: bevy_ecs::prelude::Query<
         (Entity, &mut BevyTransform, &mut BevyCamera),
+        (
+            bevy_ecs::prelude::With<EditorPlayCamera>,
+            bevy_ecs::prelude::With<Freecam>,
+            bevy_ecs::prelude::Without<EditorViewportCamera>,
+        ),
+    >,
+    viewport_camera_candidates: bevy_ecs::prelude::Query<
+        Entity,
+        (
+            bevy_ecs::prelude::With<EditorViewportCamera>,
+            bevy_ecs::prelude::Without<EditorPlayCamera>,
+        ),
+    >,
+    play_freecam_camera_candidates: bevy_ecs::prelude::Query<
+        Entity,
         (
             bevy_ecs::prelude::With<EditorPlayCamera>,
             bevy_ecs::prelude::With<Freecam>,
@@ -3496,6 +3519,21 @@ pub fn freecam_system(
     let target_pane_request = look_pane_request
         .or(active_pane_request)
         .or(hovered_pane_request);
+    let active_camera_entity = look_pane_request
+        .map(|pane| pane.camera_entity)
+        .or_else(|| active_pane_request.map(|pane| pane.camera_entity))
+        .or_else(|| hovered_pane_request.map(|pane| pane.camera_entity))
+        .or(viewport_runtime.active_camera_entity)
+        .or_else(|| {
+            viewport_runtime
+                .pane_requests
+                .first()
+                .map(|pane| pane.camera_entity)
+        });
+    let can_control_active_camera = active_camera_entity.is_some_and(|entity| {
+        viewport_camera_candidates.get(entity).is_ok()
+            || play_freecam_camera_candidates.get(entity).is_ok()
+    });
     let pointer_rect = target_pane_request
         .map(|pane| pane.viewport_rect)
         .or(viewport_runtime.main_rect_pixels)
@@ -3505,9 +3543,6 @@ pub fn freecam_system(
                 .first()
                 .map(|pane| pane.viewport_rect)
         });
-    let lock_cursor_position = state
-        .look_lock_cursor_position
-        .or_else(|| pointer_rect.map(viewport_rect_center));
     let pointer_in_viewport = pointer_rect
         .map(|rect| rect.contains(cursor_position))
         .unwrap_or(false);
@@ -3515,8 +3550,10 @@ pub fn freecam_system(
         .map(|pane| pane.pointer_over)
         .unwrap_or(false)
         || viewport_runtime.pointer_over_main;
-    let allow_viewport_look_input =
-        state.is_looking || pointer_over_active_viewport || (!wants_pointer && pointer_in_viewport);
+    let allow_viewport_look_input = can_control_active_camera
+        && (state.is_looking
+            || pointer_over_active_viewport
+            || (!wants_pointer && pointer_in_viewport));
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;
@@ -3540,32 +3577,13 @@ pub fn freecam_system(
             state.look_start_cursor_position = Some(cursor_position);
             state.last_cursor_position = cursor_position;
             state.look_pane_id = capture_pane_request.map(|pane| pane.pane_id);
-            state.look_lock_cursor_position = capture_pane_request
-                .map(|pane| viewport_rect_center(pane.viewport_rect))
-                .or(lock_cursor_position);
-            state.lock_cursor_ready = state.look_lock_cursor_position.is_none();
             state.is_looking = true;
         } else {
-            let cursor_delta = if let Some(lock_cursor_position) =
-                state.look_lock_cursor_position.or(lock_cursor_position)
-            {
-                state.last_cursor_position = cursor_position;
-                if !state.lock_cursor_ready {
-                    if cursor_positions_match(cursor_position, lock_cursor_position) {
-                        state.lock_cursor_ready = true;
-                    }
-                    DVec2::ZERO
-                } else {
-                    let delta = cursor_position - lock_cursor_position;
-                    if delta.length_squared() <= 0.25 {
-                        DVec2::ZERO
-                    } else {
-                        delta
-                    }
-                }
+            let delta = cursor_position - state.last_cursor_position;
+            state.last_cursor_position = cursor_position;
+            let cursor_delta = if delta.length_squared() <= 0.25 {
+                DVec2::ZERO
             } else {
-                let delta = cursor_position - state.last_cursor_position;
-                state.last_cursor_position = cursor_position;
                 delta
             };
 
@@ -3575,15 +3593,11 @@ pub fn freecam_system(
     } else {
         state.is_looking = false;
         state.look_pane_id = None;
-        state.look_lock_cursor_position = None;
-        state.lock_cursor_ready = false;
     }
 
     if gizmo_blocking {
         state.is_looking = false;
         state.look_pane_id = None;
-        state.look_lock_cursor_position = None;
-        state.lock_cursor_ready = false;
     }
     let restore_cursor_position = if was_looking && !state.is_looking {
         state.look_start_cursor_position.take()
@@ -3647,8 +3661,6 @@ pub fn freecam_system(
                 state.is_looking = false;
                 state.look_start_cursor_position = None;
                 state.look_pane_id = None;
-                state.look_lock_cursor_position = None;
-                state.lock_cursor_ready = false;
                 state.last_cursor_position = cursor_position;
             }
 
@@ -3713,17 +3725,6 @@ pub fn freecam_system(
             camera.fov_y_rad = base_fov * state.current_fov_multiplier;
         };
 
-    let active_camera_entity = look_pane_request
-        .map(|pane| pane.camera_entity)
-        .or_else(|| active_pane_request.map(|pane| pane.camera_entity))
-        .or_else(|| hovered_pane_request.map(|pane| pane.camera_entity))
-        .or(viewport_runtime.active_camera_entity)
-        .or_else(|| {
-            viewport_runtime
-                .pane_requests
-                .first()
-                .map(|pane| pane.camera_entity)
-        });
     if let Some(active_entity) = active_camera_entity {
         if let Ok((entity, mut transform, mut camera)) = viewport_query.get_mut(active_entity) {
             apply_freecam(entity, &mut transform, &mut camera);
@@ -3731,7 +3732,6 @@ pub fn freecam_system(
                 &state,
                 &mut cursor_control_state,
                 runtime_cursor_state.as_deref(),
-                lock_cursor_position,
                 restore_cursor_position,
             );
             return;
@@ -3742,7 +3742,6 @@ pub fn freecam_system(
                 &state,
                 &mut cursor_control_state,
                 runtime_cursor_state.as_deref(),
-                lock_cursor_position,
                 restore_cursor_position,
             );
             return;
@@ -3771,7 +3770,6 @@ pub fn freecam_system(
         &state,
         &mut cursor_control_state,
         runtime_cursor_state.as_deref(),
-        lock_cursor_position,
         restore_cursor_position,
     );
 }
@@ -3783,22 +3781,10 @@ fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
     (yaw, pitch)
 }
 
-fn viewport_rect_center(rect: ViewportRectPixels) -> DVec2 {
-    DVec2::new(
-        ((rect.min_x + rect.max_x) * 0.5).round() as f64,
-        ((rect.min_y + rect.max_y) * 0.5).round() as f64,
-    )
-}
-
-fn cursor_positions_match(a: DVec2, b: DVec2) -> bool {
-    (a.x - b.x).abs() <= 0.5 && (a.y - b.y).abs() <= 0.5
-}
-
 fn sync_editor_cursor_control(
     freecam_state: &FreecamState,
     cursor_control_state: &mut EditorCursorControlState,
     runtime_cursor_state: Option<&BevyRuntimeCursorState>,
-    lock_cursor_position: Option<DVec2>,
     restore_cursor_position: Option<DVec2>,
 ) {
     cursor_control_state.freecam_capture_active = freecam_state.is_looking;
@@ -3807,16 +3793,12 @@ fn sync_editor_cursor_control(
         runtime_cursor_state
             .0
             .set(cursor_control_state.effective_policy());
-        if freecam_state.is_looking {
-            if let Some(lock_cursor_position) = lock_cursor_position {
+        if !freecam_state.is_looking {
+            if let Some(restore_cursor_position) = restore_cursor_position {
                 runtime_cursor_state
                     .0
-                    .request_warp(lock_cursor_position.x, lock_cursor_position.y);
+                    .request_warp(restore_cursor_position.x, restore_cursor_position.y);
             }
-        } else if let Some(restore_cursor_position) = restore_cursor_position {
-            runtime_cursor_state
-                .0
-                .request_warp(restore_cursor_position.x, restore_cursor_position.y);
         }
     }
 }

@@ -2935,6 +2935,11 @@ impl GraphRenderer {
                 viewport_resize_debounce_ms,
                 !viewport.immediate_resize,
             );
+            let viewport_surface_size = self
+                .offscreen_viewports
+                .get(&viewport.id)
+                .map(|target| target.size)
+                .unwrap_or_else(|| PhysicalSize::new(target_width, target_height));
             let prev_transform = self
                 .offscreen_viewport_prev_cameras
                 .get(&viewport.id)
@@ -2978,7 +2983,7 @@ impl GraphRenderer {
             if let Err(err) = self.ensure_graph_ready(
                 &viewport_graph_spec,
                 viewport_graph_sig,
-                graph_surface_size,
+                viewport_surface_size,
             ) {
                 self.current_render_data = Some(scene);
                 return Err(err);

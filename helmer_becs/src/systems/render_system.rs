@@ -2350,8 +2350,38 @@ pub fn render_data_system(
         worker_state.last_main_scene_to_swapchain = Some(desired);
     }
 
+    let viewport_camera = resources
+        .viewport_requests
+        .as_ref()
+        .and_then(|viewports| viewports.0.first())
+        .map(|viewport| (viewport.camera_component, viewport.camera_transform));
+
     let mut camera_available = false;
-    if let Ok((camera, transform)) = camera_query.single() {
+    if let Some((camera_component, camera_transform)) = viewport_camera {
+        camera_available = true;
+        if !send_failed
+            && !try_send_change(
+                &mut *worker_state,
+                &mut worker,
+                RenderChange::UpdateCamera {
+                    camera: camera_component,
+                    transform: camera_transform,
+                },
+                "camera update",
+            )
+        {
+            send_failed = true;
+        }
+        direct_delta.camera = Some(RenderCameraDelta {
+            transform: camera_transform,
+            camera: camera_component,
+        });
+        if !send_failed {
+            worker_state.camera_sent = true;
+        } else {
+            worker_state.camera_sent = false;
+        }
+    } else if let Ok((camera, transform)) = camera_query.single() {
         camera_available = true;
         let camera_changed =
             camera.is_changed() || transform.is_changed() || !worker_state.camera_sent;

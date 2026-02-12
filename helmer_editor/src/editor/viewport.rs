@@ -109,9 +109,10 @@ impl Default for ViewportResolutionPreset {
     }
 }
 
-pub const VIEWPORT_ID_EDITOR: u64 = 1;
-pub const VIEWPORT_ID_GAMEPLAY: u64 = 2;
-pub const VIEWPORT_ID_PREVIEW: u64 = 3;
+// reserve high IDs for built-in non-pane viewports to avoid collisions with pane IDs
+pub const VIEWPORT_ID_EDITOR: u64 = u64::MAX - 2;
+pub const VIEWPORT_ID_GAMEPLAY: u64 = u64::MAX - 1;
+pub const VIEWPORT_ID_PREVIEW: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ViewportRectPixels {

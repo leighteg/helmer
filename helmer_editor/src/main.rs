@@ -203,14 +203,19 @@ fn editor_init(
     schedule.add_systems(timeline_playback_system);
     schedule.add_systems(
         editor_viewport_camera_mode_system
+            .after(helmer_becs::egui_integration::egui_system)
             .before(helmer_becs::systems::render_system::render_data_system),
     );
     schedule.add_systems(
         editor_viewport_render_requests_system
+            .after(helmer_becs::egui_integration::egui_system)
             .before(helmer_becs::systems::render_system::render_data_system),
     );
-    schedule
-        .add_systems(gizmo_system.before(helmer_becs::systems::render_system::render_data_system));
+    schedule.add_systems(
+        gizmo_system
+            .after(helmer_becs::egui_integration::egui_system)
+            .before(helmer_becs::systems::render_system::render_data_system),
+    );
     schedule.add_systems(
         editor_render_refresh_system.after(helmer_becs::systems::render_system::render_data_system),
     );
@@ -220,5 +225,9 @@ fn editor_init(
             .after(selection_system)
             .after(editor_ui_system),
     );
-    schedule.add_systems(freecam_system);
+    schedule.add_systems(
+        freecam_system
+            .after(helmer_becs::egui_integration::egui_system)
+            .before(helmer_becs::systems::render_system::render_data_system),
+    );
 }

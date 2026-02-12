@@ -5,12 +5,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy_ecs::prelude::{Resource, World};
-use egui::{Color32, ComboBox, DragValue, Key, RichText, Sense, TextEdit, Ui};
+use egui::{Color32, ComboBox, DragValue, RichText, Sense, TextEdit, Ui};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
+use glam::DQuat;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -18,10 +20,18 @@ use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use crate::editor::AssetDragPayload;
 
 pub const VISUAL_SCRIPT_EXTENSION: &str = "hvs";
+pub const VISUAL_SCRIPT_FUNCTION_EXTENSION: &str = "hvsf";
 const VISUAL_SCRIPT_VERSION: u32 = 1;
 const MAX_API_ARGS: usize = 16;
+const MAX_FUNCTION_IO_PORTS: usize = 16;
+const MAX_FUNCTION_CALL_DEPTH: usize = 32;
 const MAX_EXEC_STEPS_PER_EVENT: u32 = 10_000;
 const MAX_LOOP_ITERATIONS: u32 = 4_096;
+const PHYSICS_QUERY_FLAG_EXCLUDE_FIXED: u32 = 1 << 0;
+const PHYSICS_QUERY_FLAG_EXCLUDE_KINEMATIC: u32 = 1 << 1;
+const PHYSICS_QUERY_FLAG_EXCLUDE_DYNAMIC: u32 = 1 << 2;
+const PHYSICS_QUERY_FLAG_EXCLUDE_SENSORS: u32 = 1 << 3;
+const PHYSICS_QUERY_FLAG_EXCLUDE_SOLIDS: u32 = 1 << 4;
 
 const PIN_COLOR_EVENT: Color32 = Color32::from_rgb(67, 160, 71);
 const PIN_COLOR_EXEC: Color32 = Color32::from_rgb(74, 144, 226);
@@ -35,6 +45,7 @@ pub enum VisualValueType {
     Number,
     String,
     Entity,
+    Array,
     Vec2,
     Vec3,
     Quat,
@@ -49,6 +60,7 @@ pub enum VisualValueType {
     PhysicsVelocity,
     PhysicsWorldDefaults,
     CharacterControllerOutput,
+    PhysicsQueryFilter,
     PhysicsRayCastHit,
     PhysicsPointProjectionHit,
     PhysicsShapeCastHit,
@@ -63,6 +75,7 @@ impl VisualValueType {
             Self::Number => "Number",
             Self::String => "String",
             Self::Entity => "Entity",
+            Self::Array => "Array",
             Self::Vec2 => "Vec2",
             Self::Vec3 => "Vec3",
             Self::Quat => "Quat",
@@ -77,6 +90,7 @@ impl VisualValueType {
             Self::PhysicsVelocity => "Physics Velocity",
             Self::PhysicsWorldDefaults => "Physics World Defaults",
             Self::CharacterControllerOutput => "Character Output",
+            Self::PhysicsQueryFilter => "Physics Query Filter",
             Self::PhysicsRayCastHit => "Ray Cast Hit",
             Self::PhysicsPointProjectionHit => "Point Projection Hit",
             Self::PhysicsShapeCastHit => "Shape Cast Hit",
@@ -85,7 +99,33 @@ impl VisualValueType {
     }
 }
 
-const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 22] = [
+const VISUAL_VALUE_TYPE_CHOICES_NO_JSON: [VisualValueType; 23] = [
+    VisualValueType::Bool,
+    VisualValueType::Number,
+    VisualValueType::String,
+    VisualValueType::Entity,
+    VisualValueType::Array,
+    VisualValueType::Vec2,
+    VisualValueType::Vec3,
+    VisualValueType::Quat,
+    VisualValueType::Transform,
+    VisualValueType::Camera,
+    VisualValueType::Light,
+    VisualValueType::MeshRenderer,
+    VisualValueType::AudioEmitter,
+    VisualValueType::AudioListener,
+    VisualValueType::Script,
+    VisualValueType::Physics,
+    VisualValueType::PhysicsVelocity,
+    VisualValueType::PhysicsWorldDefaults,
+    VisualValueType::CharacterControllerOutput,
+    VisualValueType::PhysicsQueryFilter,
+    VisualValueType::PhysicsRayCastHit,
+    VisualValueType::PhysicsPointProjectionHit,
+    VisualValueType::PhysicsShapeCastHit,
+];
+
+const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 20] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -105,9 +145,7 @@ const VISUAL_VALUE_TYPE_CHOICES: [VisualValueType; 22] = [
     VisualValueType::PhysicsWorldDefaults,
     VisualValueType::CharacterControllerOutput,
     VisualValueType::PhysicsRayCastHit,
-    VisualValueType::PhysicsPointProjectionHit,
     VisualValueType::PhysicsShapeCastHit,
-    VisualValueType::Json,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,7 +157,47 @@ pub struct VisualVariableDefinition {
     #[serde(default)]
     pub value_type: VisualValueType,
     #[serde(default)]
+    pub array_item_type: Option<VisualValueType>,
+    #[serde(default)]
     pub default_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VisualFunctionIoDefinition {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default = "default_function_io_name")]
+    pub name: String,
+    #[serde(default)]
+    pub value_type: VisualValueType,
+    #[serde(default)]
+    pub array_item_type: Option<VisualValueType>,
+    #[serde(default)]
+    pub default_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct VisualScriptFunctionDefinition {
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default = "default_function_name")]
+    pub name: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub inputs: Vec<VisualFunctionIoDefinition>,
+    #[serde(default)]
+    pub outputs: Vec<VisualFunctionIoDefinition>,
+    #[serde(default)]
+    pub graph: VisualScriptGraphData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VisualScriptFunctionAsset {
+    #[serde(default = "default_visual_script_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub function: VisualScriptFunctionDefinition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -132,6 +210,8 @@ pub struct VisualScriptDocument {
     pub prelude: String,
     #[serde(default)]
     pub variables: Vec<VisualVariableDefinition>,
+    #[serde(default)]
+    pub functions: Vec<VisualScriptFunctionDefinition>,
     #[serde(default)]
     pub graph: VisualScriptGraphData,
 }
@@ -2366,6 +2446,135 @@ impl VisualMathOp {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum VisualTrigOp {
+    #[default]
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+}
+
+impl VisualTrigOp {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Sin => "Sin",
+            Self::Cos => "Cos",
+            Self::Tan => "Tan",
+            Self::Asin => "Asin",
+            Self::Acos => "Acos",
+            Self::Atan => "Atan",
+            Self::Atan2 => "Atan2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualInterpolationOp {
+    #[default]
+    Lerp,
+    SmoothStep,
+    InverseLerp,
+    Vec3Lerp,
+    QuatSlerp,
+}
+
+impl VisualInterpolationOp {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Lerp => "Lerp (Number)",
+            Self::SmoothStep => "SmoothStep",
+            Self::InverseLerp => "Inverse Lerp",
+            Self::Vec3Lerp => "Lerp (Vec3)",
+            Self::QuatSlerp => "Slerp (Quat)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualVectorMathOp {
+    #[default]
+    Dot,
+    Cross,
+    Length,
+    Normalize,
+    Distance,
+}
+
+impl VisualVectorMathOp {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Dot => "Dot",
+            Self::Cross => "Cross",
+            Self::Length => "Length",
+            Self::Normalize => "Normalize",
+            Self::Distance => "Distance",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualProceduralMathOp {
+    #[default]
+    Clamp,
+    Remap,
+    Saturate,
+    Fract,
+}
+
+impl VisualProceduralMathOp {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Clamp => "Clamp",
+            Self::Remap => "Remap",
+            Self::Saturate => "Saturate",
+            Self::Fract => "Fract",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualUtilityMathOp {
+    #[default]
+    Abs,
+    Sign,
+    Floor,
+    Ceil,
+    Round,
+    Sqrt,
+    Pow,
+    Exp,
+    Log,
+    Degrees,
+    Radians,
+}
+
+impl VisualUtilityMathOp {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Abs => "Abs",
+            Self::Sign => "Sign",
+            Self::Floor => "Floor",
+            Self::Ceil => "Ceil",
+            Self::Round => "Round",
+            Self::Sqrt => "Sqrt",
+            Self::Pow => "Pow",
+            Self::Exp => "Exp",
+            Self::Log => "Log",
+            Self::Degrees => "Radians -> Degrees",
+            Self::Radians => "Degrees -> Radians",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum VisualCompareOp {
     #[default]
     Equals,
@@ -2583,11 +2792,73 @@ pub enum VisualScriptNodeKind {
         #[serde(default)]
         value: String,
     },
+    PhysicsQueryFilterLiteral {
+        #[serde(default)]
+        value: String,
+    },
     SelfEntity,
     DeltaTime,
+    TimeSinceStart,
+    UnixTimeSeconds,
+    TimeSince {
+        #[serde(default = "default_time_since_origin")]
+        origin_seconds: String,
+    },
+    WaitSeconds {
+        #[serde(default = "default_wait_seconds")]
+        seconds: String,
+        #[serde(default = "default_wait_restart_on_retrigger")]
+        restart_on_retrigger: bool,
+    },
+    FunctionStart {
+        #[serde(default)]
+        function_id: u64,
+        #[serde(default)]
+        inputs: Vec<VisualFunctionIoDefinition>,
+    },
+    FunctionReturn {
+        #[serde(default)]
+        function_id: u64,
+        #[serde(default)]
+        outputs: Vec<VisualFunctionIoDefinition>,
+        #[serde(default)]
+        values: Vec<String>,
+    },
+    CallFunction {
+        #[serde(default)]
+        function_id: u64,
+        #[serde(default = "default_function_name")]
+        name: String,
+        #[serde(default)]
+        inputs: Vec<VisualFunctionIoDefinition>,
+        #[serde(default)]
+        outputs: Vec<VisualFunctionIoDefinition>,
+        #[serde(default)]
+        args: Vec<String>,
+    },
     MathBinary {
         #[serde(default)]
         op: VisualMathOp,
+    },
+    MathTrig {
+        #[serde(default)]
+        op: VisualTrigOp,
+    },
+    MathInterpolation {
+        #[serde(default)]
+        op: VisualInterpolationOp,
+    },
+    MathVector {
+        #[serde(default)]
+        op: VisualVectorMathOp,
+    },
+    MathProcedural {
+        #[serde(default)]
+        op: VisualProceduralMathOp,
+    },
+    MathUtility {
+        #[serde(default)]
+        op: VisualUtilityMathOp,
     },
     Compare {
         #[serde(default)]
@@ -2647,6 +2918,35 @@ pub enum VisualScriptNodeKind {
     Quat,
     Transform,
     PhysicsVelocity,
+    ArrayEmpty {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArrayLength {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArrayGet {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArraySet {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArrayPush {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArrayRemoveAt {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    ArrayClear {
+        #[serde(default = "default_array_item_type")]
+        item_type: VisualValueType,
+    },
+    RayCast,
     Comment {
         #[serde(default)]
         text: String,
@@ -2715,6 +3015,67 @@ impl VisualScriptNodeKind {
                     args.push(default_value.to_string());
                 }
             }
+            Self::FunctionStart { inputs, .. } => {
+                normalize_function_io_ports(inputs, "input");
+            }
+            Self::FunctionReturn {
+                outputs, values, ..
+            } => {
+                normalize_function_io_ports(outputs, "output");
+                values.truncate(outputs.len());
+                while values.len() < outputs.len() {
+                    let index = values.len();
+                    let value_type = outputs
+                        .get(index)
+                        .map(|port| port.value_type)
+                        .unwrap_or(VisualValueType::Json);
+                    values.push(default_literal_for_type(value_type).to_string());
+                }
+            }
+            Self::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                args,
+            } => {
+                if *function_id == 0 && !name.trim().is_empty() {
+                    *function_id = hash_string_id(name);
+                }
+                normalize_function_io_ports(inputs, "input");
+                normalize_function_io_ports(outputs, "output");
+                args.truncate(inputs.len());
+                while args.len() < inputs.len() {
+                    let value_type = inputs
+                        .get(args.len())
+                        .map(|port| port.value_type)
+                        .unwrap_or(VisualValueType::Json);
+                    args.push(default_literal_for_type(value_type).to_string());
+                }
+            }
+            Self::PhysicsQueryFilterLiteral { value } => {
+                if value.trim().is_empty() {
+                    *value =
+                        default_literal_for_type(VisualValueType::PhysicsQueryFilter).to_string();
+                } else {
+                    *value = normalize_literal_for_data_type(
+                        value,
+                        VisualValueType::PhysicsQueryFilter,
+                        None,
+                    );
+                }
+            }
+            Self::ArrayEmpty { item_type }
+            | Self::ArrayLength { item_type }
+            | Self::ArrayGet { item_type }
+            | Self::ArraySet { item_type }
+            | Self::ArrayPush { item_type }
+            | Self::ArrayRemoveAt { item_type }
+            | Self::ArrayClear { item_type } => {
+                if matches!(*item_type, VisualValueType::Array | VisualValueType::Json) {
+                    *item_type = default_array_item_type();
+                }
+            }
             _ => {}
         }
     }
@@ -2737,9 +3098,28 @@ impl VisualScriptNodeKind {
             Self::NumberLiteral { .. } => "Number".to_string(),
             Self::StringLiteral { .. } => "String".to_string(),
             Self::JsonLiteral { .. } => "JSON".to_string(),
+            Self::PhysicsQueryFilterLiteral { .. } => "Physics Query Filter".to_string(),
             Self::SelfEntity => "Self Entity".to_string(),
             Self::DeltaTime => "Delta Time".to_string(),
+            Self::TimeSinceStart => "Time Since Start".to_string(),
+            Self::UnixTimeSeconds => "Unix Time Seconds".to_string(),
+            Self::TimeSince { .. } => "Time Since".to_string(),
+            Self::WaitSeconds { .. } => "Wait Seconds".to_string(),
+            Self::FunctionStart { .. } => "Function Start".to_string(),
+            Self::FunctionReturn { .. } => "Function Return".to_string(),
+            Self::CallFunction { name, .. } => {
+                if name.trim().is_empty() {
+                    "Call Function".to_string()
+                } else {
+                    format!("Call {}", name.trim())
+                }
+            }
             Self::MathBinary { op } => format!("Math: {}", op.title()),
+            Self::MathTrig { op } => format!("Trig: {}", op.title()),
+            Self::MathInterpolation { op } => format!("Interpolation: {}", op.title()),
+            Self::MathVector { op } => format!("Vector: {}", op.title()),
+            Self::MathProcedural { op } => format!("Procedural: {}", op.title()),
+            Self::MathUtility { op } => format!("Utility: {}", op.title()),
             Self::Compare { op } => format!("Compare: {}", op.title()),
             Self::LogicalBinary { op } => format!("Logical: {}", op.title()),
             Self::Not => "Not".to_string(),
@@ -2767,6 +3147,14 @@ impl VisualScriptNodeKind {
             Self::Quat => "Quat".to_string(),
             Self::Transform => "Transform".to_string(),
             Self::PhysicsVelocity => "Physics Velocity".to_string(),
+            Self::ArrayEmpty { .. } => "Array Empty".to_string(),
+            Self::ArrayLength { .. } => "Array Length".to_string(),
+            Self::ArrayGet { .. } => "Array Get".to_string(),
+            Self::ArraySet { .. } => "Array Set".to_string(),
+            Self::ArrayPush { .. } => "Array Push".to_string(),
+            Self::ArrayRemoveAt { .. } => "Array Remove At".to_string(),
+            Self::ArrayClear { .. } => "Array Clear".to_string(),
+            Self::RayCast => "Ray Cast".to_string(),
             Self::Comment { .. } => "Comment".to_string(),
             Self::Statement { .. } => "Legacy Statement".to_string(),
         }
@@ -2783,135 +3171,18 @@ impl VisualScriptNodeKind {
             | Self::NumberLiteral { .. }
             | Self::StringLiteral { .. }
             | Self::JsonLiteral { .. }
+            | Self::PhysicsQueryFilterLiteral { .. }
             | Self::SelfEntity
             | Self::DeltaTime
+            | Self::TimeSinceStart
+            | Self::UnixTimeSeconds
+            | Self::TimeSince { .. }
             | Self::MathBinary { .. }
-            | Self::Compare { .. }
-            | Self::LogicalBinary { .. }
-            | Self::Not
-            | Self::Select { .. }
-            | Self::Vec2GetComponent { .. }
-            | Self::Vec2SetComponent { .. }
-            | Self::Vec3GetComponent { .. }
-            | Self::Vec3SetComponent { .. }
-            | Self::QuatGetComponent { .. }
-            | Self::QuatSetComponent { .. }
-            | Self::TransformGetComponent { .. }
-            | Self::TransformSetComponent { .. }
-            | Self::PhysicsVelocityGetComponent { .. }
-            | Self::PhysicsVelocitySetComponent { .. }
-            | Self::Vec2
-            | Self::Vec3
-            | Self::Quat
-            | Self::Transform
-            | Self::PhysicsVelocity => 0,
-            Self::Sequence { .. }
-            | Self::Branch { .. }
-            | Self::LoopWhile { .. }
-            | Self::Log { .. }
-            | Self::SetVariable { .. }
-            | Self::ClearVariable { .. }
-            | Self::CallApi { .. }
-            | Self::Comment { .. }
-            | Self::Statement { .. } => 1,
-        }
-    }
-
-    fn exec_output_count(&self) -> usize {
-        match self {
-            Self::OnStart | Self::OnUpdate | Self::OnStop => 1,
-            Self::Sequence { outputs } => usize::from((*outputs).clamp(1, 8)),
-            Self::Branch { .. } => 2,
-            Self::LoopWhile { .. } => 2,
-            Self::Log { .. }
-            | Self::SetVariable { .. }
-            | Self::ClearVariable { .. }
-            | Self::CallApi { .. }
-            | Self::Comment { .. }
-            | Self::Statement { .. } => 1,
-            Self::GetVariable { .. }
-            | Self::QueryApi { .. }
-            | Self::BoolLiteral { .. }
-            | Self::NumberLiteral { .. }
-            | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
-            | Self::SelfEntity
-            | Self::DeltaTime
-            | Self::MathBinary { .. }
-            | Self::Compare { .. }
-            | Self::LogicalBinary { .. }
-            | Self::Not
-            | Self::Select { .. }
-            | Self::Vec2GetComponent { .. }
-            | Self::Vec2SetComponent { .. }
-            | Self::Vec3GetComponent { .. }
-            | Self::Vec3SetComponent { .. }
-            | Self::QuatGetComponent { .. }
-            | Self::QuatSetComponent { .. }
-            | Self::TransformGetComponent { .. }
-            | Self::TransformSetComponent { .. }
-            | Self::PhysicsVelocityGetComponent { .. }
-            | Self::PhysicsVelocitySetComponent { .. }
-            | Self::Vec2
-            | Self::Vec3
-            | Self::Quat
-            | Self::Transform
-            | Self::PhysicsVelocity => 0,
-        }
-    }
-
-    fn data_input_count(&self) -> usize {
-        match self {
-            Self::Branch { .. }
-            | Self::LoopWhile { .. }
-            | Self::Log { .. }
-            | Self::SetVariable { .. }
-            | Self::Not => 1,
-            Self::CallApi { operation, .. } | Self::QueryApi { operation, .. } => {
-                operation.spec().inputs.len().min(MAX_API_ARGS)
-            }
-            Self::MathBinary { .. } | Self::Compare { .. } | Self::LogicalBinary { .. } => 2,
-            Self::Vec2GetComponent { .. }
-            | Self::Vec3GetComponent { .. }
-            | Self::QuatGetComponent { .. }
-            | Self::TransformGetComponent { .. }
-            | Self::PhysicsVelocityGetComponent { .. } => 1,
-            Self::Vec2SetComponent { .. }
-            | Self::Vec3SetComponent { .. }
-            | Self::QuatSetComponent { .. }
-            | Self::TransformSetComponent { .. }
-            | Self::PhysicsVelocitySetComponent { .. } => 2,
-            Self::Vec2 => 2,
-            Self::Vec3 | Self::Select { .. } | Self::Transform | Self::PhysicsVelocity => 3,
-            Self::Quat => 4,
-            Self::OnStart
-            | Self::OnUpdate
-            | Self::OnStop
-            | Self::Sequence { .. }
-            | Self::ClearVariable { .. }
-            | Self::GetVariable { .. }
-            | Self::BoolLiteral { .. }
-            | Self::NumberLiteral { .. }
-            | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
-            | Self::SelfEntity
-            | Self::DeltaTime
-            | Self::Comment { .. }
-            | Self::Statement { .. } => 0,
-        }
-    }
-
-    fn data_output_count(&self) -> usize {
-        match self {
-            Self::GetVariable { .. }
-            | Self::QueryApi { .. }
-            | Self::BoolLiteral { .. }
-            | Self::NumberLiteral { .. }
-            | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
-            | Self::SelfEntity
-            | Self::DeltaTime
-            | Self::MathBinary { .. }
+            | Self::MathTrig { .. }
+            | Self::MathInterpolation { .. }
+            | Self::MathVector { .. }
+            | Self::MathProcedural { .. }
+            | Self::MathUtility { .. }
             | Self::Compare { .. }
             | Self::LogicalBinary { .. }
             | Self::Not
@@ -2931,7 +3202,222 @@ impl VisualScriptNodeKind {
             | Self::Quat
             | Self::Transform
             | Self::PhysicsVelocity
+            | Self::ArrayEmpty { .. }
+            | Self::ArrayLength { .. }
+            | Self::ArrayGet { .. }
+            | Self::ArraySet { .. }
+            | Self::ArrayPush { .. }
+            | Self::ArrayRemoveAt { .. }
+            | Self::ArrayClear { .. }
+            | Self::FunctionStart { .. }
+            | Self::RayCast => 0,
+            Self::Sequence { .. }
+            | Self::Branch { .. }
+            | Self::LoopWhile { .. }
+            | Self::Log { .. }
+            | Self::SetVariable { .. }
+            | Self::ClearVariable { .. }
+            | Self::WaitSeconds { .. }
+            | Self::FunctionReturn { .. }
+            | Self::CallFunction { .. }
+            | Self::CallApi { .. }
+            | Self::Comment { .. }
+            | Self::Statement { .. } => 1,
+        }
+    }
+
+    fn exec_output_count(&self) -> usize {
+        match self {
+            Self::OnStart | Self::OnUpdate | Self::OnStop => 1,
+            Self::Sequence { outputs } => usize::from((*outputs).clamp(1, 8)),
+            Self::Branch { .. } => 2,
+            Self::LoopWhile { .. } => 2,
+            Self::Log { .. }
+            | Self::SetVariable { .. }
+            | Self::ClearVariable { .. }
+            | Self::WaitSeconds { .. }
+            | Self::CallFunction { .. }
+            | Self::CallApi { .. }
+            | Self::FunctionStart { .. }
+            | Self::Comment { .. }
+            | Self::Statement { .. } => 1,
+            Self::GetVariable { .. }
+            | Self::QueryApi { .. }
+            | Self::BoolLiteral { .. }
+            | Self::NumberLiteral { .. }
+            | Self::StringLiteral { .. }
+            | Self::JsonLiteral { .. }
+            | Self::PhysicsQueryFilterLiteral { .. }
+            | Self::SelfEntity
+            | Self::DeltaTime
+            | Self::TimeSinceStart
+            | Self::UnixTimeSeconds
+            | Self::TimeSince { .. }
+            | Self::MathBinary { .. }
+            | Self::MathTrig { .. }
+            | Self::MathInterpolation { .. }
+            | Self::MathVector { .. }
+            | Self::MathProcedural { .. }
+            | Self::MathUtility { .. }
+            | Self::Compare { .. }
+            | Self::LogicalBinary { .. }
+            | Self::Not
+            | Self::Select { .. }
+            | Self::Vec2GetComponent { .. }
+            | Self::Vec2SetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. }
+            | Self::Vec2
+            | Self::Vec3
+            | Self::Quat
+            | Self::Transform
+            | Self::PhysicsVelocity
+            | Self::ArrayEmpty { .. }
+            | Self::ArrayLength { .. }
+            | Self::ArrayGet { .. }
+            | Self::ArraySet { .. }
+            | Self::ArrayPush { .. }
+            | Self::ArrayRemoveAt { .. }
+            | Self::ArrayClear { .. }
+            | Self::RayCast
+            | Self::FunctionReturn { .. } => 0,
+        }
+    }
+
+    fn data_input_count(&self) -> usize {
+        match self {
+            Self::Branch { .. }
+            | Self::LoopWhile { .. }
+            | Self::Log { .. }
+            | Self::SetVariable { .. }
+            | Self::Not
+            | Self::WaitSeconds { .. }
+            | Self::TimeSince { .. }
+            | Self::ArrayLength { .. }
+            | Self::ArrayClear { .. } => 1,
+            Self::CallApi { operation, .. } | Self::QueryApi { operation, .. } => {
+                operation.spec().inputs.len().min(MAX_API_ARGS)
+            }
+            Self::CallFunction { inputs, .. } => inputs.len(),
+            Self::FunctionReturn { outputs, .. } => outputs.len(),
+            Self::MathBinary { .. } | Self::Compare { .. } | Self::LogicalBinary { .. } => 2,
+            Self::MathTrig { op } => {
+                if *op == VisualTrigOp::Atan2 {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::MathInterpolation { .. } => 3,
+            Self::MathVector { op } => match op {
+                VisualVectorMathOp::Dot
+                | VisualVectorMathOp::Cross
+                | VisualVectorMathOp::Distance => 2,
+                VisualVectorMathOp::Length | VisualVectorMathOp::Normalize => 1,
+            },
+            Self::MathProcedural { op } => match op {
+                VisualProceduralMathOp::Clamp => 3,
+                VisualProceduralMathOp::Remap => 5,
+                VisualProceduralMathOp::Saturate | VisualProceduralMathOp::Fract => 1,
+            },
+            Self::MathUtility { op } => match op {
+                VisualUtilityMathOp::Pow | VisualUtilityMathOp::Log => 2,
+                _ => 1,
+            },
+            Self::Vec2GetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. } => 1,
+            Self::Vec2SetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. } => 2,
+            Self::ArrayPush { .. } | Self::ArrayRemoveAt { .. } => 2,
+            Self::ArrayGet { .. } | Self::ArraySet { .. } => 3,
+            Self::RayCast => 6,
+            Self::Vec2 => 2,
+            Self::Vec3 | Self::Select { .. } | Self::Transform | Self::PhysicsVelocity => 3,
+            Self::Quat => 4,
+            Self::OnStart
+            | Self::OnUpdate
+            | Self::OnStop
+            | Self::Sequence { .. }
+            | Self::ClearVariable { .. }
+            | Self::GetVariable { .. }
+            | Self::BoolLiteral { .. }
+            | Self::NumberLiteral { .. }
+            | Self::StringLiteral { .. }
+            | Self::JsonLiteral { .. }
+            | Self::PhysicsQueryFilterLiteral { .. }
+            | Self::SelfEntity
+            | Self::DeltaTime
+            | Self::TimeSinceStart
+            | Self::UnixTimeSeconds
+            | Self::FunctionStart { .. }
+            | Self::ArrayEmpty { .. }
+            | Self::Comment { .. }
+            | Self::Statement { .. } => 0,
+        }
+    }
+
+    fn data_output_count(&self) -> usize {
+        match self {
+            Self::GetVariable { .. }
+            | Self::QueryApi { .. }
+            | Self::BoolLiteral { .. }
+            | Self::NumberLiteral { .. }
+            | Self::StringLiteral { .. }
+            | Self::JsonLiteral { .. }
+            | Self::PhysicsQueryFilterLiteral { .. }
+            | Self::SelfEntity
+            | Self::DeltaTime
+            | Self::TimeSinceStart
+            | Self::UnixTimeSeconds
+            | Self::TimeSince { .. }
+            | Self::MathBinary { .. }
+            | Self::MathTrig { .. }
+            | Self::MathInterpolation { .. }
+            | Self::MathVector { .. }
+            | Self::MathProcedural { .. }
+            | Self::MathUtility { .. }
+            | Self::Compare { .. }
+            | Self::LogicalBinary { .. }
+            | Self::Not
+            | Self::Select { .. }
+            | Self::Vec2GetComponent { .. }
+            | Self::Vec2SetComponent { .. }
+            | Self::Vec3GetComponent { .. }
+            | Self::Vec3SetComponent { .. }
+            | Self::QuatGetComponent { .. }
+            | Self::QuatSetComponent { .. }
+            | Self::TransformGetComponent { .. }
+            | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. }
+            | Self::Vec2
+            | Self::Vec3
+            | Self::Quat
+            | Self::Transform
+            | Self::PhysicsVelocity
+            | Self::ArrayEmpty { .. }
+            | Self::ArrayLength { .. }
+            | Self::ArrayGet { .. }
+            | Self::ArraySet { .. }
+            | Self::ArrayPush { .. }
+            | Self::ArrayRemoveAt { .. }
+            | Self::ArrayClear { .. }
+            | Self::RayCast
             | Self::CallApi { .. } => 1,
+            Self::FunctionStart { inputs, .. } => inputs.len(),
+            Self::CallFunction { outputs, .. } => outputs.len(),
             Self::OnStart
             | Self::OnUpdate
             | Self::OnStop
@@ -2941,6 +3427,8 @@ impl VisualScriptNodeKind {
             | Self::Log { .. }
             | Self::SetVariable { .. }
             | Self::ClearVariable { .. }
+            | Self::WaitSeconds { .. }
+            | Self::FunctionReturn { .. }
             | Self::Comment { .. }
             | Self::Statement { .. } => 0,
         }
@@ -3015,6 +3503,75 @@ impl VisualScriptNodeKind {
                         "B".to_string()
                     }
                 }
+                Self::MathTrig { op } => {
+                    if *op == VisualTrigOp::Atan2 {
+                        if slot.index == 0 {
+                            "Y".to_string()
+                        } else {
+                            "X".to_string()
+                        }
+                    } else {
+                        "Radians".to_string()
+                    }
+                }
+                Self::MathInterpolation { op } => match op {
+                    VisualInterpolationOp::InverseLerp => match slot.index {
+                        0 => "A".to_string(),
+                        1 => "B".to_string(),
+                        _ => "Value".to_string(),
+                    },
+                    _ => match slot.index {
+                        0 => "A".to_string(),
+                        1 => "B".to_string(),
+                        _ => "T".to_string(),
+                    },
+                },
+                Self::MathVector { op } => match op {
+                    VisualVectorMathOp::Length | VisualVectorMathOp::Normalize => {
+                        "Vec3".to_string()
+                    }
+                    _ => {
+                        if slot.index == 0 {
+                            "A".to_string()
+                        } else {
+                            "B".to_string()
+                        }
+                    }
+                },
+                Self::MathProcedural { op } => match op {
+                    VisualProceduralMathOp::Clamp => match slot.index {
+                        0 => "Value".to_string(),
+                        1 => "Min".to_string(),
+                        _ => "Max".to_string(),
+                    },
+                    VisualProceduralMathOp::Remap => match slot.index {
+                        0 => "Value".to_string(),
+                        1 => "In Min".to_string(),
+                        2 => "In Max".to_string(),
+                        3 => "Out Min".to_string(),
+                        _ => "Out Max".to_string(),
+                    },
+                    VisualProceduralMathOp::Saturate | VisualProceduralMathOp::Fract => {
+                        "Value".to_string()
+                    }
+                },
+                Self::MathUtility { op } => match op {
+                    VisualUtilityMathOp::Pow => {
+                        if slot.index == 0 {
+                            "Value".to_string()
+                        } else {
+                            "Exponent".to_string()
+                        }
+                    }
+                    VisualUtilityMathOp::Log => {
+                        if slot.index == 0 {
+                            "Value".to_string()
+                        } else {
+                            "Base".to_string()
+                        }
+                    }
+                    _ => "Value".to_string(),
+                },
                 Self::Compare { .. } => {
                     if slot.index == 0 {
                         "Left".to_string()
@@ -3030,6 +3587,54 @@ impl VisualScriptNodeKind {
                     }
                 }
                 Self::Not => "Value".to_string(),
+                Self::TimeSince { .. } => "From Seconds".to_string(),
+                Self::WaitSeconds { .. } => "Seconds".to_string(),
+                Self::FunctionReturn { outputs, .. } => outputs
+                    .get(slot.index)
+                    .map(|port| port.name.trim())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| format!("Return {}", slot.index + 1)),
+                Self::CallFunction { inputs, .. } => inputs
+                    .get(slot.index)
+                    .map(|port| port.name.trim())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| format!("Arg {}", slot.index + 1)),
+                Self::ArrayLength { .. } => "Array".to_string(),
+                Self::ArrayGet { .. } => match slot.index {
+                    0 => "Array".to_string(),
+                    1 => "Index".to_string(),
+                    _ => "Default".to_string(),
+                },
+                Self::ArraySet { .. } => match slot.index {
+                    0 => "Array".to_string(),
+                    1 => "Index".to_string(),
+                    _ => "Value".to_string(),
+                },
+                Self::ArrayPush { .. } => {
+                    if slot.index == 0 {
+                        "Array".to_string()
+                    } else {
+                        "Value".to_string()
+                    }
+                }
+                Self::ArrayRemoveAt { .. } => {
+                    if slot.index == 0 {
+                        "Array".to_string()
+                    } else {
+                        "Index".to_string()
+                    }
+                }
+                Self::ArrayClear { .. } => "Array".to_string(),
+                Self::RayCast => match slot.index {
+                    0 => "Origin".to_string(),
+                    1 => "Direction".to_string(),
+                    2 => "Max TOI".to_string(),
+                    3 => "Solid".to_string(),
+                    4 => "Filter".to_string(),
+                    _ => "Exclude Entity".to_string(),
+                },
                 Self::Vec2GetComponent { .. } => "Vec2".to_string(),
                 Self::Vec2SetComponent { component } => {
                     if slot.index == 0 {
@@ -3109,6 +3714,7 @@ impl VisualScriptNodeKind {
                 Self::OnStart => "Start".to_string(),
                 Self::OnUpdate => "Tick".to_string(),
                 Self::OnStop => "Stop".to_string(),
+                Self::FunctionStart { .. } => "Start".to_string(),
                 Self::Branch { .. } => {
                     if slot.index == 0 {
                         "True".to_string()
@@ -3148,6 +3754,50 @@ impl VisualScriptNodeKind {
                 Self::Quat => "Quat".to_string(),
                 Self::Transform => "Transform".to_string(),
                 Self::PhysicsVelocity => "Physics Velocity".to_string(),
+                Self::MathTrig { .. }
+                | Self::MathInterpolation { .. }
+                | Self::MathProcedural { .. }
+                | Self::MathUtility { .. }
+                | Self::TimeSince { .. }
+                | Self::TimeSinceStart
+                | Self::UnixTimeSeconds => "Number".to_string(),
+                Self::MathVector { op } => match op {
+                    VisualVectorMathOp::Cross | VisualVectorMathOp::Normalize => "Vec3".to_string(),
+                    VisualVectorMathOp::Dot
+                    | VisualVectorMathOp::Length
+                    | VisualVectorMathOp::Distance => "Number".to_string(),
+                },
+                Self::FunctionStart { inputs, .. } => inputs
+                    .get(slot.index)
+                    .map(|port| {
+                        let name = port.name.trim();
+                        if name.is_empty() {
+                            format!("Input {}", slot.index + 1)
+                        } else {
+                            name.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Input {}", slot.index + 1)),
+                Self::CallFunction { outputs, .. } => outputs
+                    .get(slot.index)
+                    .map(|port| {
+                        let name = port.name.trim();
+                        if name.is_empty() {
+                            format!("Output {}", slot.index + 1)
+                        } else {
+                            name.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("Output {}", slot.index + 1)),
+                Self::ArrayEmpty { .. }
+                | Self::ArraySet { .. }
+                | Self::ArrayPush { .. }
+                | Self::ArrayRemoveAt { .. }
+                | Self::ArrayClear { .. } => "Array".to_string(),
+                Self::ArrayLength { .. } => "Length".to_string(),
+                Self::ArrayGet { .. } => "Value".to_string(),
+                Self::PhysicsQueryFilterLiteral { .. } => "Filter".to_string(),
+                Self::RayCast => "Ray Cast Hit".to_string(),
                 _ => "Value".to_string(),
             },
         }
@@ -3169,7 +3819,15 @@ impl VisualScriptNodeKind {
     fn requires_body(&self) -> bool {
         !matches!(
             self,
-            Self::OnStart | Self::OnUpdate | Self::OnStop | Self::SelfEntity | Self::DeltaTime
+            Self::OnStart
+                | Self::OnUpdate
+                | Self::OnStop
+                | Self::SelfEntity
+                | Self::DeltaTime
+                | Self::TimeSinceStart
+                | Self::UnixTimeSeconds
+                | Self::FunctionStart { .. }
+                | Self::RayCast
         )
     }
 }
@@ -3206,12 +3864,238 @@ fn default_var_name() -> String {
     "value".to_string()
 }
 
+fn default_function_name() -> String {
+    "function".to_string()
+}
+
+fn default_function_io_name() -> String {
+    "value".to_string()
+}
+
 fn default_var_value() -> String {
     "0".to_string()
 }
 
+fn default_time_since_origin() -> String {
+    "0".to_string()
+}
+
+fn default_wait_seconds() -> String {
+    "1.0".to_string()
+}
+
+fn default_wait_restart_on_retrigger() -> bool {
+    false
+}
+
+fn default_array_item_type() -> VisualValueType {
+    VisualValueType::String
+}
+
+fn normalize_array_item_type(
+    value_type: VisualValueType,
+    array_item: &mut Option<VisualValueType>,
+) {
+    if value_type != VisualValueType::Array {
+        *array_item = None;
+        return;
+    }
+    let mut selected = array_item.unwrap_or(default_array_item_type());
+    if matches!(selected, VisualValueType::Array | VisualValueType::Json) {
+        selected = default_array_item_type();
+    }
+    *array_item = Some(selected);
+}
+
 fn default_select_value_type() -> VisualValueType {
-    VisualValueType::Json
+    VisualValueType::Number
+}
+
+fn hash_string_id(value: &str) -> u64 {
+    let mut hash = 14695981039346656037u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash.max(1)
+}
+
+fn normalize_function_io_ports(ports: &mut Vec<VisualFunctionIoDefinition>, fallback_prefix: &str) {
+    if ports.len() > MAX_FUNCTION_IO_PORTS {
+        ports.truncate(MAX_FUNCTION_IO_PORTS);
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut seen_names = HashSet::new();
+    let mut next_id = 1u64;
+
+    for port in ports {
+        port.name = port.name.trim().to_string();
+        if port.id == 0 || !seen_ids.insert(port.id) {
+            while seen_ids.contains(&next_id) {
+                next_id = next_id.saturating_add(1);
+            }
+            port.id = next_id;
+            seen_ids.insert(port.id);
+            next_id = next_id.saturating_add(1);
+        } else {
+            next_id = next_id.max(port.id.saturating_add(1));
+        }
+
+        if port.name.is_empty() {
+            port.name = format!("{}_{}", fallback_prefix, port.id);
+        }
+
+        if !seen_names.insert(port.name.clone()) {
+            let base = port.name.clone();
+            let mut suffix = 2u32;
+            loop {
+                let candidate = format!("{}_{}", base, suffix);
+                suffix = suffix.saturating_add(1);
+                if seen_names.insert(candidate.clone()) {
+                    port.name = candidate;
+                    break;
+                }
+            }
+        }
+
+        normalize_array_item_type(port.value_type, &mut port.array_item_type);
+        if port.default_value.trim().is_empty() {
+            port.default_value = default_literal_for_type(port.value_type).to_string();
+        } else {
+            port.default_value = normalize_literal_for_data_type(
+                &port.default_value,
+                port.value_type,
+                port.array_item_type,
+            );
+        }
+    }
+}
+
+fn next_function_id(functions: &[VisualScriptFunctionDefinition]) -> u64 {
+    functions
+        .iter()
+        .map(|function| function.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn default_function_graph_data(
+    function_id: u64,
+    inputs: &[VisualFunctionIoDefinition],
+    outputs: &[VisualFunctionIoDefinition],
+) -> VisualScriptGraphData {
+    let mut snarl = Snarl::new();
+    let start = snarl.insert_node(
+        egui::pos2(56.0, 110.0),
+        VisualScriptNodeKind::FunctionStart {
+            function_id,
+            inputs: inputs.to_vec(),
+        },
+    );
+    let return_values = outputs
+        .iter()
+        .map(|output| default_literal_for_type(output.value_type).to_string())
+        .collect::<Vec<_>>();
+    let ret = snarl.insert_node(
+        egui::pos2(360.0, 110.0),
+        VisualScriptNodeKind::FunctionReturn {
+            function_id,
+            outputs: outputs.to_vec(),
+            values: return_values,
+        },
+    );
+    snarl.connect(
+        OutPinId {
+            node: start,
+            output: 0,
+        },
+        InPinId {
+            node: ret,
+            input: 0,
+        },
+    );
+    graph_data_from_snarl(&snarl)
+}
+
+fn sync_function_signature_nodes(function: &mut VisualScriptFunctionDefinition) {
+    if function.graph.nodes.is_empty() {
+        function.graph =
+            default_function_graph_data(function.id, &function.inputs, &function.outputs);
+    }
+
+    let mut start_count = 0usize;
+    let mut return_count = 0usize;
+    for node in &mut function.graph.nodes {
+        match &mut node.kind {
+            VisualScriptNodeKind::FunctionStart {
+                function_id,
+                inputs,
+            } => {
+                *function_id = function.id;
+                *inputs = function.inputs.clone();
+                start_count += 1;
+            }
+            VisualScriptNodeKind::FunctionReturn {
+                function_id,
+                outputs,
+                values,
+            } => {
+                *function_id = function.id;
+                *outputs = function.outputs.clone();
+                values.truncate(outputs.len());
+                while values.len() < outputs.len() {
+                    let value_type = outputs
+                        .get(values.len())
+                        .map(|port| port.value_type)
+                        .unwrap_or(VisualValueType::Json);
+                    values.push(default_literal_for_type(value_type).to_string());
+                }
+                return_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut next_node_id = function
+        .graph
+        .nodes
+        .iter()
+        .map(|node| node.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    if start_count == 0 {
+        function.graph.nodes.push(VisualScriptNodeRecord {
+            id: next_node_id,
+            kind: VisualScriptNodeKind::FunctionStart {
+                function_id: function.id,
+                inputs: function.inputs.clone(),
+            },
+            pos: [56, 110],
+            open: true,
+        });
+        next_node_id = next_node_id.saturating_add(1);
+    }
+
+    if return_count == 0 {
+        function.graph.nodes.push(VisualScriptNodeRecord {
+            id: next_node_id,
+            kind: VisualScriptNodeKind::FunctionReturn {
+                function_id: function.id,
+                outputs: function.outputs.clone(),
+                values: function
+                    .outputs
+                    .iter()
+                    .map(|port| default_literal_for_type(port.value_type).to_string())
+                    .collect(),
+            },
+            pos: [360, 110],
+            open: true,
+        });
+    }
 }
 
 fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
@@ -3220,6 +4104,7 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         VisualValueType::Number => "0",
         VisualValueType::String => "",
         VisualValueType::Entity => "0",
+        VisualValueType::Array => "[]",
         VisualValueType::Vec2 => "{\"x\":0,\"y\":0}",
         VisualValueType::Vec3 => "{\"x\":0,\"y\":0,\"z\":0}",
         VisualValueType::Quat => "{\"x\":0,\"y\":0,\"z\":0,\"w\":1}",
@@ -3250,6 +4135,9 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         VisualValueType::CharacterControllerOutput => {
             "{\"effective_translation\":{\"x\":0,\"y\":0,\"z\":0},\"grounded\":false,\"sliding_down_slope\":false,\"collision_count\":0}"
         }
+        VisualValueType::PhysicsQueryFilter => {
+            "{\"flags\":0,\"groups_memberships\":4294967295,\"groups_filter\":4294967295,\"use_groups\":false}"
+        }
         VisualValueType::PhysicsRayCastHit => {
             "{\"has_hit\":false,\"hit_entity\":null,\"point\":{\"x\":0,\"y\":0,\"z\":0},\"normal\":{\"x\":0,\"y\":1,\"z\":0},\"toi\":0.0}"
         }
@@ -3278,6 +4166,7 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
             JsonValue::Null => String::new(),
             _ => json_to_log_string(value),
         },
+        VisualValueType::Array => compact_json_string(value),
         VisualValueType::Vec2
         | VisualValueType::Vec3
         | VisualValueType::Quat
@@ -3292,6 +4181,7 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
         | VisualValueType::PhysicsVelocity
         | VisualValueType::PhysicsWorldDefaults
         | VisualValueType::CharacterControllerOutput
+        | VisualValueType::PhysicsQueryFilter
         | VisualValueType::PhysicsRayCastHit
         | VisualValueType::PhysicsPointProjectionHit
         | VisualValueType::PhysicsShapeCastHit
@@ -3326,7 +4216,7 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
             } else if numeric(4) {
                 VisualValueType::Quat
             } else {
-                VisualValueType::Json
+                VisualValueType::Array
             }
         }
         JsonValue::Object(object) => {
@@ -3426,6 +4316,9 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 && object.contains_key("witness2")
                 && object.contains_key("normal1")
                 && object.contains_key("normal2");
+            let has_query_filter = object.contains_key("flags")
+                && object.contains_key("groups_memberships")
+                && object.contains_key("groups_filter");
             let has_physics = object.contains_key("body_kind")
                 || object.contains_key("collider_shape")
                 || object.contains_key("collider_properties")
@@ -3489,6 +4382,8 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 VisualValueType::PhysicsVelocity
             } else if has_physics_world_defaults {
                 VisualValueType::PhysicsWorldDefaults
+            } else if has_query_filter {
+                VisualValueType::PhysicsQueryFilter
             } else if has_physics {
                 VisualValueType::Physics
             } else if has_script {
@@ -3517,6 +4412,21 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
         }
         JsonValue::Null => VisualValueType::Json,
     }
+}
+
+fn infer_array_item_type_from_literal(value: &str) -> Option<VisualValueType> {
+    let parsed = parse_loose_literal(value);
+    let JsonValue::Array(entries) = parsed else {
+        return None;
+    };
+    let Some(first) = entries.first() else {
+        return Some(default_array_item_type());
+    };
+    let mut inferred = infer_visual_value_type_from_json(first);
+    if matches!(inferred, VisualValueType::Array | VisualValueType::Json) {
+        inferred = default_array_item_type();
+    }
+    Some(inferred)
 }
 
 fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueType) -> bool {
@@ -3698,17 +4608,37 @@ fn api_input_prefers_vertical_default_layout(
     )
 }
 
+fn value_type_prefers_vertical_default_layout(value_type: VisualValueType) -> bool {
+    matches!(
+        value_type,
+        VisualValueType::PhysicsQueryFilter
+            | VisualValueType::PhysicsRayCastHit
+            | VisualValueType::PhysicsPointProjectionHit
+            | VisualValueType::PhysicsShapeCastHit
+            | VisualValueType::Transform
+            | VisualValueType::Physics
+            | VisualValueType::PhysicsVelocity
+            | VisualValueType::PhysicsWorldDefaults
+            | VisualValueType::MeshRenderer
+            | VisualValueType::AudioEmitter
+            | VisualValueType::AudioListener
+            | VisualValueType::Camera
+            | VisualValueType::Light
+            | VisualValueType::CharacterControllerOutput
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum VisualApiMenuSection {
-    Gameplay,
+    Entity,
     Scene,
     Physics,
     Animation,
     Audio,
     Spline,
-    TransformRender,
+    Transform,
+    Render,
     Dynamic,
-    EntityComponent,
     InputKeyboard,
     InputMouse,
     InputGamepad,
@@ -3719,15 +4649,15 @@ enum VisualApiMenuSection {
 impl VisualApiMenuSection {
     fn title(self) -> &'static str {
         match self {
-            Self::Gameplay => "Gameplay",
+            Self::Entity => "Entity",
             Self::Scene => "Scene",
             Self::Physics => "Physics",
             Self::Animation => "Animation",
             Self::Audio => "Audio",
             Self::Spline => "Spline",
-            Self::TransformRender => "Transform & Render",
+            Self::Transform => "Transform",
+            Self::Render => "Render",
             Self::Dynamic => "Dynamic Components",
-            Self::EntityComponent => "Entity & Components",
             Self::InputKeyboard => "Input / Keyboard",
             Self::InputMouse => "Input / Mouse",
             Self::InputGamepad => "Input / Gamepad",
@@ -3738,15 +4668,15 @@ impl VisualApiMenuSection {
 }
 
 const VISUAL_API_MENU_SECTION_ORDER: [VisualApiMenuSection; 14] = [
-    VisualApiMenuSection::Gameplay,
+    VisualApiMenuSection::Entity,
+    VisualApiMenuSection::Transform,
+    VisualApiMenuSection::Render,
     VisualApiMenuSection::Scene,
     VisualApiMenuSection::Physics,
     VisualApiMenuSection::Animation,
     VisualApiMenuSection::Audio,
     VisualApiMenuSection::Spline,
-    VisualApiMenuSection::TransformRender,
     VisualApiMenuSection::Dynamic,
-    VisualApiMenuSection::EntityComponent,
     VisualApiMenuSection::InputKeyboard,
     VisualApiMenuSection::InputMouse,
     VisualApiMenuSection::InputGamepad,
@@ -3766,11 +4696,11 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
     }
 
     let function = spec.function;
-    if spec.category == "Gameplay" {
-        return VisualApiMenuSection::Gameplay;
+    if function.contains("spline") {
+        return VisualApiMenuSection::Spline;
     }
-    if function.contains("scene") {
-        return VisualApiMenuSection::Scene;
+    if function == "get_scene_asset" || function == "set_scene_asset" {
+        return VisualApiMenuSection::Render;
     }
     if function.contains("physics")
         || function.contains("force")
@@ -3785,22 +4715,25 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
     if function.contains("audio") {
         return VisualApiMenuSection::Audio;
     }
-    if function.contains("spline") {
-        return VisualApiMenuSection::Spline;
+    if function.contains("transform") {
+        return VisualApiMenuSection::Transform;
     }
-    if function.contains("transform")
-        || function.contains("camera")
+    if function.contains("camera")
         || function.contains("light")
         || function.contains("mesh")
         || function.contains("viewport")
     {
-        return VisualApiMenuSection::TransformRender;
+        return VisualApiMenuSection::Render;
+    }
+    if function.contains("scene") {
+        return VisualApiMenuSection::Scene;
     }
     if function.contains("dynamic") {
         return VisualApiMenuSection::Dynamic;
     }
-    if function.contains("entity") || function.contains("component") {
-        return VisualApiMenuSection::EntityComponent;
+    if spec.category == "Gameplay" || function.contains("entity") || function.contains("component")
+    {
+        return VisualApiMenuSection::Entity;
     }
 
     VisualApiMenuSection::Utility
@@ -3877,6 +4810,32 @@ fn runtime_variable_key(variable_id: u64, name: &str) -> String {
     }
 }
 
+fn function_call_counter_key() -> String {
+    "__visual_fn_call_counter".to_string()
+}
+
+fn function_active_call_key(function_id: u64) -> String {
+    format!("__visual_fn_active_{}", function_id)
+}
+
+fn function_input_value_key(function_id: u64, token: u64, index: usize) -> String {
+    format!("__visual_fn_input_{}_{}_{}", function_id, token, index)
+}
+
+fn function_output_value_key(function_id: u64, token: u64, index: usize) -> String {
+    format!("__visual_fn_output_{}_{}_{}", function_id, token, index)
+}
+
+fn json_to_u64(value: &JsonValue) -> Option<u64> {
+    match value {
+        JsonValue::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_i64().and_then(|value| u64::try_from(value).ok())),
+        JsonValue::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
 fn next_visual_variable_id(variables: &[VisualVariableDefinition]) -> u64 {
     variables
         .iter()
@@ -3904,6 +4863,24 @@ fn find_variable_definition<'a>(
     }
 }
 
+fn find_function_definition<'a>(
+    functions: &'a [VisualScriptFunctionDefinition],
+    function_id: u64,
+    name: &str,
+) -> Option<&'a VisualScriptFunctionDefinition> {
+    if function_id != 0 {
+        if let Some(found) = functions.iter().find(|function| function.id == function_id) {
+            return Some(found);
+        }
+    }
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        functions.iter().find(|function| function.name == trimmed)
+    }
+}
+
 fn node_data_input_type(
     node: &VisualScriptNodeKind,
     input_index: usize,
@@ -3925,9 +4902,40 @@ fn node_data_input_type(
             .inputs
             .get(input_index)
             .map(|pin| pin.value_type),
+        VisualScriptNodeKind::CallFunction { inputs, .. } => {
+            inputs.get(input_index).map(|port| port.value_type)
+        }
+        VisualScriptNodeKind::FunctionReturn { outputs, .. } => {
+            outputs.get(input_index).map(|port| port.value_type)
+        }
+        VisualScriptNodeKind::WaitSeconds { .. } => Some(VisualValueType::Number),
         VisualScriptNodeKind::MathBinary { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::MathTrig { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::MathInterpolation { op } => Some(match op {
+            VisualInterpolationOp::Lerp
+            | VisualInterpolationOp::SmoothStep
+            | VisualInterpolationOp::InverseLerp => VisualValueType::Number,
+            VisualInterpolationOp::Vec3Lerp => {
+                if input_index < 2 {
+                    VisualValueType::Vec3
+                } else {
+                    VisualValueType::Number
+                }
+            }
+            VisualInterpolationOp::QuatSlerp => {
+                if input_index < 2 {
+                    VisualValueType::Quat
+                } else {
+                    VisualValueType::Number
+                }
+            }
+        }),
+        VisualScriptNodeKind::MathVector { .. } => Some(VisualValueType::Vec3),
+        VisualScriptNodeKind::MathProcedural { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::MathUtility { .. } => Some(VisualValueType::Number),
         VisualScriptNodeKind::Compare { .. } => Some(VisualValueType::Json),
         VisualScriptNodeKind::LogicalBinary { .. } => Some(VisualValueType::Bool),
+        VisualScriptNodeKind::TimeSince { .. } => Some(VisualValueType::Number),
         VisualScriptNodeKind::Select { value_type } => {
             if input_index == 0 {
                 Some(VisualValueType::Bool)
@@ -3997,6 +5005,48 @@ fn node_data_input_type(
             0 | 1 => Some(VisualValueType::Vec3),
             _ => Some(VisualValueType::Bool),
         },
+        VisualScriptNodeKind::ArrayLength { .. }
+        | VisualScriptNodeKind::ArrayGet { .. }
+        | VisualScriptNodeKind::ArraySet { .. }
+        | VisualScriptNodeKind::ArrayPush { .. }
+        | VisualScriptNodeKind::ArrayRemoveAt { .. }
+        | VisualScriptNodeKind::ArrayClear { .. } => Some(match node {
+            VisualScriptNodeKind::ArrayLength { .. } | VisualScriptNodeKind::ArrayClear { .. } => {
+                VisualValueType::Array
+            }
+            VisualScriptNodeKind::ArrayGet { item_type } => match input_index {
+                0 => VisualValueType::Array,
+                1 => VisualValueType::Number,
+                _ => *item_type,
+            },
+            VisualScriptNodeKind::ArraySet { item_type } => match input_index {
+                0 => VisualValueType::Array,
+                1 => VisualValueType::Number,
+                _ => *item_type,
+            },
+            VisualScriptNodeKind::ArrayPush { item_type } => {
+                if input_index == 0 {
+                    VisualValueType::Array
+                } else {
+                    *item_type
+                }
+            }
+            VisualScriptNodeKind::ArrayRemoveAt { .. } => {
+                if input_index == 0 {
+                    VisualValueType::Array
+                } else {
+                    VisualValueType::Number
+                }
+            }
+            _ => VisualValueType::Json,
+        }),
+        VisualScriptNodeKind::RayCast => Some(match input_index {
+            0 | 1 => VisualValueType::Vec3,
+            2 => VisualValueType::Number,
+            3 => VisualValueType::Bool,
+            4 => VisualValueType::PhysicsQueryFilter,
+            _ => VisualValueType::Entity,
+        }),
         _ => None,
     }
 }
@@ -4007,7 +5057,15 @@ fn node_data_output_type(
     variables: &[VisualVariableDefinition],
 ) -> Option<VisualValueType> {
     if output_index != 0 {
-        return None;
+        return match node {
+            VisualScriptNodeKind::CallFunction { outputs, .. } => {
+                outputs.get(output_index).map(|port| port.value_type)
+            }
+            VisualScriptNodeKind::FunctionStart { inputs, .. } => {
+                inputs.get(output_index).map(|port| port.value_type)
+            }
+            _ => None,
+        };
     }
 
     match node {
@@ -4018,7 +5076,17 @@ fn node_data_output_type(
             .or(Some(VisualValueType::Json)),
         VisualScriptNodeKind::CallApi { operation, .. }
         | VisualScriptNodeKind::QueryApi { operation, .. } => {
-            operation.spec().output_type.or(Some(VisualValueType::Json))
+            if output_index == 0 {
+                operation.spec().output_type.or(Some(VisualValueType::Json))
+            } else {
+                None
+            }
+        }
+        VisualScriptNodeKind::CallFunction { outputs, .. } => {
+            outputs.first().map(|port| port.value_type)
+        }
+        VisualScriptNodeKind::FunctionStart { inputs, .. } => {
+            inputs.first().map(|port| port.value_type)
         }
         VisualScriptNodeKind::BoolLiteral { .. }
         | VisualScriptNodeKind::Compare { .. }
@@ -4026,9 +5094,32 @@ fn node_data_output_type(
         | VisualScriptNodeKind::Not => Some(VisualValueType::Bool),
         VisualScriptNodeKind::NumberLiteral { .. }
         | VisualScriptNodeKind::DeltaTime
+        | VisualScriptNodeKind::TimeSinceStart
+        | VisualScriptNodeKind::UnixTimeSeconds
+        | VisualScriptNodeKind::TimeSince { .. }
         | VisualScriptNodeKind::MathBinary { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::MathTrig { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::MathInterpolation { op } => Some(match op {
+            VisualInterpolationOp::Lerp
+            | VisualInterpolationOp::SmoothStep
+            | VisualInterpolationOp::InverseLerp => VisualValueType::Number,
+            VisualInterpolationOp::Vec3Lerp => VisualValueType::Vec3,
+            VisualInterpolationOp::QuatSlerp => VisualValueType::Quat,
+        }),
+        VisualScriptNodeKind::MathVector { op } => Some(match op {
+            VisualVectorMathOp::Cross | VisualVectorMathOp::Normalize => VisualValueType::Vec3,
+            VisualVectorMathOp::Dot | VisualVectorMathOp::Length | VisualVectorMathOp::Distance => {
+                VisualValueType::Number
+            }
+        }),
+        VisualScriptNodeKind::MathProcedural { .. } | VisualScriptNodeKind::MathUtility { .. } => {
+            Some(VisualValueType::Number)
+        }
         VisualScriptNodeKind::StringLiteral { .. } => Some(VisualValueType::String),
         VisualScriptNodeKind::JsonLiteral { .. } => Some(VisualValueType::Json),
+        VisualScriptNodeKind::PhysicsQueryFilterLiteral { .. } => {
+            Some(VisualValueType::PhysicsQueryFilter)
+        }
         VisualScriptNodeKind::SelfEntity => Some(VisualValueType::Entity),
         VisualScriptNodeKind::Select { value_type } => Some(*value_type),
         VisualScriptNodeKind::Vec2GetComponent { .. } => Some(VisualValueType::Number),
@@ -4057,6 +5148,15 @@ fn node_data_output_type(
         VisualScriptNodeKind::Quat => Some(VisualValueType::Quat),
         VisualScriptNodeKind::Transform => Some(VisualValueType::Transform),
         VisualScriptNodeKind::PhysicsVelocity => Some(VisualValueType::PhysicsVelocity),
+        VisualScriptNodeKind::ArrayEmpty { .. }
+        | VisualScriptNodeKind::ArraySet { .. }
+        | VisualScriptNodeKind::ArrayPush { .. }
+        | VisualScriptNodeKind::ArrayRemoveAt { .. }
+        | VisualScriptNodeKind::ArrayClear { .. } => Some(VisualValueType::Array),
+        VisualScriptNodeKind::ArrayLength { .. } => Some(VisualValueType::Number),
+        VisualScriptNodeKind::ArrayGet { item_type } => Some(*item_type),
+        VisualScriptNodeKind::RayCast => Some(VisualValueType::PhysicsRayCastHit),
+        VisualScriptNodeKind::FunctionReturn { .. } => None,
         _ => None,
     }
 }
@@ -4068,9 +5168,32 @@ pub enum VisualScriptEvent {
     Stop,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VisualWaitTimerKey {
+    pub scope: String,
+    pub node_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VisualPendingCallKey {
+    pub scope: String,
+    pub node_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct VisualPendingFunctionCall {
+    pub function_id: u64,
+    pub function_name: String,
+    pub call_token: u64,
+    pub output_defs: Vec<VisualFunctionIoDefinition>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct VisualScriptRuntimeState {
     pub variables: HashMap<String, JsonValue>,
+    pub wait_timers: HashMap<VisualWaitTimerKey, f32>,
+    pub pending_function_calls: HashMap<VisualPendingCallKey, VisualPendingFunctionCall>,
+    pub elapsed_seconds: f64,
 }
 
 pub trait VisualScriptHost {
@@ -4085,6 +5208,16 @@ pub trait VisualScriptHost {
 }
 
 #[derive(Debug, Clone)]
+struct VisualCompiledFunctionProgram {
+    id: u64,
+    name: String,
+    source_path: String,
+    inputs: Vec<VisualFunctionIoDefinition>,
+    outputs: Vec<VisualFunctionIoDefinition>,
+    program: Box<VisualScriptProgram>,
+}
+
+#[derive(Debug, Clone)]
 pub struct VisualScriptProgram {
     source_label: String,
     source_name: String,
@@ -4093,9 +5226,12 @@ pub struct VisualScriptProgram {
     data_edges: HashMap<(u64, usize), (u64, usize)>,
     variable_defaults: HashMap<String, JsonValue>,
     variable_types: HashMap<String, VisualValueType>,
+    variable_array_item_types: HashMap<String, Option<VisualValueType>>,
     on_start_nodes: Vec<u64>,
     on_update_nodes: Vec<u64>,
     on_stop_nodes: Vec<u64>,
+    functions: HashMap<u64, VisualCompiledFunctionProgram>,
+    function_context: Option<(u64, String)>,
 }
 
 impl VisualScriptProgram {
@@ -4103,11 +5239,13 @@ impl VisualScriptProgram {
         let mut api_calls = 0usize;
         let mut query_calls = 0usize;
         let mut variables = 0usize;
+        let mut call_functions = 0usize;
 
         for node in self.nodes.values() {
             match node {
                 VisualScriptNodeKind::CallApi { .. } => api_calls += 1,
                 VisualScriptNodeKind::QueryApi { .. } => query_calls += 1,
+                VisualScriptNodeKind::CallFunction { .. } => call_functions += 1,
                 VisualScriptNodeKind::SetVariable { .. }
                 | VisualScriptNodeKind::GetVariable { .. }
                 | VisualScriptNodeKind::ClearVariable { .. } => variables += 1,
@@ -4115,9 +5253,16 @@ impl VisualScriptProgram {
             }
         }
 
+        let function_label = self
+            .function_context
+            .as_ref()
+            .map(|(_, name)| format!(" (function: {})", name))
+            .unwrap_or_default();
+
         format!(
-            "Runtime Plan\nsource: {}\nnodes: {}\nexec edges: {}\ndata edges: {}\nvariable defs: {}\non_start: {}\non_update: {}\non_stop: {}\napi call nodes: {}\napi query nodes: {}\nvariable nodes: {}\nstep budget/event: {}",
+            "Runtime Plan\nsource: {}{}\nnodes: {}\nexec edges: {}\ndata edges: {}\nvariable defs: {}\non_start: {}\non_update: {}\non_stop: {}\napi call nodes: {}\napi query nodes: {}\nfunction call nodes: {}\nvariable nodes: {}\nfunctions: {}\nstep budget/event: {}",
             self.source_label,
+            function_label,
             self.nodes.len(),
             self.exec_edges
                 .values()
@@ -4130,7 +5275,9 @@ impl VisualScriptProgram {
             self.on_stop_nodes.len(),
             api_calls,
             query_calls,
+            call_functions,
             variables,
+            self.functions.len(),
             MAX_EXEC_STEPS_PER_EVENT,
         )
     }
@@ -4143,11 +5290,28 @@ impl VisualScriptProgram {
         state: &mut VisualScriptRuntimeState,
         host: &mut H,
     ) -> Result<(), String> {
+        self.execute_event_internal(event, owner_entity_id, dt, state, host, &self.functions, 0)
+    }
+
+    fn execute_event_internal<H: VisualScriptHost>(
+        &self,
+        event: VisualScriptEvent,
+        owner_entity_id: u64,
+        dt: f32,
+        state: &mut VisualScriptRuntimeState,
+        host: &mut H,
+        function_registry: &HashMap<u64, VisualCompiledFunctionProgram>,
+        call_depth: usize,
+    ) -> Result<(), String> {
         for (variable, default_value) in &self.variable_defaults {
             state
                 .variables
                 .entry(variable.clone())
                 .or_insert_with(|| default_value.clone());
+        }
+
+        if matches!(event, VisualScriptEvent::Update) {
+            state.elapsed_seconds += f64::from(dt.max(0.0));
         }
 
         let roots = match event {
@@ -4156,12 +5320,9 @@ impl VisualScriptProgram {
             VisualScriptEvent::Stop => &self.on_stop_nodes,
         };
 
-        if roots.is_empty() {
-            return Ok(());
-        }
-
         let mut context = VisualRuntimeContext {
             program: self,
+            function_registry,
             state,
             host,
             owner_entity_id,
@@ -4170,7 +5331,13 @@ impl VisualScriptProgram {
             data_cache: HashMap::new(),
             steps_left: MAX_EXEC_STEPS_PER_EVENT,
             legacy_statement_warnings: HashSet::new(),
+            call_depth,
         };
+
+        if matches!(event, VisualScriptEvent::Update) {
+            context.resume_wait_timers()?;
+            context.resume_pending_function_calls()?;
+        }
 
         for root in roots.iter().copied() {
             context.execute_exec_targets(root, 0)?;
@@ -4182,6 +5349,7 @@ impl VisualScriptProgram {
 
 struct VisualRuntimeContext<'a, H: VisualScriptHost> {
     program: &'a VisualScriptProgram,
+    function_registry: &'a HashMap<u64, VisualCompiledFunctionProgram>,
     state: &'a mut VisualScriptRuntimeState,
     host: &'a mut H,
     owner_entity_id: u64,
@@ -4190,6 +5358,12 @@ struct VisualRuntimeContext<'a, H: VisualScriptHost> {
     data_cache: HashMap<(u64, usize), JsonValue>,
     steps_left: u32,
     legacy_statement_warnings: HashSet<u64>,
+    call_depth: usize,
+}
+
+enum FunctionInvokeResult {
+    Completed(Vec<JsonValue>),
+    Pending(VisualPendingFunctionCall),
 }
 
 impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
@@ -4206,6 +5380,105 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             ));
         }
         self.steps_left -= 1;
+        Ok(())
+    }
+
+    fn runtime_scope_key(&self) -> Result<String, String> {
+        if let Some((function_id, _)) = self.program.function_context {
+            let token = self
+                .active_function_call_token(function_id)
+                .ok_or_else(|| {
+                    format!(
+                        "Function runtime context for id {} has no active call token",
+                        function_id
+                    )
+                })?;
+            Ok(format!("function:{}:{}", function_id, token))
+        } else {
+            Ok(format!("root:{}", self.program.source_label))
+        }
+    }
+
+    fn wait_timer_key(&self, node_id: u64) -> Result<VisualWaitTimerKey, String> {
+        Ok(VisualWaitTimerKey {
+            scope: self.runtime_scope_key()?,
+            node_id,
+        })
+    }
+
+    fn pending_call_key(&self, node_id: u64) -> Result<VisualPendingCallKey, String> {
+        Ok(VisualPendingCallKey {
+            scope: self.runtime_scope_key()?,
+            node_id,
+        })
+    }
+
+    fn resume_wait_timers(&mut self) -> Result<(), String> {
+        if self.state.wait_timers.is_empty() {
+            return Ok(());
+        }
+
+        let scope = self.runtime_scope_key()?;
+        let dt = self.dt.max(0.0);
+        let mut ready = Vec::<VisualWaitTimerKey>::new();
+        for (key, remaining) in self.state.wait_timers.iter_mut() {
+            if key.scope != scope {
+                continue;
+            }
+            *remaining -= dt;
+            if *remaining <= 0.0 {
+                ready.push(key.clone());
+            }
+        }
+        if ready.is_empty() {
+            return Ok(());
+        }
+
+        ready.sort_by_key(|key| key.node_id);
+        for key in &ready {
+            self.state.wait_timers.remove(key);
+        }
+
+        for key in ready {
+            self.execute_exec_targets(key.node_id, 0)?;
+        }
+
+        Ok(())
+    }
+
+    fn resume_pending_function_calls(&mut self) -> Result<(), String> {
+        if self.state.pending_function_calls.is_empty() {
+            return Ok(());
+        }
+
+        let scope = self.runtime_scope_key()?;
+        let mut keys = self
+            .state
+            .pending_function_calls
+            .keys()
+            .filter(|key| key.scope == scope)
+            .cloned()
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return Ok(());
+        }
+        keys.sort_by_key(|key| key.node_id);
+
+        for key in keys {
+            let Some(pending) = self.state.pending_function_calls.get(&key).cloned() else {
+                continue;
+            };
+            if let Some(values) = self.resume_function_call(&pending)? {
+                self.state.pending_function_calls.remove(&key);
+                for (index, value) in values.iter().enumerate() {
+                    self.data_cache.insert((key.node_id, index), value.clone());
+                }
+                self.node_results
+                    .insert(key.node_id, JsonValue::Array(values.clone()));
+                self.execute_exec_targets(key.node_id, 0)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -4300,7 +5573,17 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 )?;
                 let resolved = if let Some(value_type) = self.program.variable_types.get(&variable)
                 {
-                    coerce_json_to_visual_type(&resolved, *value_type)?
+                    let array_item_type = self
+                        .program
+                        .variable_array_item_types
+                        .get(&variable)
+                        .copied()
+                        .flatten();
+                    coerce_json_to_visual_type_with_array_item(
+                        &resolved,
+                        *value_type,
+                        array_item_type,
+                    )?
                 } else {
                     resolved
                 };
@@ -4315,6 +5598,31 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                     self.state.variables.remove(&variable);
                 }
                 self.execute_exec_targets(node_id, 0)?;
+            }
+            VisualScriptNodeKind::WaitSeconds {
+                seconds,
+                restart_on_retrigger,
+            } => {
+                let mut stack = HashSet::new();
+                let wait_seconds = self
+                    .resolve_number_input_with_stack(
+                        node_id,
+                        0,
+                        Some(seconds.as_str()),
+                        &mut stack,
+                    )?
+                    .max(0.0) as f32;
+                let timer_key = self.wait_timer_key(node_id)?;
+                if wait_seconds <= f32::EPSILON {
+                    self.state.wait_timers.remove(&timer_key);
+                    self.execute_exec_targets(node_id, 0)?;
+                } else if let Some(existing) = self.state.wait_timers.get_mut(&timer_key) {
+                    if *restart_on_retrigger {
+                        *existing = wait_seconds;
+                    }
+                } else {
+                    self.state.wait_timers.insert(timer_key, wait_seconds);
+                }
             }
             VisualScriptNodeKind::CallApi {
                 operation, args, ..
@@ -4342,6 +5650,82 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 self.node_results.insert(node_id, result);
                 self.execute_exec_targets(node_id, 0)?;
             }
+            VisualScriptNodeKind::FunctionStart { .. } => {
+                self.execute_exec_targets(node_id, 0)?;
+            }
+            VisualScriptNodeKind::FunctionReturn {
+                function_id,
+                outputs,
+                values,
+            } => {
+                let Some(call_token) = self.active_function_call_token(*function_id) else {
+                    return Err(format!(
+                        "Function Return node {} executed without active call context",
+                        node_id
+                    ));
+                };
+
+                for (index, output) in outputs.iter().enumerate() {
+                    let fallback = values
+                        .get(index)
+                        .map(|value| value.as_str())
+                        .or(Some(output.default_value.as_str()));
+                    let mut stack = HashSet::new();
+                    let resolved =
+                        self.resolve_data_input_with_stack(node_id, index, fallback, &mut stack)?;
+                    let coerced = coerce_json_to_visual_type_with_array_item(
+                        &resolved,
+                        output.value_type,
+                        output.array_item_type,
+                    )?;
+                    let key = function_output_value_key(*function_id, call_token, index);
+                    self.state.variables.insert(key, coerced);
+                }
+            }
+            VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                args,
+            } => {
+                let pending_key = self.pending_call_key(node_id)?;
+                if let Some(pending) = self.state.pending_function_calls.get(&pending_key).cloned()
+                {
+                    if let Some(values) = self.resume_function_call(&pending)? {
+                        self.state.pending_function_calls.remove(&pending_key);
+                        for (index, value) in values.iter().enumerate() {
+                            self.data_cache.insert((node_id, index), value.clone());
+                        }
+                        self.node_results
+                            .insert(node_id, JsonValue::Array(values.clone()));
+                        self.execute_exec_targets(node_id, 0)?;
+                    }
+                } else {
+                    let call_args = self.collect_function_call_args(node_id, inputs, args)?;
+                    match self.invoke_function(
+                        *function_id,
+                        name.as_str(),
+                        inputs,
+                        outputs,
+                        &call_args,
+                    )? {
+                        FunctionInvokeResult::Completed(values) => {
+                            for (index, value) in values.iter().enumerate() {
+                                self.data_cache.insert((node_id, index), value.clone());
+                            }
+                            self.node_results
+                                .insert(node_id, JsonValue::Array(values.clone()));
+                            self.execute_exec_targets(node_id, 0)?;
+                        }
+                        FunctionInvokeResult::Pending(pending) => {
+                            self.state
+                                .pending_function_calls
+                                .insert(pending_key, pending);
+                        }
+                    }
+                }
+            }
             VisualScriptNodeKind::Comment { .. } => {
                 self.execute_exec_targets(node_id, 0)?;
             }
@@ -4359,9 +5743,18 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::NumberLiteral { .. }
             | VisualScriptNodeKind::StringLiteral { .. }
             | VisualScriptNodeKind::JsonLiteral { .. }
+            | VisualScriptNodeKind::PhysicsQueryFilterLiteral { .. }
             | VisualScriptNodeKind::SelfEntity
             | VisualScriptNodeKind::DeltaTime
+            | VisualScriptNodeKind::TimeSinceStart
+            | VisualScriptNodeKind::UnixTimeSeconds
+            | VisualScriptNodeKind::TimeSince { .. }
             | VisualScriptNodeKind::MathBinary { .. }
+            | VisualScriptNodeKind::MathTrig { .. }
+            | VisualScriptNodeKind::MathInterpolation { .. }
+            | VisualScriptNodeKind::MathVector { .. }
+            | VisualScriptNodeKind::MathProcedural { .. }
+            | VisualScriptNodeKind::MathUtility { .. }
             | VisualScriptNodeKind::Compare { .. }
             | VisualScriptNodeKind::LogicalBinary { .. }
             | VisualScriptNodeKind::Not
@@ -4380,7 +5773,15 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::Vec3
             | VisualScriptNodeKind::Quat
             | VisualScriptNodeKind::Transform
-            | VisualScriptNodeKind::PhysicsVelocity => {}
+            | VisualScriptNodeKind::PhysicsVelocity
+            | VisualScriptNodeKind::ArrayEmpty { .. }
+            | VisualScriptNodeKind::ArrayLength { .. }
+            | VisualScriptNodeKind::ArrayGet { .. }
+            | VisualScriptNodeKind::ArraySet { .. }
+            | VisualScriptNodeKind::ArrayPush { .. }
+            | VisualScriptNodeKind::ArrayRemoveAt { .. }
+            | VisualScriptNodeKind::ArrayClear { .. }
+            | VisualScriptNodeKind::RayCast => {}
         }
 
         Ok(())
@@ -4419,6 +5820,269 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             args.push(coerced);
         }
         Ok(args)
+    }
+
+    fn collect_function_call_args(
+        &mut self,
+        node_id: u64,
+        inputs: &[VisualFunctionIoDefinition],
+        defaults: &[String],
+    ) -> Result<Vec<JsonValue>, String> {
+        let mut args = Vec::with_capacity(inputs.len());
+        for (index, input) in inputs.iter().enumerate() {
+            let fallback = defaults
+                .get(index)
+                .map(|value| value.as_str())
+                .or(Some(input.default_value.as_str()));
+            let mut stack = HashSet::new();
+            let value = self.resolve_data_input_with_stack(node_id, index, fallback, &mut stack)?;
+            let coerced = coerce_json_to_visual_type_with_array_item(
+                &value,
+                input.value_type,
+                input.array_item_type,
+            )
+            .map_err(|err| {
+                format!(
+                    "Function argument '{}' at node {} is invalid for {}: {}",
+                    input.name.trim(),
+                    node_id,
+                    input.value_type.title(),
+                    err
+                )
+            })?;
+            args.push(coerced);
+        }
+        Ok(args)
+    }
+
+    fn next_function_call_token(&mut self) -> u64 {
+        let key = function_call_counter_key();
+        let current = self
+            .state
+            .variables
+            .get(&key)
+            .and_then(json_to_u64)
+            .unwrap_or(0);
+        let next = current.saturating_add(1).max(1);
+        self.state
+            .variables
+            .insert(key, JsonValue::Number(JsonNumber::from(next)));
+        next
+    }
+
+    fn active_function_call_token(&self, function_id: u64) -> Option<u64> {
+        let key = function_active_call_key(function_id);
+        self.state.variables.get(&key).and_then(json_to_u64)
+    }
+
+    fn invoke_function(
+        &mut self,
+        function_id: u64,
+        function_name: &str,
+        _input_defs: &[VisualFunctionIoDefinition],
+        output_defs: &[VisualFunctionIoDefinition],
+        args: &[JsonValue],
+    ) -> Result<FunctionInvokeResult, String> {
+        let next_call_depth = self.call_depth.saturating_add(1);
+        if next_call_depth > MAX_FUNCTION_CALL_DEPTH {
+            return Err(format!(
+                "Function call depth exceeded max of {} while invoking '{}'",
+                MAX_FUNCTION_CALL_DEPTH, function_name
+            ));
+        }
+
+        let function = if function_id != 0 {
+            self.function_registry.get(&function_id).cloned()
+        } else {
+            self.function_registry
+                .values()
+                .find(|entry| entry.name == function_name.trim())
+                .cloned()
+        }
+        .ok_or_else(|| {
+            format!(
+                "Function '{}' (id {}) is not defined in this visual script",
+                function_name.trim(),
+                function_id
+            )
+        })?;
+
+        let token = self.next_function_call_token();
+        let active_key = function_active_call_key(function.id);
+        let previous_active = self.state.variables.get(&active_key).cloned();
+        self.state.variables.insert(
+            active_key.clone(),
+            JsonValue::Number(JsonNumber::from(token)),
+        );
+
+        for (index, input) in function.inputs.iter().enumerate() {
+            let value = args
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| parse_loose_literal(&input.default_value));
+            let coerced = coerce_json_to_visual_type_with_array_item(
+                &value,
+                input.value_type,
+                input.array_item_type,
+            )?;
+            let key = function_input_value_key(function.id, token, index);
+            self.state.variables.insert(key, coerced);
+        }
+
+        for index in 0..function.outputs.len() {
+            self.state
+                .variables
+                .remove(&function_output_value_key(function.id, token, index));
+        }
+
+        let run_result = function.program.execute_event_internal(
+            VisualScriptEvent::Start,
+            self.owner_entity_id,
+            self.dt,
+            self.state,
+            self.host,
+            self.function_registry,
+            next_call_depth,
+        );
+
+        match previous_active {
+            Some(value) => {
+                self.state.variables.insert(active_key, value);
+            }
+            None => {
+                self.state.variables.remove(&active_key);
+            }
+        }
+
+        run_result.map_err(|err| {
+            if function.source_path.trim().is_empty() {
+                format!("Function '{}' failed: {}", function.name, err)
+            } else {
+                format!(
+                    "Function '{}' ({}) failed: {}",
+                    function.name, function.source_path, err
+                )
+            }
+        })?;
+
+        if let Some(values) =
+            self.collect_completed_function_outputs(&function, token, output_defs)?
+        {
+            return Ok(FunctionInvokeResult::Completed(values));
+        }
+
+        Ok(FunctionInvokeResult::Pending(VisualPendingFunctionCall {
+            function_id: function.id,
+            function_name: function.name.clone(),
+            call_token: token,
+            output_defs: output_defs.to_vec(),
+        }))
+    }
+
+    fn collect_completed_function_outputs(
+        &mut self,
+        function: &VisualCompiledFunctionProgram,
+        token: u64,
+        output_defs: &[VisualFunctionIoDefinition],
+    ) -> Result<Option<Vec<JsonValue>>, String> {
+        for (index, _) in output_defs.iter().enumerate() {
+            let key = function_output_value_key(function.id, token, index);
+            if !self.state.variables.contains_key(&key) {
+                return Ok(None);
+            }
+        }
+
+        let mut out = Vec::with_capacity(output_defs.len());
+        for (index, output) in output_defs.iter().enumerate() {
+            let key = function_output_value_key(function.id, token, index);
+            let value = self
+                .state
+                .variables
+                .remove(&key)
+                .unwrap_or_else(|| parse_loose_literal(&output.default_value));
+            let coerced = coerce_json_to_visual_type_with_array_item(
+                &value,
+                output.value_type,
+                output.array_item_type,
+            )?;
+            out.push(coerced);
+        }
+
+        for index in 0..function.inputs.len() {
+            self.state
+                .variables
+                .remove(&function_input_value_key(function.id, token, index));
+        }
+
+        Ok(Some(out))
+    }
+
+    fn resume_function_call(
+        &mut self,
+        pending: &VisualPendingFunctionCall,
+    ) -> Result<Option<Vec<JsonValue>>, String> {
+        let next_call_depth = self.call_depth.saturating_add(1);
+        if next_call_depth > MAX_FUNCTION_CALL_DEPTH {
+            return Err(format!(
+                "Function call depth exceeded max of {} while resuming '{}'",
+                MAX_FUNCTION_CALL_DEPTH, pending.function_name
+            ));
+        }
+
+        let function = if pending.function_id != 0 {
+            self.function_registry.get(&pending.function_id).cloned()
+        } else {
+            self.function_registry
+                .values()
+                .find(|entry| entry.name == pending.function_name.trim())
+                .cloned()
+        }
+        .ok_or_else(|| {
+            format!(
+                "Function '{}' (id {}) is not defined in this visual script",
+                pending.function_name.trim(),
+                pending.function_id
+            )
+        })?;
+
+        let active_key = function_active_call_key(function.id);
+        let previous_active = self.state.variables.get(&active_key).cloned();
+        self.state.variables.insert(
+            active_key.clone(),
+            JsonValue::Number(JsonNumber::from(pending.call_token)),
+        );
+
+        let run_result = function.program.execute_event_internal(
+            VisualScriptEvent::Update,
+            self.owner_entity_id,
+            self.dt,
+            self.state,
+            self.host,
+            self.function_registry,
+            next_call_depth,
+        );
+
+        match previous_active {
+            Some(value) => {
+                self.state.variables.insert(active_key, value);
+            }
+            None => {
+                self.state.variables.remove(&active_key);
+            }
+        }
+
+        run_result.map_err(|err| {
+            if function.source_path.trim().is_empty() {
+                format!("Function '{}' failed: {}", function.name, err)
+            } else {
+                format!(
+                    "Function '{}' ({}) failed: {}",
+                    function.name, function.source_path, err
+                )
+            }
+        })?;
+
+        self.collect_completed_function_outputs(&function, pending.call_token, &pending.output_defs)
     }
 
     fn resolve_bool_input(
@@ -4494,7 +6158,18 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                     let fallback = parse_loose_literal(default_value);
                     let fallback =
                         if let Some(value_type) = self.program.variable_types.get(&variable) {
-                            coerce_json_to_visual_type(&fallback, *value_type).unwrap_or(fallback)
+                            let array_item_type = self
+                                .program
+                                .variable_array_item_types
+                                .get(&variable)
+                                .copied()
+                                .flatten();
+                            coerce_json_to_visual_type_with_array_item(
+                                &fallback,
+                                *value_type,
+                                array_item_type,
+                            )
+                            .unwrap_or(fallback)
                         } else {
                             fallback
                         };
@@ -4539,10 +6214,123 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             VisualScriptNodeKind::NumberLiteral { value } => json_number(*value),
             VisualScriptNodeKind::StringLiteral { value } => JsonValue::String(value.clone()),
             VisualScriptNodeKind::JsonLiteral { value } => parse_loose_literal(value),
+            VisualScriptNodeKind::PhysicsQueryFilterLiteral { value } => {
+                let parsed = parse_loose_literal(value);
+                coerce_json_to_visual_type(&parsed, VisualValueType::PhysicsQueryFilter)?
+            }
             VisualScriptNodeKind::SelfEntity => {
                 JsonValue::Number(JsonNumber::from(self.owner_entity_id))
             }
             VisualScriptNodeKind::DeltaTime => json_number(f64::from(self.dt)),
+            VisualScriptNodeKind::TimeSinceStart => json_number(self.state.elapsed_seconds),
+            VisualScriptNodeKind::UnixTimeSeconds => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs_f64())
+                    .unwrap_or(0.0);
+                json_number(now)
+            }
+            VisualScriptNodeKind::TimeSince { origin_seconds } => {
+                let origin = self.resolve_number_input_with_stack(
+                    node_id,
+                    0,
+                    Some(origin_seconds.as_str()),
+                    stack,
+                )?;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs_f64())
+                    .unwrap_or(0.0);
+                json_number((now - origin).max(0.0))
+            }
+            VisualScriptNodeKind::FunctionStart {
+                function_id,
+                inputs,
+            } => {
+                let call_token = self.active_function_call_token(*function_id).ok_or_else(
+                    || {
+                        format!(
+                            "Function Start node {} has no active call context for function id {}",
+                            node_id, function_id
+                        )
+                    },
+                )?;
+                let key = function_input_value_key(*function_id, call_token, data_output);
+                let value = self.state.variables.get(&key).cloned().or_else(|| {
+                    inputs
+                        .get(data_output)
+                        .map(|input| parse_loose_literal(&input.default_value))
+                });
+                let Some(value) = value else {
+                    return Err(format!(
+                        "Function Start node {} requested unknown input {}",
+                        node_id,
+                        data_output + 1
+                    ));
+                };
+                let (value_type, array_item_type) = inputs
+                    .get(data_output)
+                    .map(|input| (input.value_type, input.array_item_type))
+                    .unwrap_or((VisualValueType::Json, None));
+                coerce_json_to_visual_type_with_array_item(&value, value_type, array_item_type)?
+            }
+            VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                args,
+            } => {
+                let pending_key = self.pending_call_key(node_id)?;
+                let values = if let Some(JsonValue::Array(values)) = self.node_results.get(&node_id)
+                {
+                    values.clone()
+                } else if let Some(pending) =
+                    self.state.pending_function_calls.get(&pending_key).cloned()
+                {
+                    if let Some(values) = self.resume_function_call(&pending)? {
+                        self.state.pending_function_calls.remove(&pending_key);
+                        values
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    let call_args = self.collect_function_call_args(node_id, inputs, args)?;
+                    match self.invoke_function(
+                        *function_id,
+                        name.as_str(),
+                        inputs,
+                        outputs,
+                        &call_args,
+                    )? {
+                        FunctionInvokeResult::Completed(values) => values,
+                        FunctionInvokeResult::Pending(pending) => {
+                            self.state
+                                .pending_function_calls
+                                .insert(pending_key, pending);
+                            Vec::new()
+                        }
+                    }
+                };
+                for (index, value) in values.iter().enumerate() {
+                    self.data_cache.insert((node_id, index), value.clone());
+                }
+                self.node_results
+                    .insert(node_id, JsonValue::Array(values.clone()));
+                values.get(data_output).cloned().unwrap_or_else(|| {
+                    outputs
+                        .get(data_output)
+                        .and_then(|output| {
+                            coerce_json_to_visual_type_with_array_item(
+                                &parse_loose_literal(&output.default_value),
+                                output.value_type,
+                                output.array_item_type,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or(JsonValue::Null)
+                })
+            }
             VisualScriptNodeKind::MathBinary { op } => {
                 let left = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
                 let right = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
@@ -4567,6 +6355,307 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 };
                 json_number(output)
             }
+            VisualScriptNodeKind::MathTrig { op } => {
+                let output = if *op == VisualTrigOp::Atan2 {
+                    let y = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let x = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                    y.atan2(x)
+                } else {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    match op {
+                        VisualTrigOp::Sin => value.sin(),
+                        VisualTrigOp::Cos => value.cos(),
+                        VisualTrigOp::Tan => value.tan(),
+                        VisualTrigOp::Asin => value.asin(),
+                        VisualTrigOp::Acos => value.acos(),
+                        VisualTrigOp::Atan => value.atan(),
+                        VisualTrigOp::Atan2 => unreachable!(),
+                    }
+                };
+                json_number(output)
+            }
+            VisualScriptNodeKind::MathInterpolation { op } => match op {
+                VisualInterpolationOp::Lerp => {
+                    let a = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let b = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                    let t = self.resolve_number_input_with_stack(node_id, 2, Some("0"), stack)?;
+                    json_number(a + ((b - a) * t))
+                }
+                VisualInterpolationOp::SmoothStep => {
+                    let edge0 =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let edge1 =
+                        self.resolve_number_input_with_stack(node_id, 1, Some("1"), stack)?;
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 2, Some("0"), stack)?;
+                    if (edge1 - edge0).abs() <= f64::EPSILON {
+                        json_number(0.0)
+                    } else {
+                        let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+                        json_number(t * t * (3.0 - (2.0 * t)))
+                    }
+                }
+                VisualInterpolationOp::InverseLerp => {
+                    let a = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let b = self.resolve_number_input_with_stack(node_id, 1, Some("1"), stack)?;
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 2, Some("0"), stack)?;
+                    if (b - a).abs() <= f64::EPSILON {
+                        json_number(0.0)
+                    } else {
+                        json_number((value - a) / (b - a))
+                    }
+                }
+                VisualInterpolationOp::Vec3Lerp => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let b = self.resolve_data_input_with_stack(
+                        node_id,
+                        1,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let t = self.resolve_number_input_with_stack(node_id, 2, Some("0"), stack)?;
+                    let (ax, ay, az) = coerce_json_to_vec3_components(&a)?;
+                    let (bx, by, bz) = coerce_json_to_vec3_components(&b)?;
+                    vec3_json(
+                        ax + ((bx - ax) * t),
+                        ay + ((by - ay) * t),
+                        az + ((bz - az) * t),
+                    )
+                }
+                VisualInterpolationOp::QuatSlerp => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0,\"w\":1}"),
+                        stack,
+                    )?;
+                    let b = self.resolve_data_input_with_stack(
+                        node_id,
+                        1,
+                        Some("{\"x\":0,\"y\":0,\"z\":0,\"w\":1}"),
+                        stack,
+                    )?;
+                    let t = self
+                        .resolve_number_input_with_stack(node_id, 2, Some("0"), stack)?
+                        .clamp(0.0, 1.0);
+                    let (ax, ay, az, aw) = coerce_json_to_quat_components(&a)?;
+                    let (bx, by, bz, bw) = coerce_json_to_quat_components(&b)?;
+                    let qa = DQuat::from_xyzw(ax, ay, az, aw);
+                    let qb = DQuat::from_xyzw(bx, by, bz, bw);
+                    let qa = if qa.length_squared() > 1.0e-12 {
+                        qa.normalize()
+                    } else {
+                        DQuat::IDENTITY
+                    };
+                    let qb = if qb.length_squared() > 1.0e-12 {
+                        qb.normalize()
+                    } else {
+                        DQuat::IDENTITY
+                    };
+                    let result = qa.slerp(qb, t).normalize();
+                    quat_json(result.x, result.y, result.z, result.w)
+                }
+            },
+            VisualScriptNodeKind::MathVector { op } => match op {
+                VisualVectorMathOp::Dot => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let b = self.resolve_data_input_with_stack(
+                        node_id,
+                        1,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let (ax, ay, az) = coerce_json_to_vec3_components(&a)?;
+                    let (bx, by, bz) = coerce_json_to_vec3_components(&b)?;
+                    json_number((ax * bx) + (ay * by) + (az * bz))
+                }
+                VisualVectorMathOp::Cross => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let b = self.resolve_data_input_with_stack(
+                        node_id,
+                        1,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let (ax, ay, az) = coerce_json_to_vec3_components(&a)?;
+                    let (bx, by, bz) = coerce_json_to_vec3_components(&b)?;
+                    vec3_json(
+                        (ay * bz) - (az * by),
+                        (az * bx) - (ax * bz),
+                        (ax * by) - (ay * bx),
+                    )
+                }
+                VisualVectorMathOp::Length => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let (x, y, z) = coerce_json_to_vec3_components(&a)?;
+                    json_number(((x * x) + (y * y) + (z * z)).sqrt())
+                }
+                VisualVectorMathOp::Normalize => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let (x, y, z) = coerce_json_to_vec3_components(&a)?;
+                    let length = ((x * x) + (y * y) + (z * z)).sqrt();
+                    if length <= 1.0e-8 {
+                        vec3_json(0.0, 0.0, 0.0)
+                    } else {
+                        vec3_json(x / length, y / length, z / length)
+                    }
+                }
+                VisualVectorMathOp::Distance => {
+                    let a = self.resolve_data_input_with_stack(
+                        node_id,
+                        0,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let b = self.resolve_data_input_with_stack(
+                        node_id,
+                        1,
+                        Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                        stack,
+                    )?;
+                    let (ax, ay, az) = coerce_json_to_vec3_components(&a)?;
+                    let (bx, by, bz) = coerce_json_to_vec3_components(&b)?;
+                    let dx = bx - ax;
+                    let dy = by - ay;
+                    let dz = bz - az;
+                    json_number(((dx * dx) + (dy * dy) + (dz * dz)).sqrt())
+                }
+            },
+            VisualScriptNodeKind::MathProcedural { op } => match op {
+                VisualProceduralMathOp::Clamp => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let min = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                    let max = self.resolve_number_input_with_stack(node_id, 2, Some("1"), stack)?;
+                    let low = min.min(max);
+                    let high = min.max(max);
+                    json_number(value.clamp(low, high))
+                }
+                VisualProceduralMathOp::Remap => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let in_min =
+                        self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                    let in_max =
+                        self.resolve_number_input_with_stack(node_id, 2, Some("1"), stack)?;
+                    let out_min =
+                        self.resolve_number_input_with_stack(node_id, 3, Some("0"), stack)?;
+                    let out_max =
+                        self.resolve_number_input_with_stack(node_id, 4, Some("1"), stack)?;
+                    if (in_max - in_min).abs() <= f64::EPSILON {
+                        return Err(format!("Remap input range is zero at node {}", node_id));
+                    }
+                    let t = (value - in_min) / (in_max - in_min);
+                    json_number(out_min + ((out_max - out_min) * t))
+                }
+                VisualProceduralMathOp::Saturate => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.clamp(0.0, 1.0))
+                }
+                VisualProceduralMathOp::Fract => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.fract())
+                }
+            },
+            VisualScriptNodeKind::MathUtility { op } => match op {
+                VisualUtilityMathOp::Abs => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.abs())
+                }
+                VisualUtilityMathOp::Sign => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.signum())
+                }
+                VisualUtilityMathOp::Floor => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.floor())
+                }
+                VisualUtilityMathOp::Ceil => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.ceil())
+                }
+                VisualUtilityMathOp::Round => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.round())
+                }
+                VisualUtilityMathOp::Sqrt => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    if value < 0.0 {
+                        return Err(format!(
+                            "Sqrt input must be non-negative at node {}",
+                            node_id
+                        ));
+                    }
+                    json_number(value.sqrt())
+                }
+                VisualUtilityMathOp::Pow => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    let exponent =
+                        self.resolve_number_input_with_stack(node_id, 1, Some("1"), stack)?;
+                    json_number(value.powf(exponent))
+                }
+                VisualUtilityMathOp::Exp => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.exp())
+                }
+                VisualUtilityMathOp::Log => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("1"), stack)?;
+                    let base =
+                        self.resolve_number_input_with_stack(node_id, 1, Some("10"), stack)?;
+                    if value <= 0.0 || base <= 0.0 || (base - 1.0).abs() <= f64::EPSILON {
+                        return Err(format!("Invalid log inputs at node {}", node_id));
+                    }
+                    json_number(value.log(base))
+                }
+                VisualUtilityMathOp::Degrees => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.to_degrees())
+                }
+                VisualUtilityMathOp::Radians => {
+                    let value =
+                        self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
+                    json_number(value.to_radians())
+                }
+            },
             VisualScriptNodeKind::Compare { op } => {
                 let left = self.resolve_data_input_with_stack(node_id, 0, Some("null"), stack)?;
                 let right = self.resolve_data_input_with_stack(node_id, 1, Some("null"), stack)?;
@@ -4905,6 +6994,142 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 object.insert("wake_up".to_string(), wake_up);
                 JsonValue::Object(object)
             }
+            VisualScriptNodeKind::ArrayEmpty { .. } => JsonValue::Array(Vec::new()),
+            VisualScriptNodeKind::ArrayLength { .. } => {
+                let value = self.resolve_data_input_with_stack(node_id, 0, Some("[]"), stack)?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Array)?;
+                let count = normalized
+                    .as_array()
+                    .map(|entries| entries.len())
+                    .unwrap_or(0);
+                json_number(count as f64)
+            }
+            VisualScriptNodeKind::ArrayGet { item_type } => {
+                let value = self.resolve_data_input_with_stack(node_id, 0, Some("[]"), stack)?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Array)?;
+                let index = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                let fallback = self.resolve_data_input_with_stack(
+                    node_id,
+                    2,
+                    Some(default_literal_for_type(*item_type)),
+                    stack,
+                )?;
+                let fallback = coerce_json_to_visual_type(&fallback, *item_type)?;
+                if !index.is_finite() || index < 0.0 {
+                    fallback
+                } else {
+                    let value = normalized
+                        .as_array()
+                        .and_then(|entries| entries.get(index.floor() as usize))
+                        .cloned()
+                        .unwrap_or(fallback.clone());
+                    coerce_json_to_visual_type(&value, *item_type)?
+                }
+            }
+            VisualScriptNodeKind::ArraySet { item_type } => {
+                let value = self.resolve_data_input_with_stack(node_id, 0, Some("[]"), stack)?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Array)?;
+                let index = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                let replacement = self.resolve_data_input_with_stack(
+                    node_id,
+                    2,
+                    Some(default_literal_for_type(*item_type)),
+                    stack,
+                )?;
+                let replacement = coerce_json_to_visual_type(&replacement, *item_type)?;
+                let mut array = normalized.as_array().cloned().unwrap_or_default();
+                if index.is_finite() && index >= 0.0 {
+                    let index = index.floor() as usize;
+                    if index >= array.len() {
+                        array.resize(
+                            index + 1,
+                            parse_loose_literal(default_literal_for_type(*item_type)),
+                        );
+                    }
+                    array[index] = replacement;
+                }
+                JsonValue::Array(array)
+            }
+            VisualScriptNodeKind::ArrayPush { item_type } => {
+                let value = self.resolve_data_input_with_stack(node_id, 0, Some("[]"), stack)?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Array)?;
+                let mut array = normalized.as_array().cloned().unwrap_or_default();
+                let pushed = self.resolve_data_input_with_stack(
+                    node_id,
+                    1,
+                    Some(default_literal_for_type(*item_type)),
+                    stack,
+                )?;
+                let pushed = coerce_json_to_visual_type(&pushed, *item_type)?;
+                array.push(pushed);
+                JsonValue::Array(array)
+            }
+            VisualScriptNodeKind::ArrayRemoveAt { .. } => {
+                let value = self.resolve_data_input_with_stack(node_id, 0, Some("[]"), stack)?;
+                let normalized = coerce_json_to_visual_type(&value, VisualValueType::Array)?;
+                let index = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
+                let mut array = normalized.as_array().cloned().unwrap_or_default();
+                if index.is_finite() && index >= 0.0 {
+                    let index = index.floor() as usize;
+                    if index < array.len() {
+                        array.remove(index);
+                    }
+                }
+                JsonValue::Array(array)
+            }
+            VisualScriptNodeKind::ArrayClear { .. } => JsonValue::Array(Vec::new()),
+            VisualScriptNodeKind::RayCast => {
+                let origin = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                    stack,
+                )?;
+                let direction = self.resolve_data_input_with_stack(
+                    node_id,
+                    1,
+                    Some("{\"x\":0,\"y\":-1,\"z\":0}"),
+                    stack,
+                )?;
+                let max_toi =
+                    self.resolve_number_input_with_stack(node_id, 2, Some("10000"), stack)?;
+                let solid = self.resolve_data_input_with_stack(node_id, 3, Some("true"), stack)?;
+                let filter = self.resolve_data_input_with_stack(
+                    node_id,
+                    4,
+                    Some(default_literal_for_type(
+                        VisualValueType::PhysicsQueryFilter,
+                    )),
+                    stack,
+                )?;
+                let exclude_entity =
+                    self.resolve_data_input_with_stack(node_id, 5, Some("null"), stack)?;
+
+                let origin = coerce_json_to_visual_type(&origin, VisualValueType::Vec3)?;
+                let direction = coerce_json_to_visual_type(&direction, VisualValueType::Vec3)?;
+                let solid = coerce_json_to_visual_type(&solid, VisualValueType::Bool)?;
+                let filter =
+                    coerce_json_to_visual_type(&filter, VisualValueType::PhysicsQueryFilter)?;
+                let exclude_entity = if exclude_entity.is_null() {
+                    JsonValue::Null
+                } else {
+                    coerce_json_to_visual_type(&exclude_entity, VisualValueType::Entity)?
+                };
+
+                let args = vec![
+                    origin,
+                    direction,
+                    json_number(max_toi.max(0.0)),
+                    solid,
+                    filter,
+                    exclude_entity,
+                ];
+                let result = self
+                    .host
+                    .invoke_api(VisualScriptApiTable::Ecs, "ray_cast", &args)
+                    .map_err(|err| format!("ecs.ray_cast failed at node {}: {}", node_id, err))?;
+                coerce_json_to_visual_type(&result, VisualValueType::PhysicsRayCastHit)?
+            }
             VisualScriptNodeKind::OnStart
             | VisualScriptNodeKind::OnUpdate
             | VisualScriptNodeKind::OnStop
@@ -4914,6 +7139,8 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::Log { .. }
             | VisualScriptNodeKind::SetVariable { .. }
             | VisualScriptNodeKind::ClearVariable { .. }
+            | VisualScriptNodeKind::WaitSeconds { .. }
+            | VisualScriptNodeKind::FunctionReturn { .. }
             | VisualScriptNodeKind::Comment { .. }
             | VisualScriptNodeKind::Statement { .. } => JsonValue::Null,
         };
@@ -5025,6 +7252,13 @@ fn compare_visual_values_as_type(
                 .unwrap_or(0);
             left_entity.cmp(&right_entity)
         }
+        VisualValueType::Array => {
+            let left_array = coerce_json_to_visual_type(left, VisualValueType::Array)
+                .unwrap_or_else(|_| JsonValue::Array(Vec::new()));
+            let right_array = coerce_json_to_visual_type(right, VisualValueType::Array)
+                .unwrap_or_else(|_| JsonValue::Array(Vec::new()));
+            canonical_json_string(&left_array).cmp(&canonical_json_string(&right_array))
+        }
         VisualValueType::String => {
             let left_text = coerce_json_to_visual_type(left, VisualValueType::String)
                 .ok()
@@ -5133,24 +7367,26 @@ fn visual_value_type_compare_rank(value_type: VisualValueType) -> u8 {
         VisualValueType::Number => 1,
         VisualValueType::String => 2,
         VisualValueType::Entity => 3,
-        VisualValueType::Vec2 => 4,
-        VisualValueType::Vec3 => 5,
-        VisualValueType::Quat => 6,
-        VisualValueType::Transform => 7,
-        VisualValueType::Camera => 8,
-        VisualValueType::Light => 9,
-        VisualValueType::MeshRenderer => 10,
-        VisualValueType::AudioEmitter => 11,
-        VisualValueType::AudioListener => 12,
-        VisualValueType::Script => 13,
-        VisualValueType::Physics => 14,
-        VisualValueType::PhysicsVelocity => 15,
-        VisualValueType::PhysicsWorldDefaults => 16,
-        VisualValueType::CharacterControllerOutput => 17,
-        VisualValueType::PhysicsRayCastHit => 18,
-        VisualValueType::PhysicsPointProjectionHit => 19,
-        VisualValueType::PhysicsShapeCastHit => 20,
-        VisualValueType::Json => 21,
+        VisualValueType::Array => 4,
+        VisualValueType::Vec2 => 5,
+        VisualValueType::Vec3 => 6,
+        VisualValueType::Quat => 7,
+        VisualValueType::Transform => 8,
+        VisualValueType::Camera => 9,
+        VisualValueType::Light => 10,
+        VisualValueType::MeshRenderer => 11,
+        VisualValueType::AudioEmitter => 12,
+        VisualValueType::AudioListener => 13,
+        VisualValueType::Script => 14,
+        VisualValueType::Physics => 15,
+        VisualValueType::PhysicsVelocity => 16,
+        VisualValueType::PhysicsWorldDefaults => 17,
+        VisualValueType::CharacterControllerOutput => 18,
+        VisualValueType::PhysicsRayCastHit => 19,
+        VisualValueType::PhysicsPointProjectionHit => 20,
+        VisualValueType::PhysicsShapeCastHit => 21,
+        VisualValueType::PhysicsQueryFilter => 22,
+        VisualValueType::Json => 23,
     }
 }
 
@@ -5257,6 +7493,14 @@ fn coerce_json_to_visual_type(
             }
             Ok(JsonValue::Number(JsonNumber::from(raw as u64)))
         }
+        VisualValueType::Array => match value {
+            JsonValue::Array(values) => Ok(JsonValue::Array(values.clone())),
+            JsonValue::Null => Ok(JsonValue::Array(Vec::new())),
+            JsonValue::String(text) => {
+                coerce_json_to_visual_type(&parse_loose_literal(text), VisualValueType::Array)
+            }
+            _ => Err("Array values must be arrays or JSON array strings".to_string()),
+        },
         VisualValueType::Vec2 => {
             let (x, y) = coerce_json_to_vec2_components(value)?;
             let mut object = JsonMap::new();
@@ -5313,10 +7557,44 @@ fn coerce_json_to_visual_type(
         VisualValueType::PhysicsVelocity => coerce_json_to_physics_velocity(value),
         VisualValueType::PhysicsWorldDefaults => coerce_json_to_physics_world_defaults(value),
         VisualValueType::CharacterControllerOutput => coerce_json_to_character_output(value),
+        VisualValueType::PhysicsQueryFilter => coerce_json_to_physics_query_filter(value),
         VisualValueType::PhysicsRayCastHit => coerce_json_to_ray_cast_hit(value),
         VisualValueType::PhysicsPointProjectionHit => coerce_json_to_point_projection_hit(value),
         VisualValueType::PhysicsShapeCastHit => coerce_json_to_shape_cast_hit(value),
     }
+}
+
+fn coerce_json_to_visual_type_with_array_item(
+    value: &JsonValue,
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+) -> Result<JsonValue, String> {
+    if value_type != VisualValueType::Array {
+        return coerce_json_to_visual_type(value, value_type);
+    }
+
+    let array = coerce_json_to_visual_type(value, VisualValueType::Array)?;
+    let mut item_type = array_item_type;
+    normalize_array_item_type(VisualValueType::Array, &mut item_type);
+    let item_type = item_type.unwrap_or(default_array_item_type());
+
+    let values = array.as_array().cloned().unwrap_or_default();
+    let mut normalized = Vec::with_capacity(values.len());
+    for entry in values {
+        normalized.push(coerce_json_to_visual_type(&entry, item_type)?);
+    }
+    Ok(JsonValue::Array(normalized))
+}
+
+fn normalize_literal_for_data_type(
+    value: &str,
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+) -> String {
+    let parsed = parse_loose_literal(value);
+    let coerced = coerce_json_to_visual_type_with_array_item(&parsed, value_type, array_item_type)
+        .unwrap_or_else(|_| parse_loose_literal(default_literal_for_type(value_type)));
+    literal_string_for_value_type(&coerced, value_type)
 }
 
 fn coerce_json_to_loose_object(
@@ -5601,6 +7879,49 @@ fn coerce_json_to_physics_world_defaults(value: &JsonValue) -> Result<JsonValue,
         );
     }
     Ok(JsonValue::Object(merged))
+}
+
+fn coerce_json_to_physics_query_filter(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Physics Query Filter")?;
+    let mut out = JsonMap::new();
+
+    let flags = object
+        .get("flags")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0)
+        .round() as u32;
+    let groups_memberships = object
+        .get("groups_memberships")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(u32::MAX as f64)
+        .max(0.0)
+        .round() as u32;
+    let groups_filter = object
+        .get("groups_filter")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(u32::MAX as f64)
+        .max(0.0)
+        .round() as u32;
+    let use_groups = object.get("use_groups").map(is_truthy).unwrap_or(false);
+
+    out.insert(
+        "flags".to_string(),
+        JsonValue::Number(JsonNumber::from(flags)),
+    );
+    out.insert(
+        "groups_memberships".to_string(),
+        JsonValue::Number(JsonNumber::from(groups_memberships)),
+    );
+    out.insert(
+        "groups_filter".to_string(),
+        JsonValue::Number(JsonNumber::from(groups_filter)),
+    );
+    out.insert("use_groups".to_string(), JsonValue::Bool(use_groups));
+    Ok(JsonValue::Object(out))
 }
 
 fn coerce_entity_or_null(value: Option<&JsonValue>) -> JsonValue {
@@ -5907,12 +8228,13 @@ pub struct VisualScriptOpenDocument {
     pub name: String,
     pub prelude: String,
     pub variables: Vec<VisualVariableDefinition>,
+    pub functions: Vec<VisualScriptFunctionDefinition>,
     pub snarl: Snarl<VisualScriptNodeKind>,
+    pub function_snarls: HashMap<u64, Snarl<VisualScriptNodeKind>>,
+    pub active_graph_function: Option<u64>,
     pub dirty: bool,
     pub compile_preview: String,
     pub compile_error: Option<String>,
-    pub add_node_menu_open: bool,
-    pub add_node_menu_pos: [f32; 2],
 }
 
 impl VisualScriptOpenDocument {
@@ -5932,23 +8254,36 @@ impl VisualScriptOpenDocument {
             name,
             prelude: document.prelude,
             variables: document.variables,
+            functions: document.functions.clone(),
             snarl: graph_data_to_snarl(&document.graph),
+            function_snarls: document
+                .functions
+                .iter()
+                .map(|function| (function.id, graph_data_to_snarl(&function.graph)))
+                .collect(),
+            active_graph_function: None,
             dirty: false,
             compile_preview: String::new(),
             compile_error: None,
-            add_node_menu_open: false,
-            add_node_menu_pos: [0.0, 0.0],
         };
         out.recompile_preview();
         out
     }
 
     fn to_document(&self) -> VisualScriptDocument {
+        let mut functions = self.functions.clone();
+        for function in &mut functions {
+            if let Some(snarl) = self.function_snarls.get(&function.id) {
+                function.graph = graph_data_from_snarl(snarl);
+            }
+        }
+
         let mut document = VisualScriptDocument {
             version: VISUAL_SCRIPT_VERSION,
             name: self.name.trim().to_string(),
             prelude: self.prelude.clone(),
             variables: self.variables.clone(),
+            functions,
             graph: graph_data_from_snarl(&self.snarl),
         };
         normalize_document(&mut document);
@@ -6094,10 +8429,25 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                             return;
                         }
                     }
+                    let (active_graph_path, active_graph_is_function) = state
+                        .documents
+                        .get(&active_path)
+                        .map(active_graph_path_display)
+                        .unwrap_or_else(|| ("Root Event Graph".to_string(), false));
+                    let active_graph_full_path = format!(
+                        "{} / {}",
+                        path_display_name(&active_path),
+                        active_graph_path
+                    );
 
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Document:");
-                        ui.monospace(compact_display_text(&path_display_name(&active_path), 64));
+                        ui.monospace(compact_display_text(&active_graph_full_path, 88));
+                        if active_graph_is_function && ui.small_button("Open Root").clicked() {
+                            if let Some(document) = state.documents.get_mut(&active_path) {
+                                document.active_graph_function = None;
+                            }
+                        }
 
                         if ui.button("Save").clicked() {
                             if let Some(document) = state.documents.get_mut(&active_path) {
@@ -6233,14 +8583,63 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                             egui::vec2(graph_width, pane_height),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                let before = graph_data_from_snarl(&document.snarl);
-                                let mut viewer =
-                                    VisualScriptViewer::with_variables(&document.variables);
+                                if let Some(active_function) = document.active_graph_function {
+                                    if !document
+                                        .functions
+                                        .iter()
+                                        .any(|function| function.id == active_function)
+                                    {
+                                        document.active_graph_function = None;
+                                    } else if !document
+                                        .function_snarls
+                                        .contains_key(&active_function)
+                                    {
+                                        let snarl = document
+                                            .functions
+                                            .iter()
+                                            .find(|function| function.id == active_function)
+                                            .map(|function| graph_data_to_snarl(&function.graph))
+                                            .unwrap_or_else(Snarl::new);
+                                        document.function_snarls.insert(active_function, snarl);
+                                    }
+                                }
+
+                                let before =
+                                    if let Some(function_id) = document.active_graph_function {
+                                        document
+                                            .function_snarls
+                                            .get(&function_id)
+                                            .map(graph_data_from_snarl)
+                                            .unwrap_or_default()
+                                    } else {
+                                        graph_data_from_snarl(&document.snarl)
+                                    };
+                                let mut viewer = VisualScriptViewer::with_context(
+                                    &document.variables,
+                                    &document.functions,
+                                    document.active_graph_function,
+                                );
                                 let min_size = egui::vec2(120.0, 120.0);
-                                let snarl_response = SnarlWidget::new()
-                                    .id_salt(("visual_script_graph", &document.path))
-                                    .min_size(min_size)
-                                    .show(&mut document.snarl, &mut viewer, ui);
+                                let snarl_response =
+                                    if let Some(function_id) = document.active_graph_function {
+                                        let snarl = document
+                                            .function_snarls
+                                            .get_mut(&function_id)
+                                            .expect("function snarl should exist");
+                                        SnarlWidget::new()
+                                            .id_salt((
+                                                "visual_script_graph",
+                                                &document.path,
+                                                function_id,
+                                            ))
+                                            .min_size(min_size)
+                                            .show(snarl, &mut viewer, ui)
+                                    } else {
+                                        SnarlWidget::new()
+                                            .id_salt(("visual_script_graph", &document.path))
+                                            .min_size(min_size)
+                                            .show(&mut document.snarl, &mut viewer, ui)
+                                    };
 
                                 if let Some(payload) =
                                     typed_dnd_release_payload::<AssetDragPayload>(&snarl_response)
@@ -6268,70 +8667,48 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                     for (value, pos) in
                                         std::mem::take(&mut viewer.pending_asset_drop_nodes)
                                     {
-                                        document.snarl.insert_node(
-                                            pos,
-                                            VisualScriptNodeKind::StringLiteral { value },
-                                        );
+                                        if let Some(function_id) = document.active_graph_function {
+                                            if let Some(snarl) =
+                                                document.function_snarls.get_mut(&function_id)
+                                            {
+                                                snarl.insert_node(
+                                                    pos,
+                                                    VisualScriptNodeKind::StringLiteral { value },
+                                                );
+                                            }
+                                        } else {
+                                            document.snarl.insert_node(
+                                                pos,
+                                                VisualScriptNodeKind::StringLiteral { value },
+                                            );
+                                        }
                                     }
                                     viewer.mark_changed();
                                 }
 
-                                if snarl_response.secondary_clicked() && !ui.ctx().is_popup_open() {
-                                    let pointer_pos = ui
-                                        .ctx()
-                                        .input(|i| i.pointer.interact_pos())
-                                        .or_else(|| snarl_response.interact_pointer_pos());
-                                    if let Some(pos) = pointer_pos {
-                                        document.add_node_menu_pos = [pos.x, pos.y];
-                                        document.add_node_menu_open = true;
-                                    }
-                                }
-
-                                if document.add_node_menu_open {
-                                    let menu_pos = egui::pos2(
-                                        document.add_node_menu_pos[0],
-                                        document.add_node_menu_pos[1],
-                                    );
-                                    let popup_id = ui.make_persistent_id((
-                                        "visual_script_add_node_popup",
-                                        &document.path,
-                                    ));
-                                    let mut inserted = None;
-                                    let menu_area = egui::Area::new(popup_id)
-                                        .order(egui::Order::Tooltip)
-                                        .movable(false)
-                                        .interactable(true)
-                                        .fixed_pos(menu_pos)
-                                        .show(ui.ctx(), |ui| {
-                                            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                                ui.set_min_width(320.0);
-                                                inserted = viewer.add_node_menu(
-                                                    menu_pos,
-                                                    ui,
-                                                    &mut document.snarl,
-                                                );
-                                            });
-                                        });
-
-                                    if inserted.is_some() {
-                                        document.add_node_menu_open = false;
-                                    }
-
-                                    let clicked_any = ui.input(|i| i.pointer.any_click());
-                                    let clicked_secondary = snarl_response.secondary_clicked();
-                                    let pointer_pos = ui.input(|i| i.pointer.interact_pos());
-                                    let clicked_inside = pointer_pos
-                                        .is_some_and(|pos| menu_area.response.rect.contains(pos));
-                                    let close_by_escape = ui.input(|i| i.key_pressed(Key::Escape));
-                                    if close_by_escape
-                                        || (clicked_any && !clicked_inside && !clicked_secondary)
+                                let mut graph_switched = false;
+                                if let Some(function_id) = viewer.open_function_graph_request {
+                                    if document
+                                        .functions
+                                        .iter()
+                                        .any(|function| function.id == function_id)
                                     {
-                                        document.add_node_menu_open = false;
+                                        document.active_graph_function = Some(function_id);
+                                        graph_switched = true;
                                     }
                                 }
 
-                                let after = graph_data_from_snarl(&document.snarl);
-                                if before != after || viewer.changed {
+                                let after =
+                                    if let Some(function_id) = document.active_graph_function {
+                                        document
+                                            .function_snarls
+                                            .get(&function_id)
+                                            .map(graph_data_from_snarl)
+                                            .unwrap_or_default()
+                                    } else {
+                                        graph_data_from_snarl(&document.snarl)
+                                    };
+                                if ((!graph_switched) && before != after) || viewer.changed {
                                     changed = true;
                                 }
                             },
@@ -6371,6 +8748,8 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                             .show(ui, |ui| {
                                 draw_variable_definitions_panel(ui, document, &mut changed);
                                 ui.separator();
+                                draw_function_definitions_panel(ui, document, &mut changed);
+                                ui.separator();
 
                                 ui.label(RichText::new("Notes").strong());
                                 let side_text_width = ui.available_width().max(120.0);
@@ -6409,6 +8788,11 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
 
                     if prune_invalid_wires(&mut document.snarl, &document.variables) > 0 {
                         changed = true;
+                    }
+                    for snarl in document.function_snarls.values_mut() {
+                        if prune_invalid_wires(snarl, &document.variables) > 0 {
+                            changed = true;
+                        }
                     }
 
                     if changed {
@@ -6461,8 +8845,17 @@ pub fn compile_visual_script_program(
     document: &VisualScriptDocument,
     source_label: &str,
 ) -> Result<VisualScriptProgram, String> {
+    compile_visual_script_program_internal(document, source_label, false)
+}
+
+fn compile_visual_script_program_internal(
+    document: &VisualScriptDocument,
+    source_label: &str,
+    is_function_program: bool,
+) -> Result<VisualScriptProgram, String> {
     let mut variable_defaults = HashMap::new();
     let mut variable_types = HashMap::new();
+    let mut variable_array_item_types = HashMap::new();
     let mut variable_ids = HashSet::new();
     let mut variable_names = HashSet::new();
     for variable in &document.variables {
@@ -6490,10 +8883,41 @@ pub fn compile_visual_script_program(
         }
         let key = runtime_variable_key(variable.id, variable_name);
         let parsed_default = parse_loose_literal(&variable.default_value);
-        let coerced_default = coerce_json_to_visual_type(&parsed_default, variable.value_type)
-            .map_err(|err| format!("Invalid default for variable '{}': {}", variable_name, err))?;
+        let coerced_default = coerce_json_to_visual_type_with_array_item(
+            &parsed_default,
+            variable.value_type,
+            variable.array_item_type,
+        )
+        .map_err(|err| format!("Invalid default for variable '{}': {}", variable_name, err))?;
         variable_types.insert(key.clone(), variable.value_type);
+        variable_array_item_types.insert(key.clone(), variable.array_item_type);
         variable_defaults.insert(key, coerced_default);
+    }
+
+    let mut function_ids = HashSet::new();
+    let mut function_names = HashSet::new();
+    if !is_function_program {
+        for function in &document.functions {
+            if function.id == 0 {
+                return Err(format!(
+                    "Function '{}' has invalid id 0",
+                    function.name.trim()
+                ));
+            }
+            if !function_ids.insert(function.id) {
+                return Err(format!("Duplicate function id {}", function.id));
+            }
+            let function_name = function.name.trim();
+            if function_name.is_empty() {
+                return Err(format!(
+                    "Function with id {} has an empty name",
+                    function.id
+                ));
+            }
+            if !function_names.insert(function_name.to_string()) {
+                return Err(format!("Duplicate function name '{}'", function_name));
+            }
+        }
     }
 
     let mut nodes = HashMap::new();
@@ -6647,6 +9071,40 @@ pub fn compile_visual_script_program(
                     ));
                 }
             }
+            VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                ..
+            } => {
+                let function = find_function_definition(&document.functions, *function_id, name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Node {} ({}) references an undefined function",
+                            node_id,
+                            node.title()
+                        )
+                    })?;
+                if inputs.len() != function.inputs.len() || outputs.len() != function.outputs.len()
+                {
+                    return Err(format!(
+                        "Node {} ({}) has stale function signature; resync the function call node",
+                        node_id,
+                        node.title()
+                    ));
+                }
+            }
+            VisualScriptNodeKind::FunctionStart { .. }
+            | VisualScriptNodeKind::FunctionReturn { .. } => {
+                if !is_function_program {
+                    return Err(format!(
+                        "Node {} ({}) is only valid inside function graphs",
+                        node_id,
+                        node.title()
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -6687,7 +9145,91 @@ pub fn compile_visual_script_program(
     on_stop_nodes.sort_unstable();
 
     if on_start_nodes.is_empty() && on_update_nodes.is_empty() && on_stop_nodes.is_empty() {
-        return Err("Visual script must contain at least one event node".to_string());
+        if is_function_program {
+            on_start_nodes = nodes
+                .iter()
+                .filter_map(|(id, node)| {
+                    if matches!(node, VisualScriptNodeKind::FunctionStart { .. }) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            on_start_nodes.sort_unstable();
+            if on_start_nodes.is_empty() {
+                return Err(
+                    "Function graph must contain at least one Function Start node".to_string(),
+                );
+            }
+        } else {
+            return Err("Visual script must contain at least one event node".to_string());
+        }
+    }
+
+    let mut functions = HashMap::new();
+    if !is_function_program {
+        for function in &document.functions {
+            let mut graph = function.graph.clone();
+
+            let mut start_nodes = Vec::new();
+            let mut return_nodes = Vec::new();
+            for node in &graph.nodes {
+                match &node.kind {
+                    VisualScriptNodeKind::FunctionStart { .. } => start_nodes.push(node.id),
+                    VisualScriptNodeKind::FunctionReturn { .. } => return_nodes.push(node.id),
+                    VisualScriptNodeKind::OnStart
+                    | VisualScriptNodeKind::OnUpdate
+                    | VisualScriptNodeKind::OnStop => {
+                        return Err(format!(
+                            "Function '{}' cannot contain event nodes",
+                            function.name
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+
+            if start_nodes.len() != 1 {
+                return Err(format!(
+                    "Function '{}' must contain exactly one Function Start node",
+                    function.name
+                ));
+            }
+            if return_nodes.is_empty() {
+                return Err(format!(
+                    "Function '{}' must contain at least one Function Return node",
+                    function.name
+                ));
+            }
+
+            let mut function_document = VisualScriptDocument {
+                version: VISUAL_SCRIPT_VERSION,
+                name: function.name.clone(),
+                prelude: String::new(),
+                variables: document.variables.clone(),
+                functions: document.functions.clone(),
+                graph,
+            };
+            normalize_document(&mut function_document);
+
+            let function_label = format!("{}::{}", source_label, function.name);
+            let mut compiled =
+                compile_visual_script_program_internal(&function_document, &function_label, true)?;
+            compiled.functions.clear();
+            compiled.function_context = Some((function.id, function.name.clone()));
+            functions.insert(
+                function.id,
+                VisualCompiledFunctionProgram {
+                    id: function.id,
+                    name: function.name.clone(),
+                    source_path: function.source_path.clone(),
+                    inputs: function.inputs.clone(),
+                    outputs: function.outputs.clone(),
+                    program: Box::new(compiled),
+                },
+            );
+        }
     }
 
     Ok(VisualScriptProgram {
@@ -6698,9 +9240,12 @@ pub fn compile_visual_script_program(
         data_edges,
         variable_defaults,
         variable_types,
+        variable_array_item_types,
         on_start_nodes,
         on_update_nodes,
         on_stop_nodes,
+        functions,
+        function_context: None,
     })
 }
 
@@ -6709,6 +9254,46 @@ fn normalize_document(document: &mut VisualScriptDocument) {
     if document.graph.nodes.is_empty() {
         document.graph = default_visual_script_document().graph;
     }
+
+    let mut function_seen_ids = HashSet::new();
+    let mut function_seen_names = HashSet::new();
+    let mut next_fn_id = next_function_id(&document.functions);
+    for function in &mut document.functions {
+        function.name = function.name.trim().to_string();
+        function.source_path = function.source_path.trim().to_string();
+
+        if function.id == 0 || !function_seen_ids.insert(function.id) {
+            while function_seen_ids.contains(&next_fn_id) {
+                next_fn_id = next_fn_id.saturating_add(1);
+            }
+            function.id = next_fn_id;
+            function_seen_ids.insert(function.id);
+            next_fn_id = next_fn_id.saturating_add(1);
+        } else {
+            next_fn_id = next_fn_id.max(function.id.saturating_add(1));
+        }
+
+        if function.name.is_empty() {
+            function.name = format!("function_{}", function.id);
+        }
+        if !function_seen_names.insert(function.name.clone()) {
+            let base = function.name.clone();
+            let mut suffix = 2u32;
+            loop {
+                let candidate = format!("{}_{}", base, suffix);
+                suffix = suffix.saturating_add(1);
+                if function_seen_names.insert(candidate.clone()) {
+                    function.name = candidate;
+                    break;
+                }
+            }
+        }
+
+        normalize_function_io_ports(&mut function.inputs, "input");
+        normalize_function_io_ports(&mut function.outputs, "output");
+        sync_function_signature_nodes(function);
+    }
+    document.functions.sort_by_key(|function| function.id);
 
     let mut seen_ids = HashSet::new();
     let mut seen_names = HashSet::new();
@@ -6767,11 +9352,22 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         let new_id = next_id;
                         next_id = next_id.saturating_add(1);
                         let value_type = infer_visual_value_type_from_literal(value);
+                        let mut array_item_type = if value_type == VisualValueType::Array {
+                            infer_array_item_type_from_literal(value)
+                        } else {
+                            None
+                        };
+                        normalize_array_item_type(value_type, &mut array_item_type);
                         document.variables.push(VisualVariableDefinition {
                             id: new_id,
                             name: trimmed.clone(),
                             value_type,
-                            default_value: normalize_literal_for_type(value, value_type),
+                            array_item_type,
+                            default_value: normalize_literal_for_data_type(
+                                value,
+                                value_type,
+                                array_item_type,
+                            ),
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -6802,11 +9398,22 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         let new_id = next_id;
                         next_id = next_id.saturating_add(1);
                         let value_type = infer_visual_value_type_from_literal(default_value);
+                        let mut array_item_type = if value_type == VisualValueType::Array {
+                            infer_array_item_type_from_literal(default_value)
+                        } else {
+                            None
+                        };
+                        normalize_array_item_type(value_type, &mut array_item_type);
                         document.variables.push(VisualVariableDefinition {
                             id: new_id,
                             name: trimmed.clone(),
                             value_type,
-                            default_value: normalize_literal_for_type(default_value, value_type),
+                            array_item_type,
+                            default_value: normalize_literal_for_data_type(
+                                default_value,
+                                value_type,
+                                array_item_type,
+                            ),
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -6837,8 +9444,9 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         document.variables.push(VisualVariableDefinition {
                             id: new_id,
                             name: trimmed.clone(),
-                            value_type: VisualValueType::Json,
-                            default_value: "null".to_string(),
+                            value_type: VisualValueType::String,
+                            array_item_type: None,
+                            default_value: String::new(),
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -6853,6 +9461,30 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                     }
                 }
             }
+            VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                args,
+            } => {
+                if let Some(function) =
+                    find_function_definition(&document.functions, *function_id, name)
+                {
+                    *function_id = function.id;
+                    *name = function.name.clone();
+                    *inputs = function.inputs.clone();
+                    *outputs = function.outputs.clone();
+                    args.truncate(inputs.len());
+                    while args.len() < inputs.len() {
+                        let value_type = inputs
+                            .get(args.len())
+                            .map(|port| port.value_type)
+                            .unwrap_or(VisualValueType::Json);
+                        args.push(default_literal_for_type(value_type).to_string());
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -6861,19 +9493,63 @@ fn normalize_document(document: &mut VisualScriptDocument) {
 
     document.variables.sort_by_key(|var| var.id);
     for variable in &mut document.variables {
+        normalize_array_item_type(variable.value_type, &mut variable.array_item_type);
         if variable.default_value.trim().is_empty() {
             variable.default_value = default_literal_for_type(variable.value_type).to_string();
+        } else {
+            variable.default_value = normalize_literal_for_data_type(
+                &variable.default_value,
+                variable.value_type,
+                variable.array_item_type,
+            );
         }
     }
 
+    normalize_graph_wires(&mut document.graph, &document.variables);
+    let function_defs = document.functions.clone();
+    for function in &mut document.functions {
+        for node in &mut function.graph.nodes {
+            if let VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs,
+                outputs,
+                args,
+            } = &mut node.kind
+            {
+                if let Some(target) = find_function_definition(&function_defs, *function_id, name) {
+                    *function_id = target.id;
+                    *name = target.name.clone();
+                    *inputs = target.inputs.clone();
+                    *outputs = target.outputs.clone();
+                    args.truncate(inputs.len());
+                    while args.len() < inputs.len() {
+                        let value_type = inputs
+                            .get(args.len())
+                            .map(|port| port.value_type)
+                            .unwrap_or(VisualValueType::Json);
+                        args.push(default_literal_for_type(value_type).to_string());
+                    }
+                }
+            }
+            node.kind.normalize();
+        }
+        normalize_graph_wires(&mut function.graph, &document.variables);
+    }
+}
+
+fn normalize_graph_wires(
+    graph: &mut VisualScriptGraphData,
+    variables: &[VisualVariableDefinition],
+) {
     let mut node_map = HashMap::new();
-    for node in &document.graph.nodes {
+    for node in &graph.nodes {
         node_map.insert(node.id, node.kind.clone());
     }
 
     let mut seen_wires = HashSet::new();
     let mut data_input_drivers = HashSet::new();
-    document.graph.wires.retain(|wire| {
+    graph.wires.retain(|wire| {
         let key = (wire.from_node, wire.from_pin, wire.to_node, wire.to_pin);
         if !seen_wires.insert(key) {
             return false;
@@ -6898,13 +9574,11 @@ fn normalize_document(document: &mut VisualScriptDocument) {
         }
 
         if matches!(from_slot.kind, PinKind::Data) {
-            let Some(from_type) =
-                node_data_output_type(from_node, from_slot.index, &document.variables)
+            let Some(from_type) = node_data_output_type(from_node, from_slot.index, variables)
             else {
                 return false;
             };
-            let Some(to_type) = node_data_input_type(to_node, to_slot.index, &document.variables)
-            else {
+            let Some(to_type) = node_data_input_type(to_node, to_slot.index, variables) else {
                 return false;
             };
             if !are_data_types_compatible(from_type, to_type) {
@@ -7056,8 +9730,10 @@ fn default_visual_script_document() -> VisualScriptDocument {
             id: 1,
             name: "speed".to_string(),
             value_type: VisualValueType::Number,
+            array_item_type: None,
             default_value: "5".to_string(),
         }],
+        functions: Vec::new(),
         graph: graph_data_from_snarl(&snarl),
     }
 }
@@ -7068,6 +9744,19 @@ fn path_display_name(path: &Path) -> String {
     } else {
         path.to_string_lossy().to_string()
     }
+}
+
+fn active_graph_path_display(document: &VisualScriptOpenDocument) -> (String, bool) {
+    if let Some(function_id) = document.active_graph_function {
+        if let Some(function) = document
+            .functions
+            .iter()
+            .find(|function| function.id == function_id)
+        {
+            return (format!("functions/{}", function.name), true);
+        }
+    }
+    ("Root Event Graph".to_string(), false)
 }
 
 fn compact_display_text(value: &str, max_chars: usize) -> String {
@@ -7118,7 +9807,7 @@ fn draw_variable_definitions_panel(
                 ComboBox::from_id_salt(("visual_variable_type", index))
                     .selected_text(variable.value_type.title())
                     .show_ui(ui, |ui| {
-                        for value_type in VISUAL_VALUE_TYPE_CHOICES {
+                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
                             if ui
                                 .selectable_value(
                                     &mut variable.value_type,
@@ -7127,13 +9816,52 @@ fn draw_variable_definitions_panel(
                                 )
                                 .changed()
                             {
-                                variable.default_value =
-                                    normalize_literal_for_type(&variable.default_value, value_type);
+                                normalize_array_item_type(
+                                    variable.value_type,
+                                    &mut variable.array_item_type,
+                                );
+                                variable.default_value = normalize_literal_for_data_type(
+                                    &variable.default_value,
+                                    value_type,
+                                    variable.array_item_type,
+                                );
                                 *changed = true;
                                 prune_wires = true;
                             }
                         }
                     });
+
+                if variable.value_type == VisualValueType::Array {
+                    let selected = variable
+                        .array_item_type
+                        .unwrap_or(default_array_item_type());
+                    ComboBox::from_id_salt(("visual_variable_array_item_type", index))
+                        .selected_text(selected.title())
+                        .show_ui(ui, |ui| {
+                            for item_type in VISUAL_ARRAY_ITEM_TYPE_CHOICES {
+                                if ui
+                                    .selectable_value(
+                                        variable.array_item_type.get_or_insert(selected),
+                                        item_type,
+                                        item_type.title(),
+                                    )
+                                    .changed()
+                                {
+                                    normalize_array_item_type(
+                                        variable.value_type,
+                                        &mut variable.array_item_type,
+                                    );
+                                    variable.default_value = normalize_literal_for_data_type(
+                                        &variable.default_value,
+                                        variable.value_type,
+                                        variable.array_item_type,
+                                    );
+                                    *changed = true;
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
 
                 if ui.small_button("Delete").clicked() {
                     remove_index = Some(index);
@@ -7142,7 +9870,12 @@ fn draw_variable_definitions_panel(
 
             ui.horizontal(|ui| {
                 ui.label("Default");
-                if draw_typed_default_editor(ui, variable.value_type, &mut variable.default_value) {
+                if draw_typed_default_editor_with_array_item(
+                    ui,
+                    variable.value_type,
+                    variable.array_item_type,
+                    &mut variable.default_value,
+                ) {
                     *changed = true;
                 }
             });
@@ -7174,8 +9907,9 @@ fn draw_variable_definitions_panel(
         document.variables.push(VisualVariableDefinition {
             id,
             name: format!("var_{}", id),
-            value_type: VisualValueType::Json,
-            default_value: "null".to_string(),
+            value_type: VisualValueType::String,
+            array_item_type: None,
+            default_value: String::new(),
         });
         *changed = true;
     }
@@ -7230,8 +9964,430 @@ fn draw_variable_definitions_panel(
         *changed = true;
     }
 
-    if prune_wires && prune_invalid_wires(&mut document.snarl, &document.variables) > 0 {
+    if prune_wires {
+        if prune_invalid_wires(&mut document.snarl, &document.variables) > 0 {
+            *changed = true;
+        }
+        for snarl in document.function_snarls.values_mut() {
+            if prune_invalid_wires(snarl, &document.variables) > 0 {
+                *changed = true;
+            }
+        }
+    }
+}
+
+fn sanitize_filename_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "function".to_string()
+    } else {
+        out
+    }
+}
+
+fn sync_call_function_nodes_in_snarl(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    functions: &[VisualScriptFunctionDefinition],
+) -> bool {
+    let mut changed = false;
+    for (_node_id, node) in snarl.nodes_ids_data_mut() {
+        if let VisualScriptNodeKind::CallFunction {
+            function_id,
+            name,
+            inputs,
+            outputs,
+            args,
+        } = &mut node.value
+        {
+            if let Some(function) = find_function_definition(functions, *function_id, name) {
+                let previous_id = *function_id;
+                let previous_name = name.clone();
+                let previous_inputs = inputs.clone();
+                let previous_outputs = outputs.clone();
+
+                *function_id = function.id;
+                *name = function.name.clone();
+                *inputs = function.inputs.clone();
+                *outputs = function.outputs.clone();
+                args.truncate(inputs.len());
+                while args.len() < inputs.len() {
+                    let value_type = inputs
+                        .get(args.len())
+                        .map(|port| port.value_type)
+                        .unwrap_or(VisualValueType::Json);
+                    args.push(default_literal_for_type(value_type).to_string());
+                }
+
+                if previous_id != *function_id
+                    || previous_name != *name
+                    || previous_inputs != *inputs
+                    || previous_outputs != *outputs
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn draw_function_port_list(
+    ui: &mut Ui,
+    label: &str,
+    ports: &mut Vec<VisualFunctionIoDefinition>,
+    changed: &mut bool,
+) -> bool {
+    ui.label(RichText::new(label).strong());
+    let mut signature_changed = false;
+    let mut remove_index: Option<usize> = None;
+    for (index, port) in ports.iter_mut().enumerate() {
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("#{}", port.id));
+                let name_width = ui.available_width().clamp(80.0, 160.0);
+                if ui
+                    .add(TextEdit::singleline(&mut port.name).desired_width(name_width))
+                    .changed()
+                {
+                    *changed = true;
+                    signature_changed = true;
+                }
+                ComboBox::from_id_salt((label, "function_port_type", index))
+                    .selected_text(port.value_type.title())
+                    .show_ui(ui, |ui| {
+                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
+                            if ui
+                                .selectable_value(
+                                    &mut port.value_type,
+                                    value_type,
+                                    value_type.title(),
+                                )
+                                .changed()
+                            {
+                                normalize_array_item_type(
+                                    port.value_type,
+                                    &mut port.array_item_type,
+                                );
+                                port.default_value = normalize_literal_for_data_type(
+                                    &port.default_value,
+                                    value_type,
+                                    port.array_item_type,
+                                );
+                                *changed = true;
+                                signature_changed = true;
+                            }
+                        }
+                    });
+                if port.value_type == VisualValueType::Array {
+                    let selected = port.array_item_type.unwrap_or(default_array_item_type());
+                    ComboBox::from_id_salt((label, "function_port_array_item_type", index))
+                        .selected_text(selected.title())
+                        .show_ui(ui, |ui| {
+                            for item_type in VISUAL_ARRAY_ITEM_TYPE_CHOICES {
+                                if ui
+                                    .selectable_value(
+                                        port.array_item_type.get_or_insert(selected),
+                                        item_type,
+                                        item_type.title(),
+                                    )
+                                    .changed()
+                                {
+                                    normalize_array_item_type(
+                                        port.value_type,
+                                        &mut port.array_item_type,
+                                    );
+                                    port.default_value = normalize_literal_for_data_type(
+                                        &port.default_value,
+                                        port.value_type,
+                                        port.array_item_type,
+                                    );
+                                    *changed = true;
+                                    signature_changed = true;
+                                }
+                            }
+                        });
+                }
+                if ui.small_button("Delete").clicked() {
+                    remove_index = Some(index);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Default");
+                if draw_typed_default_editor_with_array_item(
+                    ui,
+                    port.value_type,
+                    port.array_item_type,
+                    &mut port.default_value,
+                ) {
+                    *changed = true;
+                }
+            });
+        });
+    }
+    if let Some(index) = remove_index {
+        if index < ports.len() {
+            ports.remove(index);
+            *changed = true;
+            signature_changed = true;
+        }
+    }
+    if ui.small_button(format!("Add {}", label)).clicked() {
+        ports.push(VisualFunctionIoDefinition {
+            id: 0,
+            name: default_function_io_name(),
+            value_type: VisualValueType::String,
+            array_item_type: None,
+            default_value: String::new(),
+        });
         *changed = true;
+        signature_changed = true;
+    }
+    signature_changed
+}
+
+fn draw_function_definitions_panel(
+    ui: &mut Ui,
+    document: &mut VisualScriptOpenDocument,
+    changed: &mut bool,
+) {
+    ui.label(RichText::new("Functions").strong());
+
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Root Graph").clicked() {
+            document.active_graph_function = None;
+        }
+        if ui.button("Add Function").clicked() {
+            let id = next_function_id(&document.functions);
+            let mut function = VisualScriptFunctionDefinition {
+                id,
+                name: format!("function_{}", id),
+                source_path: String::new(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                graph: VisualScriptGraphData::default(),
+            };
+            normalize_function_io_ports(&mut function.inputs, "input");
+            normalize_function_io_ports(&mut function.outputs, "output");
+            sync_function_signature_nodes(&mut function);
+            document
+                .function_snarls
+                .insert(function.id, graph_data_to_snarl(&function.graph));
+            document.active_graph_function = Some(function.id);
+            document.functions.push(function);
+            *changed = true;
+        }
+    });
+
+    let asset_path_id = ui.id().with(("function_asset_path", &document.path));
+    let mut asset_path = ui
+        .data_mut(|data| data.get_temp::<String>(asset_path_id))
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("Function Asset");
+        ui.add(
+            TextEdit::singleline(&mut asset_path).desired_width(ui.available_width().max(120.0)),
+        );
+    });
+    ui.data_mut(|data| data.insert_temp(asset_path_id, asset_path.clone()));
+
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Import").clicked() {
+            let import_path = if asset_path.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(asset_path.trim()))
+            };
+            if let Some(path) = import_path {
+                if let Ok(source) = fs::read_to_string(&path) {
+                    if let Ok(mut asset) = ron::de::from_str::<VisualScriptFunctionAsset>(&source) {
+                        let id = next_function_id(&document.functions);
+                        asset.function.id = id;
+                        if asset.function.source_path.trim().is_empty() {
+                            asset.function.source_path = path.to_string_lossy().to_string();
+                        }
+                        normalize_function_io_ports(&mut asset.function.inputs, "input");
+                        normalize_function_io_ports(&mut asset.function.outputs, "output");
+                        sync_function_signature_nodes(&mut asset.function);
+                        document.function_snarls.insert(
+                            asset.function.id,
+                            graph_data_to_snarl(&asset.function.graph),
+                        );
+                        document.active_graph_function = Some(asset.function.id);
+                        document.functions.push(asset.function);
+                        *changed = true;
+                    }
+                }
+            }
+        }
+        if ui.button("Export Active").clicked() {
+            if let Some(function_id) = document.active_graph_function {
+                if let Some(function) = document
+                    .functions
+                    .iter()
+                    .find(|function| function.id == function_id)
+                {
+                    let output_path = if asset_path.trim().is_empty() {
+                        let stem = document
+                            .path
+                            .file_stem()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("visual_script");
+                        document.path.with_file_name(format!(
+                            "{}__{}.{}",
+                            stem,
+                            sanitize_filename_segment(&function.name),
+                            VISUAL_SCRIPT_FUNCTION_EXTENSION
+                        ))
+                    } else {
+                        PathBuf::from(asset_path.trim())
+                    };
+                    let mut asset = VisualScriptFunctionAsset {
+                        version: VISUAL_SCRIPT_VERSION,
+                        function: function.clone(),
+                    };
+                    if let Some(snarl) = document.function_snarls.get(&function.id) {
+                        asset.function.graph = graph_data_from_snarl(snarl);
+                    }
+                    let pretty = PrettyConfig::new().compact_arrays(false);
+                    if let Ok(payload) = ron::ser::to_string_pretty(&asset, pretty) {
+                        if fs::write(&output_path, payload).is_ok() {
+                            ui.data_mut(|data| {
+                                data.insert_temp(
+                                    asset_path_id,
+                                    output_path.to_string_lossy().to_string(),
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let mut remove_index: Option<usize> = None;
+    let mut signatures_changed = false;
+    let mut requested_active_graph = document.active_graph_function;
+    let mut spawn_call_nodes: Vec<(
+        u64,
+        String,
+        Vec<VisualFunctionIoDefinition>,
+        Vec<VisualFunctionIoDefinition>,
+        f32,
+    )> = Vec::new();
+    for (index, function) in document.functions.iter_mut().enumerate() {
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("#{}", function.id));
+                let name_width = ui.available_width().clamp(80.0, 180.0);
+                if ui
+                    .add(TextEdit::singleline(&mut function.name).desired_width(name_width))
+                    .changed()
+                {
+                    *changed = true;
+                    signatures_changed = true;
+                }
+                if ui.small_button("Graph").clicked() {
+                    requested_active_graph = Some(function.id);
+                }
+                if ui.small_button("Call Node").clicked() {
+                    spawn_call_nodes.push((
+                        function.id,
+                        function.name.clone(),
+                        function.inputs.clone(),
+                        function.outputs.clone(),
+                        160.0 + (index as f32 * 28.0),
+                    ));
+                }
+                if ui.small_button("Delete").clicked() {
+                    remove_index = Some(index);
+                }
+            });
+
+            if requested_active_graph == Some(function.id) {
+                ui.horizontal(|ui| {
+                    ui.label("Source Path");
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut function.source_path)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+                });
+                signatures_changed |=
+                    draw_function_port_list(ui, "Inputs", &mut function.inputs, changed);
+                signatures_changed |=
+                    draw_function_port_list(ui, "Outputs", &mut function.outputs, changed);
+            }
+        });
+    }
+
+    for (function_id, name, inputs, outputs, y) in spawn_call_nodes {
+        document.snarl.insert_node(
+            egui::pos2(220.0, y),
+            VisualScriptNodeKind::CallFunction {
+                function_id,
+                name,
+                inputs: inputs.clone(),
+                outputs: outputs.clone(),
+                args: inputs
+                    .iter()
+                    .map(|port| default_literal_for_type(port.value_type).to_string())
+                    .collect(),
+            },
+        );
+        *changed = true;
+    }
+
+    if let Some(index) = remove_index {
+        if index < document.functions.len() {
+            let removed = document.functions.remove(index);
+            document.function_snarls.remove(&removed.id);
+            if requested_active_graph == Some(removed.id) {
+                requested_active_graph = None;
+            }
+            *changed = true;
+            signatures_changed = true;
+        }
+    }
+
+    document.active_graph_function = requested_active_graph;
+
+    if signatures_changed {
+        for function in &mut document.functions {
+            if let Some(snarl) = document.function_snarls.get(&function.id) {
+                function.graph = graph_data_from_snarl(snarl);
+            }
+            normalize_function_io_ports(&mut function.inputs, "input");
+            normalize_function_io_ports(&mut function.outputs, "output");
+            sync_function_signature_nodes(function);
+            document
+                .function_snarls
+                .insert(function.id, graph_data_to_snarl(&function.graph));
+        }
+        if sync_call_function_nodes_in_snarl(&mut document.snarl, &document.functions) {
+            *changed = true;
+        }
+        if prune_invalid_wires(&mut document.snarl, &document.variables) > 0 {
+            *changed = true;
+        }
+        for snarl in document.function_snarls.values_mut() {
+            if sync_call_function_nodes_in_snarl(snarl, &document.functions) {
+                *changed = true;
+            }
+            if prune_invalid_wires(snarl, &document.variables) > 0 {
+                *changed = true;
+            }
+        }
     }
 }
 
@@ -7241,20 +10397,40 @@ struct VisualScriptViewer {
     consumed_asset_drop: bool,
     pending_asset_drop_nodes: Vec<(String, egui::Pos2)>,
     variables: Vec<VisualVariableDefinition>,
+    functions: Vec<VisualScriptFunctionDefinition>,
+    active_function_graph: Option<u64>,
+    open_function_graph_request: Option<u64>,
 }
 
 impl VisualScriptViewer {
-    fn with_variables(variables: &[VisualVariableDefinition]) -> Self {
+    fn with_context(
+        variables: &[VisualVariableDefinition],
+        functions: &[VisualScriptFunctionDefinition],
+        active_function_graph: Option<u64>,
+    ) -> Self {
         Self {
             changed: false,
             consumed_asset_drop: false,
             pending_asset_drop_nodes: Vec::new(),
             variables: variables.to_vec(),
+            functions: functions.to_vec(),
+            active_function_graph,
+            open_function_graph_request: None,
         }
     }
 
     fn mark_changed(&mut self) {
         self.changed = true;
+    }
+
+    fn is_function_graph(&self) -> bool {
+        self.active_function_graph.is_some()
+    }
+
+    fn find_function(&self, function_id: u64) -> Option<&VisualScriptFunctionDefinition> {
+        self.functions
+            .iter()
+            .find(|function| function.id == function_id)
     }
 
     fn add_node_menu(
@@ -7263,6 +10439,11 @@ impl VisualScriptViewer {
         ui: &mut Ui,
         snarl: &mut Snarl<VisualScriptNodeKind>,
     ) -> Option<NodeId> {
+        enum AddNodeSearchAction {
+            InsertNode(VisualScriptNodeKind),
+            InsertApi(VisualApiOperation),
+        }
+
         ui.label("Add node");
         let search_id = ui.id().with("visual_script_add_node_search");
         let mut search = ui
@@ -7275,504 +10456,1308 @@ impl VisualScriptViewer {
         );
         ui.data_mut(|data| data.insert_temp(search_id, search.clone()));
         let search = search.trim().to_ascii_lowercase();
+        let has_search = !search.is_empty();
 
         let mut inserted = None;
         let mut has_visible = false;
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .max_height(520.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.label(RichText::new("Events").strong());
-                if add_node_search_matches_any(&search, &["on start", "event"]) {
-                    has_visible = true;
-                    if ui.button("On Start").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::OnStart));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["on update", "tick", "event"]) {
-                    has_visible = true;
-                    if ui.button("On Update").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::OnUpdate));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["on stop", "event"]) {
-                    has_visible = true;
-                    if ui.button("On Stop").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::OnStop));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
 
-                ui.separator();
-                ui.label(RichText::new("API").strong());
-                for section in VISUAL_API_MENU_SECTION_ORDER {
-                    let mut specs: Vec<&VisualApiOperationSpec> = VISUAL_API_OPERATION_SPECS
-                        .iter()
-                        .filter(|spec| api_menu_section(spec) == section)
-                        .filter(|spec| api_spec_matches_add_node_search(spec, section, &search))
-                        .collect();
-                    if specs.is_empty() {
-                        continue;
+        if has_search {
+            let mut results: Vec<(String, AddNodeSearchAction)> = Vec::new();
+
+            let mut push_search_result =
+                |label: String, terms: &[&str], action: AddNodeSearchAction| {
+                    if add_node_search_matches_any(&search, terms) {
+                        results.push((label, action));
                     }
-                    has_visible = true;
-                    specs.sort_by_key(|spec| spec.title);
-                    ui.collapsing(format!("{} ({})", section.title(), specs.len()), |ui| {
-                        for spec in specs {
-                            let label = match spec.flow {
-                                VisualApiFlow::Exec => format!("{} [Call]", spec.title),
-                                VisualApiFlow::Pure => spec.title.to_string(),
-                            };
+                };
+
+            if !self.is_function_graph() {
+                push_search_result(
+                    "On Start".to_string(),
+                    &["on start", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnStart),
+                );
+                push_search_result(
+                    "On Update".to_string(),
+                    &["on update", "tick", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnUpdate),
+                );
+                push_search_result(
+                    "On Stop".to_string(),
+                    &["on stop", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnStop),
+                );
+            } else if let Some(function_id) = self.active_function_graph {
+                let inputs = self
+                    .find_function(function_id)
+                    .map(|function| function.inputs.clone())
+                    .unwrap_or_default();
+                let outputs = self
+                    .find_function(function_id)
+                    .map(|function| function.outputs.clone())
+                    .unwrap_or_default();
+                push_search_result(
+                    "Function Start".to_string(),
+                    &["function start", "entry", "start"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::FunctionStart {
+                        function_id,
+                        inputs,
+                    }),
+                );
+                push_search_result(
+                    "Function Return".to_string(),
+                    &["function return", "return", "end"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::FunctionReturn {
+                        function_id,
+                        outputs: outputs.clone(),
+                        values: outputs
+                            .iter()
+                            .map(|port| default_literal_for_type(port.value_type).to_string())
+                            .collect(),
+                    }),
+                );
+            }
+
+            let mut api_specs: Vec<&VisualApiOperationSpec> = VISUAL_API_OPERATION_SPECS
+                .iter()
+                .filter(|spec| {
+                    api_spec_matches_add_node_search(spec, api_menu_section(spec), &search)
+                })
+                .collect();
+            api_specs.sort_by_key(|spec| spec.title);
+            for spec in api_specs {
+                let label = match spec.flow {
+                    VisualApiFlow::Exec => format!("API / {} [Call]", spec.title),
+                    VisualApiFlow::Pure => format!("API / {}", spec.title),
+                };
+                let section = api_menu_section(spec);
+                push_search_result(
+                    label,
+                    &[
+                        spec.title,
+                        spec.function,
+                        spec.category,
+                        spec.table.title(),
+                        section.title(),
+                        "api",
+                    ],
+                    AddNodeSearchAction::InsertApi(spec.operation),
+                );
+            }
+
+            for (label, node) in [
+                (
+                    "Sequence",
+                    VisualScriptNodeKind::Sequence {
+                        outputs: default_sequence_outputs(),
+                    },
+                ),
+                (
+                    "Branch",
+                    VisualScriptNodeKind::Branch {
+                        condition: default_branch_condition(),
+                    },
+                ),
+                (
+                    "Loop While",
+                    VisualScriptNodeKind::LoopWhile {
+                        condition: default_loop_condition(),
+                        max_iterations: default_max_loop_iterations(),
+                    },
+                ),
+                (
+                    "Log",
+                    VisualScriptNodeKind::Log {
+                        message: default_log_message(),
+                    },
+                ),
+            ] {
+                push_search_result(
+                    label.to_string(),
+                    &[label, "flow"],
+                    AddNodeSearchAction::InsertNode(node),
+                );
+            }
+
+            for variable in &self.variables {
+                let variable_label = if variable.value_type == VisualValueType::Array {
+                    let item = variable
+                        .array_item_type
+                        .unwrap_or(default_array_item_type());
+                    format!("{} (Array<{}>)", variable.name, item.title())
+                } else {
+                    format!("{} ({})", variable.name, variable.value_type.title())
+                };
+                let search_terms = [
+                    variable_label.as_str(),
+                    variable.name.as_str(),
+                    "variable",
+                    "set",
+                    "get",
+                    "clear",
+                ];
+                push_search_result(
+                    format!("Variable / Set {}", variable.name),
+                    &search_terms,
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::SetVariable {
+                        variable_id: variable.id,
+                        name: variable.name.clone(),
+                        value: variable.default_value.clone(),
+                    }),
+                );
+                push_search_result(
+                    format!("Variable / Get {}", variable.name),
+                    &search_terms,
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::GetVariable {
+                        variable_id: variable.id,
+                        name: variable.name.clone(),
+                        default_value: variable.default_value.clone(),
+                    }),
+                );
+                push_search_result(
+                    format!("Variable / Clear {}", variable.name),
+                    &search_terms,
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::ClearVariable {
+                        variable_id: variable.id,
+                        name: variable.name.clone(),
+                    }),
+                );
+            }
+
+            for function in &self.functions {
+                let call_label = if self.active_function_graph == Some(function.id) {
+                    format!("Call {} (recursive)", function.name)
+                } else {
+                    format!("Call {}", function.name)
+                };
+                push_search_result(
+                    format!("Function / {}", call_label),
+                    &[
+                        call_label.as_str(),
+                        function.name.as_str(),
+                        "function",
+                        "subgraph",
+                        "call",
+                    ],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::CallFunction {
+                        function_id: function.id,
+                        name: function.name.clone(),
+                        inputs: function.inputs.clone(),
+                        outputs: function.outputs.clone(),
+                        args: function
+                            .inputs
+                            .iter()
+                            .map(|port| default_literal_for_type(port.value_type).to_string())
+                            .collect(),
+                    }),
+                );
+            }
+
+            for (label, node, terms) in [
+                (
+                    "Values / Bool",
+                    VisualScriptNodeKind::BoolLiteral { value: false },
+                    &["bool", "value", "values"][..],
+                ),
+                (
+                    "Values / Number",
+                    VisualScriptNodeKind::NumberLiteral { value: 0.0 },
+                    &["number", "value", "values"][..],
+                ),
+                (
+                    "Values / String",
+                    VisualScriptNodeKind::StringLiteral {
+                        value: "text".to_string(),
+                    },
+                    &["string", "value", "values", "text"][..],
+                ),
+                (
+                    "Values / Self Entity",
+                    VisualScriptNodeKind::SelfEntity,
+                    &["self entity", "entity", "value", "values"][..],
+                ),
+            ] {
+                push_search_result(
+                    label.to_string(),
+                    terms,
+                    AddNodeSearchAction::InsertNode(node),
+                );
+            }
+
+            for (label, node, terms) in [
+                (
+                    "Time / Delta Time",
+                    VisualScriptNodeKind::DeltaTime,
+                    &["delta time", "time"][..],
+                ),
+                (
+                    "Time / Time Since Start",
+                    VisualScriptNodeKind::TimeSinceStart,
+                    &["time", "since start", "elapsed", "seconds"][..],
+                ),
+                (
+                    "Time / Unix Time Seconds",
+                    VisualScriptNodeKind::UnixTimeSeconds,
+                    &["time", "unix", "date", "clock"][..],
+                ),
+                (
+                    "Time / Time Since",
+                    VisualScriptNodeKind::TimeSince {
+                        origin_seconds: default_time_since_origin(),
+                    },
+                    &["time since", "duration", "time"][..],
+                ),
+                (
+                    "Time / Wait Seconds",
+                    VisualScriptNodeKind::WaitSeconds {
+                        seconds: default_wait_seconds(),
+                        restart_on_retrigger: default_wait_restart_on_retrigger(),
+                    },
+                    &["wait", "delay", "time"][..],
+                ),
+            ] {
+                push_search_result(
+                    label.to_string(),
+                    terms,
+                    AddNodeSearchAction::InsertNode(node),
+                );
+            }
+
+            for op in [
+                VisualMathOp::Add,
+                VisualMathOp::Subtract,
+                VisualMathOp::Multiply,
+                VisualMathOp::Divide,
+                VisualMathOp::Modulo,
+                VisualMathOp::Min,
+                VisualMathOp::Max,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Basic / {}", title),
+                    &[title, "math", "basic"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathBinary { op }),
+                );
+            }
+            for op in [
+                VisualTrigOp::Sin,
+                VisualTrigOp::Cos,
+                VisualTrigOp::Tan,
+                VisualTrigOp::Asin,
+                VisualTrigOp::Acos,
+                VisualTrigOp::Atan,
+                VisualTrigOp::Atan2,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Trig / {}", title),
+                    &[title, "math", "trig"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathTrig { op }),
+                );
+            }
+            for op in [
+                VisualInterpolationOp::Lerp,
+                VisualInterpolationOp::SmoothStep,
+                VisualInterpolationOp::InverseLerp,
+                VisualInterpolationOp::Vec3Lerp,
+                VisualInterpolationOp::QuatSlerp,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Interpolation / {}", title),
+                    &[title, "math", "interpolation", "lerp", "slerp"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathInterpolation { op }),
+                );
+            }
+            for op in [
+                VisualVectorMathOp::Dot,
+                VisualVectorMathOp::Cross,
+                VisualVectorMathOp::Length,
+                VisualVectorMathOp::Normalize,
+                VisualVectorMathOp::Distance,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Vector / {}", title),
+                    &[title, "math", "vector"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathVector { op }),
+                );
+            }
+            for op in [
+                VisualProceduralMathOp::Clamp,
+                VisualProceduralMathOp::Remap,
+                VisualProceduralMathOp::Saturate,
+                VisualProceduralMathOp::Fract,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Procedural / {}", title),
+                    &[title, "math", "procedural"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathProcedural { op }),
+                );
+            }
+            for op in [
+                VisualUtilityMathOp::Abs,
+                VisualUtilityMathOp::Sign,
+                VisualUtilityMathOp::Floor,
+                VisualUtilityMathOp::Ceil,
+                VisualUtilityMathOp::Round,
+                VisualUtilityMathOp::Sqrt,
+                VisualUtilityMathOp::Pow,
+                VisualUtilityMathOp::Exp,
+                VisualUtilityMathOp::Log,
+                VisualUtilityMathOp::Degrees,
+                VisualUtilityMathOp::Radians,
+            ] {
+                let title = op.title();
+                push_search_result(
+                    format!("Math / Utility / {}", title),
+                    &[title, "math", "utility"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::MathUtility { op }),
+                );
+            }
+
+            push_search_result(
+                "Logic / Compare".to_string(),
+                &["compare", "bool"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Compare {
+                    op: VisualCompareOp::Equals,
+                }),
+            );
+            push_search_result(
+                "Logic / Logical".to_string(),
+                &["logical", "bool"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::LogicalBinary {
+                    op: VisualLogicalOp::And,
+                }),
+            );
+            push_search_result(
+                "Logic / Not".to_string(),
+                &["not", "bool"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Not),
+            );
+            push_search_result(
+                "Logic / Select".to_string(),
+                &["select", "bool"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Select {
+                    value_type: default_select_value_type(),
+                }),
+            );
+
+            for (label, node) in [
+                (
+                    "Array Empty",
+                    VisualScriptNodeKind::ArrayEmpty {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Length",
+                    VisualScriptNodeKind::ArrayLength {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Get",
+                    VisualScriptNodeKind::ArrayGet {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Set",
+                    VisualScriptNodeKind::ArraySet {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Push",
+                    VisualScriptNodeKind::ArrayPush {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Remove At",
+                    VisualScriptNodeKind::ArrayRemoveAt {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+                (
+                    "Array Clear",
+                    VisualScriptNodeKind::ArrayClear {
+                        item_type: default_array_item_type(),
+                    },
+                ),
+            ] {
+                push_search_result(
+                    label.to_string(),
+                    &[label, "array"],
+                    AddNodeSearchAction::InsertNode(node),
+                );
+            }
+
+            push_search_result(
+                "Physics Queries / Ray Cast".to_string(),
+                &["ray cast", "ray", "physics query"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::RayCast),
+            );
+            push_search_result(
+                "Physics Queries / Physics Query Filter".to_string(),
+                &[
+                    "physics query filter",
+                    "query filter",
+                    "ray filter",
+                    "physics query",
+                ],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::PhysicsQueryFilterLiteral {
+                    value: default_literal_for_type(VisualValueType::PhysicsQueryFilter)
+                        .to_string(),
+                }),
+            );
+
+            push_search_result(
+                "Structured / Vec2".to_string(),
+                &["vec2", "vector", "structured"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec2),
+            );
+            push_search_result(
+                "Structured / Vec2 Get Component".to_string(),
+                &["vec2", "component", "extract"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec2GetComponent {
+                    component: VisualVec2Component::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Vec2 Set Component".to_string(),
+                &["vec2", "component", "set", "mutate"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec2SetComponent {
+                    component: VisualVec2Component::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Vec3".to_string(),
+                &["vec3", "vector", "structured"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec3),
+            );
+            push_search_result(
+                "Structured / Vec3 Get Component".to_string(),
+                &["vec3", "component", "extract"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec3GetComponent {
+                    component: VisualVec3Component::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Vec3 Set Component".to_string(),
+                &["vec3", "component", "set", "mutate"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Vec3SetComponent {
+                    component: VisualVec3Component::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Quat".to_string(),
+                &["quat", "rotation", "structured"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Quat),
+            );
+            push_search_result(
+                "Structured / Quat Get Component".to_string(),
+                &["quat", "component", "extract"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::QuatGetComponent {
+                    component: VisualQuatComponent::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Quat Set Component".to_string(),
+                &["quat", "component", "set", "mutate"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::QuatSetComponent {
+                    component: VisualQuatComponent::X,
+                }),
+            );
+            push_search_result(
+                "Structured / Transform".to_string(),
+                &["transform", "structured"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Transform),
+            );
+            push_search_result(
+                "Structured / Transform Get Part".to_string(),
+                &["transform", "extract", "part"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::TransformGetComponent {
+                    component: VisualTransformComponent::Position,
+                }),
+            );
+            push_search_result(
+                "Structured / Transform Set Part".to_string(),
+                &["transform", "set", "part", "mutate"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::TransformSetComponent {
+                    component: VisualTransformComponent::Position,
+                }),
+            );
+            push_search_result(
+                "Structured / Physics Velocity".to_string(),
+                &["physics velocity", "physics", "velocity", "structured"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::PhysicsVelocity),
+            );
+            push_search_result(
+                "Structured / Physics Velocity Get Field".to_string(),
+                &["physics velocity", "physics", "velocity", "extract", "get"],
+                AddNodeSearchAction::InsertNode(
+                    VisualScriptNodeKind::PhysicsVelocityGetComponent {
+                        component: VisualPhysicsVelocityComponent::Linear,
+                    },
+                ),
+            );
+            push_search_result(
+                "Structured / Physics Velocity Set Field".to_string(),
+                &["physics velocity", "physics", "velocity", "set", "mutate"],
+                AddNodeSearchAction::InsertNode(
+                    VisualScriptNodeKind::PhysicsVelocitySetComponent {
+                        component: VisualPhysicsVelocityComponent::Linear,
+                    },
+                ),
+            );
+
+            push_search_result(
+                "Other / Comment".to_string(),
+                &["comment", "notes"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Comment {
+                    text: "notes".to_string(),
+                }),
+            );
+            push_search_result(
+                "Other / Legacy Statement".to_string(),
+                &["legacy", "statement"],
+                AddNodeSearchAction::InsertNode(VisualScriptNodeKind::Statement {
+                    code: "-- legacy".to_string(),
+                }),
+            );
+
+            results.sort_by_key(|(label, _)| label.to_ascii_lowercase());
+            if results.is_empty() {
+                ui.small("No nodes match the current search.");
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(340.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (label, action) in results {
                             if ui.button(label).clicked() {
-                                inserted = Some(insert_api_node_from_spec(snarl, pos, spec));
-                                ui.close_kind(egui::UiKind::Menu);
-                                break;
+                                inserted = Some(match action {
+                                    AddNodeSearchAction::InsertNode(node) => {
+                                        snarl.insert_node(pos, node)
+                                    }
+                                    AddNodeSearchAction::InsertApi(operation) => {
+                                        insert_api_node_from_spec(snarl, pos, operation.spec())
+                                    }
+                                });
+                                ui.close();
                             }
                         }
                     });
-                    if inserted.is_some() {
-                        break;
-                    }
-                }
+            }
 
-                ui.separator();
-                ui.label(RichText::new("Flow").strong());
-                if add_node_search_matches_any(&search, &["sequence", "flow"]) {
-                    has_visible = true;
-                    if ui.button("Sequence").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Sequence {
-                                outputs: default_sequence_outputs(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["branch", "flow"]) {
-                    has_visible = true;
-                    if ui.button("Branch").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Branch {
-                                condition: default_branch_condition(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["loop while", "loop", "flow"]) {
-                    has_visible = true;
-                    if ui.button("Loop While").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::LoopWhile {
-                                condition: default_loop_condition(),
-                                max_iterations: default_max_loop_iterations(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["log", "message"]) {
-                    has_visible = true;
-                    if ui.button("Log").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Log {
-                                message: default_log_message(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
+            if inserted.is_some() {
+                self.mark_changed();
+            }
 
-                ui.separator();
-                ui.label(RichText::new("Variables").strong());
-                if self.variables.is_empty() {
-                    if add_node_search_matches_any(&search, &["variables", "variable"]) {
-                        has_visible = true;
-                        ui.small("Define variables in the side panel to add getter/setter nodes.");
+            return inserted;
+        }
+
+        macro_rules! add_node_button {
+            ($ui:expr, $label:expr, $terms:expr, $node:expr) => {{
+                if inserted.is_none() && add_node_search_matches_any(&search, $terms) {
+                    has_visible = true;
+                    if $ui.button($label).clicked() {
+                        inserted = Some(snarl.insert_node(pos, $node));
+                        $ui.close();
                     }
+                }
+            }};
+        }
+
+        ui.menu_button(
+            if self.is_function_graph() {
+                "Function Flow"
+            } else {
+                "Events"
+            },
+            |ui| {
+                if !self.is_function_graph() {
+                    add_node_button!(
+                        ui,
+                        "On Start",
+                        &["on start", "event"],
+                        VisualScriptNodeKind::OnStart
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Update",
+                        &["on update", "tick", "event"],
+                        VisualScriptNodeKind::OnUpdate
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Stop",
+                        &["on stop", "event"],
+                        VisualScriptNodeKind::OnStop
+                    );
+                } else if let Some(function_id) = self.active_function_graph {
+                    let inputs = self
+                        .find_function(function_id)
+                        .map(|function| function.inputs.clone())
+                        .unwrap_or_default();
+                    let outputs = self
+                        .find_function(function_id)
+                        .map(|function| function.outputs.clone())
+                        .unwrap_or_default();
+                    add_node_button!(
+                        ui,
+                        "Function Start",
+                        &["function start", "entry", "start"],
+                        VisualScriptNodeKind::FunctionStart {
+                            function_id,
+                            inputs
+                        }
+                    );
+                    add_node_button!(
+                        ui,
+                        "Function Return",
+                        &["function return", "return", "end"],
+                        VisualScriptNodeKind::FunctionReturn {
+                            function_id,
+                            outputs: outputs.clone(),
+                            values: outputs
+                                .iter()
+                                .map(|port| default_literal_for_type(port.value_type).to_string())
+                                .collect(),
+                        }
+                    );
+                }
+            },
+        );
+
+        ui.menu_button("API", |ui| {
+            let mut sections_visible = false;
+            for section in VISUAL_API_MENU_SECTION_ORDER {
+                let mut specs: Vec<&VisualApiOperationSpec> = VISUAL_API_OPERATION_SPECS
+                    .iter()
+                    .filter(|spec| api_menu_section(spec) == section)
+                    .filter(|spec| api_spec_matches_add_node_search(spec, section, &search))
+                    .collect();
+                if specs.is_empty() {
+                    continue;
+                }
+                sections_visible = true;
+                has_visible = true;
+                specs.sort_by_key(|spec| spec.title);
+                ui.menu_button(format!("{} ({})", section.title(), specs.len()), |ui| {
+                    for spec in specs {
+                        let label = match spec.flow {
+                            VisualApiFlow::Exec => format!("{} [Call]", spec.title),
+                            VisualApiFlow::Pure => spec.title.to_string(),
+                        };
+                        if ui.button(label).clicked() {
+                            inserted = Some(insert_api_node_from_spec(snarl, pos, spec));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if !sections_visible && add_node_search_matches_any(&search, &["api"]) {
+                has_visible = true;
+                ui.small("No API nodes match the current search.");
+            }
+        });
+
+        ui.menu_button("Flow", |ui| {
+            add_node_button!(
+                ui,
+                "Sequence",
+                &["sequence", "flow"],
+                VisualScriptNodeKind::Sequence {
+                    outputs: default_sequence_outputs(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Branch",
+                &["branch", "flow"],
+                VisualScriptNodeKind::Branch {
+                    condition: default_branch_condition(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Loop While",
+                &["loop while", "loop", "flow"],
+                VisualScriptNodeKind::LoopWhile {
+                    condition: default_loop_condition(),
+                    max_iterations: default_max_loop_iterations(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Log",
+                &["log", "message"],
+                VisualScriptNodeKind::Log {
+                    message: default_log_message(),
+                }
+            );
+        });
+
+        ui.menu_button("Variables", |ui| {
+            if self.variables.is_empty() {
+                if add_node_search_matches_any(&search, &["variables", "variable"]) {
+                    has_visible = true;
+                    ui.small("Define variables in the side panel to add getter/setter nodes.");
+                }
+                return;
+            }
+
+            for variable in &self.variables {
+                let mut display = format!("{} ({})", variable.name, variable.value_type.title());
+                if variable.value_type == VisualValueType::Array {
+                    let item = variable
+                        .array_item_type
+                        .unwrap_or(default_array_item_type());
+                    display = format!("{} (Array<{}>)", variable.name, item.title());
+                }
+                if !add_node_search_matches_any(
+                    &search,
+                    &[
+                        display.as_str(),
+                        variable.name.as_str(),
+                        "variable",
+                        "set",
+                        "get",
+                        "clear",
+                    ],
+                ) {
+                    continue;
+                }
+                has_visible = true;
+                ui.menu_button(display, |ui| {
+                    if ui.button("Set").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::SetVariable {
+                                variable_id: variable.id,
+                                name: variable.name.clone(),
+                                value: variable.default_value.clone(),
+                            },
+                        ));
+                        ui.close();
+                    }
+                    if ui.button("Get").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::GetVariable {
+                                variable_id: variable.id,
+                                name: variable.name.clone(),
+                                default_value: variable.default_value.clone(),
+                            },
+                        ));
+                        ui.close();
+                    }
+                    if ui.button("Clear").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::ClearVariable {
+                                variable_id: variable.id,
+                                name: variable.name.clone(),
+                            },
+                        ));
+                        ui.close();
+                    }
+                });
+            }
+        });
+
+        ui.menu_button("Functions", |ui| {
+            if self.functions.is_empty() {
+                if add_node_search_matches_any(&search, &["function", "subgraph"]) {
+                    has_visible = true;
+                    ui.small("Create a function in the side panel to add call nodes.");
+                }
+                return;
+            }
+
+            for function in &self.functions {
+                let label = if self.active_function_graph == Some(function.id) {
+                    format!("Call {} (recursive)", function.name)
                 } else {
-                    for variable in &self.variables {
-                        let variable_label =
-                            format!("{} {}", variable.name, variable.value_type.title());
-                        let matches_variable = add_node_search_matches_any(
-                            &search,
-                            &[&variable_label, "variable", "set", "get", "clear"],
-                        );
-                        if !matches_variable {
-                            continue;
-                        }
-                        has_visible = true;
-                        ui.horizontal(|ui| {
-                            ui.small(format!(
-                                "{} ({})",
-                                variable.name,
-                                variable.value_type.title()
-                            ));
-                            if ui.small_button("Set").clicked() {
-                                inserted = Some(snarl.insert_node(
-                                    pos,
-                                    VisualScriptNodeKind::SetVariable {
-                                        variable_id: variable.id,
-                                        name: variable.name.clone(),
-                                        value: variable.default_value.clone(),
-                                    },
-                                ));
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                            if ui.small_button("Get").clicked() {
-                                inserted = Some(snarl.insert_node(
-                                    pos,
-                                    VisualScriptNodeKind::GetVariable {
-                                        variable_id: variable.id,
-                                        name: variable.name.clone(),
-                                        default_value: variable.default_value.clone(),
-                                    },
-                                ));
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                            if ui.small_button("Clear").clicked() {
-                                inserted = Some(snarl.insert_node(
-                                    pos,
-                                    VisualScriptNodeKind::ClearVariable {
-                                        variable_id: variable.id,
-                                        name: variable.name.clone(),
-                                    },
-                                ));
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        });
-                        if inserted.is_some() {
-                            break;
-                        }
-                    }
-                }
-
-                ui.separator();
-                ui.label(RichText::new("Values").strong());
-                if add_node_search_matches_any(&search, &["bool", "value"]) {
-                    has_visible = true;
-                    if ui.button("Bool").clicked() {
-                        inserted =
-                            Some(snarl.insert_node(
-                                pos,
-                                VisualScriptNodeKind::BoolLiteral { value: false },
-                            ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["number", "value"]) {
-                    has_visible = true;
-                    if ui.button("Number").clicked() {
-                        inserted =
-                            Some(snarl.insert_node(
-                                pos,
-                                VisualScriptNodeKind::NumberLiteral { value: 0.0 },
-                            ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["string", "value", "text"]) {
-                    has_visible = true;
-                    if ui.button("String").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::StringLiteral {
-                                value: "text".to_string(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["json", "value"]) {
-                    has_visible = true;
-                    if ui.button("JSON").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::JsonLiteral {
-                                value: "{\"x\":0}".to_string(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["self entity", "entity", "value"]) {
-                    has_visible = true;
-                    if ui.button("Self Entity").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::SelfEntity));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["delta time", "time", "value"]) {
-                    has_visible = true;
-                    if ui.button("Delta Time").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::DeltaTime));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-
-                ui.separator();
-                ui.label(RichText::new("Math/Logic").strong());
-                if add_node_search_matches_any(&search, &["math", "number"]) {
-                    has_visible = true;
-                    if ui.button("Math").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::MathBinary {
-                                op: VisualMathOp::Add,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["compare", "bool"]) {
-                    has_visible = true;
-                    if ui.button("Compare").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Compare {
-                                op: VisualCompareOp::Equals,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["logical", "bool"]) {
-                    has_visible = true;
-                    if ui.button("Logical").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::LogicalBinary {
-                                op: VisualLogicalOp::And,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["not", "bool"]) {
-                    has_visible = true;
-                    if ui.button("Not").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Not));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["select", "bool"]) {
-                    has_visible = true;
-                    if ui.button("Select").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Select {
-                                value_type: default_select_value_type(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-
-                ui.separator();
-                ui.label(RichText::new("Structured Values").strong());
-                if add_node_search_matches_any(&search, &["vec2", "vector", "structured"]) {
-                    has_visible = true;
-                    if ui.button("Vec2").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Vec2));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["vec2", "component", "extract"]) {
-                    has_visible = true;
-                    if ui.button("Vec2 Get Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Vec2GetComponent {
-                                component: VisualVec2Component::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["vec2", "component", "set", "mutate"]) {
-                    has_visible = true;
-                    if ui.button("Vec2 Set Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Vec2SetComponent {
-                                component: VisualVec2Component::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["vec3", "vector", "structured"]) {
-                    has_visible = true;
-                    if ui.button("Vec3").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Vec3));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["vec3", "component", "extract"]) {
-                    has_visible = true;
-                    if ui.button("Vec3 Get Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Vec3GetComponent {
-                                component: VisualVec3Component::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["vec3", "component", "set", "mutate"]) {
-                    has_visible = true;
-                    if ui.button("Vec3 Set Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Vec3SetComponent {
-                                component: VisualVec3Component::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["quat", "rotation", "structured"]) {
-                    has_visible = true;
-                    if ui.button("Quat").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Quat));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["quat", "component", "extract"]) {
-                    has_visible = true;
-                    if ui.button("Quat Get Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::QuatGetComponent {
-                                component: VisualQuatComponent::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["quat", "component", "set", "mutate"]) {
-                    has_visible = true;
-                    if ui.button("Quat Set Component").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::QuatSetComponent {
-                                component: VisualQuatComponent::X,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["transform", "structured"]) {
-                    has_visible = true;
-                    if ui.button("Transform").clicked() {
-                        inserted = Some(snarl.insert_node(pos, VisualScriptNodeKind::Transform));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["transform", "extract", "part"]) {
-                    has_visible = true;
-                    if ui.button("Transform Get Part").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::TransformGetComponent {
-                                component: VisualTransformComponent::Position,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(&search, &["transform", "set", "part", "mutate"]) {
-                    has_visible = true;
-                    if ui.button("Transform Set Part").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::TransformSetComponent {
-                                component: VisualTransformComponent::Position,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
-                if add_node_search_matches_any(
+                    format!("Call {}", function.name)
+                };
+                if !add_node_search_matches_any(
                     &search,
-                    &["physics velocity", "physics", "velocity", "structured"],
+                    &[
+                        label.as_str(),
+                        function.name.as_str(),
+                        "function",
+                        "subgraph",
+                        "call",
+                    ],
                 ) {
-                    has_visible = true;
-                    if ui.button("Physics Velocity").clicked() {
-                        inserted =
-                            Some(snarl.insert_node(pos, VisualScriptNodeKind::PhysicsVelocity));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
+                    continue;
                 }
-                if add_node_search_matches_any(
-                    &search,
-                    &["physics velocity", "physics", "velocity", "extract", "get"],
-                ) {
-                    has_visible = true;
-                    if ui.button("Physics Velocity Get Field").clicked() {
-                        inserted = Some(snarl.insert_node(
+                has_visible = true;
+                if ui.button(label).clicked() {
+                    inserted = Some(
+                        snarl.insert_node(
                             pos,
-                            VisualScriptNodeKind::PhysicsVelocityGetComponent {
-                                component: VisualPhysicsVelocityComponent::Linear,
+                            VisualScriptNodeKind::CallFunction {
+                                function_id: function.id,
+                                name: function.name.clone(),
+                                inputs: function.inputs.clone(),
+                                outputs: function.outputs.clone(),
+                                args: function
+                                    .inputs
+                                    .iter()
+                                    .map(|port| {
+                                        default_literal_for_type(port.value_type).to_string()
+                                    })
+                                    .collect(),
                             },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
+                        ),
+                    );
+                    ui.close();
                 }
-                if add_node_search_matches_any(
-                    &search,
-                    &["physics velocity", "physics", "velocity", "set", "mutate"],
-                ) {
-                    has_visible = true;
-                    if ui.button("Physics Velocity Set Field").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::PhysicsVelocitySetComponent {
-                                component: VisualPhysicsVelocityComponent::Linear,
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
+            }
+        });
 
-                ui.separator();
-                ui.label(RichText::new("Other").strong());
-                if add_node_search_matches_any(&search, &["comment", "notes"]) {
-                    has_visible = true;
-                    if ui.button("Comment").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Comment {
-                                text: "notes".to_string(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
+        ui.menu_button("Values", |ui| {
+            add_node_button!(
+                ui,
+                "Bool",
+                &["bool", "value"],
+                VisualScriptNodeKind::BoolLiteral { value: false }
+            );
+            add_node_button!(
+                ui,
+                "Number",
+                &["number", "value"],
+                VisualScriptNodeKind::NumberLiteral { value: 0.0 }
+            );
+            add_node_button!(
+                ui,
+                "String",
+                &["string", "value", "text"],
+                VisualScriptNodeKind::StringLiteral {
+                    value: "text".to_string(),
                 }
-                if add_node_search_matches_any(&search, &["legacy", "statement"]) {
-                    has_visible = true;
-                    if ui.button("Legacy Statement").clicked() {
-                        inserted = Some(snarl.insert_node(
-                            pos,
-                            VisualScriptNodeKind::Statement {
-                                code: "-- legacy".to_string(),
-                            },
-                        ));
-                        ui.close_kind(egui::UiKind::Menu);
-                    }
-                }
+            );
+            add_node_button!(
+                ui,
+                "Self Entity",
+                &["self entity", "entity", "value"],
+                VisualScriptNodeKind::SelfEntity
+            );
+        });
 
-                if !has_visible {
-                    ui.small("No nodes match the current search.");
+        ui.menu_button("Time", |ui| {
+            add_node_button!(
+                ui,
+                "Delta Time",
+                &["delta time", "time"],
+                VisualScriptNodeKind::DeltaTime
+            );
+            add_node_button!(
+                ui,
+                "Time Since Start",
+                &["time", "since start", "elapsed", "seconds"],
+                VisualScriptNodeKind::TimeSinceStart
+            );
+            add_node_button!(
+                ui,
+                "Unix Time Seconds",
+                &["time", "unix", "date", "clock"],
+                VisualScriptNodeKind::UnixTimeSeconds
+            );
+            add_node_button!(
+                ui,
+                "Time Since",
+                &["time since", "duration", "time"],
+                VisualScriptNodeKind::TimeSince {
+                    origin_seconds: default_time_since_origin(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Wait Seconds",
+                &["wait", "delay", "time"],
+                VisualScriptNodeKind::WaitSeconds {
+                    seconds: default_wait_seconds(),
+                    restart_on_retrigger: default_wait_restart_on_retrigger(),
+                }
+            );
+        });
+
+        ui.menu_button("Math", |ui| {
+            ui.menu_button("Basic", |ui| {
+                for op in [
+                    VisualMathOp::Add,
+                    VisualMathOp::Subtract,
+                    VisualMathOp::Multiply,
+                    VisualMathOp::Divide,
+                    VisualMathOp::Modulo,
+                    VisualMathOp::Min,
+                    VisualMathOp::Max,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "basic"],
+                        VisualScriptNodeKind::MathBinary { op }
+                    );
                 }
             });
+            ui.menu_button("Trig", |ui| {
+                for op in [
+                    VisualTrigOp::Sin,
+                    VisualTrigOp::Cos,
+                    VisualTrigOp::Tan,
+                    VisualTrigOp::Asin,
+                    VisualTrigOp::Acos,
+                    VisualTrigOp::Atan,
+                    VisualTrigOp::Atan2,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "trig"],
+                        VisualScriptNodeKind::MathTrig { op }
+                    );
+                }
+            });
+            ui.menu_button("Interpolation", |ui| {
+                for op in [
+                    VisualInterpolationOp::Lerp,
+                    VisualInterpolationOp::SmoothStep,
+                    VisualInterpolationOp::InverseLerp,
+                    VisualInterpolationOp::Vec3Lerp,
+                    VisualInterpolationOp::QuatSlerp,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "interpolation", "lerp", "slerp"],
+                        VisualScriptNodeKind::MathInterpolation { op }
+                    );
+                }
+            });
+            ui.menu_button("Vector", |ui| {
+                for op in [
+                    VisualVectorMathOp::Dot,
+                    VisualVectorMathOp::Cross,
+                    VisualVectorMathOp::Length,
+                    VisualVectorMathOp::Normalize,
+                    VisualVectorMathOp::Distance,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "vector"],
+                        VisualScriptNodeKind::MathVector { op }
+                    );
+                }
+            });
+            ui.menu_button("Procedural", |ui| {
+                for op in [
+                    VisualProceduralMathOp::Clamp,
+                    VisualProceduralMathOp::Remap,
+                    VisualProceduralMathOp::Saturate,
+                    VisualProceduralMathOp::Fract,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "procedural"],
+                        VisualScriptNodeKind::MathProcedural { op }
+                    );
+                }
+            });
+            ui.menu_button("Utility", |ui| {
+                for op in [
+                    VisualUtilityMathOp::Abs,
+                    VisualUtilityMathOp::Sign,
+                    VisualUtilityMathOp::Floor,
+                    VisualUtilityMathOp::Ceil,
+                    VisualUtilityMathOp::Round,
+                    VisualUtilityMathOp::Sqrt,
+                    VisualUtilityMathOp::Pow,
+                    VisualUtilityMathOp::Exp,
+                    VisualUtilityMathOp::Log,
+                    VisualUtilityMathOp::Degrees,
+                    VisualUtilityMathOp::Radians,
+                ] {
+                    let title = op.title();
+                    add_node_button!(
+                        ui,
+                        title,
+                        &[title, "math", "utility"],
+                        VisualScriptNodeKind::MathUtility { op }
+                    );
+                }
+            });
+        });
+
+        ui.menu_button("Logic", |ui| {
+            add_node_button!(
+                ui,
+                "Compare",
+                &["compare", "bool"],
+                VisualScriptNodeKind::Compare {
+                    op: VisualCompareOp::Equals,
+                }
+            );
+            add_node_button!(
+                ui,
+                "Logical",
+                &["logical", "bool"],
+                VisualScriptNodeKind::LogicalBinary {
+                    op: VisualLogicalOp::And,
+                }
+            );
+            add_node_button!(ui, "Not", &["not", "bool"], VisualScriptNodeKind::Not);
+            add_node_button!(
+                ui,
+                "Select",
+                &["select", "bool"],
+                VisualScriptNodeKind::Select {
+                    value_type: default_select_value_type(),
+                }
+            );
+        });
+
+        ui.menu_button("Arrays", |ui| {
+            add_node_button!(
+                ui,
+                "Array Empty",
+                &["array", "empty", "create"],
+                VisualScriptNodeKind::ArrayEmpty {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Length",
+                &["array", "length", "count"],
+                VisualScriptNodeKind::ArrayLength {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Get",
+                &["array", "get", "index"],
+                VisualScriptNodeKind::ArrayGet {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Set",
+                &["array", "set", "index"],
+                VisualScriptNodeKind::ArraySet {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Push",
+                &["array", "push", "append"],
+                VisualScriptNodeKind::ArrayPush {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Remove At",
+                &["array", "remove", "index"],
+                VisualScriptNodeKind::ArrayRemoveAt {
+                    item_type: default_array_item_type(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Array Clear",
+                &["array", "clear"],
+                VisualScriptNodeKind::ArrayClear {
+                    item_type: default_array_item_type(),
+                }
+            );
+        });
+
+        ui.menu_button("Physics Queries", |ui| {
+            add_node_button!(
+                ui,
+                "Ray Cast",
+                &["ray cast", "ray", "physics query"],
+                VisualScriptNodeKind::RayCast
+            );
+            add_node_button!(
+                ui,
+                "Physics Query Filter",
+                &[
+                    "physics query filter",
+                    "query filter",
+                    "ray filter",
+                    "physics query"
+                ],
+                VisualScriptNodeKind::PhysicsQueryFilterLiteral {
+                    value: default_literal_for_type(VisualValueType::PhysicsQueryFilter)
+                        .to_string(),
+                }
+            );
+        });
+
+        ui.menu_button("Structured Values", |ui| {
+            ui.menu_button("Vec2", |ui| {
+                add_node_button!(
+                    ui,
+                    "Vec2",
+                    &["vec2", "vector", "structured"],
+                    VisualScriptNodeKind::Vec2
+                );
+                add_node_button!(
+                    ui,
+                    "Vec2 Get Component",
+                    &["vec2", "component", "extract"],
+                    VisualScriptNodeKind::Vec2GetComponent {
+                        component: VisualVec2Component::X,
+                    }
+                );
+                add_node_button!(
+                    ui,
+                    "Vec2 Set Component",
+                    &["vec2", "component", "set", "mutate"],
+                    VisualScriptNodeKind::Vec2SetComponent {
+                        component: VisualVec2Component::X,
+                    }
+                );
+            });
+            ui.menu_button("Vec3", |ui| {
+                add_node_button!(
+                    ui,
+                    "Vec3",
+                    &["vec3", "vector", "structured"],
+                    VisualScriptNodeKind::Vec3
+                );
+                add_node_button!(
+                    ui,
+                    "Vec3 Get Component",
+                    &["vec3", "component", "extract"],
+                    VisualScriptNodeKind::Vec3GetComponent {
+                        component: VisualVec3Component::X,
+                    }
+                );
+                add_node_button!(
+                    ui,
+                    "Vec3 Set Component",
+                    &["vec3", "component", "set", "mutate"],
+                    VisualScriptNodeKind::Vec3SetComponent {
+                        component: VisualVec3Component::X,
+                    }
+                );
+            });
+            ui.menu_button("Quat", |ui| {
+                add_node_button!(
+                    ui,
+                    "Quat",
+                    &["quat", "rotation", "structured"],
+                    VisualScriptNodeKind::Quat
+                );
+                add_node_button!(
+                    ui,
+                    "Quat Get Component",
+                    &["quat", "component", "extract"],
+                    VisualScriptNodeKind::QuatGetComponent {
+                        component: VisualQuatComponent::X,
+                    }
+                );
+                add_node_button!(
+                    ui,
+                    "Quat Set Component",
+                    &["quat", "component", "set", "mutate"],
+                    VisualScriptNodeKind::QuatSetComponent {
+                        component: VisualQuatComponent::X,
+                    }
+                );
+            });
+            ui.menu_button("Transform", |ui| {
+                add_node_button!(
+                    ui,
+                    "Transform",
+                    &["transform", "structured"],
+                    VisualScriptNodeKind::Transform
+                );
+                add_node_button!(
+                    ui,
+                    "Transform Get Part",
+                    &["transform", "extract", "part"],
+                    VisualScriptNodeKind::TransformGetComponent {
+                        component: VisualTransformComponent::Position,
+                    }
+                );
+                add_node_button!(
+                    ui,
+                    "Transform Set Part",
+                    &["transform", "set", "part", "mutate"],
+                    VisualScriptNodeKind::TransformSetComponent {
+                        component: VisualTransformComponent::Position,
+                    }
+                );
+            });
+            ui.menu_button("Physics Velocity", |ui| {
+                add_node_button!(
+                    ui,
+                    "Physics Velocity",
+                    &["physics velocity", "physics", "velocity", "structured"],
+                    VisualScriptNodeKind::PhysicsVelocity
+                );
+                add_node_button!(
+                    ui,
+                    "Physics Velocity Get Field",
+                    &["physics velocity", "physics", "velocity", "extract", "get"],
+                    VisualScriptNodeKind::PhysicsVelocityGetComponent {
+                        component: VisualPhysicsVelocityComponent::Linear,
+                    }
+                );
+                add_node_button!(
+                    ui,
+                    "Physics Velocity Set Field",
+                    &["physics velocity", "physics", "velocity", "set", "mutate"],
+                    VisualScriptNodeKind::PhysicsVelocitySetComponent {
+                        component: VisualPhysicsVelocityComponent::Linear,
+                    }
+                );
+            });
+        });
+
+        ui.menu_button("Other", |ui| {
+            add_node_button!(
+                ui,
+                "Comment",
+                &["comment", "notes"],
+                VisualScriptNodeKind::Comment {
+                    text: "notes".to_string(),
+                }
+            );
+            add_node_button!(
+                ui,
+                "Legacy Statement",
+                &["legacy", "statement"],
+                VisualScriptNodeKind::Statement {
+                    code: "-- legacy".to_string(),
+                }
+            );
+        });
+
+        if has_search && !has_visible {
+            ui.small("No nodes match the current search.");
+        }
 
         if inserted.is_some() {
             self.mark_changed();
@@ -7810,6 +11795,30 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 format!("Clear {}", variable)
             }
             _ => node.title(),
+        }
+    }
+
+    fn show_header(
+        &mut self,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut Ui,
+        snarl: &mut Snarl<VisualScriptNodeKind>,
+    ) {
+        let title = snarl
+            .get_node(node)
+            .map(|entry| self.title(entry))
+            .unwrap_or_else(|| "Node".to_string());
+        let response = ui.add(egui::Label::new(title).sense(Sense::click()));
+        if response.double_clicked() {
+            if let Some(VisualScriptNodeKind::CallFunction { function_id, .. }) =
+                snarl.get_node(node)
+            {
+                if *function_id != 0 {
+                    self.open_function_graph_request = Some(*function_id);
+                }
+            }
         }
     }
 
@@ -7871,6 +11880,9 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
         let prefers_vertical_layout = api_operation
             .map(|operation| api_input_prefers_vertical_default_layout(operation, slot.index))
             .unwrap_or(false);
+        let value_prefers_vertical_layout = value_type
+            .map(value_type_prefers_vertical_default_layout)
+            .unwrap_or(false);
         let render_default =
             |ui: &mut Ui,
              this: &mut VisualScriptViewer,
@@ -7931,10 +11943,10 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 }
             };
 
-        if has_structured_default
-            && prefers_vertical_layout
-            && allow_inline_default
+        if allow_inline_default
             && pin.remotes.is_empty()
+            && ((has_structured_default && prefers_vertical_layout)
+                || value_prefers_vertical_layout)
         {
             ui.vertical(|ui| {
                 ui.small(label.as_str());
@@ -7994,12 +12006,15 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 | VisualScriptNodeKind::OnStop
                 | VisualScriptNodeKind::SelfEntity
                 | VisualScriptNodeKind::DeltaTime
+                | VisualScriptNodeKind::TimeSinceStart
+                | VisualScriptNodeKind::UnixTimeSeconds
                 | VisualScriptNodeKind::Not
                 | VisualScriptNodeKind::Vec2
                 | VisualScriptNodeKind::Vec3
                 | VisualScriptNodeKind::Quat
                 | VisualScriptNodeKind::Transform
-                | VisualScriptNodeKind::PhysicsVelocity => {}
+                | VisualScriptNodeKind::PhysicsVelocity
+                | VisualScriptNodeKind::RayCast => {}
                 VisualScriptNodeKind::Sequence { outputs } => {
                     let mut value = i32::from(*outputs);
                     ui.horizontal(|ui| {
@@ -8065,7 +12080,11 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         if let Some(variable) =
                             find_variable_definition(&self.variables, *variable_id, name)
                         {
-                            *value = normalize_literal_for_type(value, variable.value_type);
+                            *value = normalize_literal_for_data_type(
+                                value,
+                                variable.value_type,
+                                variable.array_item_type,
+                            );
                         }
                         self.mark_changed();
                         prune_wires = true;
@@ -8073,11 +12092,16 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                     if node_input_is_disconnected(inputs, 1) {
                         ui.horizontal(|ui| {
                             ui.label("Default when unplugged");
-                            let value_type =
+                            let (value_type, array_item_type) =
                                 find_variable_definition(&self.variables, *variable_id, name)
-                                    .map(|var| var.value_type)
-                                    .unwrap_or(VisualValueType::Json);
-                            if draw_typed_default_editor(ui, value_type, value) {
+                                    .map(|var| (var.value_type, var.array_item_type))
+                                    .unwrap_or((VisualValueType::Json, None));
+                            if draw_typed_default_editor_with_array_item(
+                                ui,
+                                value_type,
+                                array_item_type,
+                                value,
+                            ) {
                                 self.mark_changed();
                             }
                         });
@@ -8098,19 +12122,27 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         if let Some(variable) =
                             find_variable_definition(&self.variables, *variable_id, name)
                         {
-                            *default_value =
-                                normalize_literal_for_type(default_value, variable.value_type);
+                            *default_value = normalize_literal_for_data_type(
+                                default_value,
+                                variable.value_type,
+                                variable.array_item_type,
+                            );
                         }
                         self.mark_changed();
                         prune_wires = true;
                     }
                     ui.horizontal(|ui| {
                         ui.label("Default");
-                        let value_type =
+                        let (value_type, array_item_type) =
                             find_variable_definition(&self.variables, *variable_id, name)
-                                .map(|var| var.value_type)
-                                .unwrap_or(VisualValueType::Json);
-                        if draw_typed_default_editor(ui, value_type, default_value) {
+                                .map(|var| (var.value_type, var.array_item_type))
+                                .unwrap_or((VisualValueType::Json, None));
+                        if draw_typed_default_editor_with_array_item(
+                            ui,
+                            value_type,
+                            array_item_type,
+                            default_value,
+                        ) {
                             self.mark_changed();
                         }
                     });
@@ -8174,6 +12206,156 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         self.mark_changed();
                     }
                 }
+                VisualScriptNodeKind::PhysicsQueryFilterLiteral { value } => {
+                    if draw_typed_default_editor(ui, VisualValueType::PhysicsQueryFilter, value) {
+                        self.mark_changed();
+                    }
+                }
+                VisualScriptNodeKind::TimeSince { origin_seconds } => {
+                    if node_input_is_disconnected(inputs, 0) {
+                        ui.horizontal(|ui| {
+                            ui.label("Origin (Unix seconds)");
+                            if draw_typed_default_editor(
+                                ui,
+                                VisualValueType::Number,
+                                origin_seconds,
+                            ) {
+                                self.mark_changed();
+                            }
+                        });
+                    }
+                }
+                VisualScriptNodeKind::WaitSeconds {
+                    seconds,
+                    restart_on_retrigger,
+                } => {
+                    if node_input_is_disconnected(inputs, 1) {
+                        ui.horizontal(|ui| {
+                            ui.label("Delay (seconds)");
+                            if draw_typed_default_editor(ui, VisualValueType::Number, seconds) {
+                                self.mark_changed();
+                            }
+                        });
+                    }
+                    if ui
+                        .checkbox(restart_on_retrigger, "Restart timer when retriggered")
+                        .changed()
+                    {
+                        self.mark_changed();
+                    }
+                }
+                VisualScriptNodeKind::FunctionStart { .. } => {
+                    ui.small("Function entry point");
+                }
+                VisualScriptNodeKind::FunctionReturn {
+                    outputs, values, ..
+                } => {
+                    for (index, output) in outputs.iter().enumerate() {
+                        let disconnected = node_input_is_disconnected(inputs, index + 1);
+                        if !disconnected {
+                            continue;
+                        }
+                        while values.len() <= index {
+                            values.push(default_literal_for_type(output.value_type).to_string());
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} default", output.name));
+                            if draw_typed_default_editor_with_array_item(
+                                ui,
+                                output.value_type,
+                                output.array_item_type,
+                                &mut values[index],
+                            ) {
+                                self.mark_changed();
+                            }
+                        });
+                    }
+                }
+                VisualScriptNodeKind::CallFunction {
+                    function_id,
+                    name,
+                    inputs: input_ports,
+                    outputs,
+                    args,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Function ID");
+                        let mut value = i64::try_from(*function_id).unwrap_or(0);
+                        if ui
+                            .add(DragValue::new(&mut value).range(0..=i64::MAX))
+                            .changed()
+                        {
+                            *function_id = u64::try_from(value).unwrap_or(0);
+                            self.mark_changed();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Function Name");
+                        if ui.text_edit_singleline(name).changed() {
+                            self.mark_changed();
+                        }
+                    });
+                    if input_ports.len() != args.len() {
+                        args.truncate(input_ports.len());
+                        while args.len() < input_ports.len() {
+                            let value_type = input_ports
+                                .get(args.len())
+                                .map(|port| port.value_type)
+                                .unwrap_or(VisualValueType::Json);
+                            args.push(default_literal_for_type(value_type).to_string());
+                        }
+                        self.mark_changed();
+                    }
+                    for (index, input) in input_ports.iter().enumerate() {
+                        if node_input_is_disconnected(inputs, index + 1) {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{} default", input.name));
+                                if let Some(arg) = args.get_mut(index) {
+                                    if draw_typed_default_editor_with_array_item(
+                                        ui,
+                                        input.value_type,
+                                        input.array_item_type,
+                                        arg,
+                                    ) {
+                                        self.mark_changed();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ui.small(format!("Returns {} value(s)", outputs.len()));
+                }
+                VisualScriptNodeKind::ArrayEmpty { item_type }
+                | VisualScriptNodeKind::ArrayLength { item_type }
+                | VisualScriptNodeKind::ArrayGet { item_type }
+                | VisualScriptNodeKind::ArraySet { item_type }
+                | VisualScriptNodeKind::ArrayPush { item_type }
+                | VisualScriptNodeKind::ArrayRemoveAt { item_type }
+                | VisualScriptNodeKind::ArrayClear { item_type } => {
+                    let selected = *item_type;
+                    ui.horizontal(|ui| {
+                        ui.label("Item Type");
+                        ComboBox::from_id_salt(("visual_array_item_type", node_id.0))
+                            .selected_text(selected.title())
+                            .show_ui(ui, |ui| {
+                                for candidate in VISUAL_ARRAY_ITEM_TYPE_CHOICES {
+                                    if ui
+                                        .selectable_value(item_type, candidate, candidate.title())
+                                        .changed()
+                                    {
+                                        if matches!(
+                                            *item_type,
+                                            VisualValueType::Array | VisualValueType::Json
+                                        ) {
+                                            *item_type = default_array_item_type();
+                                        }
+                                        prune_wires = true;
+                                        self.mark_changed();
+                                    }
+                                }
+                            });
+                    });
+                }
                 VisualScriptNodeKind::MathBinary { op } => {
                     ComboBox::from_id_salt(("visual_math_op", node_id.0))
                         .selected_text(op.title())
@@ -8192,6 +12374,118 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                                     .changed()
                                 {
                                     self.mark_changed();
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::MathTrig { op } => {
+                    ComboBox::from_id_salt(("visual_trig_op", node_id.0))
+                        .selected_text(op.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualTrigOp::Sin,
+                                VisualTrigOp::Cos,
+                                VisualTrigOp::Tan,
+                                VisualTrigOp::Asin,
+                                VisualTrigOp::Acos,
+                                VisualTrigOp::Atan,
+                                VisualTrigOp::Atan2,
+                            ] {
+                                if ui
+                                    .selectable_value(op, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::MathInterpolation { op } => {
+                    ComboBox::from_id_salt(("visual_interpolation_op", node_id.0))
+                        .selected_text(op.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualInterpolationOp::Lerp,
+                                VisualInterpolationOp::SmoothStep,
+                                VisualInterpolationOp::InverseLerp,
+                                VisualInterpolationOp::Vec3Lerp,
+                                VisualInterpolationOp::QuatSlerp,
+                            ] {
+                                if ui
+                                    .selectable_value(op, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::MathVector { op } => {
+                    ComboBox::from_id_salt(("visual_vector_math_op", node_id.0))
+                        .selected_text(op.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualVectorMathOp::Dot,
+                                VisualVectorMathOp::Cross,
+                                VisualVectorMathOp::Length,
+                                VisualVectorMathOp::Normalize,
+                                VisualVectorMathOp::Distance,
+                            ] {
+                                if ui
+                                    .selectable_value(op, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::MathProcedural { op } => {
+                    ComboBox::from_id_salt(("visual_procedural_math_op", node_id.0))
+                        .selected_text(op.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualProceduralMathOp::Clamp,
+                                VisualProceduralMathOp::Remap,
+                                VisualProceduralMathOp::Saturate,
+                                VisualProceduralMathOp::Fract,
+                            ] {
+                                if ui
+                                    .selectable_value(op, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::MathUtility { op } => {
+                    ComboBox::from_id_salt(("visual_utility_math_op", node_id.0))
+                        .selected_text(op.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualUtilityMathOp::Abs,
+                                VisualUtilityMathOp::Sign,
+                                VisualUtilityMathOp::Floor,
+                                VisualUtilityMathOp::Ceil,
+                                VisualUtilityMathOp::Round,
+                                VisualUtilityMathOp::Sqrt,
+                                VisualUtilityMathOp::Pow,
+                                VisualUtilityMathOp::Exp,
+                                VisualUtilityMathOp::Log,
+                                VisualUtilityMathOp::Degrees,
+                                VisualUtilityMathOp::Radians,
+                            ] {
+                                if ui
+                                    .selectable_value(op, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
                                 }
                             }
                         });
@@ -8235,7 +12529,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                     ComboBox::from_id_salt(("visual_select_type", node_id.0))
                         .selected_text(value_type.title())
                         .show_ui(ui, |ui| {
-                            for candidate in VISUAL_VALUE_TYPE_CHOICES {
+                            for candidate in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
                                 if ui
                                     .selectable_value(value_type, candidate, candidate.title())
                                     .changed()
@@ -8466,15 +12760,16 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
         _pos: egui::Pos2,
         _snarl: &mut Snarl<VisualScriptNodeKind>,
     ) -> bool {
-        false
+        true
     }
 
     fn show_graph_menu(
         &mut self,
-        _pos: egui::Pos2,
-        _ui: &mut Ui,
-        _snarl: &mut Snarl<VisualScriptNodeKind>,
+        pos: egui::Pos2,
+        ui: &mut Ui,
+        snarl: &mut Snarl<VisualScriptNodeKind>,
     ) {
+        let _ = self.add_node_menu(pos, ui, snarl);
     }
 
     fn has_dropped_wire_menu(
@@ -8735,7 +13030,16 @@ fn draw_variable_binding_selector<T: std::hash::Hash>(
     }
 
     let selected = find_variable_definition(variables, *variable_id, name)
-        .map(|variable| format!("{} ({})", variable.name, variable.value_type.title()))
+        .map(|variable| {
+            if variable.value_type == VisualValueType::Array {
+                let item = variable
+                    .array_item_type
+                    .unwrap_or(default_array_item_type());
+                format!("{} (Array<{}>)", variable.name, item.title())
+            } else {
+                format!("{} ({})", variable.name, variable.value_type.title())
+            }
+        })
         .unwrap_or_else(|| "Select variable".to_string());
 
     ComboBox::from_id_salt(id_salt)
@@ -9943,6 +14247,103 @@ fn draw_character_output_editor(ui: &mut Ui, value: &mut String) -> bool {
     changed
 }
 
+fn draw_physics_query_filter_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut flags = json_object_i64(&object, "flags", 0).max(0) as u32;
+    let mut groups_memberships =
+        json_object_i64(&object, "groups_memberships", i64::from(u32::MAX)).max(0) as u32;
+    let mut groups_filter =
+        json_object_i64(&object, "groups_filter", i64::from(u32::MAX)).max(0) as u32;
+    let mut use_groups = json_object_bool(&object, "use_groups", false);
+
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label("Flags");
+            let mut flags_i64 = i64::from(flags);
+            if ui
+                .add(
+                    DragValue::new(&mut flags_i64)
+                        .speed(1.0)
+                        .range(0..=i64::from(u32::MAX)),
+                )
+                .changed()
+            {
+                flags = u32::try_from(flags_i64).unwrap_or(0);
+                changed = true;
+            }
+        });
+        for (label, bit) in [
+            ("No Fixed", PHYSICS_QUERY_FLAG_EXCLUDE_FIXED),
+            ("No Kinematic", PHYSICS_QUERY_FLAG_EXCLUDE_KINEMATIC),
+            ("No Dynamic", PHYSICS_QUERY_FLAG_EXCLUDE_DYNAMIC),
+            ("No Sensors", PHYSICS_QUERY_FLAG_EXCLUDE_SENSORS),
+            ("No Solids", PHYSICS_QUERY_FLAG_EXCLUDE_SOLIDS),
+        ] {
+            let mut enabled = (flags & bit) != 0;
+            if ui.checkbox(&mut enabled, label).changed() {
+                if enabled {
+                    flags |= bit;
+                } else {
+                    flags &= !bit;
+                }
+                changed = true;
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Groups Memberships");
+            let mut value_i64 = i64::from(groups_memberships);
+            if ui
+                .add(
+                    DragValue::new(&mut value_i64)
+                        .speed(1.0)
+                        .range(0..=i64::from(u32::MAX)),
+                )
+                .changed()
+            {
+                groups_memberships = u32::try_from(value_i64).unwrap_or(u32::MAX);
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Groups Filter");
+            let mut value_i64 = i64::from(groups_filter);
+            if ui
+                .add(
+                    DragValue::new(&mut value_i64)
+                        .speed(1.0)
+                        .range(0..=i64::from(u32::MAX)),
+                )
+                .changed()
+            {
+                groups_filter = u32::try_from(value_i64).unwrap_or(u32::MAX);
+                changed = true;
+            }
+        });
+        if ui.checkbox(&mut use_groups, "Use Groups").changed() {
+            changed = true;
+        }
+    });
+
+    if changed {
+        object.insert(
+            "flags".to_string(),
+            JsonValue::Number(JsonNumber::from(flags)),
+        );
+        object.insert(
+            "groups_memberships".to_string(),
+            JsonValue::Number(JsonNumber::from(groups_memberships)),
+        );
+        object.insert(
+            "groups_filter".to_string(),
+            JsonValue::Number(JsonNumber::from(groups_filter)),
+        );
+        object.insert("use_groups".to_string(), JsonValue::Bool(use_groups));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
 fn draw_ray_cast_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
     let mut object = parse_json_object_literal(value);
     let mut changed = false;
@@ -10097,7 +14498,16 @@ fn draw_shape_cast_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
 }
 
 fn draw_typed_default_editor(ui: &mut Ui, value_type: VisualValueType, value: &mut String) -> bool {
-    draw_typed_editor_with_width(ui, value_type, value, 140.0)
+    draw_typed_default_editor_with_array_item(ui, value_type, None, value)
+}
+
+fn draw_typed_default_editor_with_array_item(
+    ui: &mut Ui,
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+    value: &mut String,
+) -> bool {
+    draw_typed_editor_with_width(ui, value_type, array_item_type, value, 140.0)
 }
 
 fn draw_typed_pin_input_editor(
@@ -10105,12 +14515,22 @@ fn draw_typed_pin_input_editor(
     value_type: VisualValueType,
     value: &mut String,
 ) -> bool {
-    draw_typed_editor_with_width(ui, value_type, value, 112.0)
+    draw_typed_pin_input_editor_with_array_item(ui, value_type, None, value)
+}
+
+fn draw_typed_pin_input_editor_with_array_item(
+    ui: &mut Ui,
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+    value: &mut String,
+) -> bool {
+    draw_typed_editor_with_width(ui, value_type, array_item_type, value, 112.0)
 }
 
 fn draw_typed_editor_with_width(
     ui: &mut Ui,
     value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
     value: &mut String,
     text_width: f32,
 ) -> bool {
@@ -10145,6 +14565,53 @@ fn draw_typed_editor_with_width(
                 *value = parsed.to_string();
             }
             response.changed()
+        }
+        VisualValueType::Array => {
+            let mut item_type = array_item_type;
+            normalize_array_item_type(value_type, &mut item_type);
+            let item_type = item_type.unwrap_or(default_array_item_type());
+            let parsed = parse_loose_literal(value);
+            let mut items = match parsed {
+                JsonValue::Array(values) => values,
+                _ => Vec::new(),
+            };
+            let mut changed = false;
+            let mut remove_index = None;
+            ui.vertical(|ui| {
+                for (index, item) in items.iter_mut().enumerate() {
+                    let mut entry = literal_string_for_value_type(item, item_type);
+                    ui.horizontal(|ui| {
+                        let row_changed = draw_typed_editor_with_width(
+                            ui, item_type, None, &mut entry, text_width,
+                        );
+                        if row_changed {
+                            *item =
+                                coerce_json_to_visual_type(&parse_loose_literal(&entry), item_type)
+                                    .unwrap_or_else(|_| {
+                                        parse_loose_literal(default_literal_for_type(item_type))
+                                    });
+                            changed = true;
+                        }
+                        if ui.small_button("-").clicked() {
+                            remove_index = Some(index);
+                        }
+                    });
+                }
+                if ui.small_button("+ Item").clicked() {
+                    items.push(parse_loose_literal(default_literal_for_type(item_type)));
+                    changed = true;
+                }
+            });
+            if let Some(index) = remove_index {
+                if index < items.len() {
+                    items.remove(index);
+                    changed = true;
+                }
+            }
+            if changed {
+                *value = compact_json_string(&JsonValue::Array(items));
+            }
+            changed
         }
         VisualValueType::Vec2 => {
             let mut components = parse_vec2_literal(value);
@@ -10298,6 +14765,7 @@ fn draw_typed_editor_with_width(
         VisualValueType::PhysicsVelocity => draw_physics_velocity_editor(ui, value),
         VisualValueType::PhysicsWorldDefaults => draw_physics_world_defaults_editor(ui, value),
         VisualValueType::CharacterControllerOutput => draw_character_output_editor(ui, value),
+        VisualValueType::PhysicsQueryFilter => draw_physics_query_filter_editor(ui, value),
         VisualValueType::PhysicsRayCastHit => draw_ray_cast_hit_editor(ui, value),
         VisualValueType::PhysicsPointProjectionHit => draw_point_projection_hit_editor(ui, value),
         VisualValueType::PhysicsShapeCastHit => draw_shape_cast_hit_editor(ui, value),

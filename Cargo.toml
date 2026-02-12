@@ -60,6 +60,7 @@ opt-level = 3
 [patch.crates-io]
 egui-wgpu = { path = "vendor/egui-wgpu" }
 basis-universal-sys = { path = "vendor/basis-universal-sys" }
+egui-snarl = { path = "vendor/egui-snarl" }
 
 # Math helpers
 [profile.dev.package.num-traits]

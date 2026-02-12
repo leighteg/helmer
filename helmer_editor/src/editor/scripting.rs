@@ -4780,6 +4780,52 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_ray_cast = world_ptr;
+    ecs.set(
+        "ray_cast",
+        lua.create_function(
+            move |lua,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast as *mut World) };
+                let mut hit = PhysicsRayCastHit::default();
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return ray_cast_hit_to_table(lua, hit);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return ray_cast_hit_to_table(lua, hit);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                if let Some(phys) = world.get_resource::<PhysicsResource>() {
+                    hit = phys.cast_ray(
+                        origin,
+                        direction,
+                        max_toi.unwrap_or(10_000.0),
+                        solid.unwrap_or(true),
+                        query_filter,
+                        exclude_entity,
+                    );
+                }
+
+                ray_cast_hit_to_table(lua, hit)
+            },
+        )?,
+    )?;
+
     let world_ptr_get_velocity = world_ptr;
     ecs.set(
         "get_physics_velocity",

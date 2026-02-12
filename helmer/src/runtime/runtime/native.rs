@@ -51,8 +51,6 @@ use crate::{
     },
 };
 
-const MACOS_RETINA_SCALE_FIX_MIN_X: u32 = 3840;
-const MACOS_RETINA_SCALE_FIX_MIN_Y: u32 = 2160;
 const DEFAULT_RUNTIME_LOG_FILTER: &str = "info,helmer=trace,helmer_becs=trace,helmer_editor=trace,script=trace,audio=trace,\
      wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,notify=info,mio=info,polling=info";
 
@@ -1043,16 +1041,7 @@ impl<T: Send + 'static> Runtime<T> {
 
         let mut input = self.input_manager.write();
         input.window_size = UVec2::new(new_size.width, new_size.height);
-        #[cfg(target_os = "macos")]
-        if new_size.width >= MACOS_RETINA_SCALE_FIX_MIN_X
-            && new_size.height >= MACOS_RETINA_SCALE_FIX_MIN_Y
-        {
-            input.scale_factor = window.scale_factor();
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            input.scale_factor = window.scale_factor();
-        }
+        input.scale_factor = window.scale_factor();
         input.clear_queues();
         input.clear_egui_state();
         drop(input);
@@ -1541,19 +1530,7 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
 
                     let mut input = self.input_manager.write();
                     input.window_size = UVec2::new(new_size.width, new_size.height);
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        input.scale_factor = self.window.as_ref().unwrap().scale_factor();
-                    }
-                    if new_size.width >= MACOS_RETINA_SCALE_FIX_MIN_X
-                        && new_size.height >= MACOS_RETINA_SCALE_FIX_MIN_Y
-                    {
-                        input.scale_factor = self.window.as_ref().unwrap().scale_factor();
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        input.scale_factor = self.window.as_ref().unwrap().scale_factor();
-                    }
+                    input.scale_factor = self.window.as_ref().unwrap().scale_factor();
                     drop(input);
 
                     if let Some(user_state) = &self.user_state {

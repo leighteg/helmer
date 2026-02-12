@@ -4448,6 +4448,25 @@ fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueTyp
     )
 }
 
+fn are_data_types_compatible_strict_typed(
+    from_type: VisualValueType,
+    to_type: VisualValueType,
+) -> bool {
+    if from_type == to_type {
+        return true;
+    }
+
+    if matches!(from_type, VisualValueType::Json) || matches!(to_type, VisualValueType::Json) {
+        return false;
+    }
+
+    matches!(
+        (from_type, to_type),
+        (VisualValueType::Number, VisualValueType::Entity)
+            | (VisualValueType::Entity, VisualValueType::Number)
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisualAssetPathKind {
     Scene,
@@ -4792,30 +4811,111 @@ fn insert_api_node_from_spec(
     pos: egui::Pos2,
     spec: &VisualApiOperationSpec,
 ) -> NodeId {
+    snarl.insert_node(pos, api_node_kind_from_spec(spec))
+}
+
+fn api_node_kind_from_spec(spec: &VisualApiOperationSpec) -> VisualScriptNodeKind {
     let args = spec
         .inputs
         .iter()
         .map(|input| default_literal_for_type(input.value_type).to_string())
         .collect();
     match spec.flow {
-        VisualApiFlow::Exec => snarl.insert_node(
-            pos,
-            VisualScriptNodeKind::CallApi {
-                operation: spec.operation,
-                table: spec.table,
-                function: spec.function.to_string(),
-                args,
-            },
-        ),
-        VisualApiFlow::Pure => snarl.insert_node(
-            pos,
-            VisualScriptNodeKind::QueryApi {
-                operation: spec.operation,
-                table: spec.table,
-                function: spec.function.to_string(),
-                args,
-            },
-        ),
+        VisualApiFlow::Exec => VisualScriptNodeKind::CallApi {
+            operation: spec.operation,
+            table: spec.table,
+            function: spec.function.to_string(),
+            args,
+        },
+        VisualApiFlow::Pure => VisualScriptNodeKind::QueryApi {
+            operation: spec.operation,
+            table: spec.table,
+            function: spec.function.to_string(),
+            args,
+        },
+    }
+}
+
+fn node_slots_are_compatible(
+    from_node: &VisualScriptNodeKind,
+    from_slot: PinSlot,
+    to_node: &VisualScriptNodeKind,
+    to_slot: PinSlot,
+    variables: &[VisualVariableDefinition],
+) -> bool {
+    if from_slot.kind != to_slot.kind {
+        return false;
+    }
+
+    if matches!(from_slot.kind, PinKind::Data) {
+        let Some(from_type) = node_data_output_type(from_node, from_slot.index, variables) else {
+            return false;
+        };
+        let Some(to_type) = node_data_input_type(to_node, to_slot.index, variables) else {
+            return false;
+        };
+        if !are_data_types_compatible_strict_typed(from_type, to_type) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn node_kind_has_compatible_pin_for_dropped_wire(
+    candidate: &VisualScriptNodeKind,
+    src_pins: &AnyPins<'_>,
+    snarl: &Snarl<VisualScriptNodeKind>,
+    variables: &[VisualVariableDefinition],
+) -> bool {
+    match src_pins {
+        AnyPins::Out(outputs) => {
+            if candidate.input_count() == 0 {
+                return false;
+            }
+            for output in *outputs {
+                let Some(from_node) = snarl.get_node(output.node) else {
+                    continue;
+                };
+                let Some(from_slot) = from_node.output_slot(output.output) else {
+                    continue;
+                };
+                for input_index in 0..candidate.input_count() {
+                    let Some(to_slot) = candidate.input_slot(input_index) else {
+                        continue;
+                    };
+                    if node_slots_are_compatible(
+                        from_node, from_slot, candidate, to_slot, variables,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        AnyPins::In(inputs) => {
+            if candidate.output_count() == 0 {
+                return false;
+            }
+            for input in *inputs {
+                let Some(to_node) = snarl.get_node(input.node) else {
+                    continue;
+                };
+                let Some(to_slot) = to_node.input_slot(input.input) else {
+                    continue;
+                };
+                for output_index in 0..candidate.output_count() {
+                    let Some(from_slot) = candidate.output_slot(output_index) else {
+                        continue;
+                    };
+                    if node_slots_are_compatible(candidate, from_slot, to_node, to_slot, variables)
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
     }
 }
 
@@ -11111,6 +11211,7 @@ impl VisualScriptViewer {
         pos: egui::Pos2,
         ui: &mut Ui,
         snarl: &mut Snarl<VisualScriptNodeKind>,
+        wire_context: Option<&AnyPins<'_>>,
     ) -> Option<NodeId> {
         enum AddNodeSearchAction {
             InsertNode(VisualScriptNodeKind),
@@ -11133,8 +11234,13 @@ impl VisualScriptViewer {
 
         let mut inserted = None;
         let mut has_visible = false;
+        let force_compatible_only = wire_context.is_some();
 
-        if has_search {
+        if force_compatible_only {
+            ui.small("Showing only nodes compatible with the dropped wire");
+        }
+
+        if has_search || force_compatible_only {
             let mut results: Vec<(String, AddNodeSearchAction)> = Vec::new();
 
             let mut push_search_result =
@@ -11702,9 +11808,30 @@ impl VisualScriptViewer {
                 }),
             );
 
+            if let Some(src_pins) = wire_context {
+                results.retain(|(_, action)| {
+                    let candidate = match action {
+                        AddNodeSearchAction::InsertNode(node) => node.clone(),
+                        AddNodeSearchAction::InsertApi(operation) => {
+                            api_node_kind_from_spec(operation.spec())
+                        }
+                    };
+                    node_kind_has_compatible_pin_for_dropped_wire(
+                        &candidate,
+                        src_pins,
+                        snarl,
+                        &self.variables,
+                    )
+                });
+            }
+
             results.sort_by_key(|(label, _)| label.to_ascii_lowercase());
             if results.is_empty() {
-                ui.small("No nodes match the current search");
+                if force_compatible_only {
+                    ui.small("No compatible nodes for this wire.");
+                } else {
+                    ui.small("No nodes match the current search");
+                }
             } else {
                 egui::ScrollArea::vertical()
                     .max_height(340.0)
@@ -13455,7 +13582,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
         ui: &mut Ui,
         snarl: &mut Snarl<VisualScriptNodeKind>,
     ) {
-        let _ = self.add_node_menu(pos, ui, snarl);
+        let _ = self.add_node_menu(pos, ui, snarl, None);
     }
 
     fn has_dropped_wire_menu(
@@ -13473,7 +13600,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
         src_pins: AnyPins,
         snarl: &mut Snarl<VisualScriptNodeKind>,
     ) {
-        if let Some(new_node) = self.add_node_menu(pos, ui, snarl) {
+        if let Some(new_node) = self.add_node_menu(pos, ui, snarl, Some(&src_pins)) {
             match src_pins {
                 AnyPins::Out(outputs) => {
                     let new_node_inputs = snarl

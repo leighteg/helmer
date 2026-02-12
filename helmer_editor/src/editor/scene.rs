@@ -2315,6 +2315,34 @@ pub fn reset_editor_scene(world: &mut World) {
     }
 }
 
+pub fn reset_scene_root_instance(world: &mut World, scene_root: Entity) {
+    let mut children_to_despawn: HashSet<Entity> = HashSet::new();
+
+    if let Some(mut spawned) = world.get_resource_mut::<SceneSpawnedChildren>() {
+        if let Some(children) = spawned.spawned_scenes.remove(&scene_root) {
+            children_to_despawn.extend(children);
+        }
+    }
+
+    let mut child_query = world.query::<(Entity, &SceneChild)>();
+    for (child_entity, child_link) in child_query.iter(world) {
+        if child_link.scene_root == scene_root {
+            children_to_despawn.insert(child_entity);
+        }
+    }
+
+    for child_entity in children_to_despawn {
+        if child_entity == scene_root {
+            continue;
+        }
+        let _ = world.despawn(child_entity);
+    }
+
+    if world.get_entity(scene_root).is_ok() {
+        world.entity_mut(scene_root).remove::<SpawnedScene>();
+    }
+}
+
 pub fn spawn_default_camera(world: &mut World) -> Entity {
     world
         .spawn((

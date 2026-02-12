@@ -78,7 +78,7 @@ use crate::editor::{
         EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, WorldState,
         animation_asset_from_group, apply_custom_clips_to_animator,
         merge_animation_asset_into_timeline, next_available_scene_path,
-        read_animation_asset_document, write_animation_asset_document,
+        read_animation_asset_document, reset_scene_root_instance, write_animation_asset_document,
     },
     scripting::{
         ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
@@ -10655,6 +10655,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
+            reset_scene_root_instance(world, entity);
             world.entity_mut(entity).remove::<SceneRoot>();
             world.entity_mut(entity).remove::<SceneAssetPath>();
             push_undo_snapshot(world, "Remove Scene Asset");
@@ -14591,6 +14592,7 @@ fn apply_scene_asset(world: &mut World, entity: Entity, path: &Path) {
     } else {
         asset_server.0.lock().load_scene(path)
     };
+    reset_scene_root_instance(world, entity);
     world.entity_mut(entity).insert(SceneRoot(handle));
     world.entity_mut(entity).insert(SceneAssetPath {
         path: path.to_path_buf(),

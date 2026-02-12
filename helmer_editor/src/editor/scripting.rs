@@ -63,7 +63,7 @@ use crate::editor::{
     commands::{EditorCommand, EditorCommandQueue},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
     project::EditorProject,
-    scene::{EditorEntity, EditorSceneState, WorldState},
+    scene::{EditorEntity, EditorSceneState, WorldState, reset_scene_root_instance},
     set_play_camera,
     viewport::{
         EditorCursorControlState, EditorViewportRuntime, EditorViewportState, PlayViewportKind,
@@ -2831,6 +2831,7 @@ fn build_ecs_table(
                     world.entity_mut(entity).remove::<BevyAnimator>();
                 }
                 "scene" => {
+                    reset_scene_root_instance(world, entity);
                     world.entity_mut(entity).remove::<SceneRoot>();
                     world.entity_mut(entity).remove::<SceneAssetPath>();
                 }
@@ -3801,6 +3802,7 @@ fn build_ecs_table(
             } else {
                 asset_server.0.lock().load_scene(&resolved)
             };
+            reset_scene_root_instance(world, entity);
             world.entity_mut(entity).insert(SceneRoot(handle));
             world
                 .entity_mut(entity)

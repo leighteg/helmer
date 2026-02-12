@@ -37,11 +37,13 @@ use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
-    EditorCursorControlState, EditorLayout, EditorLayoutState, EditorPlayCamera,
-    EditorTimelineState, EditorViewportCamera, EditorViewportRuntime, EditorViewportState,
-    LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect, PlayViewportKind,
-    VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY, VIEWPORT_ID_PREVIEW, ViewportRectPixels,
-    activate_play_camera, activate_viewport_camera, activate_viewport_camera_for_pane,
+    EditorCursorControlState, EditorLayout, EditorLayoutState, EditorPaneViewportState,
+    EditorPlayCamera, EditorTimelineState, EditorViewportCamera, EditorViewportRuntime,
+    EditorViewportState, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN, FREECAM_SMOOTHING_MAX,
+    FREECAM_SMOOTHING_MIN, LayoutDragEdges, LayoutDragMode, LayoutSaveRequest, NormalizedRect,
+    PlayViewportKind, VIEWPORT_ID_EDITOR, VIEWPORT_ID_GAMEPLAY, VIEWPORT_ID_PREVIEW,
+    ViewportRectPixels, activate_play_camera, activate_viewport_camera,
+    activate_viewport_camera_for_pane,
     assets::{
         AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
         MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
@@ -3407,11 +3409,13 @@ fn set_status(world: &mut World, message: String) {
 pub struct FreecamState {
     speed: f32,
     sensitivity: f32,
+    look_smoothing: f32,
     fov_lerp_speed: f32,
     is_looking: bool,
     look_start_cursor_position: Option<DVec2>,
     look_pane_id: Option<u64>,
     last_cursor_position: DVec2,
+    smoothed_cursor_delta: DVec2,
     current_fov_multiplier: f32,
     active_entity: Option<Entity>,
 }
@@ -3427,6 +3431,7 @@ pub fn freecam_system(
     gizmo_state: Res<EditorGizmoState>,
     scene_state: Res<EditorSceneState>,
     viewport_state: Res<EditorViewportState>,
+    pane_viewport_state: Option<Res<EditorPaneViewportState>>,
     viewport_runtime: Res<EditorViewportRuntime>,
     runtime_cursor_state: Option<Res<BevyRuntimeCursorState>>,
     mut cursor_control_state: ResMut<EditorCursorControlState>,
@@ -3463,13 +3468,19 @@ pub fn freecam_system(
 ) {
     if state.speed == 0.0 {
         state.speed = 1.0;
-        state.sensitivity = 0.3;
+        state.sensitivity = viewport_state
+            .freecam_sensitivity
+            .clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
+        state.look_smoothing = viewport_state
+            .freecam_smoothing
+            .clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
         state.fov_lerp_speed = 8.0;
         state.current_fov_multiplier = 1.0;
     }
 
     let dt = time.0;
     let input_manager = &input.0.read();
+    let raw_mouse_delta = input_manager.mouse_motion;
     let egui_pixels_per_point = egui_res.ctx.pixels_per_point() as f64;
     let egui_cursor_position = egui_res.ctx.input(|input| {
         input
@@ -3534,6 +3545,24 @@ pub fn freecam_system(
         viewport_camera_candidates.get(entity).is_ok()
             || play_freecam_camera_candidates.get(entity).is_ok()
     });
+    let freecam_settings_pane_id = state
+        .look_pane_id
+        .or_else(|| active_pane_request.map(|pane| pane.pane_id))
+        .or_else(|| hovered_pane_request.map(|pane| pane.pane_id))
+        .or(viewport_runtime.active_pane_id);
+    let mut configured_sensitivity = viewport_state.freecam_sensitivity;
+    let mut configured_smoothing = viewport_state.freecam_smoothing;
+    if let (Some(pane_id), Some(pane_state)) =
+        (freecam_settings_pane_id, pane_viewport_state.as_deref())
+    {
+        if let Some(pane_settings) = pane_state.settings.get(&pane_id) {
+            configured_sensitivity = pane_settings.freecam_sensitivity;
+            configured_smoothing = pane_settings.freecam_smoothing;
+        }
+    }
+    state.sensitivity =
+        configured_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
+    state.look_smoothing = configured_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
     let pointer_rect = target_pane_request
         .map(|pane| pane.viewport_rect)
         .or(viewport_runtime.main_rect_pixels)
@@ -3576,15 +3605,32 @@ pub fn freecam_system(
                 .or_else(|| viewport_runtime.pane_requests.first());
             state.look_start_cursor_position = Some(cursor_position);
             state.last_cursor_position = cursor_position;
+            state.smoothed_cursor_delta = DVec2::ZERO;
             state.look_pane_id = capture_pane_request.map(|pane| pane.pane_id);
             state.is_looking = true;
         } else {
-            let delta = cursor_position - state.last_cursor_position;
+            let mut cursor_delta = raw_mouse_delta;
+            if cursor_delta.length_squared() <= f64::EPSILON {
+                cursor_delta = cursor_position - state.last_cursor_position;
+            }
             state.last_cursor_position = cursor_position;
-            let cursor_delta = if delta.length_squared() <= 0.25 {
+            let cursor_delta = if cursor_delta.length_squared() <= 0.25 {
                 DVec2::ZERO
             } else {
-                delta
+                cursor_delta
+            };
+            if state.look_smoothing > 0.0 {
+                let smoothing_seconds = state.look_smoothing.max(0.0001) as f64;
+                let alpha = (1.0 - (-(dt as f64) / smoothing_seconds).exp()).clamp(0.0, 1.0);
+                let smoothed_cursor_delta = state.smoothed_cursor_delta;
+                state.smoothed_cursor_delta += (cursor_delta - smoothed_cursor_delta) * alpha;
+            } else {
+                state.smoothed_cursor_delta = cursor_delta;
+            }
+            let cursor_delta = if state.smoothed_cursor_delta.length_squared() <= 0.01 {
+                DVec2::ZERO
+            } else {
+                state.smoothed_cursor_delta
             };
 
             yaw_delta -= cursor_delta.x as f32 * state.sensitivity / 100.0;
@@ -3593,11 +3639,13 @@ pub fn freecam_system(
     } else {
         state.is_looking = false;
         state.look_pane_id = None;
+        state.smoothed_cursor_delta = DVec2::ZERO;
     }
 
     if gizmo_blocking {
         state.is_looking = false;
         state.look_pane_id = None;
+        state.smoothed_cursor_delta = DVec2::ZERO;
     }
     let restore_cursor_position = if was_looking && !state.is_looking {
         state.look_start_cursor_position.take()
@@ -3662,6 +3710,7 @@ pub fn freecam_system(
                 state.look_start_cursor_position = None;
                 state.look_pane_id = None;
                 state.last_cursor_position = cursor_position;
+                state.smoothed_cursor_delta = DVec2::ZERO;
             }
 
             let transform = &mut transform.0;

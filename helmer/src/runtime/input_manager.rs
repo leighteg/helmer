@@ -64,6 +64,7 @@ pub enum InputEvent {
     Keyboard { key: KeyCode, pressed: bool },
     MouseButton { button: MouseButton, pressed: bool },
     CursorMoved(DVec2),
+    MouseMotion(DVec2),
     MouseWheel(Vec2),
 }
 
@@ -89,6 +90,7 @@ pub struct InputManager {
     pub active_mouse_buttons: HashSet<MouseButton>,
     pub mouse_wheel: Vec2,
     mouse_wheel_accumulator: Vec2,
+    pub mouse_motion: DVec2,
     pub cursor_position: DVec2,
     pub window_size: UVec2,
     pub scale_factor: f64,
@@ -149,6 +151,7 @@ impl InputManager {
             active_mouse_buttons: HashSet::new(),
             mouse_wheel: Vec2::ZERO,
             mouse_wheel_accumulator: Vec2::ZERO,
+            mouse_motion: DVec2::ZERO,
             cursor_position: DVec2::ZERO,
             window_size: UVec2::ZERO,
             scale_factor: 1.0,
@@ -176,6 +179,7 @@ impl InputManager {
     /// Called by the logic thread once per tick to process all pending input.
     pub fn process_events(&mut self) {
         self.just_pressed.clear();
+        self.mouse_motion = DVec2::ZERO;
 
         // --- 1. Poll gamepads for controller state ---
         #[cfg(not(target_arch = "wasm32"))]
@@ -272,6 +276,9 @@ impl InputManager {
                     if !self.egui_wants_pointer {
                         self.cursor_position = pos;
                     }
+                }
+                InputEvent::MouseMotion(delta) => {
+                    self.mouse_motion += delta;
                 }
                 InputEvent::MouseButton { button, pressed } => {
                     if self.egui_wants_pointer {
@@ -537,6 +544,7 @@ impl InputManager {
         self.active_keys.clear();
         self.active_mouse_buttons.clear();
         self.just_pressed.clear();
+        self.mouse_motion = DVec2::ZERO;
     }
 
     pub fn clear_egui_state(&mut self) {

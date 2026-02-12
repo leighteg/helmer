@@ -22,7 +22,7 @@ use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilder
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::WindowEvent,
+    event::{DeviceEvent, DeviceId, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowAttributes, WindowId},
@@ -1252,6 +1252,19 @@ impl<T: Send + 'static> Runtime<T> {
 }
 
 impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            self.input_manager
+                .read()
+                .push_event(InputEvent::MouseMotion(DVec2::new(delta.0, delta.1)));
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,

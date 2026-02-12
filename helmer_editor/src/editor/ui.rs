@@ -54,8 +54,9 @@ use walkdir::WalkDir;
 use crate::editor::{
     EditorLayoutState, EditorPlayCamera, EditorSplineState, EditorTimelineState, EditorUndoState,
     EditorViewportCamera, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
-    Freecam, LayoutSaveRequest, PlayViewportKind, UndoEntry, ViewportRectPixels,
-    ViewportResolutionPreset,
+    FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN,
+    FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN, Freecam,
+    LayoutSaveRequest, PlayViewportKind, UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
     assets::{
         AssetBrowserState, AssetEntry, EditorAssetCache, EditorAudio, EditorMesh,
         EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath, cached_audio_handle,
@@ -249,7 +250,7 @@ impl Default for EditorPaneWorkspaceState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EditorPaneViewportSettings {
     pub graph_template: String,
     pub gizmos_in_play: bool,
@@ -259,6 +260,8 @@ pub struct EditorPaneViewportSettings {
     pub show_spot_light_gizmos: bool,
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
+    pub freecam_sensitivity: f32,
+    pub freecam_smoothing: f32,
 }
 
 impl EditorPaneViewportSettings {
@@ -272,6 +275,8 @@ impl EditorPaneViewportSettings {
             show_spot_light_gizmos: state.show_spot_light_gizmos,
             show_spline_paths: state.show_spline_paths,
             show_spline_points: state.show_spline_points,
+            freecam_sensitivity: state.freecam_sensitivity,
+            freecam_smoothing: state.freecam_smoothing,
         }
     }
 }
@@ -1673,6 +1678,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let mut show_spot_light_gizmos = pane_settings.show_spot_light_gizmos;
         let mut show_spline_paths = pane_settings.show_spline_paths;
         let mut show_spline_points = pane_settings.show_spline_points;
+        let mut freecam_sensitivity = pane_settings.freecam_sensitivity;
+        let mut freecam_smoothing = pane_settings.freecam_smoothing;
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -1844,6 +1851,33 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale");
+                            });
+                        });
+                });
+            MenuButton::new("Freecam")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Sensitivity");
+                                ui.add(
+                                    DragValue::new(&mut freecam_sensitivity)
+                                        .speed(0.01)
+                                        .range(FREECAM_SENSITIVITY_MIN..=FREECAM_SENSITIVITY_MAX),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Smoothing");
+                                ui.add(
+                                    DragValue::new(&mut freecam_smoothing)
+                                        .speed(0.0025)
+                                        .range(FREECAM_SMOOTHING_MIN..=FREECAM_SMOOTHING_MAX)
+                                        .suffix(" s"),
+                                );
                             });
                         });
                 });
@@ -2645,6 +2679,10 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+            freecam_sensitivity =
+                freecam_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
+            freecam_smoothing =
+                freecam_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
@@ -2659,6 +2697,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
+            viewport_state.freecam_sensitivity = freecam_sensitivity;
+            viewport_state.freecam_smoothing = freecam_smoothing;
             viewport_state.show_options_panel = show_options_panel;
         }
 
@@ -2699,6 +2739,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                     show_spot_light_gizmos,
                     show_spline_paths,
                     show_spline_points,
+                    freecam_sensitivity,
+                    freecam_smoothing,
                 },
             );
         }
@@ -2767,6 +2809,14 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.show_spline_points)
             .unwrap_or(true);
+        let mut freecam_sensitivity = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_sensitivity)
+            .unwrap_or(FREECAM_SENSITIVITY_DEFAULT);
+        let mut freecam_smoothing = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_smoothing)
+            .unwrap_or(FREECAM_SMOOTHING_DEFAULT);
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -2917,6 +2967,33 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
                                 ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale");
+                            });
+                        });
+                });
+            MenuButton::new("Freecam")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Sensitivity");
+                                ui.add(
+                                    DragValue::new(&mut freecam_sensitivity)
+                                        .speed(0.01)
+                                        .range(FREECAM_SENSITIVITY_MIN..=FREECAM_SENSITIVITY_MAX),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Smoothing");
+                                ui.add(
+                                    DragValue::new(&mut freecam_smoothing)
+                                        .speed(0.0025)
+                                        .range(FREECAM_SMOOTHING_MIN..=FREECAM_SMOOTHING_MAX)
+                                        .suffix(" s"),
+                                );
                             });
                         });
                 });
@@ -3652,6 +3729,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+            freecam_sensitivity =
+                freecam_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
+            freecam_smoothing =
+                freecam_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
@@ -3666,6 +3747,8 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
+            viewport_state.freecam_sensitivity = freecam_sensitivity;
+            viewport_state.freecam_smoothing = freecam_smoothing;
             viewport_state.show_options_panel = show_options_panel;
         }
 

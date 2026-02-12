@@ -114,6 +114,13 @@ pub const VIEWPORT_ID_EDITOR: u64 = u64::MAX - 2;
 pub const VIEWPORT_ID_GAMEPLAY: u64 = u64::MAX - 1;
 pub const VIEWPORT_ID_PREVIEW: u64 = u64::MAX;
 
+pub const FREECAM_SENSITIVITY_DEFAULT: f32 = 0.12;
+pub const FREECAM_SENSITIVITY_MIN: f32 = 0.01;
+pub const FREECAM_SENSITIVITY_MAX: f32 = 2.0;
+pub const FREECAM_SMOOTHING_DEFAULT: f32 = 0.04;
+pub const FREECAM_SMOOTHING_MIN: f32 = 0.0;
+pub const FREECAM_SMOOTHING_MAX: f32 = 0.25;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ViewportRectPixels {
     pub min_x: f32,
@@ -267,6 +274,8 @@ pub struct EditorViewportState {
     pub show_spot_light_gizmos: bool,
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
+    pub freecam_sensitivity: f32,
+    pub freecam_smoothing: f32,
 }
 
 impl Default for EditorViewportState {
@@ -287,6 +296,8 @@ impl Default for EditorViewportState {
             show_spot_light_gizmos: true,
             show_spline_paths: true,
             show_spline_points: true,
+            freecam_sensitivity: FREECAM_SENSITIVITY_DEFAULT,
+            freecam_smoothing: FREECAM_SMOOTHING_DEFAULT,
         }
     }
 }

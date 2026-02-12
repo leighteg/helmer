@@ -9,8 +9,11 @@ use std::{
 };
 
 use bevy_ecs::prelude::{Resource, World};
-use egui::{Color32, ComboBox, DragValue, RichText, Sense, TextEdit, Ui};
-use egui_snarl::ui::{AnyPins, PinInfo, SnarlViewer, SnarlWidget};
+use egui::{Color32, ComboBox, DragValue, RichText, Sense, Stroke, TextEdit, Ui};
+use egui_snarl::ui::{
+    AnyPins, BackgroundPattern, Grid, NodeLayout, NodeLayoutKind, PinInfo, PinPlacement, PinShape,
+    SelectionStyle, SnarlStyle, SnarlViewer, SnarlWidget, WireLayer, WireStyle,
+};
 use egui_snarl::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use glam::DQuat;
 use ron::ser::PrettyConfig;
@@ -4578,6 +4581,24 @@ fn api_input_label(operation: VisualApiOperation, input_index: usize) -> String 
     }
 }
 
+fn with_data_type_suffix(label: String, value_type: Option<VisualValueType>) -> String {
+    let Some(value_type) = value_type else {
+        return label;
+    };
+    if value_type == VisualValueType::Json {
+        return label;
+    }
+    let type_title = value_type.title();
+    if label.eq_ignore_ascii_case(type_title) {
+        return label;
+    }
+    let suffix = format!("({})", type_title);
+    if label.contains(&suffix) {
+        return label;
+    }
+    format!("{} ({})", label, type_title)
+}
+
 fn has_structured_api_default_editor(operation: VisualApiOperation, input_index: usize) -> bool {
     matches!(
         (operation, input_index),
@@ -8315,11 +8336,658 @@ impl VisualScriptOpenDocument {
     }
 }
 
-#[derive(Resource, Default)]
+fn default_visual_graph_style() -> SnarlStyle {
+    let mut style = SnarlStyle::new();
+    style.pin_placement = Some(PinPlacement::Edge);
+    style
+}
+
+fn node_layout_kind_label(kind: NodeLayoutKind) -> &'static str {
+    match kind {
+        NodeLayoutKind::Coil => "Coil",
+        NodeLayoutKind::Sandwich => "Sandwich",
+        NodeLayoutKind::FlippedSandwich => "Flipped Sandwich",
+    }
+}
+
+fn pin_placement_label(placement: PinPlacement) -> &'static str {
+    match placement {
+        PinPlacement::Inside => "Inside",
+        PinPlacement::Edge => "Edge",
+        PinPlacement::Outside { .. } => "Outside",
+    }
+}
+
+fn pin_shape_label(shape: PinShape) -> &'static str {
+    match shape {
+        PinShape::Circle => "Circle",
+        PinShape::Triangle => "Triangle",
+        PinShape::Square => "Square",
+        PinShape::Star => "Star",
+    }
+}
+
+fn wire_style_label(style: WireStyle) -> &'static str {
+    match style {
+        WireStyle::Line => "Line",
+        WireStyle::AxisAligned { .. } => "Axis Aligned",
+        WireStyle::Bezier3 => "Bezier 3",
+        WireStyle::Bezier5 => "Bezier 5",
+    }
+}
+
+fn wire_layer_label(layer: WireLayer) -> &'static str {
+    match layer {
+        WireLayer::BehindNodes => "Behind Nodes",
+        WireLayer::AboveNodes => "Above Nodes",
+    }
+}
+
+fn background_pattern_label(pattern: BackgroundPattern) -> &'static str {
+    match pattern {
+        BackgroundPattern::NoPattern => "None",
+        BackgroundPattern::Grid(_) => "Grid",
+    }
+}
+
+fn draw_stroke_editor(ui: &mut Ui, label: &str, stroke: &mut Stroke) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui
+            .add(
+                DragValue::new(&mut stroke.width)
+                    .range(0.0..=16.0)
+                    .speed(0.05),
+            )
+            .changed();
+        changed |= ui.color_edit_button_srgba(&mut stroke.color).changed();
+    });
+    changed
+}
+
+fn draw_margin_editor(ui: &mut Ui, label: &str, margin: &mut egui::Margin) -> bool {
+    let mut changed = false;
+    let mut x = i32::from(margin.left.max(margin.right));
+    let mut y = i32::from(margin.top.max(margin.bottom));
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.label("X");
+        changed |= ui.add(DragValue::new(&mut x).range(-64..=64)).changed();
+        ui.label("Y");
+        changed |= ui.add(DragValue::new(&mut y).range(-64..=64)).changed();
+    });
+    if changed {
+        *margin = egui::Margin::symmetric(x.clamp(-64, 64) as i8, y.clamp(-64, 64) as i8);
+    }
+    changed
+}
+
+fn draw_corner_radius_editor(
+    ui: &mut Ui,
+    label: &str,
+    corner_radius: &mut egui::CornerRadius,
+) -> bool {
+    let mut changed = false;
+    let mut uniform_radius = corner_radius.average().round() as i32;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui
+            .add(DragValue::new(&mut uniform_radius).range(0..=255))
+            .changed();
+    });
+    if changed {
+        *corner_radius = egui::CornerRadius::same(uniform_radius.clamp(0, 255) as u8);
+    }
+    changed
+}
+
+fn draw_shadow_editor(ui: &mut Ui, label: &str, shadow: &mut egui::epaint::Shadow) -> bool {
+    let mut changed = false;
+    let mut offset_x = i32::from(shadow.offset[0]);
+    let mut offset_y = i32::from(shadow.offset[1]);
+    let mut blur = i32::from(shadow.blur);
+    let mut spread = i32::from(shadow.spread);
+
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.label("X");
+        changed |= ui
+            .add(DragValue::new(&mut offset_x).range(-64..=64))
+            .changed();
+        ui.label("Y");
+        changed |= ui
+            .add(DragValue::new(&mut offset_y).range(-64..=64))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Blur");
+        changed |= ui.add(DragValue::new(&mut blur).range(0..=255)).changed();
+        ui.label("Spread");
+        changed |= ui.add(DragValue::new(&mut spread).range(0..=255)).changed();
+        changed |= ui.color_edit_button_srgba(&mut shadow.color).changed();
+    });
+
+    if changed {
+        shadow.offset = [offset_x.clamp(-64, 64) as i8, offset_y.clamp(-64, 64) as i8];
+        shadow.blur = blur.clamp(0, 255) as u8;
+        shadow.spread = spread.clamp(0, 255) as u8;
+    }
+    changed
+}
+
+fn draw_frame_editor(ui: &mut Ui, label: &str, frame: &mut egui::Frame) -> bool {
+    let mut changed = false;
+    ui.collapsing(label, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Fill");
+            changed |= ui.color_edit_button_srgba(&mut frame.fill).changed();
+        });
+        changed |= draw_stroke_editor(ui, "Stroke", &mut frame.stroke);
+        changed |= draw_corner_radius_editor(ui, "Corner radius", &mut frame.corner_radius);
+        changed |= draw_margin_editor(ui, "Inner margin", &mut frame.inner_margin);
+        changed |= draw_margin_editor(ui, "Outer margin", &mut frame.outer_margin);
+        changed |= draw_shadow_editor(ui, "Shadow", &mut frame.shadow);
+    });
+    changed
+}
+
+fn draw_selection_style_editor(ui: &mut Ui, style: &mut SelectionStyle) -> bool {
+    let mut changed = false;
+    changed |= draw_margin_editor(ui, "Margin", &mut style.margin);
+    changed |= draw_corner_radius_editor(ui, "Corner radius", &mut style.rounding);
+    ui.horizontal(|ui| {
+        ui.label("Fill");
+        changed |= ui.color_edit_button_srgba(&mut style.fill).changed();
+    });
+    changed |= draw_stroke_editor(ui, "Stroke", &mut style.stroke);
+    changed
+}
+
+fn draw_visual_graph_style_menu(ui: &mut Ui, graph_style: &mut SnarlStyle) {
+    ui.set_min_width(360.0);
+    if ui.button("Reset Editor Default").clicked() {
+        *graph_style = default_visual_graph_style();
+        ui.ctx().request_repaint();
+        return;
+    }
+    if ui.button("Reset Snarl Default").clicked() {
+        *graph_style = SnarlStyle::new();
+        ui.ctx().request_repaint();
+        return;
+    }
+    ui.separator();
+
+    ui.collapsing("Layout", |ui| {
+        let mut node_layout = graph_style.node_layout.unwrap_or_else(NodeLayout::coil);
+        ui.horizontal(|ui| {
+            ui.label("Node layout");
+            ComboBox::from_id_salt(ui.id().with("graph_style_node_layout"))
+                .selected_text(node_layout_kind_label(node_layout.kind))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut node_layout.kind, NodeLayoutKind::Coil, "Coil");
+                    ui.selectable_value(
+                        &mut node_layout.kind,
+                        NodeLayoutKind::Sandwich,
+                        "Sandwich",
+                    );
+                    ui.selectable_value(
+                        &mut node_layout.kind,
+                        NodeLayoutKind::FlippedSandwich,
+                        "Flipped Sandwich",
+                    );
+                });
+        });
+        ui.checkbox(
+            &mut node_layout.equal_pin_row_heights,
+            "Equal input/output row heights",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Min pin row height");
+            ui.add(
+                DragValue::new(&mut node_layout.min_pin_row_height)
+                    .range(0.0..=128.0)
+                    .speed(0.2),
+            );
+        });
+        graph_style.node_layout = Some(node_layout);
+
+        let mut header_drag_space = graph_style.header_drag_space.unwrap_or_else(|| {
+            egui::vec2(ui.style().spacing.icon_width, ui.style().spacing.icon_width)
+        });
+        ui.horizontal(|ui| {
+            ui.label("Header drag");
+            ui.label("X");
+            ui.add(
+                DragValue::new(&mut header_drag_space.x)
+                    .range(0.0..=128.0)
+                    .speed(0.2),
+            );
+            ui.label("Y");
+            ui.add(
+                DragValue::new(&mut header_drag_space.y)
+                    .range(0.0..=128.0)
+                    .speed(0.2),
+            );
+        });
+        graph_style.header_drag_space = Some(header_drag_space);
+
+        let mut collapsible = graph_style.collapsible.unwrap_or(true);
+        if ui.checkbox(&mut collapsible, "Collapsible nodes").changed() {
+            graph_style.collapsible = Some(collapsible);
+        }
+    });
+
+    ui.collapsing("Pins", |ui| {
+        let mut pin_placement = graph_style.pin_placement.unwrap_or(PinPlacement::Edge);
+        let mut pin_placement_kind = match pin_placement {
+            PinPlacement::Inside => 0,
+            PinPlacement::Edge => 1,
+            PinPlacement::Outside { .. } => 2,
+        };
+        ui.horizontal(|ui| {
+            ui.label("Placement");
+            ComboBox::from_id_salt(ui.id().with("graph_style_pin_placement"))
+                .selected_text(pin_placement_label(pin_placement))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut pin_placement_kind, 0, "Inside");
+                    ui.selectable_value(&mut pin_placement_kind, 1, "Edge");
+                    ui.selectable_value(&mut pin_placement_kind, 2, "Outside");
+                });
+        });
+        pin_placement = match pin_placement_kind {
+            0 => PinPlacement::Inside,
+            1 => PinPlacement::Edge,
+            _ => {
+                let default_margin = 12.0;
+                let mut margin = match pin_placement {
+                    PinPlacement::Outside { margin } => margin,
+                    _ => default_margin,
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Outside margin");
+                    ui.add(DragValue::new(&mut margin).range(0.0..=128.0).speed(0.2));
+                });
+                PinPlacement::Outside {
+                    margin: margin.max(0.0),
+                }
+            }
+        };
+        graph_style.pin_placement = Some(pin_placement);
+
+        let mut pin_shape = graph_style.pin_shape.unwrap_or(PinShape::Circle);
+        ui.horizontal(|ui| {
+            ui.label("Shape");
+            ComboBox::from_id_salt(ui.id().with("graph_style_pin_shape"))
+                .selected_text(pin_shape_label(pin_shape))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut pin_shape, PinShape::Circle, "Circle");
+                    ui.selectable_value(&mut pin_shape, PinShape::Triangle, "Triangle");
+                    ui.selectable_value(&mut pin_shape, PinShape::Square, "Square");
+                    ui.selectable_value(&mut pin_shape, PinShape::Star, "Star");
+                });
+        });
+        graph_style.pin_shape = Some(pin_shape);
+
+        let mut pin_size = graph_style
+            .pin_size
+            .unwrap_or(ui.style().spacing.interact_size.y * 0.6);
+        ui.horizontal(|ui| {
+            ui.label("Size");
+            ui.add(DragValue::new(&mut pin_size).range(1.0..=64.0).speed(0.2));
+        });
+        graph_style.pin_size = Some(pin_size.max(1.0));
+
+        let mut pin_fill = graph_style
+            .pin_fill
+            .unwrap_or(ui.style().visuals.widgets.active.bg_fill);
+        ui.horizontal(|ui| {
+            ui.label("Fill");
+            if ui.color_edit_button_srgba(&mut pin_fill).changed() {
+                graph_style.pin_fill = Some(pin_fill);
+            }
+            if ui.small_button("Theme").clicked() {
+                graph_style.pin_fill = None;
+            }
+        });
+
+        let mut pin_stroke = graph_style
+            .pin_stroke
+            .unwrap_or(ui.style().visuals.widgets.active.bg_stroke);
+        if draw_stroke_editor(ui, "Stroke", &mut pin_stroke) {
+            graph_style.pin_stroke = Some(pin_stroke);
+        }
+        if ui.small_button("Pin stroke from theme").clicked() {
+            graph_style.pin_stroke = None;
+        }
+    });
+
+    ui.collapsing("Wires", |ui| {
+        let pin_size = graph_style
+            .pin_size
+            .unwrap_or(ui.style().spacing.interact_size.y * 0.6);
+        let mut wire_width = graph_style.wire_width.unwrap_or(pin_size * 0.1);
+        let mut wire_frame_size = graph_style.wire_frame_size.unwrap_or(pin_size * 3.0);
+        let mut wire_smoothness = graph_style.wire_smoothness.unwrap_or(1.0);
+        ui.horizontal(|ui| {
+            ui.label("Width");
+            ui.add(DragValue::new(&mut wire_width).range(0.1..=32.0).speed(0.1));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Frame size");
+            ui.add(
+                DragValue::new(&mut wire_frame_size)
+                    .range(0.1..=512.0)
+                    .speed(0.5),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Smoothness");
+            ui.add(
+                DragValue::new(&mut wire_smoothness)
+                    .range(0.0..=10.0)
+                    .speed(0.05),
+            );
+        });
+        graph_style.wire_width = Some(wire_width.max(0.1));
+        graph_style.wire_frame_size = Some(wire_frame_size.max(0.1));
+        graph_style.wire_smoothness = Some(wire_smoothness.clamp(0.0, 10.0));
+
+        let mut downscale_wire_frame = graph_style.downscale_wire_frame.unwrap_or(true);
+        let mut upscale_wire_frame = graph_style.upscale_wire_frame.unwrap_or(false);
+        if ui
+            .checkbox(&mut downscale_wire_frame, "Downscale frame when close")
+            .changed()
+        {
+            graph_style.downscale_wire_frame = Some(downscale_wire_frame);
+        }
+        if ui
+            .checkbox(&mut upscale_wire_frame, "Upscale frame when far")
+            .changed()
+        {
+            graph_style.upscale_wire_frame = Some(upscale_wire_frame);
+        }
+
+        let mut wire_style = graph_style.wire_style.unwrap_or(WireStyle::Bezier5);
+        let mut wire_style_kind = match wire_style {
+            WireStyle::Line => 0,
+            WireStyle::AxisAligned { .. } => 1,
+            WireStyle::Bezier3 => 2,
+            WireStyle::Bezier5 => 3,
+        };
+        ui.horizontal(|ui| {
+            ui.label("Style");
+            ComboBox::from_id_salt(ui.id().with("graph_style_wire_style"))
+                .selected_text(wire_style_label(wire_style))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut wire_style_kind, 0, "Line");
+                    ui.selectable_value(&mut wire_style_kind, 1, "Axis Aligned");
+                    ui.selectable_value(&mut wire_style_kind, 2, "Bezier 3");
+                    ui.selectable_value(&mut wire_style_kind, 3, "Bezier 5");
+                });
+        });
+        wire_style = match wire_style_kind {
+            0 => WireStyle::Line,
+            1 => {
+                let mut corner_radius = match wire_style {
+                    WireStyle::AxisAligned { corner_radius } => corner_radius,
+                    _ => 10.0,
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Corner radius");
+                    ui.add(
+                        DragValue::new(&mut corner_radius)
+                            .range(0.0..=128.0)
+                            .speed(0.2),
+                    );
+                });
+                WireStyle::AxisAligned {
+                    corner_radius: corner_radius.max(0.0),
+                }
+            }
+            2 => WireStyle::Bezier3,
+            _ => WireStyle::Bezier5,
+        };
+        graph_style.wire_style = Some(wire_style);
+
+        let mut wire_layer = graph_style.wire_layer.unwrap_or(WireLayer::BehindNodes);
+        ui.horizontal(|ui| {
+            ui.label("Layer");
+            ComboBox::from_id_salt(ui.id().with("graph_style_wire_layer"))
+                .selected_text(wire_layer_label(wire_layer))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut wire_layer, WireLayer::BehindNodes, "Behind Nodes");
+                    ui.selectable_value(&mut wire_layer, WireLayer::AboveNodes, "Above Nodes");
+                });
+        });
+        graph_style.wire_layer = Some(wire_layer);
+    });
+
+    ui.collapsing("Background", |ui| {
+        let mut pattern_kind = match graph_style.bg_pattern {
+            None => 0,
+            Some(BackgroundPattern::NoPattern) => 1,
+            Some(BackgroundPattern::Grid(_)) => 2,
+        };
+        let pattern_label = match graph_style.bg_pattern {
+            None => "Default".to_string(),
+            Some(pattern) => background_pattern_label(pattern).to_string(),
+        };
+        let mut pattern_kind_changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Pattern");
+            ComboBox::from_id_salt(ui.id().with("graph_style_bg_pattern"))
+                .selected_text(pattern_label)
+                .show_ui(ui, |ui| {
+                    pattern_kind_changed |= ui
+                        .selectable_value(&mut pattern_kind, 0, "Default")
+                        .changed();
+                    pattern_kind_changed |=
+                        ui.selectable_value(&mut pattern_kind, 1, "None").changed();
+                    pattern_kind_changed |=
+                        ui.selectable_value(&mut pattern_kind, 2, "Grid").changed();
+                });
+        });
+        if pattern_kind_changed {
+            graph_style.bg_pattern = match pattern_kind {
+                0 => None,
+                1 => Some(BackgroundPattern::NoPattern),
+                _ => Some(BackgroundPattern::Grid(Grid::default())),
+            };
+        }
+
+        if pattern_kind == 2 {
+            let mut grid = match graph_style.bg_pattern {
+                Some(BackgroundPattern::Grid(grid)) => grid,
+                _ => Grid::default(),
+            };
+            let mut grid_changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Spacing X");
+                grid_changed |= ui
+                    .add(
+                        DragValue::new(&mut grid.spacing.x)
+                            .range(1.0..=1024.0)
+                            .speed(1.0),
+                    )
+                    .changed();
+                ui.label("Y");
+                grid_changed |= ui
+                    .add(
+                        DragValue::new(&mut grid.spacing.y)
+                            .range(1.0..=1024.0)
+                            .speed(1.0),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Angle (rad)");
+                grid_changed |= ui
+                    .add(
+                        DragValue::new(&mut grid.angle)
+                            .range(-std::f32::consts::TAU..=std::f32::consts::TAU)
+                            .speed(0.01),
+                    )
+                    .changed();
+            });
+            if grid_changed {
+                graph_style.bg_pattern = Some(BackgroundPattern::Grid(grid));
+            }
+        }
+
+        let mut bg_pattern_stroke = graph_style
+            .bg_pattern_stroke
+            .unwrap_or(ui.style().visuals.widgets.noninteractive.bg_stroke);
+        if draw_stroke_editor(ui, "Pattern stroke", &mut bg_pattern_stroke) {
+            graph_style.bg_pattern_stroke = Some(bg_pattern_stroke);
+        }
+        if ui.small_button("Pattern stroke from theme").clicked() {
+            graph_style.bg_pattern_stroke = None;
+        }
+    });
+
+    ui.collapsing("Interaction", |ui| {
+        let mut min_scale = graph_style.min_scale.unwrap_or(0.2);
+        let mut max_scale = graph_style.max_scale.unwrap_or(2.0);
+        ui.horizontal(|ui| {
+            ui.label("Min scale");
+            ui.add(DragValue::new(&mut min_scale).range(0.01..=8.0).speed(0.01));
+            ui.label("Max");
+            ui.add(DragValue::new(&mut max_scale).range(0.1..=16.0).speed(0.01));
+        });
+        min_scale = min_scale.clamp(0.01, 8.0);
+        max_scale = max_scale.clamp(min_scale, 16.0);
+        graph_style.min_scale = Some(min_scale);
+        graph_style.max_scale = Some(max_scale);
+
+        let mut centering = graph_style.centering.unwrap_or(true);
+        if ui.checkbox(&mut centering, "Double-click center").changed() {
+            graph_style.centering = Some(centering);
+        }
+        let mut crisp_text = graph_style.crisp_magnified_text.unwrap_or(false);
+        if ui
+            .checkbox(&mut crisp_text, "Crisp magnified text")
+            .changed()
+        {
+            graph_style.crisp_magnified_text = Some(crisp_text);
+        }
+    });
+
+    ui.collapsing("Selection", |ui| {
+        let default_select_stroke = Stroke::new(
+            ui.style().visuals.selection.stroke.width,
+            ui.style()
+                .visuals
+                .selection
+                .stroke
+                .color
+                .gamma_multiply(0.5),
+        );
+        let mut select_stroke = graph_style.select_stoke.unwrap_or(default_select_stroke);
+        if draw_stroke_editor(ui, "Stroke", &mut select_stroke) {
+            graph_style.select_stoke = Some(select_stroke);
+        }
+        if ui.small_button("Stroke from theme").clicked() {
+            graph_style.select_stoke = None;
+        }
+
+        let mut select_fill = graph_style
+            .select_fill
+            .unwrap_or(ui.style().visuals.selection.bg_fill.gamma_multiply(0.3));
+        ui.horizontal(|ui| {
+            ui.label("Fill");
+            if ui.color_edit_button_srgba(&mut select_fill).changed() {
+                graph_style.select_fill = Some(select_fill);
+            }
+            if ui.small_button("Theme").clicked() {
+                graph_style.select_fill = None;
+            }
+        });
+
+        let mut contained = graph_style.select_rect_contained.unwrap_or(false);
+        if ui
+            .checkbox(&mut contained, "Selection requires full containment")
+            .changed()
+        {
+            graph_style.select_rect_contained = Some(contained);
+        }
+
+        let mut use_custom_style = graph_style.select_style.is_some();
+        if ui
+            .checkbox(
+                &mut use_custom_style,
+                "Use custom node selection frame style",
+            )
+            .changed()
+        {
+            if use_custom_style {
+                graph_style.select_style = Some(SelectionStyle {
+                    margin: ui.style().spacing.window_margin,
+                    rounding: ui.style().visuals.window_corner_radius,
+                    fill: select_fill,
+                    stroke: select_stroke,
+                });
+            } else {
+                graph_style.select_style = None;
+            }
+        }
+        if let Some(mut selection_style) = graph_style.select_style {
+            if draw_selection_style_editor(ui, &mut selection_style) {
+                graph_style.select_style = Some(selection_style);
+            }
+        }
+    });
+
+    ui.collapsing("Frames", |ui| {
+        let default_node_frame = egui::Frame::window(ui.style());
+        let default_header_frame = default_node_frame.shadow(egui::epaint::Shadow::NONE);
+        let default_bg_frame = egui::Frame::canvas(ui.style());
+
+        let mut node_frame = graph_style.node_frame.unwrap_or(default_node_frame);
+        if draw_frame_editor(ui, "Node Frame", &mut node_frame) {
+            graph_style.node_frame = Some(node_frame);
+        }
+        if ui.small_button("Node frame from theme").clicked() {
+            graph_style.node_frame = None;
+        }
+
+        let mut header_frame = graph_style.header_frame.unwrap_or(default_header_frame);
+        if draw_frame_editor(ui, "Header Frame", &mut header_frame) {
+            graph_style.header_frame = Some(header_frame);
+        }
+        if ui.small_button("Header frame from theme").clicked() {
+            graph_style.header_frame = None;
+        }
+
+        let mut bg_frame = graph_style.bg_frame.unwrap_or(default_bg_frame);
+        if draw_frame_editor(ui, "Background Frame", &mut bg_frame) {
+            graph_style.bg_frame = Some(bg_frame);
+        }
+        if ui.small_button("Background frame from theme").clicked() {
+            graph_style.bg_frame = None;
+        }
+    });
+}
+
+#[derive(Resource)]
 pub struct VisualScriptEditorState {
     pub open: bool,
     pub active_path: Option<PathBuf>,
     pub documents: HashMap<PathBuf, VisualScriptOpenDocument>,
+    pub graph_style: SnarlStyle,
+    pub graph_style_popup_open: bool,
+}
+
+impl Default for VisualScriptEditorState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            active_path: None,
+            documents: HashMap::new(),
+            graph_style: default_visual_graph_style(),
+            graph_style_popup_open: false,
+        }
+    }
 }
 
 pub fn is_visual_script_path(path: &Path) -> bool {
@@ -8508,9 +9176,36 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                 });
                             }
                         }
+
+                        ui.separator();
+                        let graph_style_button = ui.button("Graph Style");
+                        if graph_style_button.clicked() {
+                            state.graph_style_popup_open = !state.graph_style_popup_open;
+                        }
+                        let mut graph_style_popup_open = state.graph_style_popup_open;
+                        let _ = egui::Popup::from_response(&graph_style_button)
+                            .id(ui.id().with("visual_graph_style_popup"))
+                            .open_bool(&mut graph_style_popup_open)
+                            .kind(egui::PopupKind::Popup)
+                            .layout(egui::Layout::top_down(egui::Align::Min))
+                            .info(egui::UiStackInfo::new(egui::UiKind::Popup))
+                            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+                            .show(|ui| {
+                                let max_height =
+                                    (ui.ctx().content_rect().height() * 0.85).clamp(560.0, 1400.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("visual_graph_style_menu_scroll")
+                                    .max_height(max_height)
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        draw_visual_graph_style_menu(ui, &mut state.graph_style);
+                                    });
+                            });
+                        state.graph_style_popup_open = graph_style_popup_open;
                     });
 
                     state.active_path = Some(active_path.clone());
+                    let graph_style = state.graph_style;
 
                     let Some(document) = state.documents.get_mut(&active_path) else {
                         return;
@@ -8632,11 +9327,13 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                                 &document.path,
                                                 function_id,
                                             ))
+                                            .style(graph_style)
                                             .min_size(min_size)
                                             .show(snarl, &mut viewer, ui)
                                     } else {
                                         SnarlWidget::new()
                                             .id_salt(("visual_script_graph", &document.path))
+                                            .style(graph_style)
                                             .min_size(min_size)
                                             .show(&mut document.snarl, &mut viewer, ui)
                                     };
@@ -11824,6 +12521,11 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
             } else {
                 None
             };
+            let label = if matches!(slot.kind, PinKind::Data) {
+                with_data_type_suffix(node.input_label(slot), value_type)
+            } else {
+                node.input_label(slot)
+            };
             let allow_inline_default = matches!(
                 node,
                 VisualScriptNodeKind::CallApi { .. } | VisualScriptNodeKind::QueryApi { .. }
@@ -11838,7 +12540,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
             };
             Some((
                 slot,
-                node.input_label(slot),
+                label,
                 node.pin_color(slot, false),
                 value_type,
                 allow_inline_default,
@@ -11951,7 +12653,15 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
     ) -> PinInfo {
         if let Some(node) = snarl.get_node(pin.id.node) {
             if let Some(slot) = node.output_slot(pin.id.output) {
-                ui.small(node.output_label(slot));
+                let label = if matches!(slot.kind, PinKind::Data) {
+                    with_data_type_suffix(
+                        node.output_label(slot),
+                        node_data_output_type(node, slot.index, &self.variables),
+                    )
+                } else {
+                    node.output_label(slot)
+                };
+                ui.small(label);
                 return PinInfo::square().with_fill(node.pin_color(slot, true));
             }
         }

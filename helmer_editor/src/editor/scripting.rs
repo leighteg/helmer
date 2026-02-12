@@ -65,7 +65,9 @@ use crate::editor::{
     project::EditorProject,
     scene::{EditorEntity, EditorSceneState, WorldState},
     set_play_camera,
-    viewport::{EditorCursorControlState, EditorViewportState, PlayViewportKind},
+    viewport::{
+        EditorCursorControlState, EditorViewportRuntime, EditorViewportState, PlayViewportKind,
+    },
     visual_scripting::{
         VisualScriptApiTable, VisualScriptEvent, VisualScriptHost, VisualScriptProgram,
         VisualScriptRuntimeState, compile_visual_script_runtime_source, is_visual_script_path,
@@ -7019,6 +7021,46 @@ fn queue_physics_impulse_at_point(
     true
 }
 
+fn gameplay_input_capture_allowed(world: &World) -> bool {
+    let in_play_mode = world
+        .get_resource::<EditorSceneState>()
+        .map(|state| state.world_state == WorldState::Play)
+        .unwrap_or(false);
+    if !in_play_mode {
+        return true;
+    }
+
+    if let Some(runtime) = world.get_resource::<EditorViewportRuntime>() {
+        if !runtime.pane_requests.is_empty() {
+            let pointer_over_play_viewport = runtime.pane_requests.iter().any(|pane| {
+                pane.pointer_over && world.get::<EditorPlayCamera>(pane.camera_entity).is_some()
+            });
+            if pointer_over_play_viewport {
+                return true;
+            }
+
+            if runtime.keyboard_focus {
+                if let Some(active_pane) = runtime.active_pane_id.and_then(|pane_id| {
+                    runtime
+                        .pane_requests
+                        .iter()
+                        .find(|pane| pane.pane_id == pane_id)
+                }) {
+                    return world
+                        .get::<EditorPlayCamera>(active_pane.camera_entity)
+                        .is_some();
+                }
+            }
+
+            return false;
+        }
+    }
+
+    world
+        .get_resource::<EditorViewportState>()
+        .is_some_and(|state| state.play_mode_view == PlayViewportKind::Gameplay)
+}
+
 fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
     let input = lua.create_table()?;
 
@@ -7082,6 +7124,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "key_down",
         lua.create_function(move |_, key: Value| {
             let world = unsafe { &mut *(world_ptr_key as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7101,6 +7146,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "key_pressed",
         lua.create_function(move |_, key: Value| {
             let world = unsafe { &mut *(world_ptr_key_pressed as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7120,6 +7168,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "key_released",
         lua.create_function(move |_, key: Value| {
             let world = unsafe { &mut *(world_ptr_key_released as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7142,6 +7193,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "mouse_down",
         lua.create_function(move |_, button: Value| {
             let world = unsafe { &mut *(world_ptr_mouse as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7161,6 +7215,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "mouse_pressed",
         lua.create_function(move |_, button: Value| {
             let world = unsafe { &mut *(world_ptr_mouse_pressed as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7185,6 +7242,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "mouse_released",
         lua.create_function(move |_, button: Value| {
             let world = unsafe { &mut *(world_ptr_mouse_released as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(false);
             };
@@ -7209,10 +7269,16 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "cursor",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_cursor as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(None);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(None);
             };
             let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(None);
+            }
             let position = Vec2::new(
                 input_manager.cursor_position.x as f32,
                 input_manager.cursor_position.y as f32,
@@ -7226,10 +7292,16 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "cursor_delta",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_cursor_delta as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(None);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(None);
             };
             let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(None);
+            }
             let Some(input_state) = world.get_resource::<ScriptInputState>() else {
                 return Ok(None);
             };
@@ -7244,10 +7316,16 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "wheel",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_wheel as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(None);
+            }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
                 return Ok(None);
             };
             let input_manager = input_manager.0.read();
+            if input_manager.egui_wants_pointer {
+                return Ok(None);
+            }
             Ok(Some(vec2_to_table(lua, input_manager.mouse_wheel)?))
         })?,
     )?;
@@ -7291,7 +7369,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(None);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_key {
+            if input_manager.egui_wants_key || !gameplay_input_capture_allowed(world) {
                 let table = lua.create_table()?;
                 table.set("shift", false)?;
                 table.set("ctrl", false)?;
@@ -7327,7 +7405,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            Ok(input_manager.egui_wants_key)
+            Ok(input_manager.egui_wants_key || !gameplay_input_capture_allowed(world))
         })?,
     )?;
 
@@ -7340,7 +7418,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            Ok(input_manager.egui_wants_pointer)
+            Ok(input_manager.egui_wants_pointer || !gameplay_input_capture_allowed(world))
         })?,
     )?;
 

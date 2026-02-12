@@ -3400,6 +3400,8 @@ pub struct FreecamState {
     fov_lerp_speed: f32,
     is_looking: bool,
     look_start_cursor_position: Option<DVec2>,
+    look_pane_id: Option<u64>,
+    look_lock_cursor_position: Option<DVec2>,
     lock_cursor_ready: bool,
     last_cursor_position: DVec2,
     current_fov_multiplier: f32,
@@ -3458,7 +3460,11 @@ pub fn freecam_system(
                 )
             })
     });
-    let cursor_position = egui_cursor_position.unwrap_or(input_manager.cursor_position);
+    let cursor_position = if state.is_looking {
+        input_manager.cursor_position
+    } else {
+        egui_cursor_position.unwrap_or(input_manager.cursor_position)
+    };
     let right_mouse_down = input_manager.is_mouse_button_active(MouseButton::Right)
         || egui_res
             .ctx
@@ -3481,9 +3487,17 @@ pub fn freecam_system(
             .iter()
             .find(|pane| pane.pane_id == pane_id)
     });
-    let pointer_rect = hovered_pane_request
+    let look_pane_request = state.look_pane_id.and_then(|pane_id| {
+        viewport_runtime
+            .pane_requests
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+    });
+    let target_pane_request = look_pane_request
+        .or(active_pane_request)
+        .or(hovered_pane_request);
+    let pointer_rect = target_pane_request
         .map(|pane| pane.viewport_rect)
-        .or_else(|| active_pane_request.map(|pane| pane.viewport_rect))
         .or(viewport_runtime.main_rect_pixels)
         .or_else(|| {
             viewport_runtime
@@ -3491,16 +3505,18 @@ pub fn freecam_system(
                 .first()
                 .map(|pane| pane.viewport_rect)
         });
-    let lock_cursor_position = pointer_rect.map(viewport_rect_center);
+    let lock_cursor_position = state
+        .look_lock_cursor_position
+        .or_else(|| pointer_rect.map(viewport_rect_center));
     let pointer_in_viewport = pointer_rect
         .map(|rect| rect.contains(cursor_position))
         .unwrap_or(false);
-    let pointer_over_active_viewport = hovered_pane_request
+    let pointer_over_active_viewport = target_pane_request
         .map(|pane| pane.pointer_over)
         .unwrap_or(false)
         || viewport_runtime.pointer_over_main;
     let allow_viewport_look_input =
-        pointer_over_active_viewport || (!wants_pointer && pointer_in_viewport);
+        state.is_looking || pointer_over_active_viewport || (!wants_pointer && pointer_in_viewport);
 
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const BOOST_AMOUNT: f32 = 1.15;
@@ -3518,12 +3534,21 @@ pub fn freecam_system(
         && (pointer_in_viewport || pointer_over_active_viewport || state.is_looking)
     {
         if !state.is_looking {
+            let capture_pane_request = active_pane_request
+                .or(hovered_pane_request)
+                .or_else(|| viewport_runtime.pane_requests.first());
             state.look_start_cursor_position = Some(cursor_position);
             state.last_cursor_position = cursor_position;
-            state.lock_cursor_ready = lock_cursor_position.is_none();
+            state.look_pane_id = capture_pane_request.map(|pane| pane.pane_id);
+            state.look_lock_cursor_position = capture_pane_request
+                .map(|pane| viewport_rect_center(pane.viewport_rect))
+                .or(lock_cursor_position);
+            state.lock_cursor_ready = state.look_lock_cursor_position.is_none();
             state.is_looking = true;
         } else {
-            let cursor_delta = if let Some(lock_cursor_position) = lock_cursor_position {
+            let cursor_delta = if let Some(lock_cursor_position) =
+                state.look_lock_cursor_position.or(lock_cursor_position)
+            {
                 state.last_cursor_position = cursor_position;
                 if !state.lock_cursor_ready {
                     if cursor_positions_match(cursor_position, lock_cursor_position) {
@@ -3549,11 +3574,15 @@ pub fn freecam_system(
         }
     } else {
         state.is_looking = false;
+        state.look_pane_id = None;
+        state.look_lock_cursor_position = None;
         state.lock_cursor_ready = false;
     }
 
     if gizmo_blocking {
         state.is_looking = false;
+        state.look_pane_id = None;
+        state.look_lock_cursor_position = None;
         state.lock_cursor_ready = false;
     }
     let restore_cursor_position = if was_looking && !state.is_looking {
@@ -3617,6 +3646,8 @@ pub fn freecam_system(
                 state.current_fov_multiplier = 1.0;
                 state.is_looking = false;
                 state.look_start_cursor_position = None;
+                state.look_pane_id = None;
+                state.look_lock_cursor_position = None;
                 state.lock_cursor_ready = false;
                 state.last_cursor_position = cursor_position;
             }
@@ -3682,9 +3713,10 @@ pub fn freecam_system(
             camera.fov_y_rad = base_fov * state.current_fov_multiplier;
         };
 
-    let active_camera_entity = hovered_pane_request
+    let active_camera_entity = look_pane_request
         .map(|pane| pane.camera_entity)
         .or_else(|| active_pane_request.map(|pane| pane.camera_entity))
+        .or_else(|| hovered_pane_request.map(|pane| pane.camera_entity))
         .or(viewport_runtime.active_camera_entity)
         .or_else(|| {
             viewport_runtime
@@ -3753,8 +3785,8 @@ fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
 
 fn viewport_rect_center(rect: ViewportRectPixels) -> DVec2 {
     DVec2::new(
-        ((rect.min_x + rect.max_x) * 0.5) as f64,
-        ((rect.min_y + rect.max_y) * 0.5) as f64,
+        ((rect.min_x + rect.max_x) * 0.5).round() as f64,
+        ((rect.min_y + rect.max_y) * 0.5).round() as f64,
     )
 }
 

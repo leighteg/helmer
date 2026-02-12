@@ -10,7 +10,6 @@ use bevy_ecs::{component::Component, name::Name};
 use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
 use helmer::graphics::common::renderer::{RenderViewportGizmoOptions, RenderViewportRequest};
-use helmer::graphics::render_graphs::template_for_graph;
 use helmer::provided::components::{
     Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
 };
@@ -21,9 +20,7 @@ use helmer_becs::egui_integration::{
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
-use helmer_becs::systems::render_system::{
-    RenderGraphResource, RenderSyncRequest, RenderViewportRequests,
-};
+use helmer_becs::systems::render_system::{RenderSyncRequest, RenderViewportRequests};
 use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
@@ -2703,21 +2700,6 @@ fn handle_set_active_camera(world: &mut World, entity: Entity) -> bool {
     true
 }
 
-fn apply_viewport_graph(world: &mut World) {
-    let template_name = world
-        .get_resource::<EditorViewportState>()
-        .map(|state| state.graph_template.clone());
-    let Some(template_name) = template_name else {
-        return;
-    };
-    let Some(template) = template_for_graph(&template_name) else {
-        return;
-    };
-    if let Some(mut graph_res) = world.get_resource_mut::<RenderGraphResource>() {
-        graph_res.0 = (template.build)();
-    }
-}
-
 fn has_camera(world: &World, entity: Entity) -> bool {
     world.get::<BevyCamera>(entity).is_some() && world.get::<BevyTransform>(entity).is_some()
 }
@@ -3075,7 +3057,6 @@ fn handle_toggle_play(world: &mut World) {
             }
             activate_play_camera(world);
             set_viewport_audio_listener_enabled(world, false);
-            apply_viewport_graph(world);
             spawn_play_viewport_pane(world);
 
             set_status(world, "Play mode".to_string());
@@ -3144,7 +3125,6 @@ fn handle_toggle_play(world: &mut World) {
 
             activate_viewport_camera(world);
             set_viewport_audio_listener_enabled(world, true);
-            apply_viewport_graph(world);
 
             set_status(world, "Edit mode".to_string());
         }

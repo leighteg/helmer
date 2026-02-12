@@ -9692,13 +9692,6 @@ fn default_visual_script_document() -> VisualScriptDocument {
             message: "visual script started".to_string(),
         },
     );
-    let update_note = snarl.insert_node(
-        egui::pos2(340.0, 280.0),
-        VisualScriptNodeKind::Comment {
-            text: "Use typed API nodes to drive gameplay.\nExamples:\n- Set Transform\n- Spawn Entity\n- Input Key Down"
-                .to_string(),
-        },
-    );
 
     snarl.connect(
         OutPinId {
@@ -9711,28 +9704,11 @@ fn default_visual_script_document() -> VisualScriptDocument {
         },
     );
 
-    snarl.connect(
-        OutPinId {
-            node: on_update,
-            output: 0,
-        },
-        InPinId {
-            node: update_note,
-            input: 0,
-        },
-    );
-
     VisualScriptDocument {
         version: VISUAL_SCRIPT_VERSION,
         name: "visual_script".to_string(),
-        prelude: "Graph runtime notes. This field is optional metadata.".to_string(),
-        variables: vec![VisualVariableDefinition {
-            id: 1,
-            name: "speed".to_string(),
-            value_type: VisualValueType::Number,
-            array_item_type: None,
-            default_value: "5".to_string(),
-        }],
+        prelude: "".to_string(),
+        variables: Vec::new(),
         functions: Vec::new(),
         graph: graph_data_from_snarl(&snarl),
     }
@@ -11031,7 +11007,7 @@ impl VisualScriptViewer {
 
             results.sort_by_key(|(label, _)| label.to_ascii_lowercase());
             if results.is_empty() {
-                ui.small("No nodes match the current search.");
+                ui.small("No nodes match the current search");
             } else {
                 egui::ScrollArea::vertical()
                     .max_height(340.0)
@@ -11756,7 +11732,7 @@ impl VisualScriptViewer {
         });
 
         if has_search && !has_visible {
-            ui.small("No nodes match the current search.");
+            ui.small("No nodes match the current search");
         }
 
         if inserted.is_some() {

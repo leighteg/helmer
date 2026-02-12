@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -2481,6 +2482,25 @@ impl VisualTransformComponent {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualPhysicsVelocityComponent {
+    #[default]
+    Linear,
+    Angular,
+    WakeUp,
+}
+
+impl VisualPhysicsVelocityComponent {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Linear => "Linear",
+            Self::Angular => "Angular",
+            Self::WakeUp => "Wake Up",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VisualScriptNodeKind {
@@ -2614,10 +2634,19 @@ pub enum VisualScriptNodeKind {
         #[serde(default)]
         component: VisualTransformComponent,
     },
+    PhysicsVelocityGetComponent {
+        #[serde(default)]
+        component: VisualPhysicsVelocityComponent,
+    },
+    PhysicsVelocitySetComponent {
+        #[serde(default)]
+        component: VisualPhysicsVelocityComponent,
+    },
     Vec2,
     Vec3,
     Quat,
     Transform,
+    PhysicsVelocity,
     Comment {
         #[serde(default)]
         text: String,
@@ -2727,10 +2756,17 @@ impl VisualScriptNodeKind {
             Self::TransformSetComponent { component } => {
                 format!("Transform Set {}", component.title())
             }
+            Self::PhysicsVelocityGetComponent { component } => {
+                format!("Physics Velocity Get {}", component.title())
+            }
+            Self::PhysicsVelocitySetComponent { component } => {
+                format!("Physics Velocity Set {}", component.title())
+            }
             Self::Vec2 => "Vec2".to_string(),
             Self::Vec3 => "Vec3".to_string(),
             Self::Quat => "Quat".to_string(),
             Self::Transform => "Transform".to_string(),
+            Self::PhysicsVelocity => "Physics Velocity".to_string(),
             Self::Comment { .. } => "Comment".to_string(),
             Self::Statement { .. } => "Legacy Statement".to_string(),
         }
@@ -2762,10 +2798,13 @@ impl VisualScriptNodeKind {
             | Self::QuatSetComponent { .. }
             | Self::TransformGetComponent { .. }
             | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
-            | Self::Transform => 0,
+            | Self::Transform
+            | Self::PhysicsVelocity => 0,
             Self::Sequence { .. }
             | Self::Branch { .. }
             | Self::LoopWhile { .. }
@@ -2811,10 +2850,13 @@ impl VisualScriptNodeKind {
             | Self::QuatSetComponent { .. }
             | Self::TransformGetComponent { .. }
             | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
-            | Self::Transform => 0,
+            | Self::Transform
+            | Self::PhysicsVelocity => 0,
         }
     }
 
@@ -2832,13 +2874,15 @@ impl VisualScriptNodeKind {
             Self::Vec2GetComponent { .. }
             | Self::Vec3GetComponent { .. }
             | Self::QuatGetComponent { .. }
-            | Self::TransformGetComponent { .. } => 1,
+            | Self::TransformGetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. } => 1,
             Self::Vec2SetComponent { .. }
             | Self::Vec3SetComponent { .. }
             | Self::QuatSetComponent { .. }
-            | Self::TransformSetComponent { .. } => 2,
+            | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. } => 2,
             Self::Vec2 => 2,
-            Self::Vec3 | Self::Select { .. } | Self::Transform => 3,
+            Self::Vec3 | Self::Select { .. } | Self::Transform | Self::PhysicsVelocity => 3,
             Self::Quat => 4,
             Self::OnStart
             | Self::OnUpdate
@@ -2880,10 +2924,13 @@ impl VisualScriptNodeKind {
             | Self::QuatSetComponent { .. }
             | Self::TransformGetComponent { .. }
             | Self::TransformSetComponent { .. }
+            | Self::PhysicsVelocityGetComponent { .. }
+            | Self::PhysicsVelocitySetComponent { .. }
             | Self::Vec2
             | Self::Vec3
             | Self::Quat
             | Self::Transform
+            | Self::PhysicsVelocity
             | Self::CallApi { .. } => 1,
             Self::OnStart
             | Self::OnUpdate
@@ -3015,6 +3062,14 @@ impl VisualScriptNodeKind {
                         component.title().to_string()
                     }
                 }
+                Self::PhysicsVelocityGetComponent { .. } => "Physics Velocity".to_string(),
+                Self::PhysicsVelocitySetComponent { component } => {
+                    if slot.index == 0 {
+                        "Physics Velocity".to_string()
+                    } else {
+                        component.title().to_string()
+                    }
+                }
                 Self::Vec2 => {
                     if slot.index == 0 {
                         "X".to_string()
@@ -3037,6 +3092,11 @@ impl VisualScriptNodeKind {
                     0 => "Position".to_string(),
                     1 => "Rotation".to_string(),
                     _ => "Scale".to_string(),
+                },
+                Self::PhysicsVelocity => match slot.index {
+                    0 => "Linear".to_string(),
+                    1 => "Angular".to_string(),
+                    _ => "Wake Up".to_string(),
                 },
                 _ => format!("Input {}", slot.index + 1),
             },
@@ -3081,10 +3141,13 @@ impl VisualScriptNodeKind {
                 Self::QuatSetComponent { .. } => "Quat".to_string(),
                 Self::TransformGetComponent { component } => component.title().to_string(),
                 Self::TransformSetComponent { .. } => "Transform".to_string(),
+                Self::PhysicsVelocityGetComponent { component } => component.title().to_string(),
+                Self::PhysicsVelocitySetComponent { .. } => "Physics Velocity".to_string(),
                 Self::Vec2 => "Vec2".to_string(),
                 Self::Vec3 => "Vec3".to_string(),
                 Self::Quat => "Quat".to_string(),
                 Self::Transform => "Transform".to_string(),
+                Self::PhysicsVelocity => "Physics Velocity".to_string(),
                 _ => "Value".to_string(),
             },
         }
@@ -3863,13 +3926,7 @@ fn node_data_input_type(
             .get(input_index)
             .map(|pin| pin.value_type),
         VisualScriptNodeKind::MathBinary { .. } => Some(VisualValueType::Number),
-        VisualScriptNodeKind::Compare { op } => match op {
-            VisualCompareOp::Equals | VisualCompareOp::NotEquals => Some(VisualValueType::Json),
-            VisualCompareOp::Less
-            | VisualCompareOp::LessOrEqual
-            | VisualCompareOp::Greater
-            | VisualCompareOp::GreaterOrEqual => Some(VisualValueType::Number),
-        },
+        VisualScriptNodeKind::Compare { .. } => Some(VisualValueType::Json),
         VisualScriptNodeKind::LogicalBinary { .. } => Some(VisualValueType::Bool),
         VisualScriptNodeKind::Select { value_type } => {
             if input_index == 0 {
@@ -3914,6 +3971,20 @@ fn node_data_input_type(
                 })
             }
         }
+        VisualScriptNodeKind::PhysicsVelocityGetComponent { .. } => {
+            Some(VisualValueType::PhysicsVelocity)
+        }
+        VisualScriptNodeKind::PhysicsVelocitySetComponent { component } => {
+            if input_index == 0 {
+                Some(VisualValueType::PhysicsVelocity)
+            } else {
+                Some(match component {
+                    VisualPhysicsVelocityComponent::Linear
+                    | VisualPhysicsVelocityComponent::Angular => VisualValueType::Vec3,
+                    VisualPhysicsVelocityComponent::WakeUp => VisualValueType::Bool,
+                })
+            }
+        }
         VisualScriptNodeKind::Vec2 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Number),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Number),
@@ -3921,6 +3992,10 @@ fn node_data_input_type(
             0 => Some(VisualValueType::Vec3),
             1 => Some(VisualValueType::Quat),
             _ => Some(VisualValueType::Vec3),
+        },
+        VisualScriptNodeKind::PhysicsVelocity => match input_index {
+            0 | 1 => Some(VisualValueType::Vec3),
+            _ => Some(VisualValueType::Bool),
         },
         _ => None,
     }
@@ -3968,10 +4043,20 @@ fn node_data_output_type(
             VisualTransformComponent::Scale => VisualValueType::Vec3,
         }),
         VisualScriptNodeKind::TransformSetComponent { .. } => Some(VisualValueType::Transform),
+        VisualScriptNodeKind::PhysicsVelocityGetComponent { component } => Some(match component {
+            VisualPhysicsVelocityComponent::Linear | VisualPhysicsVelocityComponent::Angular => {
+                VisualValueType::Vec3
+            }
+            VisualPhysicsVelocityComponent::WakeUp => VisualValueType::Bool,
+        }),
+        VisualScriptNodeKind::PhysicsVelocitySetComponent { .. } => {
+            Some(VisualValueType::PhysicsVelocity)
+        }
         VisualScriptNodeKind::Vec2 => Some(VisualValueType::Vec2),
         VisualScriptNodeKind::Vec3 => Some(VisualValueType::Vec3),
         VisualScriptNodeKind::Quat => Some(VisualValueType::Quat),
         VisualScriptNodeKind::Transform => Some(VisualValueType::Transform),
+        VisualScriptNodeKind::PhysicsVelocity => Some(VisualValueType::PhysicsVelocity),
         _ => None,
     }
 }
@@ -4289,10 +4374,13 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::QuatSetComponent { .. }
             | VisualScriptNodeKind::TransformGetComponent { .. }
             | VisualScriptNodeKind::TransformSetComponent { .. }
+            | VisualScriptNodeKind::PhysicsVelocityGetComponent { .. }
+            | VisualScriptNodeKind::PhysicsVelocitySetComponent { .. }
             | VisualScriptNodeKind::Vec2
             | VisualScriptNodeKind::Vec3
             | VisualScriptNodeKind::Quat
-            | VisualScriptNodeKind::Transform => {}
+            | VisualScriptNodeKind::Transform
+            | VisualScriptNodeKind::PhysicsVelocity => {}
         }
 
         Ok(())
@@ -4482,22 +4570,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             VisualScriptNodeKind::Compare { op } => {
                 let left = self.resolve_data_input_with_stack(node_id, 0, Some("null"), stack)?;
                 let right = self.resolve_data_input_with_stack(node_id, 1, Some("null"), stack)?;
-                let result = match op {
-                    VisualCompareOp::Equals => left == right,
-                    VisualCompareOp::NotEquals => left != right,
-                    VisualCompareOp::Less => {
-                        coerce_json_to_f64(&left)? < coerce_json_to_f64(&right)?
-                    }
-                    VisualCompareOp::LessOrEqual => {
-                        coerce_json_to_f64(&left)? <= coerce_json_to_f64(&right)?
-                    }
-                    VisualCompareOp::Greater => {
-                        coerce_json_to_f64(&left)? > coerce_json_to_f64(&right)?
-                    }
-                    VisualCompareOp::GreaterOrEqual => {
-                        coerce_json_to_f64(&left)? >= coerce_json_to_f64(&right)?
-                    }
-                };
+                let result = compare_visual_values(&left, &right, *op);
                 JsonValue::Bool(result)
             }
             VisualScriptNodeKind::LogicalBinary { op } => {
@@ -4694,6 +4767,74 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 );
                 JsonValue::Object(object)
             }
+            VisualScriptNodeKind::PhysicsVelocityGetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some(default_literal_for_type(VisualValueType::PhysicsVelocity)),
+                    stack,
+                )?;
+                let normalized =
+                    coerce_json_to_visual_type(&value, VisualValueType::PhysicsVelocity)?;
+                let object = normalized
+                    .as_object()
+                    .ok_or_else(|| "Physics velocity values must be JSON objects".to_string())?;
+                match component {
+                    VisualPhysicsVelocityComponent::Linear => object
+                        .get("linear")
+                        .cloned()
+                        .ok_or_else(|| "Physics velocity value missing linear".to_string())?,
+                    VisualPhysicsVelocityComponent::Angular => object
+                        .get("angular")
+                        .cloned()
+                        .ok_or_else(|| "Physics velocity value missing angular".to_string())?,
+                    VisualPhysicsVelocityComponent::WakeUp => object
+                        .get("wake_up")
+                        .cloned()
+                        .ok_or_else(|| "Physics velocity value missing wake_up".to_string())?,
+                }
+            }
+            VisualScriptNodeKind::PhysicsVelocitySetComponent { component } => {
+                let value = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some(default_literal_for_type(VisualValueType::PhysicsVelocity)),
+                    stack,
+                )?;
+                let normalized =
+                    coerce_json_to_visual_type(&value, VisualValueType::PhysicsVelocity)?;
+                let mut object = normalized
+                    .as_object()
+                    .cloned()
+                    .ok_or_else(|| "Physics velocity values must be JSON objects".to_string())?;
+                let replacement = match component {
+                    VisualPhysicsVelocityComponent::Linear
+                    | VisualPhysicsVelocityComponent::Angular => {
+                        let value = self.resolve_data_input_with_stack(
+                            node_id,
+                            1,
+                            Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                            stack,
+                        )?;
+                        coerce_json_to_visual_type(&value, VisualValueType::Vec3)?
+                    }
+                    VisualPhysicsVelocityComponent::WakeUp => {
+                        let value =
+                            self.resolve_data_input_with_stack(node_id, 1, Some("true"), stack)?;
+                        coerce_json_to_visual_type(&value, VisualValueType::Bool)?
+                    }
+                };
+                object.insert(
+                    match component {
+                        VisualPhysicsVelocityComponent::Linear => "linear",
+                        VisualPhysicsVelocityComponent::Angular => "angular",
+                        VisualPhysicsVelocityComponent::WakeUp => "wake_up",
+                    }
+                    .to_string(),
+                    replacement,
+                );
+                JsonValue::Object(object)
+            }
             VisualScriptNodeKind::Vec2 => {
                 let x = self.resolve_number_input_with_stack(node_id, 0, Some("0"), stack)?;
                 let y = self.resolve_number_input_with_stack(node_id, 1, Some("0"), stack)?;
@@ -4740,6 +4881,30 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 object.insert("scale".to_string(), scale);
                 JsonValue::Object(object)
             }
+            VisualScriptNodeKind::PhysicsVelocity => {
+                let linear = self.resolve_data_input_with_stack(
+                    node_id,
+                    0,
+                    Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                    stack,
+                )?;
+                let angular = self.resolve_data_input_with_stack(
+                    node_id,
+                    1,
+                    Some("{\"x\":0,\"y\":0,\"z\":0}"),
+                    stack,
+                )?;
+                let wake_up =
+                    self.resolve_data_input_with_stack(node_id, 2, Some("true"), stack)?;
+                let linear = coerce_json_to_visual_type(&linear, VisualValueType::Vec3)?;
+                let angular = coerce_json_to_visual_type(&angular, VisualValueType::Vec3)?;
+                let wake_up = coerce_json_to_visual_type(&wake_up, VisualValueType::Bool)?;
+                let mut object = JsonMap::new();
+                object.insert("linear".to_string(), linear);
+                object.insert("angular".to_string(), angular);
+                object.insert("wake_up".to_string(), wake_up);
+                JsonValue::Object(object)
+            }
             VisualScriptNodeKind::OnStart
             | VisualScriptNodeKind::OnUpdate
             | VisualScriptNodeKind::OnStop
@@ -4772,6 +4937,244 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
         let value =
             self.resolve_data_input_with_stack(node_id, data_input, fallback_literal, stack)?;
         coerce_json_to_f64(&value)
+    }
+}
+
+fn compare_visual_values(left: &JsonValue, right: &JsonValue, op: VisualCompareOp) -> bool {
+    let ordering = compare_visual_values_ordering(left, right);
+    match op {
+        VisualCompareOp::Equals => ordering == Ordering::Equal,
+        VisualCompareOp::NotEquals => ordering != Ordering::Equal,
+        VisualCompareOp::Less => ordering == Ordering::Less,
+        VisualCompareOp::LessOrEqual => ordering != Ordering::Greater,
+        VisualCompareOp::Greater => ordering == Ordering::Greater,
+        VisualCompareOp::GreaterOrEqual => ordering != Ordering::Less,
+    }
+}
+
+fn compare_visual_values_ordering(left: &JsonValue, right: &JsonValue) -> Ordering {
+    let left_type = infer_visual_value_type_from_json(left);
+    let right_type = infer_visual_value_type_from_json(right);
+
+    if let Some(common_type) = shared_compare_type(left_type, right_type) {
+        return compare_visual_values_as_type(left, right, common_type);
+    }
+
+    if let (Ok(left_number), Ok(right_number)) =
+        (coerce_json_to_f64(left), coerce_json_to_f64(right))
+    {
+        return compare_f64(left_number, right_number);
+    }
+
+    let type_order =
+        visual_value_type_compare_rank(left_type).cmp(&visual_value_type_compare_rank(right_type));
+    if type_order != Ordering::Equal {
+        return type_order;
+    }
+
+    canonical_json_string(left).cmp(&canonical_json_string(right))
+}
+
+fn shared_compare_type(
+    left_type: VisualValueType,
+    right_type: VisualValueType,
+) -> Option<VisualValueType> {
+    if left_type == right_type {
+        return Some(left_type);
+    }
+
+    if matches!(
+        (left_type, right_type),
+        (VisualValueType::Number, VisualValueType::Entity)
+            | (VisualValueType::Entity, VisualValueType::Number)
+    ) {
+        return Some(VisualValueType::Number);
+    }
+
+    if left_type == VisualValueType::Json {
+        return Some(right_type);
+    }
+
+    if right_type == VisualValueType::Json {
+        return Some(left_type);
+    }
+
+    None
+}
+
+fn compare_visual_values_as_type(
+    left: &JsonValue,
+    right: &JsonValue,
+    value_type: VisualValueType,
+) -> Ordering {
+    match value_type {
+        VisualValueType::Bool => is_truthy(left).cmp(&is_truthy(right)),
+        VisualValueType::Number => {
+            let left_number = coerce_json_to_f64(left).ok().unwrap_or(0.0);
+            let right_number = coerce_json_to_f64(right).ok().unwrap_or(0.0);
+            compare_f64(left_number, right_number)
+        }
+        VisualValueType::Entity => {
+            let left_entity = coerce_json_to_visual_type(left, VisualValueType::Entity)
+                .ok()
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let right_entity = coerce_json_to_visual_type(right, VisualValueType::Entity)
+                .ok()
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            left_entity.cmp(&right_entity)
+        }
+        VisualValueType::String => {
+            let left_text = coerce_json_to_visual_type(left, VisualValueType::String)
+                .ok()
+                .and_then(|value| value.as_str().map(|text| text.to_string()))
+                .unwrap_or_else(|| json_to_log_string(left));
+            let right_text = coerce_json_to_visual_type(right, VisualValueType::String)
+                .ok()
+                .and_then(|value| value.as_str().map(|text| text.to_string()))
+                .unwrap_or_else(|| json_to_log_string(right));
+            left_text.cmp(&right_text)
+        }
+        VisualValueType::Vec2 => {
+            let left_vec = coerce_json_to_vec2_components(left).unwrap_or((0.0, 0.0));
+            let right_vec = coerce_json_to_vec2_components(right).unwrap_or((0.0, 0.0));
+            compare_vec2(left_vec, right_vec)
+        }
+        VisualValueType::Vec3 => {
+            let left_vec = coerce_json_to_vec3_components(left).unwrap_or((0.0, 0.0, 0.0));
+            let right_vec = coerce_json_to_vec3_components(right).unwrap_or((0.0, 0.0, 0.0));
+            compare_vec3(left_vec, right_vec)
+        }
+        VisualValueType::Quat => {
+            let left_quat = coerce_json_to_quat_components(left).unwrap_or((0.0, 0.0, 0.0, 1.0));
+            let right_quat = coerce_json_to_quat_components(right).unwrap_or((0.0, 0.0, 0.0, 1.0));
+            compare_quat(left_quat, right_quat)
+        }
+        VisualValueType::Transform => compare_transforms(left, right),
+        VisualValueType::Json => canonical_json_string(left).cmp(&canonical_json_string(right)),
+        _ => {
+            let left_normalized =
+                coerce_json_to_visual_type(left, value_type).unwrap_or_else(|_| left.clone());
+            let right_normalized =
+                coerce_json_to_visual_type(right, value_type).unwrap_or_else(|_| right.clone());
+            canonical_json_string(&left_normalized).cmp(&canonical_json_string(&right_normalized))
+        }
+    }
+}
+
+fn compare_f64(left: f64, right: f64) -> Ordering {
+    left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+}
+
+fn compare_vec2(left: (f64, f64), right: (f64, f64)) -> Ordering {
+    compare_f64(left.0, right.0).then_with(|| compare_f64(left.1, right.1))
+}
+
+fn compare_vec3(left: (f64, f64, f64), right: (f64, f64, f64)) -> Ordering {
+    compare_f64(left.0, right.0)
+        .then_with(|| compare_f64(left.1, right.1))
+        .then_with(|| compare_f64(left.2, right.2))
+}
+
+fn compare_quat(left: (f64, f64, f64, f64), right: (f64, f64, f64, f64)) -> Ordering {
+    compare_f64(left.0, right.0)
+        .then_with(|| compare_f64(left.1, right.1))
+        .then_with(|| compare_f64(left.2, right.2))
+        .then_with(|| compare_f64(left.3, right.3))
+}
+
+fn compare_transforms(left: &JsonValue, right: &JsonValue) -> Ordering {
+    let left_normalized = coerce_json_to_visual_type(left, VisualValueType::Transform)
+        .unwrap_or_else(|_| {
+            parse_loose_literal(default_literal_for_type(VisualValueType::Transform))
+        });
+    let right_normalized = coerce_json_to_visual_type(right, VisualValueType::Transform)
+        .unwrap_or_else(|_| {
+            parse_loose_literal(default_literal_for_type(VisualValueType::Transform))
+        });
+
+    let left_object = left_normalized.as_object();
+    let right_object = right_normalized.as_object();
+
+    let left_position = left_object
+        .and_then(|object| object.get("position"))
+        .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or((0.0, 0.0, 0.0));
+    let right_position = right_object
+        .and_then(|object| object.get("position"))
+        .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or((0.0, 0.0, 0.0));
+    let left_rotation = left_object
+        .and_then(|object| object.get("rotation"))
+        .and_then(|value| coerce_json_to_quat_components(value).ok())
+        .unwrap_or((0.0, 0.0, 0.0, 1.0));
+    let right_rotation = right_object
+        .and_then(|object| object.get("rotation"))
+        .and_then(|value| coerce_json_to_quat_components(value).ok())
+        .unwrap_or((0.0, 0.0, 0.0, 1.0));
+    let left_scale = left_object
+        .and_then(|object| object.get("scale"))
+        .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or((1.0, 1.0, 1.0));
+    let right_scale = right_object
+        .and_then(|object| object.get("scale"))
+        .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or((1.0, 1.0, 1.0));
+
+    compare_vec3(left_position, right_position)
+        .then_with(|| compare_quat(left_rotation, right_rotation))
+        .then_with(|| compare_vec3(left_scale, right_scale))
+}
+
+fn visual_value_type_compare_rank(value_type: VisualValueType) -> u8 {
+    match value_type {
+        VisualValueType::Bool => 0,
+        VisualValueType::Number => 1,
+        VisualValueType::String => 2,
+        VisualValueType::Entity => 3,
+        VisualValueType::Vec2 => 4,
+        VisualValueType::Vec3 => 5,
+        VisualValueType::Quat => 6,
+        VisualValueType::Transform => 7,
+        VisualValueType::Camera => 8,
+        VisualValueType::Light => 9,
+        VisualValueType::MeshRenderer => 10,
+        VisualValueType::AudioEmitter => 11,
+        VisualValueType::AudioListener => 12,
+        VisualValueType::Script => 13,
+        VisualValueType::Physics => 14,
+        VisualValueType::PhysicsVelocity => 15,
+        VisualValueType::PhysicsWorldDefaults => 16,
+        VisualValueType::CharacterControllerOutput => 17,
+        VisualValueType::PhysicsRayCastHit => 18,
+        VisualValueType::PhysicsPointProjectionHit => 19,
+        VisualValueType::PhysicsShapeCastHit => 20,
+        VisualValueType::Json => 21,
+    }
+}
+
+fn canonical_json_string(value: &JsonValue) -> String {
+    serde_json::to_string(&canonicalize_json_value(value)).unwrap_or_else(|_| "null".to_string())
+}
+
+fn canonicalize_json_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.iter().map(canonicalize_json_value).collect())
+        }
+        JsonValue::Object(values) => {
+            let mut sorted_keys = values.keys().cloned().collect::<Vec<_>>();
+            sorted_keys.sort();
+            let mut object = JsonMap::new();
+            for key in sorted_keys {
+                if let Some(entry) = values.get(&key) {
+                    object.insert(key, canonicalize_json_value(entry));
+                }
+            }
+            JsonValue::Object(object)
+        }
+        _ => value.clone(),
     }
 }
 
@@ -6504,7 +6907,7 @@ fn normalize_document(document: &mut VisualScriptDocument) {
             else {
                 return false;
             };
-            if from_type != to_type {
+            if !are_data_types_compatible(from_type, to_type) {
                 return false;
             }
             if !data_input_drivers.insert((wire.to_node, to_slot.index)) {
@@ -7297,6 +7700,47 @@ impl VisualScriptViewer {
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 }
+                if add_node_search_matches_any(
+                    &search,
+                    &["physics velocity", "physics", "velocity", "structured"],
+                ) {
+                    has_visible = true;
+                    if ui.button("Physics Velocity").clicked() {
+                        inserted =
+                            Some(snarl.insert_node(pos, VisualScriptNodeKind::PhysicsVelocity));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(
+                    &search,
+                    &["physics velocity", "physics", "velocity", "extract", "get"],
+                ) {
+                    has_visible = true;
+                    if ui.button("Physics Velocity Get Field").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::PhysicsVelocityGetComponent {
+                                component: VisualPhysicsVelocityComponent::Linear,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
+                if add_node_search_matches_any(
+                    &search,
+                    &["physics velocity", "physics", "velocity", "set", "mutate"],
+                ) {
+                    has_visible = true;
+                    if ui.button("Physics Velocity Set Field").clicked() {
+                        inserted = Some(snarl.insert_node(
+                            pos,
+                            VisualScriptNodeKind::PhysicsVelocitySetComponent {
+                                component: VisualPhysicsVelocityComponent::Linear,
+                            },
+                        ));
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                }
 
                 ui.separator();
                 ui.label(RichText::new("Other").strong());
@@ -7554,7 +7998,8 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 | VisualScriptNodeKind::Vec2
                 | VisualScriptNodeKind::Vec3
                 | VisualScriptNodeKind::Quat
-                | VisualScriptNodeKind::Transform => {}
+                | VisualScriptNodeKind::Transform
+                | VisualScriptNodeKind::PhysicsVelocity => {}
                 VisualScriptNodeKind::Sequence { outputs } => {
                     let mut value = i32::from(*outputs);
                     ui.horizontal(|ui| {
@@ -7930,6 +8375,44 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                                 VisualTransformComponent::Position,
                                 VisualTransformComponent::Rotation,
                                 VisualTransformComponent::Scale,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::PhysicsVelocityGetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_physics_velocity_get_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualPhysicsVelocityComponent::Linear,
+                                VisualPhysicsVelocityComponent::Angular,
+                                VisualPhysicsVelocityComponent::WakeUp,
+                            ] {
+                                if ui
+                                    .selectable_value(component, candidate, candidate.title())
+                                    .changed()
+                                {
+                                    self.mark_changed();
+                                    prune_wires = true;
+                                }
+                            }
+                        });
+                }
+                VisualScriptNodeKind::PhysicsVelocitySetComponent { component } => {
+                    ComboBox::from_id_salt(("visual_physics_velocity_set_component", node_id.0))
+                        .selected_text(component.title())
+                        .show_ui(ui, |ui| {
+                            for candidate in [
+                                VisualPhysicsVelocityComponent::Linear,
+                                VisualPhysicsVelocityComponent::Angular,
+                                VisualPhysicsVelocityComponent::WakeUp,
                             ] {
                                 if ui
                                     .selectable_value(component, candidate, candidate.title())

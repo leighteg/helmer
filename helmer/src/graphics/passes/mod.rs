@@ -207,6 +207,7 @@ pub struct GizmoParams {
     pub scale_params: [f32; 4],
     pub rotate_params: [f32; 4],
     pub origin_params: [f32; 4],
+    pub plane_params: [f32; 4],
     pub axis_color_x: [f32; 4],
     pub axis_color_y: [f32; 4],
     pub axis_color_z: [f32; 4],

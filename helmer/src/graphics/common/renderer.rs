@@ -592,6 +592,9 @@ pub enum GizmoAxis {
     Y = 2,
     Z = 3,
     Center = 4,
+    XY = 5,
+    XZ = 6,
+    YZ = 7,
 }
 
 impl Default for GizmoAxis {
@@ -669,6 +672,9 @@ pub struct GizmoStyle {
     pub rotate_radius_scale: f32,
     pub rotate_thickness_scale: f32,
     pub rotate_thickness_min: f32,
+    pub plane_offset_scale: f32,
+    pub plane_size_scale: f32,
+    pub plane_alpha: f32,
     pub origin_size_scale: f32,
     pub origin_size_min: f32,
     pub axis_color_x: [f32; 3],
@@ -706,6 +712,9 @@ impl Default for GizmoStyle {
             rotate_radius_scale: 0.85,
             rotate_thickness_scale: 0.03,
             rotate_thickness_min: 0.01,
+            plane_offset_scale: 0.22,
+            plane_size_scale: 0.2,
+            plane_alpha: 0.35,
             origin_size_scale: 0.06,
             origin_size_min: 0.03,
             axis_color_x: [1.0, 0.2, 0.2],

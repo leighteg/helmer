@@ -109,6 +109,7 @@ pub struct EditorSplineState {
     pub handle_size_min: f32,
     pub pick_radius_scale: f32,
     pub pick_radius_min: f32,
+    pub selected_points: Vec<usize>,
     pub active_point: Option<usize>,
     pub hover_point: Option<usize>,
     pub dragging: bool,
@@ -133,6 +134,7 @@ impl Default for EditorSplineState {
             handle_size_min: 0.05,
             pick_radius_scale: 0.03,
             pick_radius_min: 0.04,
+            selected_points: Vec::new(),
             active_point: None,
             hover_point: None,
             dragging: false,
@@ -146,10 +148,15 @@ impl Default for EditorSplineState {
 }
 
 #[derive(Debug, Clone)]
-struct SplinePointDrag {
+struct SplineDragPoint {
     index: usize,
-    start_local: Vec3,
     start_world: Vec3,
+}
+
+#[derive(Debug, Clone)]
+struct SplinePointDrag {
+    points: Vec<SplineDragPoint>,
+    anchor_world: Vec3,
     pivot_world: Vec3,
     start_rotation: Quat,
     mode: GizmoMode,
@@ -180,6 +187,8 @@ pub struct EditorGizmoSettings {
     pub center_pick_radius_min: f32,
     pub rotate_pick_radius_scale: f32,
     pub rotate_pick_radius_min: f32,
+    pub plane_pick_padding_scale: f32,
+    pub plane_pick_padding_min: f32,
     pub scale_min: f32,
     pub ring_segments: u32,
     pub translate_thickness_scale: f32,
@@ -193,6 +202,9 @@ pub struct EditorGizmoSettings {
     pub rotate_radius_scale: f32,
     pub rotate_thickness_scale: f32,
     pub rotate_thickness_min: f32,
+    pub plane_offset_scale: f32,
+    pub plane_size_scale: f32,
+    pub plane_alpha: f32,
     pub origin_size_scale: f32,
     pub origin_size_min: f32,
     pub axis_color_x: [f32; 3],
@@ -237,6 +249,8 @@ impl Default for EditorGizmoSettings {
             center_pick_radius_min: 0.06,
             rotate_pick_radius_scale: 0.08,
             rotate_pick_radius_min: 0.04,
+            plane_pick_padding_scale: 0.08,
+            plane_pick_padding_min: 0.02,
             scale_min: 0.01,
             ring_segments: 32,
             translate_thickness_scale: 0.05,
@@ -250,6 +264,9 @@ impl Default for EditorGizmoSettings {
             rotate_radius_scale: 0.85,
             rotate_thickness_scale: 0.03,
             rotate_thickness_min: 0.01,
+            plane_offset_scale: 0.22,
+            plane_size_scale: 0.2,
+            plane_alpha: 0.35,
             origin_size_scale: 0.06,
             origin_size_min: 0.03,
             axis_color_x: [1.0, 0.2, 0.2],
@@ -296,6 +313,9 @@ impl EditorGizmoSettings {
             rotate_radius_scale: self.rotate_radius_scale,
             rotate_thickness_scale: self.rotate_thickness_scale,
             rotate_thickness_min: self.rotate_thickness_min,
+            plane_offset_scale: self.plane_offset_scale,
+            plane_size_scale: self.plane_size_scale,
+            plane_alpha: self.plane_alpha,
             origin_size_scale: self.origin_size_scale,
             origin_size_min: self.origin_size_min,
             axis_color_x: self.axis_color_x,
@@ -340,8 +360,52 @@ impl EditorGizmoSettings {
         self.outline_alpha = self.outline_alpha.clamp(0.0, 1.0);
         self.camera_icon_alpha = self.camera_icon_alpha.clamp(0.0, 1.0);
         self.light_icon_alpha = self.light_icon_alpha.clamp(0.0, 1.0);
+        self.plane_alpha = self.plane_alpha.clamp(0.0, 1.0);
+        self.plane_offset_scale = self.plane_offset_scale.max(0.0);
+        self.plane_size_scale = self.plane_size_scale.max(0.0);
+        self.plane_pick_padding_scale = self.plane_pick_padding_scale.max(0.0);
+        self.plane_pick_padding_min = self.plane_pick_padding_min.max(0.0);
         self.hover_mix = self.hover_mix.clamp(0.0, 1.0);
         self.active_mix = self.active_mix.clamp(0.0, 1.0);
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct EditorGizmoSnapSettings {
+    pub enabled: bool,
+    pub ctrl_toggles: bool,
+    pub shift_fine: bool,
+    pub alt_coarse: bool,
+    pub translate_step: f32,
+    pub rotate_step_degrees: f32,
+    pub scale_step: f32,
+    pub fine_scale: f32,
+    pub coarse_scale: f32,
+}
+
+impl Default for EditorGizmoSnapSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ctrl_toggles: true,
+            shift_fine: true,
+            alt_coarse: true,
+            translate_step: 0.5,
+            rotate_step_degrees: 15.0,
+            scale_step: 0.1,
+            fine_scale: 0.25,
+            coarse_scale: 4.0,
+        }
+    }
+}
+
+impl EditorGizmoSnapSettings {
+    pub fn sanitize(&mut self) {
+        self.translate_step = self.translate_step.max(0.0);
+        self.rotate_step_degrees = self.rotate_step_degrees.max(0.0);
+        self.scale_step = self.scale_step.max(0.0);
+        self.fine_scale = self.fine_scale.max(0.001);
+        self.coarse_scale = self.coarse_scale.max(1.0);
     }
 }
 
@@ -371,10 +435,25 @@ enum GizmoDragKind {
         plane_normal: Vec3,
         start_distance: f32,
     },
+    PlaneScale {
+        plane_normal: Vec3,
+        axis_u: Vec3,
+        axis_v: Vec3,
+        start_u: f32,
+        start_v: f32,
+    },
     CenterRotate {
         plane_normal: Vec3,
         start_vector: Vec3,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DragSnapState {
+    enabled: bool,
+    translate_step: f32,
+    rotate_step_radians: f32,
+    scale_step: f32,
 }
 
 #[derive(SystemParam)]
@@ -382,6 +461,7 @@ pub struct GizmoSystemParams<'w, 's> {
     state: ResMut<'w, EditorGizmoState>,
     render_gizmo: ResMut<'w, RenderGizmoState>,
     settings: Res<'w, EditorGizmoSettings>,
+    snap_settings: Res<'w, EditorGizmoSnapSettings>,
     outline_cache: ResMut<'w, EditorMeshOutlineCache>,
     spline_state: ResMut<'w, EditorSplineState>,
     pose_state: ResMut<'w, PoseEditorState>,
@@ -435,6 +515,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         mut state,
         mut render_gizmo,
         settings,
+        snap_settings,
         mut outline_cache,
         mut spline_state,
         mut pose_state,
@@ -457,8 +538,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
 
     state.suppress_selection = false;
     let input_manager = input.0.read();
+    let interaction_locked =
+        state.is_drag_active() || spline_state.dragging || spline_state.key_dragging;
     let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
-        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
+        pick_viewport_interaction_target(
+            input_manager.cursor_position,
+            &viewport_runtime,
+            interaction_locked,
+        );
     let viewport_state_changed = viewport_state.is_changed();
     let viewport_state =
         effective_viewport_state_for_pane(&viewport_state, &viewport_runtime, interaction_pane_id);
@@ -639,6 +726,11 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let spline_edit_active = spline_state.enabled && spline_selected && !pose_edit_active;
     if !spline_selected {
         spline_state.point_drag = None;
+        spline_state.selected_points.clear();
+        spline_state.active_point = None;
+        spline_state.hover_point = None;
+    } else if let Some(spline_ref) = spline.as_ref() {
+        normalize_spline_selection(&mut spline_state, spline_ref.0.points.len());
     }
 
     let pointer_in_viewport = viewport_rect
@@ -703,8 +795,18 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     ray,
                 ) {
                     spline_state.active_point = Some(new_index);
+                    spline_state.selected_points.clear();
+                    spline_state.selected_points.push(new_index);
                     spline_state.hover_point = Some(new_index);
-                    spline_state.point_drag = None;
+                    spline_state.point_drag = build_spline_point_drag_from_indices(
+                        &spline_mut.0,
+                        &[new_index],
+                        &target_transform,
+                        plane_origin,
+                        plane_origin,
+                        target_transform.rotation,
+                        GizmoMode::Translate,
+                    );
                     spline_state.drag_plane_origin = plane_origin;
                     spline_state.drag_plane_normal = plane_normal;
                     spline_state.key_dragging = true;
@@ -727,8 +829,18 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         request_begin_undo_group(&mut undo_state, "Spline");
                     }
                     spline_state.active_point = Some(new_index);
+                    spline_state.selected_points.clear();
+                    spline_state.selected_points.push(new_index);
                     spline_state.hover_point = Some(new_index);
-                    spline_state.point_drag = None;
+                    spline_state.point_drag = build_spline_point_drag_from_indices(
+                        &spline_mut.0,
+                        &[new_index],
+                        &target_transform,
+                        plane_origin,
+                        plane_origin,
+                        target_transform.rotation,
+                        GizmoMode::Translate,
+                    );
                     spline_state.drag_plane_origin = plane_origin;
                     spline_state.drag_plane_normal = plane_normal;
                     spline_state.key_dragging = true;
@@ -856,6 +968,26 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             || input_manager.is_key_active(KeyCode::ControlRight);
         let shift_active = input_manager.is_key_active(KeyCode::ShiftLeft)
             || input_manager.is_key_active(KeyCode::ShiftRight);
+        let alt_active = input_manager.is_key_active(KeyCode::AltLeft)
+            || input_manager.is_key_active(KeyCode::AltRight);
+        let mut snap_enabled = snap_settings.enabled;
+        if snap_settings.ctrl_toggles && control_active {
+            snap_enabled = !snap_enabled;
+        }
+        let mut snap_scale = 1.0f32;
+        if snap_settings.shift_fine && shift_active {
+            snap_scale *= snap_settings.fine_scale.max(0.001);
+        }
+        if snap_settings.alt_coarse && alt_active {
+            snap_scale *= snap_settings.coarse_scale.max(1.0);
+        }
+        let snap_state = DragSnapState {
+            enabled: snap_enabled,
+            translate_step: snap_settings.translate_step.max(0.0) * snap_scale,
+            rotate_step_radians: snap_settings.rotate_step_degrees.max(0.0).to_radians()
+                * snap_scale,
+            scale_step: snap_settings.scale_step.max(0.0) * snap_scale,
+        };
         let key_mode = if !wants_key && !control_active && !freecam_looking {
             if input_manager.was_just_pressed(KeyCode::KeyG) {
                 Some(GizmoMode::Translate)
@@ -891,19 +1023,18 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     state.drag = Some(drag_state);
                     state.key_drag_active = true;
                     if point_gizmo_active {
-                        if let Some(index) = spline_state.active_point {
-                            spline_state.point_drag = Some(SplinePointDrag {
-                                index,
-                                start_local: spline
-                                    .as_ref()
-                                    .and_then(|spline| spline.0.points.get(index))
-                                    .copied()
-                                    .unwrap_or(Vec3::ZERO),
-                                start_world: point_world,
+                        if let Some(spline_ref) = spline.as_ref() {
+                            let selected =
+                                spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                            spline_state.point_drag = build_spline_point_drag_from_indices(
+                                &spline_ref.0,
+                                &selected,
+                                &target_transform,
+                                point_world,
                                 pivot_world,
-                                start_rotation: rotation,
+                                rotation,
                                 mode,
-                            });
+                            );
                         }
                     }
                     if bone_gizmo_active {
@@ -951,19 +1082,18 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 state.drag = Some(drag_state);
                 state.key_drag_active = false;
                 if point_gizmo_active {
-                    if let Some(index) = spline_state.active_point {
-                        spline_state.point_drag = Some(SplinePointDrag {
-                            index,
-                            start_local: spline
-                                .as_ref()
-                                .and_then(|spline| spline.0.points.get(index))
-                                .copied()
-                                .unwrap_or(Vec3::ZERO),
-                            start_world: point_world,
+                    if let Some(spline_ref) = spline.as_ref() {
+                        let selected =
+                            spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                        spline_state.point_drag = build_spline_point_drag_from_indices(
+                            &spline_ref.0,
+                            &selected,
+                            &target_transform,
+                            point_world,
                             pivot_world,
-                            start_rotation: rotation,
-                            mode: state.mode,
-                        });
+                            rotation,
+                            state.mode,
+                        );
                     }
                 }
                 if bone_gizmo_active {
@@ -981,33 +1111,45 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 if let Some(point_drag) = spline_state.point_drag.as_ref() {
                     let mut drag_transform =
                         Transform::new(drag.start_transform.position, rotation, Vec3::ONE);
-                    apply_drag(&mut drag_transform, &drag, ray_origin, ray_dir, &settings);
-                    let new_world = match point_drag.mode {
-                        GizmoMode::Translate => drag_transform.position,
-                        GizmoMode::Rotate => {
-                            let delta =
-                                drag_transform.rotation * point_drag.start_rotation.inverse();
-                            point_drag.pivot_world
-                                + delta * (point_drag.start_world - point_drag.pivot_world)
-                        }
-                        GizmoMode::Scale => {
-                            let scale = drag_transform.scale;
-                            let local_offset = point_drag.start_rotation.inverse()
-                                * (point_drag.start_world - point_drag.pivot_world);
-                            let scaled_local = Vec3::new(
-                                local_offset.x * scale.x,
-                                local_offset.y * scale.y,
-                                local_offset.z * scale.z,
-                            );
-                            point_drag.pivot_world + point_drag.start_rotation * scaled_local
-                        }
-                        GizmoMode::None => point_drag.start_world,
-                    };
+                    apply_drag(
+                        &mut drag_transform,
+                        &drag,
+                        ray_origin,
+                        ray_dir,
+                        &settings,
+                        snap_state,
+                    );
+                    let translate_delta = drag_transform.position - point_drag.anchor_world;
+                    let rotate_delta =
+                        drag_transform.rotation * point_drag.start_rotation.inverse();
+                    let scale_delta = drag_transform.scale;
                     if let Some(spline_mut) = spline.as_mut() {
                         let inv_spline_matrix = target_transform.to_matrix().inverse();
-                        let local_hit = inv_spline_matrix.transform_point3(new_world);
-                        if point_drag.index < spline_mut.0.points.len() {
-                            spline_mut.0.points[point_drag.index] = local_hit;
+                        for point in point_drag.points.iter() {
+                            let new_world = match point_drag.mode {
+                                GizmoMode::Translate => point.start_world + translate_delta,
+                                GizmoMode::Rotate => {
+                                    point_drag.pivot_world
+                                        + rotate_delta
+                                            * (point.start_world - point_drag.pivot_world)
+                                }
+                                GizmoMode::Scale => {
+                                    let local_offset = point_drag.start_rotation.inverse()
+                                        * (point.start_world - point_drag.pivot_world);
+                                    let scaled_local = Vec3::new(
+                                        local_offset.x * scale_delta.x,
+                                        local_offset.y * scale_delta.y,
+                                        local_offset.z * scale_delta.z,
+                                    );
+                                    point_drag.pivot_world
+                                        + point_drag.start_rotation * scaled_local
+                                }
+                                GizmoMode::None => point.start_world,
+                            };
+                            let local_hit = inv_spline_matrix.transform_point3(new_world);
+                            if point.index < spline_mut.0.points.len() {
+                                spline_mut.0.points[point.index] = local_hit;
+                            }
                         }
                     }
                     did_apply = true;
@@ -1016,7 +1158,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         (pose_state.selected_joint, selected_parent_world)
                     {
                         let mut drag_transform = drag.start_transform;
-                        apply_drag(&mut drag_transform, &drag, ray_origin, ray_dir, &settings);
+                        apply_drag(
+                            &mut drag_transform,
+                            &drag,
+                            ray_origin,
+                            ray_dir,
+                            &settings,
+                            snap_state,
+                        );
                         let parent_matrix = parent_world.to_matrix();
                         let local_matrix = parent_matrix.inverse() * drag_transform.to_matrix();
                         let local = Transform::from_matrix(local_matrix);
@@ -1028,7 +1177,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         did_apply = true;
                     }
                 } else if !lock_entity_gizmo {
-                    apply_drag(&mut target_transform, &drag, ray_origin, ray_dir, &settings);
+                    apply_drag(
+                        &mut target_transform,
+                        &drag,
+                        ray_origin,
+                        ray_dir,
+                        &settings,
+                        snap_state,
+                    );
                     did_apply = true;
                 }
             }
@@ -1086,6 +1242,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             }
             spline_state.dragging = false;
             spline_state.key_dragging = false;
+            spline_state.point_drag = None;
             spline_state.hover_point = None;
         } else if wants_pointer && !allow_ui_raycast {
             if (spline_state.dragging || spline_state.key_dragging) && allow_undo {
@@ -1093,6 +1250,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             }
             spline_state.dragging = false;
             spline_state.key_dragging = false;
+            spline_state.point_drag = None;
             spline_state.hover_point = None;
         } else if let Some((ray_origin, ray_dir)) = ray {
             let plane_normal = spline_plane_normal(spline_state.draw_plane, &camera_transform);
@@ -1119,19 +1277,55 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             };
 
             spline_state.hover_point = hover_point;
+            let control_active = input_manager.is_key_active(KeyCode::ControlLeft)
+                || input_manager.is_key_active(KeyCode::ControlRight);
+            let shift_active = input_manager.is_key_active(KeyCode::ShiftLeft)
+                || input_manager.is_key_active(KeyCode::ShiftRight);
+            let selection_modifier = control_active || shift_active;
 
             if left_pressed && !spline_state.dragging {
                 if let Some(index) = hover_point {
-                    spline_state.active_point = Some(index);
-                    if allow_plane_drag {
+                    let point_count = spline
+                        .as_ref()
+                        .map(|spline| spline.0.points.len())
+                        .unwrap_or(0);
+                    apply_spline_point_click_selection(
+                        &mut spline_state,
+                        index,
+                        point_count,
+                        shift_active,
+                        control_active,
+                    );
+                    if allow_plane_drag && !selection_modifier {
                         spline_state.dragging = true;
-                        spline_state.drag_plane_origin = spline_matrix.transform_point3(
-                            spline
-                                .as_ref()
-                                .map(|spline| spline.0.points[index])
-                                .unwrap_or(Vec3::ZERO),
-                        );
                         spline_state.drag_plane_normal = plane_normal;
+                        if let Some(spline_ref) = spline.as_ref() {
+                            let selected =
+                                spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                            let anchor_world = spline_state
+                                .active_point
+                                .and_then(|active_index| {
+                                    spline_ref
+                                        .0
+                                        .points
+                                        .get(active_index)
+                                        .copied()
+                                        .map(|point| spline_matrix.transform_point3(point))
+                                })
+                                .unwrap_or_else(|| spline_matrix.transform_point3(Vec3::ZERO));
+                            spline_state.drag_plane_origin = anchor_world;
+                            spline_state.point_drag = build_spline_point_drag_from_indices(
+                                &spline_ref.0,
+                                &selected,
+                                &target_transform,
+                                anchor_world,
+                                anchor_world,
+                                target_transform.rotation,
+                                GizmoMode::Translate,
+                            );
+                        } else {
+                            spline_state.point_drag = None;
+                        }
                         if allow_undo {
                             request_begin_undo_group(&mut undo_state, "Spline");
                         }
@@ -1154,22 +1348,48 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                                 let index = index.min(spline_mut.0.points.len());
                                 spline_mut.0.points.insert(index, local_hit);
                                 spline_state.active_point = Some(index);
+                                spline_state.selected_points.clear();
+                                spline_state.selected_points.push(index);
                             } else {
                                 spline_mut.0.points.push(local_hit);
-                                spline_state.active_point = Some(spline_mut.0.points.len() - 1);
+                                let index = spline_mut.0.points.len() - 1;
+                                spline_state.active_point = Some(index);
+                                spline_state.selected_points.clear();
+                                spline_state.selected_points.push(index);
                             }
+                            spline_state.point_drag = None;
                         }
                         if allow_undo {
                             request_begin_undo_group(&mut undo_state, "Spline");
                             request_end_undo_group(&mut undo_state);
                         }
                     }
-                } else if !spline_edit_active {
+                } else if !spline_edit_active
+                    || (!selection_modifier
+                        && state.drag.is_none()
+                        && !state.key_drag_active
+                        && state.hover_axis == GizmoAxis::None)
+                {
                     spline_state.active_point = None;
+                    spline_state.selected_points.clear();
                 }
             }
 
             if (spline_state.dragging || spline_state.key_dragging) && allow_plane_drag {
+                let apply_plane_drag =
+                    |spline_state: &EditorSplineState, spline_mut: &mut BevySpline, hit: Vec3| {
+                        let Some(point_drag) = spline_state.point_drag.as_ref() else {
+                            return;
+                        };
+                        let delta = hit - point_drag.anchor_world;
+                        for point in point_drag.points.iter() {
+                            let new_world = point.start_world + delta;
+                            let local_hit = inv_spline_matrix.transform_point3(new_world);
+                            if point.index < spline_mut.0.points.len() {
+                                spline_mut.0.points[point.index] = local_hit;
+                            }
+                        }
+                    };
                 if spline_state.key_dragging {
                     if let Some(hit) = intersect_ray_plane(
                         ray_origin,
@@ -1177,17 +1397,13 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         spline_state.drag_plane_origin,
                         spline_state.drag_plane_normal,
                     ) {
-                        let local_hit = inv_spline_matrix.transform_point3(hit);
                         if let Some(spline_mut) = spline.as_mut() {
-                            if let Some(index) = spline_state.active_point {
-                                if index < spline_mut.0.points.len() {
-                                    spline_mut.0.points[index] = local_hit;
-                                }
-                            }
+                            apply_plane_drag(&spline_state, spline_mut, hit);
                         }
                     }
                     if left_pressed {
                         spline_state.key_dragging = false;
+                        spline_state.point_drag = None;
                         if allow_undo {
                             request_end_undo_group(&mut undo_state);
                         }
@@ -1199,17 +1415,13 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         spline_state.drag_plane_origin,
                         spline_state.drag_plane_normal,
                     ) {
-                        let local_hit = inv_spline_matrix.transform_point3(hit);
                         if let Some(spline_mut) = spline.as_mut() {
-                            if let Some(index) = spline_state.active_point {
-                                if index < spline_mut.0.points.len() {
-                                    spline_mut.0.points[index] = local_hit;
-                                }
-                            }
+                            apply_plane_drag(&spline_state, spline_mut, hit);
                         }
                     }
                 } else {
                     spline_state.dragging = false;
+                    spline_state.point_drag = None;
                     if allow_undo {
                         request_end_undo_group(&mut undo_state);
                     }
@@ -1217,12 +1429,17 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             } else if !allow_plane_drag {
                 spline_state.dragging = false;
                 spline_state.key_dragging = false;
+                if !(point_gizmo_active && (state.drag.is_some() || state.key_drag_active)) {
+                    spline_state.point_drag = None;
+                }
             }
         }
     } else {
         spline_state.dragging = false;
         spline_state.key_dragging = false;
+        spline_state.point_drag = None;
         spline_state.hover_point = None;
+        spline_state.selected_points.clear();
         spline_state.active_point = None;
     }
 
@@ -1328,20 +1545,6 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     end: origin + z,
                 });
             }
-        }
-    }
-    if !combined_lines.is_empty() {
-        let gizmo_scale = if edit_gizmo_active {
-            Vec3::ONE
-        } else {
-            target_transform.scale
-        };
-        let gizmo_matrix =
-            Mat4::from_scale_rotation_translation(gizmo_scale, rotation, gizmo_origin);
-        let inv_gizmo = gizmo_matrix.inverse();
-        for line in combined_lines.iter_mut() {
-            line.start = inv_gizmo.transform_point3(line.start);
-            line.end = inv_gizmo.transform_point3(line.end);
         }
     }
     let outline_lines = if lines_equal(&prev_outline_lines, &combined_lines) {
@@ -1466,7 +1669,7 @@ pub fn selection_system(params: SelectionSystemParams) {
     } = params;
     let input_manager = input.0.read();
     let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
-        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime);
+        pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime, false);
     let viewport_state =
         effective_viewport_state_for_pane(&viewport_state, &viewport_runtime, interaction_pane_id);
 
@@ -2025,7 +2228,14 @@ fn selection_bounds(
 fn pick_viewport_interaction_target(
     cursor: glam::DVec2,
     viewport_runtime: &EditorViewportRuntime,
+    prefer_active: bool,
 ) -> (Option<ViewportRectPixels>, Option<Entity>, Option<u64>) {
+    let active_pane = viewport_runtime.active_pane_id.and_then(|pane_id| {
+        viewport_runtime
+            .pane_requests
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+    });
     let hovered_pane = viewport_runtime
         .pane_requests
         .iter()
@@ -2036,16 +2246,14 @@ fn pick_viewport_interaction_target(
                 .iter()
                 .find(|pane| pane.viewport_rect.contains(cursor))
         });
-    let active_pane = viewport_runtime.active_pane_id.and_then(|pane_id| {
-        viewport_runtime
-            .pane_requests
-            .iter()
-            .find(|pane| pane.pane_id == pane_id)
-    });
+    let primary_pane = if prefer_active {
+        active_pane.or(hovered_pane)
+    } else {
+        hovered_pane.or(active_pane)
+    };
 
-    let viewport_rect = hovered_pane
+    let viewport_rect = primary_pane
         .map(|pane| pane.viewport_rect)
-        .or_else(|| active_pane.map(|pane| pane.viewport_rect))
         .or(viewport_runtime.main_rect_pixels)
         .or_else(|| {
             viewport_runtime
@@ -2053,9 +2261,8 @@ fn pick_viewport_interaction_target(
                 .first()
                 .map(|pane| pane.viewport_rect)
         });
-    let camera_entity = hovered_pane
+    let camera_entity = primary_pane
         .map(|pane| pane.camera_entity)
-        .or_else(|| active_pane.map(|pane| pane.camera_entity))
         .or(viewport_runtime.active_camera_entity)
         .or_else(|| {
             viewport_runtime
@@ -2063,15 +2270,12 @@ fn pick_viewport_interaction_target(
                 .first()
                 .map(|pane| pane.camera_entity)
         });
-    let pane_id = hovered_pane
-        .map(|pane| pane.pane_id)
-        .or_else(|| active_pane.map(|pane| pane.pane_id))
-        .or_else(|| {
-            viewport_runtime
-                .pane_requests
-                .first()
-                .map(|pane| pane.pane_id)
-        });
+    let pane_id = primary_pane.map(|pane| pane.pane_id).or_else(|| {
+        viewport_runtime
+            .pane_requests
+            .first()
+            .map(|pane| pane.pane_id)
+    });
 
     (viewport_rect, camera_entity, pane_id)
 }
@@ -2305,6 +2509,37 @@ fn pick_gizmo(
 
     match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
+            let plane_offset = size * settings.plane_offset_scale.max(0.0);
+            let plane_size = size * settings.plane_size_scale.max(0.0);
+            let plane_padding = (size * settings.plane_pick_padding_scale)
+                .max(settings.plane_pick_padding_min)
+                .max(0.0);
+            if plane_size > 0.0 {
+                let min = plane_offset - plane_padding;
+                let max = plane_offset + plane_size + plane_padding;
+                let plane_axis_ids = [GizmoAxis::XY, GizmoAxis::XZ, GizmoAxis::YZ];
+                for axis in plane_axis_ids {
+                    let Some((axis_u, axis_v, normal)) = plane_axes(rotation, axis) else {
+                        continue;
+                    };
+                    let Some(hit) = intersect_ray_plane(ray_origin, ray_dir, origin, normal) else {
+                        continue;
+                    };
+                    let rel = hit - origin;
+                    let u = rel.dot(axis_u);
+                    let v = rel.dot(axis_v);
+                    if u >= min && u <= max && v >= min && v <= max {
+                        let center = plane_offset + plane_size * 0.5;
+                        let score = ((u - center).abs() + (v - center).abs())
+                            / (plane_size + plane_padding * 2.0).max(1.0e-4);
+                        if score < best_score {
+                            best_score = score;
+                            best_axis = axis;
+                        }
+                    }
+                }
+            }
+
             let threshold =
                 (size * settings.axis_pick_radius_scale).max(settings.axis_pick_radius_min);
             for (axis, dir) in axes {
@@ -2406,6 +2641,42 @@ fn begin_drag(
         }
     }
 
+    if let Some((axis_u, axis_v, plane_normal)) = plane_axes(start_transform.rotation, axis) {
+        match mode {
+            GizmoMode::Translate => {
+                let hit = intersect_ray_plane(ray_origin, ray_dir, origin, plane_normal)?;
+                return Some(GizmoDragState {
+                    axis,
+                    mode,
+                    start_transform,
+                    kind: GizmoDragKind::CenterTranslate {
+                        plane_normal,
+                        start_hit: hit,
+                    },
+                });
+            }
+            GizmoMode::Scale => {
+                let hit = intersect_ray_plane(ray_origin, ray_dir, origin, plane_normal)?;
+                let rel = hit - origin;
+                let start_u = rel.dot(axis_u).abs().max(1.0e-4);
+                let start_v = rel.dot(axis_v).abs().max(1.0e-4);
+                return Some(GizmoDragState {
+                    axis,
+                    mode,
+                    start_transform,
+                    kind: GizmoDragKind::PlaneScale {
+                        plane_normal,
+                        axis_u,
+                        axis_v,
+                        start_u,
+                        start_v,
+                    },
+                });
+            }
+            GizmoMode::Rotate | GizmoMode::None => return None,
+        }
+    }
+
     let axis_dir = axis_direction(start_transform.rotation, axis).normalize_or_zero();
     match mode {
         GizmoMode::Translate | GizmoMode::Scale => {
@@ -2447,6 +2718,7 @@ fn apply_drag(
     ray_origin: Vec3,
     ray_dir: Vec3,
     settings: &EditorGizmoSettings,
+    snap: DragSnapState,
 ) {
     let origin = drag.start_transform.position;
     match drag.mode {
@@ -2458,7 +2730,10 @@ fn apply_drag(
                 if let Some((axis_t, _)) =
                     closest_point_on_axis(ray_origin, ray_dir, origin, axis_dir)
                 {
-                    let delta = axis_t - start_axis_param;
+                    let mut delta = axis_t - start_axis_param;
+                    if snap.enabled && snap.translate_step > 1.0e-6 {
+                        delta = snap_to_step(delta, snap.translate_step);
+                    }
                     transform.position = drag.start_transform.position + axis_dir * delta;
                 }
             }
@@ -2467,7 +2742,10 @@ fn apply_drag(
                 start_hit,
             } => {
                 if let Some(hit) = intersect_ray_plane(ray_origin, ray_dir, origin, plane_normal) {
-                    let delta = hit - start_hit;
+                    let mut delta = hit - start_hit;
+                    if snap.enabled && snap.translate_step > 1.0e-6 {
+                        delta = snap_vec3(delta, snap.translate_step);
+                    }
                     transform.position = drag.start_transform.position + delta;
                 }
             }
@@ -2489,6 +2767,9 @@ fn apply_drag(
                         GizmoAxis::Z => scale.z = (scale.z + delta).max(settings.scale_min),
                         _ => {}
                     }
+                    if snap.enabled && snap.scale_step > 1.0e-6 {
+                        scale = snap_scale_vec3(scale, snap.scale_step, settings.scale_min);
+                    }
                     transform.scale = scale;
                 }
             }
@@ -2503,6 +2784,44 @@ fn apply_drag(
                     scale.x = scale.x.max(settings.scale_min);
                     scale.y = scale.y.max(settings.scale_min);
                     scale.z = scale.z.max(settings.scale_min);
+                    if snap.enabled && snap.scale_step > 1.0e-6 {
+                        scale = snap_scale_vec3(scale, snap.scale_step, settings.scale_min);
+                    }
+                    transform.scale = scale;
+                }
+            }
+            GizmoDragKind::PlaneScale {
+                plane_normal,
+                axis_u,
+                axis_v,
+                start_u,
+                start_v,
+            } => {
+                if let Some(hit) = intersect_ray_plane(ray_origin, ray_dir, origin, plane_normal) {
+                    let rel = hit - origin;
+                    let current_u = rel.dot(axis_u).abs().max(1.0e-4);
+                    let current_v = rel.dot(axis_v).abs().max(1.0e-4);
+                    let factor_u = (current_u / start_u.max(1.0e-4)).max(1.0e-4);
+                    let factor_v = (current_v / start_v.max(1.0e-4)).max(1.0e-4);
+                    let mut scale = drag.start_transform.scale;
+                    match drag.axis {
+                        GizmoAxis::XY => {
+                            scale.x = (scale.x * factor_u).max(settings.scale_min);
+                            scale.y = (scale.y * factor_v).max(settings.scale_min);
+                        }
+                        GizmoAxis::XZ => {
+                            scale.x = (scale.x * factor_u).max(settings.scale_min);
+                            scale.z = (scale.z * factor_v).max(settings.scale_min);
+                        }
+                        GizmoAxis::YZ => {
+                            scale.y = (scale.y * factor_u).max(settings.scale_min);
+                            scale.z = (scale.z * factor_v).max(settings.scale_min);
+                        }
+                        _ => {}
+                    }
+                    if snap.enabled && snap.scale_step > 1.0e-6 {
+                        scale = snap_scale_vec3(scale, snap.scale_step, settings.scale_min);
+                    }
                     transform.scale = scale;
                 }
             }
@@ -2521,6 +2840,9 @@ fn apply_drag(
                         if axis_dir.dot(cross) < 0.0 {
                             angle = -angle;
                         }
+                        if snap.enabled && snap.rotate_step_radians > 1.0e-6 {
+                            angle = snap_to_step(angle, snap.rotate_step_radians);
+                        }
                         let delta = Quat::from_axis_angle(axis_dir, angle);
                         transform.rotation = delta * drag.start_transform.rotation;
                     }
@@ -2538,6 +2860,9 @@ fn apply_drag(
                         if plane_normal.dot(cross) < 0.0 {
                             angle = -angle;
                         }
+                        if snap.enabled && snap.rotate_step_radians > 1.0e-6 {
+                            angle = snap_to_step(angle, snap.rotate_step_radians);
+                        }
                         let delta = Quat::from_axis_angle(plane_normal, angle);
                         transform.rotation = delta * drag.start_transform.rotation;
                     }
@@ -2547,6 +2872,29 @@ fn apply_drag(
         },
         GizmoMode::None => {}
     }
+}
+
+fn snap_to_step(value: f32, step: f32) -> f32 {
+    if !value.is_finite() || step <= 1.0e-6 || !step.is_finite() {
+        return value;
+    }
+    (value / step).round() * step
+}
+
+fn snap_vec3(value: Vec3, step: f32) -> Vec3 {
+    Vec3::new(
+        snap_to_step(value.x, step),
+        snap_to_step(value.y, step),
+        snap_to_step(value.z, step),
+    )
+}
+
+fn snap_scale_vec3(scale: Vec3, step: f32, scale_min: f32) -> Vec3 {
+    Vec3::new(
+        snap_to_step(scale.x, step).max(scale_min),
+        snap_to_step(scale.y, step).max(scale_min),
+        snap_to_step(scale.z, step).max(scale_min),
+    )
 }
 
 fn ray_point_distance(ray_origin: Vec3, ray_dir: Vec3, point: Vec3) -> f32 {
@@ -2727,12 +3075,166 @@ fn build_spline_handle_lines(
     lines
 }
 
+fn normalize_spline_selection(state: &mut EditorSplineState, point_count: usize) {
+    state.selected_points.retain(|index| *index < point_count);
+    state.selected_points.sort_unstable();
+    state.selected_points.dedup();
+
+    if let Some(active) = state.active_point {
+        if active >= point_count {
+            state.active_point = None;
+        } else if !state.selected_points.contains(&active) {
+            state.selected_points.clear();
+            state.selected_points.push(active);
+        }
+    } else if let Some(index) = state.selected_points.first().copied() {
+        state.active_point = Some(index);
+    }
+
+    if let Some(hover) = state.hover_point {
+        if hover >= point_count {
+            state.hover_point = None;
+        }
+    }
+
+    if let Some(point_drag) = state.point_drag.as_mut() {
+        point_drag.points.retain(|point| point.index < point_count);
+        if point_drag.points.is_empty() {
+            state.point_drag = None;
+        }
+    }
+}
+
+fn spline_selected_indices(state: &EditorSplineState, point_count: usize) -> Vec<usize> {
+    let mut selected = state
+        .selected_points
+        .iter()
+        .copied()
+        .filter(|index| *index < point_count)
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    selected.dedup();
+    if selected.is_empty() {
+        if let Some(active) = state.active_point {
+            if active < point_count {
+                selected.push(active);
+            }
+        }
+    }
+    selected
+}
+
+fn apply_spline_point_click_selection(
+    state: &mut EditorSplineState,
+    clicked: usize,
+    point_count: usize,
+    shift_active: bool,
+    control_active: bool,
+) {
+    if point_count == 0 || clicked >= point_count {
+        return;
+    }
+
+    if control_active {
+        if let Some(index) = state
+            .selected_points
+            .iter()
+            .position(|selected| *selected == clicked)
+        {
+            state.selected_points.remove(index);
+            if state.selected_points.is_empty() {
+                state.active_point = None;
+            } else if state.active_point == Some(clicked) {
+                state.active_point = state.selected_points.first().copied();
+            }
+        } else {
+            state.selected_points.push(clicked);
+            state.selected_points.sort_unstable();
+            state.selected_points.dedup();
+            state.active_point = Some(clicked);
+        }
+        return;
+    }
+
+    if shift_active {
+        if let Some(active) = state.active_point {
+            let start = active.min(clicked);
+            let end = active.max(clicked);
+            state.selected_points = (start..=end).collect();
+        } else {
+            state.selected_points.clear();
+            state.selected_points.push(clicked);
+        }
+        state.active_point = Some(clicked);
+        return;
+    }
+
+    state.selected_points.clear();
+    state.selected_points.push(clicked);
+    state.active_point = Some(clicked);
+}
+
+fn build_spline_point_drag_from_indices(
+    spline: &Spline,
+    indices: &[usize],
+    spline_transform: &Transform,
+    anchor_world: Vec3,
+    pivot_world: Vec3,
+    start_rotation: Quat,
+    mode: GizmoMode,
+) -> Option<SplinePointDrag> {
+    let mut unique_indices = indices
+        .iter()
+        .copied()
+        .filter(|index| *index < spline.points.len())
+        .collect::<Vec<_>>();
+    unique_indices.sort_unstable();
+    unique_indices.dedup();
+    if unique_indices.is_empty() {
+        return None;
+    }
+
+    let spline_matrix = spline_transform.to_matrix();
+    let mut points = Vec::with_capacity(unique_indices.len());
+    for index in unique_indices {
+        if let Some(local) = spline.points.get(index).copied() {
+            points.push(SplineDragPoint {
+                index,
+                start_world: spline_matrix.transform_point3(local),
+            });
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+
+    Some(SplinePointDrag {
+        points,
+        anchor_world,
+        pivot_world,
+        start_rotation,
+        mode,
+    })
+}
+
 fn axis_direction(rotation: Quat, axis: GizmoAxis) -> Vec3 {
     match axis {
         GizmoAxis::X => rotation * Vec3::X,
         GizmoAxis::Y => rotation * Vec3::Y,
         GizmoAxis::Z => rotation * Vec3::Z,
         _ => Vec3::ZERO,
+    }
+}
+
+fn plane_axes(rotation: Quat, axis: GizmoAxis) -> Option<(Vec3, Vec3, Vec3)> {
+    let x = rotation * Vec3::X;
+    let y = rotation * Vec3::Y;
+    let z = rotation * Vec3::Z;
+    match axis {
+        GizmoAxis::XY => Some((x, y, z)),
+        GizmoAxis::XZ => Some((x, z, y)),
+        GizmoAxis::YZ => Some((y, z, x)),
+        _ => None,
     }
 }
 

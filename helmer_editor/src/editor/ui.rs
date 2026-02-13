@@ -67,7 +67,7 @@ use crate::editor::{
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue, DynamicValueKind},
     end_material_undo_group, end_undo_group, enforce_undo_cap, ensure_play_camera,
     ensure_viewport_camera_for_pane,
-    gizmos::{EditorGizmoSettings, EditorGizmoState},
+    gizmos::{EditorGizmoSettings, EditorGizmoSnapSettings, EditorGizmoState},
     project::{
         EditorProject, ProjectConfig, default_rust_script_template_full,
         default_script_template_full, rust_script_manifest_template,
@@ -261,6 +261,7 @@ pub struct EditorPaneViewportSettings {
     pub show_spot_light_gizmos: bool,
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
+    pub show_navigation_gizmo: bool,
     pub freecam_sensitivity: f32,
     pub freecam_smoothing: f32,
 }
@@ -276,6 +277,7 @@ impl EditorPaneViewportSettings {
             show_spot_light_gizmos: state.show_spot_light_gizmos,
             show_spline_paths: state.show_spline_paths,
             show_spline_points: state.show_spline_points,
+            show_navigation_gizmo: state.show_navigation_gizmo,
             freecam_sensitivity: state.freecam_sensitivity,
             freecam_smoothing: state.freecam_smoothing,
         }
@@ -1606,6 +1608,320 @@ fn fit_rect_to_aspect(container: Rect, aspect_ratio: f32) -> Rect {
     }
 }
 
+fn navigation_focus_point(world: &World) -> Vec3 {
+    world
+        .get_resource::<InspectorSelectedEntityResource>()
+        .and_then(|selection| selection.0)
+        .and_then(|entity| {
+            world
+                .get::<BevyTransform>(entity)
+                .map(|transform| transform.0.position)
+        })
+        .unwrap_or(Vec3::ZERO)
+}
+
+fn navigation_up_vector(forward: Vec3) -> Vec3 {
+    if forward.dot(Vec3::Y).abs() > 0.98 {
+        if forward.y > 0.0 {
+            Vec3::NEG_Z
+        } else {
+            Vec3::Z
+        }
+    } else {
+        Vec3::Y
+    }
+}
+
+fn navigation_rotation_from_forward(forward: Vec3) -> Quat {
+    let forward = forward.normalize_or_zero();
+    if forward.length_squared() < 1.0e-6 {
+        return Quat::IDENTITY;
+    }
+
+    let mut up = navigation_up_vector(forward).normalize_or_zero();
+    let mut right = up.cross(forward).normalize_or_zero();
+    if right.length_squared() < 1.0e-6 {
+        up = Vec3::Z;
+        right = up.cross(forward).normalize_or_zero();
+    }
+    if right.length_squared() < 1.0e-6 {
+        right = Vec3::X;
+    }
+    let up = forward.cross(right).normalize_or_zero();
+    let basis = Mat3::from_cols(right, up, forward);
+    Quat::from_mat3(&basis)
+}
+
+fn draw_viewport_navigation_gizmo(
+    ui: &mut Ui,
+    world: &mut World,
+    scene_rect: Rect,
+    camera_entity: Entity,
+    pane_id: Option<u64>,
+    enabled: bool,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    if scene_rect.width() < 96.0 || scene_rect.height() < 96.0 {
+        return false;
+    }
+
+    let camera_rotation = if let Some(transform) = world.get::<BevyTransform>(camera_entity) {
+        transform.0.rotation
+    } else {
+        return false;
+    };
+
+    let radius = scene_rect
+        .width()
+        .min(scene_rect.height())
+        .mul_add(0.085, 0.0)
+        .clamp(34.0, 58.0);
+    let center = Pos2::new(
+        scene_rect.max.x - (radius + 12.0),
+        scene_rect.min.y + (radius + 12.0),
+    );
+    let orbit_radius = (radius - 14.0).max(12.0);
+    let home_radius = (radius * 0.18).clamp(7.0, 11.0);
+    let orbit_id = ui.id().with((
+        "viewport_nav_orbit",
+        pane_id.unwrap_or(u64::MAX),
+        camera_entity.to_bits(),
+    ));
+    let orbit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0 + 12.0).max(24.0)));
+    let orbit_response = ui.interact(orbit_rect, orbit_id, Sense::click_and_drag());
+
+    let pointer_inside_widget = ui
+        .ctx()
+        .input(|input| {
+            input
+                .pointer
+                .interact_pos()
+                .or_else(|| input.pointer.hover_pos())
+        })
+        .is_some_and(|pointer| pointer.distance(center) <= radius + 6.0);
+
+    ui.painter().circle_filled(
+        center,
+        radius,
+        Color32::from_rgba_unmultiplied(16, 20, 26, 180),
+    );
+    ui.painter().circle_stroke(
+        center,
+        radius,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(220, 220, 220, 90)),
+    );
+
+    let home_id = ui.id().with((
+        "viewport_nav_home",
+        pane_id.unwrap_or(u64::MAX),
+        camera_entity.to_bits(),
+    ));
+    let home_rect =
+        Rect::from_center_size(center, Vec2::splat((home_radius * 2.0 + 6.0).max(16.0)));
+    let home_response = ui.interact(home_rect, home_id, Sense::click());
+    let home_color = if home_response.hovered() {
+        Color32::from_rgb(235, 235, 235)
+    } else {
+        Color32::from_rgb(205, 205, 205)
+    };
+    ui.painter().circle_filled(center, home_radius, home_color);
+    ui.painter().text(
+        center,
+        Align2::CENTER_CENTER,
+        "H",
+        FontId::proportional((home_radius + 2.0).max(9.0)),
+        Color32::from_rgb(20, 24, 30),
+    );
+
+    struct NavMarker {
+        id: usize,
+        label: &'static str,
+        axis: Vec3,
+        base_color: Color32,
+        depth: f32,
+        center: Pos2,
+        radius: f32,
+    }
+
+    let axis_markers = [
+        ("+X", Vec3::X, Color32::from_rgb(220, 70, 70)),
+        ("-X", -Vec3::X, Color32::from_rgb(130, 55, 55)),
+        ("+Y", Vec3::Y, Color32::from_rgb(70, 205, 95)),
+        ("-Y", -Vec3::Y, Color32::from_rgb(55, 120, 70)),
+        ("+Z", Vec3::Z, Color32::from_rgb(95, 145, 235)),
+        ("-Z", -Vec3::Z, Color32::from_rgb(55, 85, 135)),
+    ];
+
+    let inv_camera = camera_rotation.inverse();
+    let mut markers = axis_markers
+        .iter()
+        .enumerate()
+        .map(|(index, (label, axis, color))| {
+            let view = inv_camera * *axis;
+            let marker_center = center + Vec2::new(view.x, -view.y) * orbit_radius;
+            let radius = if view.z >= 0.0 { 8.0 } else { 6.5 };
+            NavMarker {
+                id: index,
+                label,
+                axis: *axis,
+                base_color: *color,
+                depth: view.z,
+                center: marker_center,
+                radius,
+            }
+        })
+        .collect::<Vec<_>>();
+    markers.sort_by(|a, b| {
+        a.depth
+            .partial_cmp(&b.depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut target_axis: Option<Vec3> = None;
+    let mut marker_hovered = false;
+    for marker in markers {
+        let marker_id = ui.id().with((
+            "viewport_nav_axis",
+            pane_id.unwrap_or(u64::MAX),
+            camera_entity.to_bits(),
+            marker.id,
+        ));
+        let marker_rect = Rect::from_center_size(
+            marker.center,
+            Vec2::splat((marker.radius * 2.0 + 6.0).max(14.0)),
+        );
+        let response = ui.interact(marker_rect, marker_id, Sense::click());
+        let front = marker.depth >= 0.0;
+        let mut fill = marker.base_color;
+        if !front {
+            fill = Color32::from_rgba_unmultiplied(fill.r() / 2, fill.g() / 2, fill.b() / 2, 200);
+        }
+        if response.hovered() {
+            marker_hovered = true;
+            fill = Color32::from_rgb(
+                fill.r().saturating_add(24),
+                fill.g().saturating_add(24),
+                fill.b().saturating_add(24),
+            );
+        }
+        let to_marker = marker.center - center;
+        let len = to_marker.length().max(1.0);
+        let line_end = center + to_marker * ((orbit_radius - marker.radius * 0.6).max(2.0) / len);
+        let line_color = Color32::from_rgba_unmultiplied(
+            fill.r(),
+            fill.g(),
+            fill.b(),
+            if front { 220 } else { 135 },
+        );
+        ui.painter().line_segment(
+            [center, line_end],
+            Stroke::new(if front { 2.0 } else { 1.3 }, line_color),
+        );
+        ui.painter()
+            .circle_filled(marker.center, marker.radius, fill);
+        ui.painter().circle_stroke(
+            marker.center,
+            marker.radius,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(16, 20, 24, 180)),
+        );
+        ui.painter().text(
+            marker.center,
+            Align2::CENTER_CENTER,
+            marker.label,
+            FontId::proportional(if front { 10.0 } else { 9.0 }),
+            Color32::from_rgb(238, 238, 238),
+        );
+        if response.clicked() {
+            target_axis = Some(marker.axis);
+        }
+    }
+    ui.painter()
+        .circle_filled(center, 2.4, Color32::from_rgb(236, 236, 236));
+
+    let drag_background = orbit_response.dragged_by(PointerButton::Primary)
+        && !home_response.hovered()
+        && !marker_hovered
+        && target_axis.is_none();
+    if drag_background {
+        let pointer_delta = ui.ctx().input(|input| input.pointer.delta());
+        if pointer_delta.length_sq() > 0.0 {
+            let focus = navigation_focus_point(world);
+            let current_transform = world
+                .get::<BevyTransform>(camera_entity)
+                .map(|transform| transform.0)
+                .unwrap_or_default();
+            let mut distance = current_transform.position.distance(focus);
+            if !distance.is_finite() || distance < 0.25 {
+                distance = 5.0;
+            }
+            let mut forward = (focus - current_transform.position).normalize_or_zero();
+            if forward.length_squared() < 1.0e-6 {
+                forward = current_transform.forward().normalize_or_zero();
+            }
+            if forward.length_squared() > 1.0e-6 {
+                let mut yaw = forward.x.atan2(forward.z);
+                let mut pitch = forward.y.clamp(-1.0, 1.0).asin();
+                let sensitivity = 0.0085;
+                yaw -= pointer_delta.x * sensitivity;
+                pitch = (pitch + pointer_delta.y * sensitivity).clamp(-1.45, 1.45);
+                let cos_pitch = pitch.cos();
+                let new_forward =
+                    Vec3::new(yaw.sin() * cos_pitch, pitch.sin(), yaw.cos() * cos_pitch)
+                        .normalize_or_zero();
+                let position = focus - new_forward * distance;
+                let rotation = navigation_rotation_from_forward(new_forward);
+                if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
+                    transform.0.position = position;
+                    transform.0.rotation = rotation;
+                }
+                if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+                    runtime.active_camera_entity = Some(camera_entity);
+                    if let Some(pane_id) = pane_id {
+                        runtime.active_pane_id = Some(pane_id);
+                    }
+                    runtime.keyboard_focus = true;
+                }
+            }
+        }
+    }
+
+    let clicked_home = home_response.clicked();
+    if !drag_background && (clicked_home || target_axis.is_some()) {
+        let focus = navigation_focus_point(world);
+        let current_transform = world
+            .get::<BevyTransform>(camera_entity)
+            .map(|transform| transform.0)
+            .unwrap_or_default();
+        let mut distance = current_transform.position.distance(focus);
+        if !distance.is_finite() || distance < 0.25 {
+            distance = 5.0;
+        }
+        let offset_dir = target_axis.unwrap_or_else(|| Vec3::new(1.0, 1.0, 1.0).normalize());
+        let position = focus + offset_dir * distance;
+        let forward = (focus - position).normalize_or_zero();
+        let rotation = navigation_rotation_from_forward(forward);
+
+        if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
+            transform.0.position = position;
+            transform.0.rotation = rotation;
+        }
+        if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+            runtime.active_camera_entity = Some(camera_entity);
+            if let Some(pane_id) = pane_id {
+                runtime.active_pane_id = Some(pane_id);
+            }
+            runtime.keyboard_focus = true;
+        }
+    }
+
+    pointer_inside_widget
+        || home_response.hovered()
+        || marker_hovered
+        || orbit_response.dragged_by(PointerButton::Primary)
+}
+
 fn first_camera_with_component<T: Component>(world: &mut World) -> Option<Entity> {
     let mut query = world.query_filtered::<(Entity, &BevyCamera), With<T>>();
     query.iter(world).map(|(entity, _)| entity).next()
@@ -1653,6 +1969,67 @@ fn ensure_pane_viewport_texture_id(
         })
         .id();
     Some(id)
+}
+
+fn draw_gizmo_menu_contents(
+    ui: &mut Ui,
+    gizmos_in_play: &mut bool,
+    show_camera_gizmos: &mut bool,
+    show_directional_light_gizmos: &mut bool,
+    show_point_light_gizmos: &mut bool,
+    show_spot_light_gizmos: &mut bool,
+    show_spline_paths: &mut bool,
+    show_spline_points: &mut bool,
+    show_navigation_gizmo: &mut bool,
+    gizmo_mode: &mut GizmoMode,
+    snap_settings: &mut EditorGizmoSnapSettings,
+) {
+    ui.checkbox(gizmos_in_play, "Show Gizmos in Play");
+    ui.checkbox(show_camera_gizmos, "Show Camera Gizmos");
+    ui.checkbox(
+        show_directional_light_gizmos,
+        "Show Directional Light Gizmos",
+    );
+    ui.checkbox(show_point_light_gizmos, "Show Point Light Gizmos");
+    ui.checkbox(show_spot_light_gizmos, "Show Spot Light Gizmos");
+    ui.checkbox(show_spline_paths, "Show Spline Paths");
+    ui.checkbox(show_spline_points, "Show Spline Points");
+    ui.checkbox(show_navigation_gizmo, "Show Navigation Gizmo");
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(gizmo_mode, GizmoMode::None, "Select");
+        ui.selectable_value(gizmo_mode, GizmoMode::Translate, "Move");
+        ui.selectable_value(gizmo_mode, GizmoMode::Rotate, "Rotate");
+        ui.selectable_value(gizmo_mode, GizmoMode::Scale, "Scale");
+    });
+    ui.separator();
+    ui.label("Snapping");
+    ui.checkbox(&mut snap_settings.enabled, "Enable Snapping");
+    ui.checkbox(&mut snap_settings.ctrl_toggles, "Ctrl Inverts Snap");
+    ui.checkbox(&mut snap_settings.shift_fine, "Shift Fine Step");
+    ui.checkbox(&mut snap_settings.alt_coarse, "Alt Coarse Step");
+    ui.horizontal(|ui| {
+        ui.label("Move Step");
+        ui.add(DragValue::new(&mut snap_settings.translate_step).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Rotate Step (deg)");
+        ui.add(DragValue::new(&mut snap_settings.rotate_step_degrees).speed(0.5));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Scale Step");
+        ui.add(DragValue::new(&mut snap_settings.scale_step).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Fine Mult");
+        ui.add(DragValue::new(&mut snap_settings.fine_scale).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Coarse Mult");
+        ui.add(DragValue::new(&mut snap_settings.coarse_scale).speed(0.05));
+    });
+    ui.label("Modifiers: Ctrl=toggle, Shift=fine, Alt=coarse");
+    snap_settings.sanitize();
 }
 
 pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_viewport: bool) {
@@ -1714,12 +2091,17 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let mut show_spot_light_gizmos = pane_settings.show_spot_light_gizmos;
         let mut show_spline_paths = pane_settings.show_spline_paths;
         let mut show_spline_points = pane_settings.show_spline_points;
+        let mut show_navigation_gizmo = pane_settings.show_navigation_gizmo;
         let mut freecam_sensitivity = pane_settings.freecam_sensitivity;
         let mut freecam_smoothing = pane_settings.freecam_smoothing;
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
             .unwrap_or(GizmoMode::None);
+        let mut snap_settings = world
+            .get_resource::<EditorGizmoSnapSettings>()
+            .cloned()
+            .unwrap_or_default();
         let mut preview_position_norm = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.preview_position_norm)
@@ -1871,23 +2253,19 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                         .auto_shrink([true, true])
                         .max_height(menu_max_height)
                         .show(ui, |ui| {
-                            ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
-                            ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
-                            ui.checkbox(
+                            draw_gizmo_menu_contents(
+                                ui,
+                                &mut gizmos_in_play,
+                                &mut show_camera_gizmos,
                                 &mut show_directional_light_gizmos,
-                                "Show Directional Light Gizmos",
+                                &mut show_point_light_gizmos,
+                                &mut show_spot_light_gizmos,
+                                &mut show_spline_paths,
+                                &mut show_spline_points,
+                                &mut show_navigation_gizmo,
+                                &mut gizmo_mode,
+                                &mut snap_settings,
                             );
-                            ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
-                            ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
-                            ui.checkbox(&mut show_spline_paths, "Show Spline Paths");
-                            ui.checkbox(&mut show_spline_points, "Show Spline Points");
-                            ui.separator();
-                            ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale");
-                            });
                         });
                 });
             MenuButton::new("Freecam")
@@ -2083,6 +2461,44 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                             &mut gizmo_settings.ring_segments,
                                             1.0,
                                             3..=u32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Plane Handles", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Offset Scale",
+                                            &mut gizmo_settings.plane_offset_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Size Scale",
+                                            &mut gizmo_settings.plane_size_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Alpha",
+                                            &mut gizmo_settings.plane_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Pick Padding Scale",
+                                            &mut gizmo_settings.plane_pick_padding_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Pick Padding Min",
+                                            &mut gizmo_settings.plane_pick_padding_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
                                         );
                                     });
 
@@ -2603,6 +3019,15 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             }
         }
 
+        let navigation_pointer_blocked = draw_viewport_navigation_gizmo(
+            ui,
+            world,
+            scene_rect,
+            camera_entity,
+            Some(pane_id),
+            show_navigation_gizmo,
+        );
+
         let pointer_pos = ui.ctx().input(|input| {
             input
                 .pointer
@@ -2612,6 +3037,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let pointer_over = pointer_pos.is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
             && main_response.hovered()
             && !preview_pointer_blocked
+            && !navigation_pointer_blocked
             && pointer_pos
                 .and_then(|pos| ui.ctx().layer_id_at(pos))
                 .map_or(true, |layer| layer == ui.layer_id());
@@ -2684,7 +3110,10 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                         runtime.preview_texture_id = preview_texture_id;
                         runtime.preview_rect_pixels = preview_rect_pixels;
                         runtime.preview_camera_entity = shown_preview_camera;
-                        if ui.ctx().input(|input| input.pointer.any_pressed()) && !pointer_over {
+                        if ui.ctx().input(|input| input.pointer.any_pressed())
+                            && !pointer_over
+                            && !navigation_pointer_blocked
+                        {
                             runtime.keyboard_focus = false;
                         }
                     }
@@ -2713,6 +3142,10 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
             gizmo_state.mode = gizmo_mode;
         }
+        if let Some(mut resource) = world.get_resource_mut::<EditorGizmoSnapSettings>() {
+            snap_settings.sanitize();
+            *resource = snap_settings.clone();
+        }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             freecam_sensitivity =
@@ -2733,6 +3166,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
+            viewport_state.show_navigation_gizmo = show_navigation_gizmo;
             viewport_state.freecam_sensitivity = freecam_sensitivity;
             viewport_state.freecam_smoothing = freecam_smoothing;
             viewport_state.show_options_panel = show_options_panel;
@@ -2775,6 +3209,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                     show_spot_light_gizmos,
                     show_spline_paths,
                     show_spline_points,
+                    show_navigation_gizmo,
                     freecam_sensitivity,
                     freecam_smoothing,
                 },
@@ -2845,6 +3280,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.show_spline_points)
             .unwrap_or(true);
+        let mut show_navigation_gizmo = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.show_navigation_gizmo)
+            .unwrap_or(true);
         let mut freecam_sensitivity = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.freecam_sensitivity)
@@ -2857,6 +3296,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
             .unwrap_or(GizmoMode::None);
+        let mut snap_settings = world
+            .get_resource::<EditorGizmoSnapSettings>()
+            .cloned()
+            .unwrap_or_default();
         let mut preview_position_norm = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.preview_position_norm)
@@ -2987,23 +3430,19 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         .auto_shrink([true, true])
                         .max_height(menu_max_height)
                         .show(ui, |ui| {
-                            ui.checkbox(&mut gizmos_in_play, "Show Gizmos in Play");
-                            ui.checkbox(&mut show_camera_gizmos, "Show Camera Gizmos");
-                            ui.checkbox(
+                            draw_gizmo_menu_contents(
+                                ui,
+                                &mut gizmos_in_play,
+                                &mut show_camera_gizmos,
                                 &mut show_directional_light_gizmos,
-                                "Show Directional Light Gizmos",
+                                &mut show_point_light_gizmos,
+                                &mut show_spot_light_gizmos,
+                                &mut show_spline_paths,
+                                &mut show_spline_points,
+                                &mut show_navigation_gizmo,
+                                &mut gizmo_mode,
+                                &mut snap_settings,
                             );
-                            ui.checkbox(&mut show_point_light_gizmos, "Show Point Light Gizmos");
-                            ui.checkbox(&mut show_spot_light_gizmos, "Show Spot Light Gizmos");
-                            ui.checkbox(&mut show_spline_paths, "Show Spline Paths");
-                            ui.checkbox(&mut show_spline_points, "Show Spline Points");
-                            ui.separator();
-                            ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::None, "Select");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Translate, "Move");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Rotate, "Rotate");
-                                ui.selectable_value(&mut gizmo_mode, GizmoMode::Scale, "Scale");
-                            });
                         });
                 });
             MenuButton::new("Freecam")
@@ -3199,6 +3638,44 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                             &mut gizmo_settings.ring_segments,
                                             1.0,
                                             3..=u32::MAX,
+                                        );
+                                    });
+
+                                    ui.collapsing("Plane Handles", |ui| {
+                                        edit_float_range(
+                                            ui,
+                                            "Offset Scale",
+                                            &mut gizmo_settings.plane_offset_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Size Scale",
+                                            &mut gizmo_settings.plane_size_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Alpha",
+                                            &mut gizmo_settings.plane_alpha,
+                                            0.01,
+                                            0.0..=1.0,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Pick Padding Scale",
+                                            &mut gizmo_settings.plane_pick_padding_scale,
+                                            0.01,
+                                            0.0..=f32::MAX,
+                                        );
+                                        edit_float_range(
+                                            ui,
+                                            "Pick Padding Min",
+                                            &mut gizmo_settings.plane_pick_padding_min,
+                                            0.005,
+                                            0.0..=f32::MAX,
                                         );
                                     });
 
@@ -3709,6 +4186,19 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 }
             }
 
+            let navigation_pointer_blocked = main_camera_entity
+                .map(|camera_entity| {
+                    draw_viewport_navigation_gizmo(
+                        ui,
+                        world,
+                        scene_rect,
+                        camera_entity,
+                        None,
+                        show_navigation_gizmo,
+                    )
+                })
+                .unwrap_or(false);
+
             let pointer_pos = ui.ctx().input(|input| {
                 input
                     .pointer
@@ -3726,6 +4216,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 .is_some_and(|pointer_pos| scene_rect.contains(pointer_pos))
                 && main_response.hovered()
                 && !preview_pointer_blocked
+                && !navigation_pointer_blocked
                 && pointer_pos
                     .and_then(|pos| ui.ctx().layer_id_at(pos))
                     .map_or(true, |layer| layer == ui.layer_id());
@@ -3763,6 +4254,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         if let Some(mut gizmo_state) = world.get_resource_mut::<EditorGizmoState>() {
             gizmo_state.mode = gizmo_mode;
         }
+        if let Some(mut resource) = world.get_resource_mut::<EditorGizmoSnapSettings>() {
+            snap_settings.sanitize();
+            *resource = snap_settings.clone();
+        }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
             freecam_sensitivity =
@@ -3783,6 +4278,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             viewport_state.show_spot_light_gizmos = show_spot_light_gizmos;
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
+            viewport_state.show_navigation_gizmo = show_navigation_gizmo;
             viewport_state.freecam_sensitivity = freecam_sensitivity;
             viewport_state.freecam_smoothing = freecam_smoothing;
             viewport_state.show_options_panel = show_options_panel;
@@ -8654,6 +9150,17 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.checkbox(&mut spline_state.add_mode, "Add Points on Click");
                     ui.checkbox(&mut spline_state.insert_mode, "Insert After Selection");
                     ui.checkbox(&mut spline_state.use_gizmo, "Use Gizmo Handles");
+                    if !spline_state.selected_points.is_empty() {
+                        ui.label(format!(
+                            "Selected Points: {}",
+                            spline_state.selected_points.len()
+                        ));
+                        if ui.button("Clear Point Selection").clicked() {
+                            spline_state.selected_points.clear();
+                            spline_state.active_point = None;
+                            spline_state.hover_point = None;
+                        }
+                    }
                     if ui.button("Insert Midpoint").clicked() {
                         if let Some(active_index) = spline_state.active_point {
                             if let Some(mut spline) = world.get_mut::<BevySpline>(entity) {
@@ -8674,6 +9181,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                                             (active_index + 1).min(spline.0.points.len());
                                         spline.0.points.insert(insert_index, (a + b) * 0.5);
                                         spline_state.active_point = Some(insert_index);
+                                        spline_state.selected_points.clear();
+                                        spline_state.selected_points.push(insert_index);
                                         push_undo_snapshot(world, "Spline");
                                     }
                                 }

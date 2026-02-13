@@ -274,6 +274,7 @@ pub struct EditorViewportState {
     pub show_spot_light_gizmos: bool,
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
+    pub show_navigation_gizmo: bool,
     pub freecam_sensitivity: f32,
     pub freecam_smoothing: f32,
 }
@@ -296,6 +297,7 @@ impl Default for EditorViewportState {
             show_spot_light_gizmos: true,
             show_spline_paths: true,
             show_spline_points: true,
+            show_navigation_gizmo: true,
             freecam_sensitivity: FREECAM_SENSITIVITY_DEFAULT,
             freecam_smoothing: FREECAM_SMOOTHING_DEFAULT,
         }

@@ -2923,6 +2923,7 @@ impl GraphRenderer {
         let main_camera_transform = scene.data.current_camera_transform;
         let main_prev_camera_transform = scene.data.previous_camera_transform;
         let main_camera_component = scene.data.camera_component;
+        let has_offscreen_viewports = !scene.data.viewports.is_empty();
 
         for viewport in scene.data.viewports.clone() {
             active_offscreen_ids.insert(viewport.id);
@@ -3001,6 +3002,8 @@ impl GraphRenderer {
             scene.data.render_graph = viewport_graph_spec.clone();
             scene.data.gizmo = Self::viewport_gizmo_data(&main_gizmo, viewport.gizmo_options);
             self.prev_view_proj = viewport_prev_view_proj;
+            // Each viewport camera needs fresh shadow uniforms; shared caches are global.
+            self.shadow_uniforms_dirty = true;
 
             if let Some(globals) = self.prepare_frame_globals(&scene) {
                 if globals.render_config.gpu_driven {
@@ -3076,6 +3079,10 @@ impl GraphRenderer {
         self.prune_offscreen_viewports(&active_offscreen_ids);
         scene.data.render_graph = main_graph_spec.clone();
         scene.data.gizmo = main_gizmo.clone();
+        if has_offscreen_viewports {
+            // Main viewport camera differs from the last offscreen viewport camera.
+            self.shadow_uniforms_dirty = true;
+        }
 
         if let Some(data) = cached_egui_data {
             self.frame_inputs.set_arc(data);
@@ -7864,11 +7871,14 @@ impl GraphRenderer {
                 let ring_verts_per_axis = ring_segments * 6;
                 let translate_verts_per_axis: u32 = 9;
                 let scale_verts_per_axis: u32 = 12;
+                let plane_verts: u32 = 3 * 6;
                 let origin_verts: u32 = 6;
                 let gizmo_verts = match gizmo.mode {
-                    GizmoMode::Translate => translate_verts_per_axis * 3 + origin_verts,
+                    GizmoMode::Translate => {
+                        translate_verts_per_axis * 3 + plane_verts + origin_verts
+                    }
                     GizmoMode::Rotate => ring_verts_per_axis * 3 + origin_verts,
-                    GizmoMode::Scale => scale_verts_per_axis * 3 + origin_verts,
+                    GizmoMode::Scale => scale_verts_per_axis * 3 + plane_verts + origin_verts,
                     GizmoMode::None => 0,
                 };
                 let selection_verts: u32 = if gizmo.selection_enabled { 12 * 6 } else { 0 };
@@ -7894,7 +7904,10 @@ impl GraphRenderer {
                 };
                 self.gizmo_icon_cache
                     .mark_if_changed(icon_key, icon_len, self.frames_in_flight);
-                let upload_icons = self.gizmo_icon_cache.should_upload(icon_len);
+                // Track cache state for frame-slot hygiene, but always upload here because a
+                // single frame can render multiple viewports with distinct gizmo payloads.
+                let _ = self.gizmo_icon_cache.should_upload(icon_len);
+                let upload_icons = icon_len > 0;
 
                 let outline_key = if outline_len == 0 {
                     0
@@ -7908,7 +7921,8 @@ impl GraphRenderer {
                     outline_len,
                     self.frames_in_flight,
                 );
-                let upload_outline = self.gizmo_outline_cache.should_upload(outline_len);
+                let _ = self.gizmo_outline_cache.should_upload(outline_len);
+                let upload_outline = outline_len > 0;
 
                 let icon_buffer_len = icon_len.max(1);
                 let icon_buffer_size =
@@ -7987,6 +8001,12 @@ impl GraphRenderer {
                         0.0,
                     ],
                     origin_params: [style.origin_size_scale, style.origin_size_min, 0.0, 0.0],
+                    plane_params: [
+                        style.plane_offset_scale,
+                        style.plane_size_scale,
+                        style.plane_alpha,
+                        0.0,
+                    ],
                     axis_color_x: [
                         style.axis_color_x[0],
                         style.axis_color_x[1],

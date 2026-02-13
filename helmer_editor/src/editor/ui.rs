@@ -2482,10 +2482,6 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             .get_resource::<EditorSceneState>()
             .map(|state| state.world_state)
             .unwrap_or(WorldState::Edit);
-        let mut play_mode_view = world
-            .get_resource::<EditorViewportState>()
-            .map(|state| state.play_mode_view)
-            .unwrap_or_default();
         let show_options_panel = false;
         let fallback_viewport_state = world
             .get_resource::<EditorViewportState>()
@@ -2613,17 +2609,6 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         };
 
         ui.horizontal_wrapped(|ui| {
-            if play_viewport {
-                ui.label("Play Viewport");
-            } else {
-                ui.label("Viewport");
-            }
-            if play_viewport && world_state == WorldState::Play {
-                ui.separator();
-                ui.selectable_value(&mut play_mode_view, PlayViewportKind::Gameplay, "Game");
-                ui.selectable_value(&mut play_mode_view, PlayViewportKind::Editor, "Edit");
-            }
-            ui.separator();
             ComboBox::from_id_salt(("pane_viewport_resolution_preset", pane_id, play_viewport))
                 .selected_text(render_resolution.label())
                 .show_ui(ui, |ui| {
@@ -3490,13 +3475,14 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             }
         }
 
+        let navigation_gizmo_enabled = show_navigation_gizmo && (!play_viewport || gizmos_in_play);
         let navigation_pointer_blocked = draw_viewport_navigation_gizmo(
             ui,
             world,
             scene_rect,
             camera_entity,
             Some(pane_id),
-            show_navigation_gizmo,
+            navigation_gizmo_enabled,
             &navigation_gizmo,
         );
 
@@ -3650,7 +3636,6 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             );
             navigation_gizmo.sanitize();
             viewport_state.graph_template = graph_template.clone();
-            viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
             viewport_state.pinned_camera = pinned_camera;
             viewport_state.preview_position_norm = preview_position_norm;

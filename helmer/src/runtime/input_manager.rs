@@ -393,11 +393,21 @@ impl InputManager {
             }
 
             WindowEvent::ModifiersChanged(new_state) => {
+                let state = new_state.state();
                 let mut mods = self.egui_modifiers.lock();
-                mods.shift = new_state.state().contains(ModifiersState::SHIFT);
-                mods.ctrl = new_state.state().contains(ModifiersState::CONTROL);
-                mods.alt = new_state.state().contains(ModifiersState::ALT);
-                mods.command = new_state.state().contains(ModifiersState::SUPER);
+                mods.shift = state.contains(ModifiersState::SHIFT);
+                mods.ctrl = state.contains(ModifiersState::CONTROL);
+                mods.alt = state.contains(ModifiersState::ALT);
+                #[cfg(target_os = "macos")]
+                {
+                    mods.mac_cmd = state.contains(ModifiersState::SUPER);
+                    mods.command = mods.mac_cmd;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    mods.mac_cmd = false;
+                    mods.command = mods.ctrl;
+                }
             }
 
             WindowEvent::KeyboardInput {
@@ -428,8 +438,20 @@ impl InputManager {
                         }
                     }
                 } else if let Key::Character(c) = logical_key {
-                    if pressed {
-                        let mut events = self.egui_events.lock();
+                    let mut events = self.egui_events.lock();
+                    let modifiers = *self.egui_modifiers.lock();
+
+                    if let Some(egui_key) = winit_char_to_egui_key(c.as_ref()) {
+                        events.push(egui::Event::Key {
+                            key: egui_key,
+                            physical_key: None,
+                            pressed,
+                            repeat: *repeat,
+                            modifiers,
+                        });
+                    }
+
+                    if pressed && !is_command_shortcut(modifiers) {
                         events.push(egui::Event::Text(c.to_string()));
                     }
                 }
@@ -731,4 +753,56 @@ fn winit_key_to_egui(key: winit::keyboard::NamedKey) -> Option<egui::Key> {
         WinitKey::F12 => EguiKey::F12,
         _ => return None,
     })
+}
+
+fn winit_char_to_egui_key(character: &str) -> Option<egui::Key> {
+    let mut chars = character.chars();
+    let first = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+
+    Some(match first.to_ascii_uppercase() {
+        '0' => egui::Key::Num0,
+        '1' => egui::Key::Num1,
+        '2' => egui::Key::Num2,
+        '3' => egui::Key::Num3,
+        '4' => egui::Key::Num4,
+        '5' => egui::Key::Num5,
+        '6' => egui::Key::Num6,
+        '7' => egui::Key::Num7,
+        '8' => egui::Key::Num8,
+        '9' => egui::Key::Num9,
+        'A' => egui::Key::A,
+        'B' => egui::Key::B,
+        'C' => egui::Key::C,
+        'D' => egui::Key::D,
+        'E' => egui::Key::E,
+        'F' => egui::Key::F,
+        'G' => egui::Key::G,
+        'H' => egui::Key::H,
+        'I' => egui::Key::I,
+        'J' => egui::Key::J,
+        'K' => egui::Key::K,
+        'L' => egui::Key::L,
+        'M' => egui::Key::M,
+        'N' => egui::Key::N,
+        'O' => egui::Key::O,
+        'P' => egui::Key::P,
+        'Q' => egui::Key::Q,
+        'R' => egui::Key::R,
+        'S' => egui::Key::S,
+        'T' => egui::Key::T,
+        'U' => egui::Key::U,
+        'V' => egui::Key::V,
+        'W' => egui::Key::W,
+        'X' => egui::Key::X,
+        'Y' => egui::Key::Y,
+        'Z' => egui::Key::Z,
+        _ => return None,
+    })
+}
+
+fn is_command_shortcut(modifiers: egui::Modifiers) -> bool {
+    (modifiers.command || modifiers.ctrl) && !modifiers.alt
 }

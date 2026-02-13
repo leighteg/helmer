@@ -19,6 +19,7 @@ web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rapier3d = { version = "0.32.0", features = ["simd-stable", "parallel"] }
+arboard = "3.6.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rapier3d = { version = "0.32.0", default-features = false, features = ["dim3", "f32", "simd-stable"] }

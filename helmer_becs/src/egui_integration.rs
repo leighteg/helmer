@@ -1,10 +1,13 @@
+#[cfg(not(target_arch = "wasm32"))]
+use arboard::Clipboard;
 use bevy_ecs::prelude::*;
 use egui::collapsing_header::CollapsingState;
-use egui::{Context, Frame, Order, Pos2, Rect, Shadow, TextStyle, Vec2};
+use egui::{Context, Event, Frame, Key, Order, OutputCommand, Pos2, Rect, Shadow, TextStyle, Vec2};
 use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -47,6 +50,61 @@ pub struct EguiWindowSpec {
 pub struct EguiInputPassthrough {
     pub pointer: bool,
     pub keyboard: bool,
+}
+
+#[derive(Resource, Default)]
+pub struct EguiClipboard {
+    #[cfg(not(target_arch = "wasm32"))]
+    clipboard: Option<Clipboard>,
+    cached_text: Option<String>,
+}
+
+impl EguiClipboard {
+    pub fn read_text(&mut self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.clipboard.is_none() {
+                self.clipboard = Clipboard::new().ok();
+            }
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                if let Ok(text) = clipboard.get_text() {
+                    self.cached_text = Some(text.clone());
+                    return Some(text);
+                }
+            }
+        }
+        self.cached_text.clone()
+    }
+
+    pub fn write_text(&mut self, text: &str) {
+        self.cached_text = Some(text.to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.clipboard.is_none() {
+                self.clipboard = Clipboard::new().ok();
+            }
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                let _ = clipboard.set_text(text.to_string());
+            }
+        }
+    }
+
+    pub fn read_file_paths(&mut self) -> Vec<PathBuf> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.clipboard.is_none() {
+                self.clipboard = Clipboard::new().ok();
+            }
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                if let Ok(paths) = clipboard.get().file_list() {
+                    if !paths.is_empty() {
+                        return paths;
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
 }
 
 #[derive(Resource, Default)]
@@ -158,6 +216,101 @@ fn window_frame_for_chrome(
     Some(frame)
 }
 
+fn command_shortcut(modifiers: egui::Modifiers) -> bool {
+    (modifiers.command || modifiers.ctrl) && !modifiers.alt
+}
+
+fn normalize_clipboard_events(events: Vec<Event>, clipboard: &mut EguiClipboard) -> Vec<Event> {
+    let mut normalized = Vec::with_capacity(events.len());
+    let mut consume_shortcut_text = false;
+
+    for event in events {
+        match event {
+            Event::Key {
+                key,
+                physical_key,
+                pressed: true,
+                repeat,
+                modifiers,
+            } => {
+                let shortcut = command_shortcut(modifiers);
+                let mut translated = false;
+
+                if key == Key::Insert && modifiers.shift {
+                    if let Some(text) = clipboard.read_text() {
+                        normalized.push(Event::Paste(text));
+                    }
+                    translated = true;
+                } else if key == Key::Delete
+                    && modifiers.shift
+                    && !modifiers.ctrl
+                    && !modifiers.command
+                    && !modifiers.alt
+                {
+                    normalized.push(Event::Cut);
+                    translated = true;
+                } else if shortcut {
+                    match key {
+                        Key::C | Key::Insert => {
+                            normalized.push(Event::Copy);
+                            translated = true;
+                        }
+                        Key::X => {
+                            normalized.push(Event::Cut);
+                            translated = true;
+                        }
+                        Key::V => {
+                            if let Some(text) = clipboard.read_text() {
+                                normalized.push(Event::Paste(text));
+                            }
+                            translated = true;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if translated {
+                    consume_shortcut_text = true;
+                    normalized.push(Event::Key {
+                        key,
+                        physical_key,
+                        pressed: true,
+                        repeat,
+                        modifiers,
+                    });
+                    continue;
+                }
+
+                consume_shortcut_text = false;
+                normalized.push(Event::Key {
+                    key,
+                    physical_key,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                });
+            }
+            Event::Text(_) if consume_shortcut_text => {
+                consume_shortcut_text = false;
+            }
+            other => {
+                consume_shortcut_text = false;
+                normalized.push(other);
+            }
+        }
+    }
+
+    normalized
+}
+
+fn apply_clipboard_commands(output: &egui::PlatformOutput, clipboard: &mut EguiClipboard) {
+    for command in &output.commands {
+        if let OutputCommand::CopyText(text) = command {
+            clipboard.write_text(text);
+        }
+    }
+}
+
 pub fn egui_system(world: &mut World) {
     let input_arc = world
         .get_resource::<BevyInputManager>()
@@ -196,6 +349,11 @@ pub fn egui_system(world: &mut World) {
         );
         raw_input.screen_rect = Some(Rect::from_min_size(Pos2::new(0.0, 0.0), size));
     }
+
+    world.resource_scope::<EguiClipboard, _>(|_world, mut clipboard| {
+        let events = std::mem::take(&mut raw_input.events);
+        raw_input.events = normalize_clipboard_events(events, &mut clipboard);
+    });
 
     let ctx = {
         let mut egui_res = world
@@ -398,6 +556,10 @@ pub fn egui_system(world: &mut World) {
             egui_res.window_chrome_overrides = window_chrome_overrides;
             egui_res.last_screen_rect = last_screen_rect;
         }
+    });
+
+    world.resource_scope::<EguiClipboard, _>(|_world, mut clipboard| {
+        apply_clipboard_commands(&full_output.platform_output, &mut clipboard);
     });
 
     let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);

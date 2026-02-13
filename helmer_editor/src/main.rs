@@ -8,14 +8,14 @@ use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_b
 
 use helmer_editor::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
-    EditorCommand, EditorCommandQueue, EditorConsoleState, EditorCursorControlState,
-    EditorGizmoSettings, EditorGizmoState, EditorMeshOutlineCache, EditorPaneAutoState,
-    EditorPaneManagerState, EditorPaneViewportState, EditorPaneVisibility,
-    EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh, EditorSceneState,
-    EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState, EditorUndoState,
-    EditorViewportRuntime, EditorViewportState, EditorViewportTextures, EditorWorkspaceState,
-    EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
-    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
+    EditorClipboardShortcutState, EditorClipboardState, EditorCommand, EditorCommandQueue,
+    EditorConsoleState, EditorCursorControlState, EditorGizmoSettings, EditorGizmoState,
+    EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState, EditorPaneViewportState,
+    EditorPaneVisibility, EditorPaneWorkspaceState, EditorProject, EditorRenderRefresh,
+    EditorSceneState, EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState,
+    EditorUndoState, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
+    EditorWorkspaceState, EntityDragState, FileWatchState, HierarchyUiState,
+    InspectorNameEditState, InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
     PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
     RustScriptRuntimeBuildPolicy, ScriptEditModeState, ScriptInputState, ScriptRegistry,
     ScriptRunState, ScriptRuntime, VisualScriptEditorState, activate_viewport_camera,
@@ -71,6 +71,8 @@ fn editor_init(
     world.insert_resource(EntityDragState::default());
     world.insert_resource(MiddleDragUiState::default());
     world.insert_resource(EditorCommandQueue::default());
+    world.insert_resource(EditorClipboardState::default());
+    world.insert_resource(EditorClipboardShortcutState::default());
     world.insert_resource(ScriptRegistry::default());
     world.insert_resource(FileWatchState::default());
     world.insert_resource(ScriptRuntime::default());

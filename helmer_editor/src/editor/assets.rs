@@ -111,6 +111,12 @@ pub struct AssetEntry {
     pub is_dir: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetRenameSelection {
+    All,
+    FileStem,
+}
+
 #[derive(Resource)]
 pub struct AssetBrowserState {
     pub root: Option<PathBuf>,
@@ -130,6 +136,7 @@ pub struct AssetBrowserState {
     pub status: Option<String>,
     pub rename_path: Option<PathBuf>,
     pub rename_buffer: String,
+    pub rename_pending_selection: Option<AssetRenameSelection>,
     pub tile_size: f32,
 }
 
@@ -153,6 +160,7 @@ impl Default for AssetBrowserState {
             status: None,
             rename_path: None,
             rename_buffer: String::new(),
+            rename_pending_selection: None,
             tile_size: 120.0,
         }
     }

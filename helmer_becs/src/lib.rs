@@ -38,7 +38,7 @@ use crate::systems::follow_system::{entity_follow_system, look_at_system};
 use crate::systems::render_system::RenderGraphResource;
 use crate::systems::spline_system::spline_follow_system;
 use crate::{
-    egui_integration::{EguiInputPassthrough, EguiResource, egui_system},
+    egui_integration::{EguiClipboard, EguiInputPassthrough, EguiResource, egui_system},
     physics::{
         physics_resource::PhysicsResource,
         systems::{
@@ -306,6 +306,7 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource(RenderGraphResource::default());
             world.insert_resource(SceneSpawnedChildren::default());
             world.insert_resource::<EguiResource>(EguiResource::default());
+            world.insert_resource::<EguiClipboard>(EguiClipboard::default());
             world.insert_resource::<EguiInputPassthrough>(EguiInputPassthrough::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
             world.insert_resource::<AudioBackendResource>(AudioBackendResource(Arc::new(

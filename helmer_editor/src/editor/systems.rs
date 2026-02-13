@@ -42,8 +42,9 @@ use crate::editor::{
     ViewportRectPixels, activate_play_camera, activate_viewport_camera,
     activate_viewport_camera_for_pane,
     assets::{
-        AssetBrowserState, EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh,
-        MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle, scan_asset_entries,
+        AssetBrowserState, AssetRenameSelection, EditorAssetCache, EditorAudio, EditorMesh,
+        EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle,
+        scan_asset_entries,
     },
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -2659,7 +2660,27 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
     match result {
         Ok(()) => {
             if let Some(mut asset_state) = world.get_resource_mut::<AssetBrowserState>() {
+                let display_name = target_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(name)
+                    .to_string();
                 asset_state.refresh_requested = true;
+                asset_state.current_dir = Some(directory.to_path_buf());
+                asset_state.expanded.insert(directory.to_path_buf());
+                asset_state.selected = Some(target_path.clone());
+                asset_state.selected_paths.clear();
+                asset_state.selected_paths.insert(target_path.clone());
+                asset_state.selection_anchor = Some(target_path.clone());
+                asset_state.selection_drag_start = None;
+                asset_state.rename_path = Some(target_path.clone());
+                asset_state.rename_buffer = display_name;
+                asset_state.rename_pending_selection = Some(match kind {
+                    AssetCreateKind::Folder | AssetCreateKind::RustScript => {
+                        AssetRenameSelection::All
+                    }
+                    _ => AssetRenameSelection::FileStem,
+                });
             }
             set_status(world, format!("Created {}", target_path.display()));
         }
@@ -3339,19 +3360,38 @@ fn unique_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let extension = path.extension().and_then(|ext| ext.to_str());
+    let lower = file_name.to_ascii_lowercase();
+    let composite_suffix = [".hscene.ron", ".hanim.ron"]
+        .iter()
+        .find(|suffix| lower.ends_with(*suffix))
+        .copied();
+    let (base_name, suffix) = if let Some(suffix) = composite_suffix {
+        let split = file_name.len().saturating_sub(suffix.len());
+        (
+            file_name[..split].to_string(),
+            file_name[split..].to_string(),
+        )
+    } else {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let suffix = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| format!(".{}", ext))
+            .unwrap_or_default();
+        (stem, suffix)
+    };
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
     for idx in 1..=999u32 {
-        let file_name = match extension {
-            Some(ext) => format!("{}_{}.{}", stem, idx, ext),
-            None => format!("{}_{}", stem, idx),
-        };
-        let candidate = parent.join(file_name);
+        let candidate = parent.join(format!("{}_{}{}", base_name, idx, suffix));
         if !candidate.exists() {
             return candidate;
         }

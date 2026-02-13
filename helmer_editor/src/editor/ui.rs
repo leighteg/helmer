@@ -28,7 +28,7 @@ use helmer::provided::components::{
     PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
-use helmer_becs::egui_integration::{EguiInputPassthrough, EguiResource};
+use helmer_becs::egui_integration::{EguiClipboard, EguiInputPassthrough, EguiResource};
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
     ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
@@ -58,9 +58,9 @@ use crate::editor::{
     FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN, Freecam,
     LayoutSaveRequest, PlayViewportKind, UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
     assets::{
-        AssetBrowserState, AssetEntry, EditorAssetCache, EditorAudio, EditorMesh,
-        EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath, cached_audio_handle,
-        cached_scene_handle, is_entry_visible,
+        AssetBrowserState, AssetEntry, AssetRenameSelection, EditorAssetCache, EditorAudio,
+        EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        cached_audio_handle, cached_scene_handle, is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -75,10 +75,11 @@ use crate::editor::{
     },
     push_undo_snapshot, save_layouts,
     scene::{
-        EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, WorldState,
-        animation_asset_from_group, apply_custom_clips_to_animator,
-        merge_animation_asset_into_timeline, next_available_scene_path,
-        read_animation_asset_document, reset_scene_root_instance, write_animation_asset_document,
+        EditorEntity, EditorSceneState, PendingSkinnedMeshAsset, SceneChildLinkData, SceneDocument,
+        SceneEntityData, SceneEntityRelationData, WorldState, animation_asset_from_group,
+        apply_custom_clips_to_animator, merge_animation_asset_into_timeline,
+        next_available_scene_path, read_animation_asset_document, reset_scene_root_instance,
+        serialize_scene, spawn_scene_from_document, write_animation_asset_document,
     },
     scripting::{
         ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
@@ -554,6 +555,41 @@ impl Default for AnimatorUiState {
             new_trigger_name: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetClipboardMode {
+    Copy,
+    Cut,
+}
+
+#[derive(Debug, Clone)]
+struct AssetClipboardPayload {
+    mode: AssetClipboardMode,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct EntityClipboardPayload {
+    document: SceneDocument,
+}
+
+#[derive(Debug, Clone, Resource, Default)]
+pub struct EditorClipboardState {
+    assets: Option<AssetClipboardPayload>,
+    entity: Option<EntityClipboardPayload>,
+    entity_paste_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, Resource, Default)]
+pub struct EditorClipboardShortcutState {
+    last_input_time: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipboardShortcutScope {
+    Assets,
+    Entities,
 }
 
 #[derive(Debug, Clone, Resource)]
@@ -3994,6 +4030,7 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
 
 pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
     with_middle_drag_blocked(ui, world, |ui, world| {
+        handle_clipboard_shortcuts(ui, world, ClipboardShortcutScope::Entities);
         let entries = collect_hierarchy_entries(world);
 
         egui::Frame::none().show(ui, |ui| {
@@ -6822,11 +6859,40 @@ fn draw_hierarchy_row(
             }
 
             response.context_menu(|ui| {
+                if ui.button("Copy").clicked() {
+                    copy_entity_to_clipboard(world, entity);
+                    ui.close_menu();
+                }
+                if ui.button("Cut").clicked() {
+                    if copy_entity_to_clipboard(world, entity) {
+                        push_command(world, EditorCommand::DeleteEntity { entity });
+                    }
+                    ui.close_menu();
+                }
+                let can_paste = world
+                    .get_resource::<EditorClipboardState>()
+                    .is_some_and(|clipboard| clipboard.entity.is_some());
+                if ui
+                    .add_enabled(can_paste, egui::Button::new("Paste"))
+                    .clicked()
+                {
+                    paste_entity_from_clipboard(world);
+                    ui.close_menu();
+                }
+                if ui.button("Duplicate").clicked() {
+                    duplicate_entity_subtree(world, entity);
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Rename").clicked() {
                     begin_rename(world, entity);
                     ui.close_menu();
                 }
                 if ui.button("Delete").clicked() {
+                    delete_entity_preserve_children(world, entity);
+                    ui.close_menu();
+                }
+                if !children.is_empty() && ui.button("Delete Hierarchy").clicked() {
                     push_command(world, EditorCommand::DeleteEntity { entity });
                     ui.close_menu();
                 }
@@ -6946,32 +7012,11 @@ fn is_descendant_of(world: &World, candidate: Entity, ancestor: Entity) -> bool 
     false
 }
 
-fn reparent_entity_in_hierarchy(
+fn apply_entity_parent_change(
     world: &mut World,
     child: Entity,
     new_parent: Option<Entity>,
 ) -> bool {
-    if world.get_entity(child).is_err() {
-        return false;
-    }
-
-    if let Some(parent) = new_parent {
-        if parent == child {
-            set_status(world, "Cannot parent an entity to itself".to_string());
-            return false;
-        }
-        if world.get_entity(parent).is_err() {
-            return false;
-        }
-        if is_descendant_of(world, parent, child) {
-            set_status(
-                world,
-                "Cannot parent an entity to one of its descendants".to_string(),
-            );
-            return false;
-        }
-    }
-
     let current_parent = world
         .get::<EntityParent>(child)
         .map(|relation| relation.parent);
@@ -7028,6 +7073,39 @@ fn reparent_entity_in_hierarchy(
         });
     }
 
+    true
+}
+
+fn reparent_entity_in_hierarchy(
+    world: &mut World,
+    child: Entity,
+    new_parent: Option<Entity>,
+) -> bool {
+    if world.get_entity(child).is_err() {
+        return false;
+    }
+
+    if let Some(parent) = new_parent {
+        if parent == child {
+            set_status(world, "Cannot parent an entity to itself".to_string());
+            return false;
+        }
+        if world.get_entity(parent).is_err() {
+            return false;
+        }
+        if is_descendant_of(world, parent, child) {
+            set_status(
+                world,
+                "Cannot parent an entity to one of its descendants".to_string(),
+            );
+            return false;
+        }
+    }
+
+    if !apply_entity_parent_change(world, child, new_parent) {
+        return false;
+    }
+
     push_undo_snapshot(
         world,
         if new_parent.is_some() {
@@ -7036,6 +7114,33 @@ fn reparent_entity_in_hierarchy(
             "Unparent Entity"
         },
     );
+    true
+}
+
+fn delete_entity_preserve_children(world: &mut World, entity: Entity) -> bool {
+    if world.get_entity(entity).is_err() {
+        return false;
+    }
+
+    let parent = world
+        .get::<EntityParent>(entity)
+        .map(|relation| relation.parent)
+        .filter(|parent| world.get_entity(*parent).is_ok());
+
+    let mut children = Vec::new();
+    let mut relation_query = world.query::<(Entity, &EntityParent)>();
+    for (child, relation) in relation_query.iter(world) {
+        if relation.parent == entity {
+            children.push(child);
+        }
+    }
+    children.sort_by_key(|child| child.to_bits());
+
+    for child in children {
+        let _ = apply_entity_parent_change(world, child, parent);
+    }
+
+    push_command(world, EditorCommand::DeleteEntity { entity });
     true
 }
 
@@ -11050,6 +11155,7 @@ pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
     };
 
     with_middle_drag_blocked(ui, world, |ui, world| {
+        handle_clipboard_shortcuts(ui, world, ClipboardShortcutScope::Assets);
         {
             let mut state = world
                 .get_resource_mut::<AssetBrowserState>()
@@ -11467,6 +11573,23 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
             background_response.context_menu(|ui| {
                 if ui.button("Open in File Browser").clicked() {
                     open_in_file_browser(world, &current_dir);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Copy Selected").clicked() {
+                    copy_selected_assets_to_clipboard(world, AssetClipboardMode::Copy);
+                    ui.close_menu();
+                }
+                if ui.button("Cut Selected").clicked() {
+                    copy_selected_assets_to_clipboard(world, AssetClipboardMode::Cut);
+                    ui.close_menu();
+                }
+                let can_paste = asset_paste_available(world);
+                if ui
+                    .add_enabled(can_paste, egui::Button::new("Paste"))
+                    .clicked()
+                {
+                    paste_assets_to_directory(world, Some(current_dir.clone()));
                     ui.close_menu();
                 }
                 ui.separator();
@@ -11925,6 +12048,23 @@ fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path) {
     }
     asset_create_menu(world, ui, path);
     ui.separator();
+    if ui.button("Copy").clicked() {
+        copy_assets_for_action(world, Some(path), AssetClipboardMode::Copy);
+        ui.close_menu();
+    }
+    if ui.button("Cut").clicked() {
+        copy_assets_for_action(world, Some(path), AssetClipboardMode::Cut);
+        ui.close_menu();
+    }
+    let can_paste = asset_paste_available(world);
+    if ui
+        .add_enabled(can_paste, egui::Button::new("Paste"))
+        .clicked()
+    {
+        paste_assets_to_directory(world, Some(path.to_path_buf()));
+        ui.close_menu();
+    }
+    ui.separator();
     if ui.button("Duplicate").clicked() {
         if let Some(selection) = selected_assets_for_action(world, Some(path)) {
             duplicate_assets(world, &selection);
@@ -11989,6 +12129,28 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
         open_in_file_browser(world, path);
         ui.close_menu();
     }
+
+    if ui.button("Copy").clicked() {
+        copy_assets_for_action(world, Some(path), AssetClipboardMode::Copy);
+        ui.close_menu();
+    }
+
+    if ui.button("Cut").clicked() {
+        copy_assets_for_action(world, Some(path), AssetClipboardMode::Cut);
+        ui.close_menu();
+    }
+
+    let can_paste = asset_paste_available(world);
+    if ui
+        .add_enabled(can_paste, egui::Button::new("Paste"))
+        .clicked()
+    {
+        let destination = path.parent().map(|parent| parent.to_path_buf());
+        paste_assets_to_directory(world, destination);
+        ui.close_menu();
+    }
+
+    ui.separator();
 
     if ui.button("Duplicate").clicked() {
         if let Some(selection) = selected_assets_for_action(world, Some(path)) {
@@ -12569,8 +12731,29 @@ fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {
     let mut cancel = false;
 
     world.resource_scope::<AssetBrowserState, _>(|_world, mut state| {
-        let response = ui.text_edit_singleline(&mut state.rename_buffer);
-        if response.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+        let mut output = egui::TextEdit::singleline(&mut state.rename_buffer).show(ui);
+        if let Some(selection) = state.rename_pending_selection {
+            if output.response.has_focus() {
+                let end = match selection {
+                    AssetRenameSelection::All => state.rename_buffer.chars().count(),
+                    AssetRenameSelection::FileStem => {
+                        editable_asset_name_char_count(path, &state.rename_buffer)
+                    }
+                };
+                output
+                    .state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(end),
+                    )));
+                output.state.store(ui.ctx(), output.response.id);
+                state.rename_pending_selection = None;
+            } else {
+                output.response.request_focus();
+            }
+        }
+        if output.response.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             finalize = Some(state.rename_buffer.trim().to_string());
         }
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -12588,10 +12771,34 @@ fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {
     }
 }
 
+fn editable_asset_name_char_count(path: &Path, name: &str) -> usize {
+    if path.is_dir() {
+        return name.chars().count();
+    }
+
+    let lower = name.to_ascii_lowercase();
+    for suffix in [".hscene.ron", ".hanim.ron"] {
+        if lower.ends_with(suffix) {
+            return name.chars().count().saturating_sub(suffix.chars().count());
+        }
+    }
+
+    Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.chars().count())
+        .unwrap_or_else(|| name.chars().count())
+}
+
 fn begin_asset_rename(world: &mut World, path: &Path) {
     if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
         state.rename_path = Some(path.to_path_buf());
         state.rename_buffer = asset_display_name(path);
+        state.rename_pending_selection = Some(if path.is_dir() {
+            AssetRenameSelection::All
+        } else {
+            AssetRenameSelection::FileStem
+        });
     }
 }
 
@@ -12599,6 +12806,7 @@ fn clear_asset_rename(world: &mut World) {
     if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
         state.rename_path = None;
         state.rename_buffer.clear();
+        state.rename_pending_selection = None;
     }
 }
 
@@ -14760,19 +14968,38 @@ fn unique_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let extension = path.extension().and_then(|ext| ext.to_str());
+    let lower = file_name.to_ascii_lowercase();
+    let composite_suffix = [".hscene.ron", ".hanim.ron"]
+        .iter()
+        .find(|suffix| lower.ends_with(*suffix))
+        .copied();
+    let (base_name, suffix) = if let Some(suffix) = composite_suffix {
+        let split = file_name.len().saturating_sub(suffix.len());
+        (
+            file_name[..split].to_string(),
+            file_name[split..].to_string(),
+        )
+    } else {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let suffix = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| format!(".{}", ext))
+            .unwrap_or_default();
+        (stem, suffix)
+    };
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
     for idx in 1..=999u32 {
-        let file_name = match extension {
-            Some(ext) => format!("{}_{}.{}", stem, idx, ext),
-            None => format!("{}_{}", stem, idx),
-        };
-        let candidate = parent.join(file_name);
+        let candidate = parent.join(format!("{}_{}{}", base_name, idx, suffix));
         if !candidate.exists() {
             return candidate;
         }
@@ -15056,6 +15283,687 @@ fn set_selection(world: &mut World, entity: Option<Entity>) {
     if let Some(mut selection) = world.get_resource_mut::<InspectorSelectedEntityResource>() {
         selection.0 = entity;
     }
+}
+
+fn should_dispatch_clipboard_shortcuts(ui: &Ui, world: &World) -> Option<f64> {
+    if ui.ctx().wants_keyboard_input() {
+        return None;
+    }
+
+    let pointer_pos = ui.ctx().input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .or_else(|| input.pointer.interact_pos())
+    });
+    let pointer_over = pointer_pos.is_some_and(|pos| ui.max_rect().contains(pos));
+    if !pointer_over {
+        return None;
+    }
+
+    let input_time = ui.ctx().input(|input| input.time);
+    if world
+        .get_resource::<EditorClipboardShortcutState>()
+        .is_some_and(|state| (state.last_input_time - input_time).abs() <= f64::EPSILON)
+    {
+        return None;
+    }
+
+    Some(input_time)
+}
+
+fn mark_clipboard_shortcut_dispatched(world: &mut World, input_time: f64) {
+    if let Some(mut state) = world.get_resource_mut::<EditorClipboardShortcutState>() {
+        state.last_input_time = input_time;
+    }
+}
+
+fn handle_clipboard_shortcuts(ui: &Ui, world: &mut World, scope: ClipboardShortcutScope) {
+    let Some(input_time) = should_dispatch_clipboard_shortcuts(ui, world) else {
+        return;
+    };
+
+    let (modifiers, copy_pressed, cut_pressed, paste_pressed) = ui.ctx().input(|input| {
+        (
+            input.modifiers,
+            input.key_pressed(egui::Key::C),
+            input.key_pressed(egui::Key::X),
+            input.key_pressed(egui::Key::V),
+        )
+    });
+
+    let command_or_ctrl = modifiers.command || modifiers.ctrl;
+    if !command_or_ctrl || modifiers.alt {
+        return;
+    }
+
+    let handled = match scope {
+        ClipboardShortcutScope::Assets => {
+            if copy_pressed {
+                copy_selected_assets_to_clipboard(world, AssetClipboardMode::Copy)
+            } else if cut_pressed {
+                copy_selected_assets_to_clipboard(world, AssetClipboardMode::Cut)
+            } else if paste_pressed {
+                paste_assets_to_directory(world, None)
+            } else {
+                false
+            }
+        }
+        ClipboardShortcutScope::Entities => {
+            if copy_pressed {
+                copy_selected_entity_to_clipboard(world)
+            } else if cut_pressed {
+                cut_selected_entity_to_clipboard(world)
+            } else if paste_pressed {
+                paste_entity_from_clipboard(world)
+            } else {
+                false
+            }
+        }
+    };
+
+    if handled {
+        mark_clipboard_shortcut_dispatched(world, input_time);
+    }
+}
+
+fn normalize_asset_clipboard_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut normalized = paths.to_vec();
+    normalized.sort();
+    normalized.dedup();
+
+    let mut filtered = Vec::new();
+    'outer: for path in normalized {
+        for existing in &filtered {
+            if path != *existing && path.starts_with(existing) {
+                continue 'outer;
+            }
+        }
+        filtered.push(path);
+    }
+    filtered
+}
+
+fn set_asset_clipboard(
+    world: &mut World,
+    paths: Vec<PathBuf>,
+    mode: AssetClipboardMode,
+    action_label: &str,
+) -> bool {
+    let root = world
+        .get_resource::<AssetBrowserState>()
+        .and_then(|state| state.root.clone());
+    let mut normalized = normalize_asset_clipboard_paths(&paths);
+    if let Some(root) = root {
+        normalized.retain(|path| path != &root);
+    }
+
+    if normalized.is_empty() {
+        set_status(world, "Nothing to copy".to_string());
+        return false;
+    }
+
+    if let Some(mut clipboard) = world.get_resource_mut::<EditorClipboardState>() {
+        clipboard.assets = Some(AssetClipboardPayload {
+            mode,
+            paths: normalized.clone(),
+        });
+    }
+
+    if let Some(mut os_clipboard) = world.get_resource_mut::<EguiClipboard>() {
+        let text = normalized
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        os_clipboard.write_text(&text);
+    }
+
+    set_status(
+        world,
+        format!("{} {} item(s)", action_label, normalized.len()),
+    );
+    true
+}
+
+fn copy_selected_assets_to_clipboard(world: &mut World, mode: AssetClipboardMode) -> bool {
+    let Some(selection) = selected_assets_for_action(world, None) else {
+        set_status(world, "No assets selected".to_string());
+        return false;
+    };
+    let action = match mode {
+        AssetClipboardMode::Copy => "Copied",
+        AssetClipboardMode::Cut => "Cut",
+    };
+    set_asset_clipboard(world, selection, mode, action)
+}
+
+fn copy_assets_for_action(
+    world: &mut World,
+    path: Option<&Path>,
+    mode: AssetClipboardMode,
+) -> bool {
+    let Some(selection) = selected_assets_for_action(world, path) else {
+        set_status(world, "No assets selected".to_string());
+        return false;
+    };
+    let action = match mode {
+        AssetClipboardMode::Copy => "Copied",
+        AssetClipboardMode::Cut => "Cut",
+    };
+    set_asset_clipboard(world, selection, mode, action)
+}
+
+fn parse_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_percent_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                parse_hex_nibble(bytes[index + 1]),
+                parse_hex_nibble(bytes[index + 2]),
+            ) {
+                decoded.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
+fn parse_file_uri_path(value: &str) -> Option<PathBuf> {
+    let path = value.strip_prefix("file://")?;
+    if path.is_empty() {
+        return None;
+    }
+
+    let normalized = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let (_, remainder) = path.split_once('/')?;
+        format!("/{}", remainder)
+    };
+    if normalized.is_empty() {
+        return None;
+    }
+
+    #[cfg(windows)]
+    let path = if let Some(rest) = normalized.strip_prefix('/') {
+        let mut chars = rest.chars();
+        match (chars.next(), chars.next()) {
+            (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => rest,
+            _ => normalized.as_str(),
+        }
+    } else {
+        normalized.as_str()
+    };
+
+    #[cfg(not(windows))]
+    let path = normalized.as_str();
+
+    let decoded = decode_percent_escapes(path);
+    if decoded.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(decoded))
+}
+
+fn parse_clipboard_file_paths(text: &str) -> Vec<PathBuf> {
+    text.replace('\r', "\n")
+        .split(|ch| ch == '\n' || ch == '\0')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_matches('"'))
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| !(line.eq_ignore_ascii_case("copy") || line.eq_ignore_ascii_case("cut")))
+        .filter_map(|line| {
+            if line.starts_with("file://") {
+                parse_file_uri_path(line).or_else(|| Some(PathBuf::from(line)))
+            } else {
+                Some(PathBuf::from(line))
+            }
+        })
+        .filter(|path| path.exists())
+        .collect()
+}
+
+fn read_external_clipboard_paths(world: &mut World) -> Vec<PathBuf> {
+    let Some(mut clipboard) = world.get_resource_mut::<EguiClipboard>() else {
+        return Vec::new();
+    };
+
+    let paths = clipboard.read_file_paths();
+    if !paths.is_empty() {
+        return paths;
+    }
+
+    clipboard
+        .read_text()
+        .map(|text| parse_clipboard_file_paths(&text))
+        .unwrap_or_default()
+}
+
+fn clipboard_has_external_file_paths(world: &mut World) -> bool {
+    !read_external_clipboard_paths(world).is_empty()
+}
+
+fn asset_paste_available(world: &mut World) -> bool {
+    if world
+        .get_resource::<EditorClipboardState>()
+        .is_some_and(|clipboard| clipboard.assets.is_some())
+    {
+        return true;
+    }
+    clipboard_has_external_file_paths(world)
+}
+
+fn copy_asset_to_directory(source: &Path, target_dir: &Path) -> Result<PathBuf, String> {
+    if source.is_dir() && target_dir.starts_with(source) {
+        return Err("Cannot copy a folder into itself".to_string());
+    }
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "Asset has no name".to_string())?;
+    let target_path = unique_path(&target_dir.join(file_name));
+    if source.is_dir() {
+        copy_dir_recursive(source, &target_path)?;
+    } else {
+        fs::copy(source, &target_path)
+            .map(|_| ())
+            .map_err(|err| format!("Copy failed: {}", err))?;
+    }
+    Ok(target_path)
+}
+
+fn move_asset_to_directory(
+    world: &mut World,
+    source: &Path,
+    target_dir: &Path,
+) -> Result<PathBuf, String> {
+    if source == target_dir {
+        return Err("Cannot move into itself".to_string());
+    }
+
+    if source.parent() == Some(target_dir) {
+        return Ok(source.to_path_buf());
+    }
+
+    if source.is_dir() && target_dir.starts_with(source) {
+        return Err("Cannot move a folder into itself".to_string());
+    }
+
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| "Asset has no name".to_string())?;
+    let target_path = unique_path(&target_dir.join(file_name));
+    fs::rename(source, &target_path).map_err(|err| format!("Move failed: {}", err))?;
+    remap_asset_state_paths(world, source, &target_path);
+    Ok(target_path)
+}
+
+fn set_asset_selection_paths(world: &mut World, paths: &[PathBuf]) {
+    let Some(first) = paths.first().cloned() else {
+        return;
+    };
+    let selection: HashSet<PathBuf> = paths.iter().cloned().collect();
+    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+        state.selected = Some(first.clone());
+        state.selected_paths = selection;
+        state.selection_anchor = Some(first);
+        state.selection_drag_start = None;
+        state.rename_path = None;
+        state.rename_buffer.clear();
+    }
+}
+
+fn resolve_asset_paste_target(world: &World, target_override: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(path) = target_override {
+        return Some(path);
+    }
+    let state = world.get_resource::<AssetBrowserState>()?;
+    state.current_dir.clone().or_else(|| state.root.clone())
+}
+
+fn paste_assets_to_directory(world: &mut World, target_override: Option<PathBuf>) -> bool {
+    let Some(target_dir) = resolve_asset_paste_target(world, target_override) else {
+        set_status(world, "No asset target directory available".to_string());
+        return false;
+    };
+    if !target_dir.exists() || !target_dir.is_dir() {
+        set_status(world, "Paste target directory does not exist".to_string());
+        return false;
+    }
+
+    let mut from_os_clipboard = false;
+    let payload = world
+        .get_resource::<EditorClipboardState>()
+        .and_then(|clipboard| clipboard.assets.clone())
+        .or_else(|| {
+            let paths = read_external_clipboard_paths(world);
+            if paths.is_empty() {
+                None
+            } else {
+                from_os_clipboard = true;
+                Some(AssetClipboardPayload {
+                    mode: AssetClipboardMode::Copy,
+                    paths,
+                })
+            }
+        });
+
+    let Some(payload) = payload else {
+        set_status(world, "Asset clipboard is empty".to_string());
+        return false;
+    };
+
+    let sources = normalize_asset_clipboard_paths(&payload.paths);
+    if sources.is_empty() {
+        set_status(world, "Asset clipboard is empty".to_string());
+        return false;
+    }
+
+    let mut pasted = Vec::new();
+    let mut failed = 0usize;
+
+    for source in sources {
+        if !source.exists() {
+            failed = failed.saturating_add(1);
+            continue;
+        }
+        let result = match payload.mode {
+            AssetClipboardMode::Copy => copy_asset_to_directory(&source, &target_dir),
+            AssetClipboardMode::Cut => move_asset_to_directory(world, &source, &target_dir),
+        };
+        match result {
+            Ok(path) => pasted.push(path),
+            Err(_) => failed = failed.saturating_add(1),
+        }
+    }
+
+    if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
+        state.refresh_requested = true;
+    }
+
+    if !pasted.is_empty() {
+        set_asset_selection_paths(world, &pasted);
+    }
+
+    if payload.mode == AssetClipboardMode::Cut && !from_os_clipboard {
+        if let Some(mut clipboard) = world.get_resource_mut::<EditorClipboardState>() {
+            clipboard.assets = None;
+        }
+    }
+
+    if pasted.is_empty() {
+        set_status(world, "Asset paste failed".to_string());
+        return false;
+    }
+
+    if failed == 0 {
+        set_status(world, format!("Pasted {} item(s)", pasted.len()));
+    } else {
+        set_status(
+            world,
+            format!("Pasted {} item(s), {} failed", pasted.len(), failed),
+        );
+    }
+    true
+}
+
+fn selected_entity_for_clipboard(world: &World) -> Option<Entity> {
+    world
+        .get_resource::<InspectorSelectedEntityResource>()
+        .and_then(|selection| selection.0)
+        .or_else(|| {
+            world
+                .get_resource::<InspectorPinnedEntityResource>()
+                .and_then(|pinned| pinned.0)
+        })
+}
+
+fn collect_entity_subtree_order(entities: &[SceneEntityData], root_index: usize) -> Vec<usize> {
+    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (index, entity_data) in entities.iter().enumerate() {
+        if let Some(relation) = entity_data.relation.as_ref() {
+            children.entry(relation.parent).or_default().push(index);
+        }
+    }
+
+    for list in children.values_mut() {
+        list.sort_unstable();
+    }
+
+    let mut ordered = Vec::new();
+    let mut stack = vec![root_index];
+    let mut visited = HashSet::new();
+    while let Some(index) = stack.pop() {
+        if !visited.insert(index) {
+            continue;
+        }
+        ordered.push(index);
+        if let Some(child_indices) = children.get(&index) {
+            for child in child_indices.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+    ordered
+}
+
+fn build_entity_clipboard_document(source: &SceneDocument, root_index: usize) -> SceneDocument {
+    let ordered = collect_entity_subtree_order(&source.entities, root_index);
+    let mut index_map = HashMap::new();
+    for (new_index, old_index) in ordered.iter().copied().enumerate() {
+        index_map.insert(old_index, new_index);
+    }
+
+    let mut entities = Vec::with_capacity(ordered.len());
+    for old_index in ordered {
+        let mut entity_data = source.entities[old_index].clone();
+        entity_data.relation = entity_data.relation.and_then(|relation| {
+            index_map
+                .get(&relation.parent)
+                .copied()
+                .map(|parent| SceneEntityRelationData { parent })
+        });
+        entity_data.scene_child = entity_data.scene_child.and_then(|scene_child| {
+            index_map
+                .get(&scene_child.scene_root)
+                .copied()
+                .map(|scene_root| SceneChildLinkData {
+                    scene_root,
+                    scene_node_index: scene_child.scene_node_index,
+                })
+        });
+        entities.push(entity_data);
+    }
+
+    SceneDocument {
+        version: source.version,
+        entities,
+        scene_child_animations: Vec::new(),
+        scene_child_pose_overrides: Vec::new(),
+    }
+}
+
+fn capture_entity_clipboard_document(
+    world: &mut World,
+    entity: Entity,
+) -> Result<SceneDocument, String> {
+    if world.get_entity(entity).is_err() {
+        return Err("Selected entity does not exist".to_string());
+    }
+
+    let project = world
+        .get_resource::<EditorProject>()
+        .cloned()
+        .ok_or_else(|| "Project state is unavailable".to_string())?;
+    let (document, entity_order) = serialize_scene(world, &project);
+    let root_index = entity_order
+        .iter()
+        .position(|candidate| *candidate == entity)
+        .ok_or_else(|| "Selected entity is not part of the authored scene".to_string())?;
+
+    Ok(build_entity_clipboard_document(&document, root_index))
+}
+
+fn copy_entity_to_clipboard(world: &mut World, entity: Entity) -> bool {
+    let document = match capture_entity_clipboard_document(world, entity) {
+        Ok(document) => document,
+        Err(err) => {
+            set_status(world, format!("Copy entity failed: {}", err));
+            return false;
+        }
+    };
+
+    let copied_count = document.entities.len();
+    if let Some(mut clipboard) = world.get_resource_mut::<EditorClipboardState>() {
+        clipboard.entity = Some(EntityClipboardPayload { document });
+        clipboard.entity_paste_count = 0;
+    }
+    set_status(world, format!("Copied entity subtree ({})", copied_count));
+    true
+}
+
+fn copy_selected_entity_to_clipboard(world: &mut World) -> bool {
+    let Some(entity) = selected_entity_for_clipboard(world) else {
+        set_status(world, "No entity selected".to_string());
+        return false;
+    };
+    copy_entity_to_clipboard(world, entity)
+}
+
+fn cut_selected_entity_to_clipboard(world: &mut World) -> bool {
+    let Some(entity) = selected_entity_for_clipboard(world) else {
+        set_status(world, "No entity selected".to_string());
+        return false;
+    };
+    if !copy_entity_to_clipboard(world, entity) {
+        return false;
+    }
+    push_command(world, EditorCommand::DeleteEntity { entity });
+    true
+}
+
+fn duplicate_entity_subtree(world: &mut World, entity: Entity) -> bool {
+    let document = match capture_entity_clipboard_document(world, entity) {
+        Ok(document) => document,
+        Err(err) => {
+            set_status(world, format!("Duplicate entity failed: {}", err));
+            return false;
+        }
+    };
+
+    let project = world
+        .get_resource::<EditorProject>()
+        .cloned()
+        .unwrap_or_default();
+    let created = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
+        let asset_server = {
+            let asset_server = world
+                .get_resource::<BevyAssetServer>()
+                .expect("AssetServer missing");
+            BevyAssetServer(asset_server.0.clone())
+        };
+        spawn_scene_from_document(world, &document, &project, &mut cache, &asset_server)
+    });
+
+    if created.is_empty() {
+        set_status(world, "Duplicate entity failed".to_string());
+        return false;
+    }
+
+    let offset = Vec3::new(0.75, 0.0, 0.0);
+    for duplicate in created.iter().copied() {
+        if let Some(mut transform) = world.get_mut::<BevyTransform>(duplicate) {
+            transform.0.position += offset;
+        }
+    }
+
+    if let Some(first) = created.first().copied() {
+        set_selection(world, Some(first));
+        if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>() {
+            pinned.0 = Some(first);
+        }
+    }
+
+    push_undo_snapshot(world, "Duplicate Entity");
+    set_status(world, format!("Duplicated {} entity(ies)", created.len()));
+    true
+}
+
+fn paste_entity_from_clipboard(world: &mut World) -> bool {
+    let Some(document) = world
+        .get_resource::<EditorClipboardState>()
+        .and_then(|clipboard| {
+            clipboard
+                .entity
+                .as_ref()
+                .map(|entry| entry.document.clone())
+        })
+    else {
+        set_status(world, "Entity clipboard is empty".to_string());
+        return false;
+    };
+
+    let project = world
+        .get_resource::<EditorProject>()
+        .cloned()
+        .unwrap_or_default();
+    let created = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
+        let asset_server = {
+            let asset_server = world
+                .get_resource::<BevyAssetServer>()
+                .expect("AssetServer missing");
+            BevyAssetServer(asset_server.0.clone())
+        };
+        spawn_scene_from_document(world, &document, &project, &mut cache, &asset_server)
+    });
+
+    if created.is_empty() {
+        set_status(world, "Entity paste failed".to_string());
+        return false;
+    }
+
+    let paste_count = if let Some(mut clipboard) = world.get_resource_mut::<EditorClipboardState>()
+    {
+        let count = clipboard.entity_paste_count;
+        clipboard.entity_paste_count = clipboard.entity_paste_count.saturating_add(1);
+        count
+    } else {
+        0
+    };
+    let offset_amount = 0.75 * (paste_count.saturating_add(1) as f32);
+    let offset = Vec3::new(offset_amount, 0.0, 0.0);
+    for entity in created.iter().copied() {
+        if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+            transform.0.position += offset;
+        }
+    }
+
+    if let Some(first) = created.first().copied() {
+        set_selection(world, Some(first));
+        if let Some(mut pinned) = world.get_resource_mut::<InspectorPinnedEntityResource>() {
+            pinned.0 = Some(first);
+        }
+    }
+
+    push_undo_snapshot(world, "Paste Entity");
+    set_status(world, format!("Pasted {} entity(ies)", created.len()));
+    true
 }
 
 fn apply_animation_asset_to_entity(world: &mut World, entity: Entity, path: &Path) {

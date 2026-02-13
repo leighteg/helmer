@@ -42,9 +42,9 @@ use crate::editor::{
     ViewportRectPixels, activate_play_camera, activate_viewport_camera,
     activate_viewport_camera_for_pane,
     assets::{
-        AssetBrowserState, AssetRenameSelection, EditorAssetCache, EditorAudio, EditorMesh,
-        EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath, cached_scene_handle,
-        scan_asset_entries,
+        AssetBrowserState, AssetRenameSelection, AssetRenameView, EditorAssetCache, EditorAudio,
+        EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        cached_scene_handle, scan_asset_entries,
     },
     capture_layout,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -2681,6 +2681,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
                     }
                     _ => AssetRenameSelection::FileStem,
                 });
+                asset_state.rename_view = AssetRenameView::Grid;
             }
             set_status(world, format!("Created {}", target_path.display()));
         }

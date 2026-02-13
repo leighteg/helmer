@@ -117,6 +117,12 @@ pub enum AssetRenameSelection {
     FileStem,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetRenameView {
+    Tree,
+    Grid,
+}
+
 #[derive(Resource)]
 pub struct AssetBrowserState {
     pub root: Option<PathBuf>,
@@ -137,6 +143,7 @@ pub struct AssetBrowserState {
     pub rename_path: Option<PathBuf>,
     pub rename_buffer: String,
     pub rename_pending_selection: Option<AssetRenameSelection>,
+    pub rename_view: AssetRenameView,
     pub tile_size: f32,
 }
 
@@ -161,6 +168,7 @@ impl Default for AssetBrowserState {
             rename_path: None,
             rename_buffer: String::new(),
             rename_pending_selection: None,
+            rename_view: AssetRenameView::Grid,
             tile_size: 120.0,
         }
     }

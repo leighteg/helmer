@@ -58,8 +58,8 @@ use crate::editor::{
     FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN, Freecam,
     LayoutSaveRequest, PlayViewportKind, UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
     assets::{
-        AssetBrowserState, AssetEntry, AssetRenameSelection, EditorAssetCache, EditorAudio,
-        EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
+        AssetBrowserState, AssetEntry, AssetRenameSelection, AssetRenameView, EditorAssetCache,
+        EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
         cached_audio_handle, cached_scene_handle, is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
@@ -11447,7 +11447,7 @@ fn drag_egui_window_on_middle_click(ui: &Ui, world: &mut World, window_id: &str)
 }
 
 fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
-    let (entries, expanded, current_dir, rename_path) = {
+    let (entries, expanded, current_dir, rename_path, rename_view) = {
         let state = world
             .get_resource::<AssetBrowserState>()
             .expect("AssetBrowserState missing");
@@ -11456,6 +11456,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
             state.expanded.clone(),
             state.current_dir.clone(),
             state.rename_path.clone(),
+            state.rename_view,
         )
     };
 
@@ -11473,6 +11474,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                 let is_expanded = expanded.contains(&entry.path);
                 let is_current = current_dir.as_ref() == Some(&entry.path);
                 let is_renaming = rename_path.as_ref() == Some(&entry.path);
+                let edit_here = is_renaming && rename_view == AssetRenameView::Tree;
 
                 ui.horizontal(|ui| {
                     ui.add_space(depth_indent);
@@ -11481,7 +11483,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                         toggle_expand(world, entry.path.clone());
                     }
 
-                    if is_renaming {
+                    if edit_here {
                         asset_rename_editor(ui, world, &entry.path);
                         return;
                     }
@@ -11521,7 +11523,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
                     }
 
                     response.context_menu(|ui| {
-                        asset_dir_menu(world, ui, &entry.path);
+                        asset_dir_menu(world, ui, &entry.path, AssetRenameView::Tree);
                     });
                 });
             }
@@ -11529,7 +11531,7 @@ fn draw_asset_tree(ui: &mut Ui, world: &mut World, root: &Path) {
 }
 
 fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
-    let (entries, current_dir, selected_paths, rename_path, tile_size) = {
+    let (entries, current_dir, selected_paths, rename_path, rename_view, tile_size) = {
         let state = world
             .get_resource::<AssetBrowserState>()
             .expect("AssetBrowserState missing");
@@ -11541,6 +11543,7 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
                 .unwrap_or_else(|| root.to_path_buf()),
             state.selected_paths.clone(),
             state.rename_path.clone(),
+            state.rename_view,
             state.tile_size,
         )
     };
@@ -11652,7 +11655,8 @@ fn draw_asset_grid(ui: &mut Ui, world: &mut World, root: &Path) {
                         }
                         let entry = &items[index];
                         let is_selected = selected_paths.contains(&entry.path);
-                        let is_renaming = rename_path.as_ref() == Some(&entry.path);
+                        let is_renaming = rename_path.as_ref() == Some(&entry.path)
+                            && rename_view == AssetRenameView::Grid;
                         let rect = draw_asset_tile(
                             ui,
                             world,
@@ -11789,9 +11793,9 @@ fn draw_asset_tile(
 
     response.context_menu(|ui| {
         if entry.is_dir {
-            asset_dir_menu(world, ui, &entry.path);
+            asset_dir_menu(world, ui, &entry.path, AssetRenameView::Grid);
         } else {
-            asset_file_menu(world, ui, &entry.path);
+            asset_file_menu(world, ui, &entry.path, AssetRenameView::Grid);
         }
     });
 
@@ -12037,7 +12041,7 @@ fn asset_thumbnail_color(entry: &AssetEntry) -> Color32 {
     }
 }
 
-fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path) {
+fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path, rename_view: AssetRenameView) {
     if ui.button("Open").clicked() {
         set_current_dir(world, path.to_path_buf());
         ui.close_menu();
@@ -12072,7 +12076,7 @@ fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path) {
         ui.close_menu();
     }
     if ui.button("Rename").clicked() {
-        begin_asset_rename(world, path);
+        begin_asset_rename(world, path, rename_view);
         ui.close_menu();
     }
     if ui.button("Delete").clicked() {
@@ -12083,7 +12087,7 @@ fn asset_dir_menu(world: &mut World, ui: &mut Ui, path: &Path) {
     }
 }
 
-fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
+fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path, rename_view: AssetRenameView) {
     if is_scene_file(path) && ui.button("Open Scene").clicked() {
         push_command(
             world,
@@ -12160,7 +12164,7 @@ fn asset_file_menu(world: &mut World, ui: &mut Ui, path: &Path) {
     }
 
     if ui.button("Rename").clicked() {
-        begin_asset_rename(world, path);
+        begin_asset_rename(world, path, rename_view);
         ui.close_menu();
     }
     if ui.button("Delete").clicked() {
@@ -12731,8 +12735,14 @@ fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {
     let mut cancel = false;
 
     world.resource_scope::<AssetBrowserState, _>(|_world, mut state| {
-        let mut output = egui::TextEdit::singleline(&mut state.rename_buffer).show(ui);
+        let text_edit_id = ui.id().with("asset_rename").with(path.to_string_lossy());
+        let mut output = egui::TextEdit::singleline(&mut state.rename_buffer)
+            .id(text_edit_id)
+            .show(ui);
         if let Some(selection) = state.rename_pending_selection {
+            if !output.response.has_focus() {
+                output.response.request_focus();
+            }
             if output.response.has_focus() {
                 let end = match selection {
                     AssetRenameSelection::All => state.rename_buffer.chars().count(),
@@ -12749,8 +12759,6 @@ fn asset_rename_editor(ui: &mut Ui, world: &mut World, path: &Path) {
                     )));
                 output.state.store(ui.ctx(), output.response.id);
                 state.rename_pending_selection = None;
-            } else {
-                output.response.request_focus();
             }
         }
         if output.response.lost_focus() || ui.input(|input| input.key_pressed(egui::Key::Enter)) {
@@ -12790,10 +12798,11 @@ fn editable_asset_name_char_count(path: &Path, name: &str) -> usize {
         .unwrap_or_else(|| name.chars().count())
 }
 
-fn begin_asset_rename(world: &mut World, path: &Path) {
+fn begin_asset_rename(world: &mut World, path: &Path, rename_view: AssetRenameView) {
     if let Some(mut state) = world.get_resource_mut::<AssetBrowserState>() {
         state.rename_path = Some(path.to_path_buf());
         state.rename_buffer = asset_display_name(path);
+        state.rename_view = rename_view;
         state.rename_pending_selection = Some(if path.is_dir() {
             AssetRenameSelection::All
         } else {

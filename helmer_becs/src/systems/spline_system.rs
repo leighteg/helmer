@@ -1,13 +1,20 @@
 use bevy_ecs::prelude::{Entity, Query, Res, Without};
 use glam::{Mat3, Vec3};
 
-use crate::{BevySpline, BevySplineFollower, BevyTransform, DeltaTime};
+use crate::{BevySpline, BevySplineFollower, BevySystemProfiler, BevyTransform, DeltaTime};
 
 pub fn spline_follow_system(
     time: Res<DeltaTime>,
     mut followers: Query<(Entity, &mut BevyTransform, &mut BevySplineFollower)>,
     splines: Query<(&BevySpline, Option<&BevyTransform>), Without<BevySplineFollower>>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::spline_follow_system")
+    });
+
     let dt = time.0;
     for (entity, mut transform, mut follower) in followers.iter_mut() {
         let target_bits = follower.0.spline_entity.unwrap_or(entity.to_bits());

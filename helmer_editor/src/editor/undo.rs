@@ -4,8 +4,8 @@ use std::{
 };
 
 use bevy_ecs::prelude::{Resource, World};
-use helmer_becs::BevySkinnedMeshRenderer;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
+use helmer_becs::{BevySkinnedMeshRenderer, BevySystemProfiler};
 
 use crate::editor::{
     EditorProject,
@@ -338,6 +338,14 @@ pub fn process_undo_requests(world: &mut World) {
 }
 
 pub fn editor_undo_request_system(world: &mut World) {
+    let _system_scope = world
+        .get_resource::<BevySystemProfiler>()
+        .and_then(|profiler| {
+            profiler
+                .0
+                .begin_scope("helmer_editor::editor::editor_undo_request_system")
+        });
+
     process_undo_requests(world);
 }
 

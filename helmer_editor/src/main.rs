@@ -4,22 +4,25 @@ use bevy_ecs::schedule::IntoScheduleConfigs;
 use helmer::graphics::render_graphs::template_for_graph;
 use helmer::runtime::asset_server::AssetServer;
 use helmer_becs::systems::render_system::{RenderGizmoState, RenderMainSceneToSwapchain};
-use helmer_becs::{AudioBackendResource, egui_integration::EguiResource, helmer_becs_init};
+use helmer_becs::{
+    AudioBackendResource, BevySystemProfiler, egui_integration::EguiResource, helmer_becs_init,
+};
 
 use helmer_editor::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
     EditorClipboardShortcutState, EditorClipboardState, EditorCommand, EditorCommandQueue,
     EditorConsoleState, EditorCursorControlState, EditorGizmoSettings, EditorGizmoSnapSettings,
     EditorGizmoState, EditorMeshOutlineCache, EditorPaneAutoState, EditorPaneManagerState,
-    EditorPaneViewportState, EditorPaneVisibility, EditorPaneWorkspaceState, EditorProject,
-    EditorRenderRefresh, EditorSceneState, EditorSelectionState, EditorSplineState,
-    EditorTimelineState, EditorUiState, EditorUndoState, EditorViewportRuntime,
-    EditorViewportState, EditorViewportTextures, EditorWorkspaceState, EntityDragState,
-    FileWatchState, HierarchyUiState, InspectorNameEditState, InspectorPinnedEntityResource,
-    MaterialEditorCache, MiddleDragUiState, PendingSceneChildAnimations,
-    PendingSceneChildPoseOverrides, PoseEditorState, RustScriptRuntimeBuildPolicy,
-    ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
-    VisualScriptEditorState, activate_viewport_camera, apply_scene_child_animations_system,
+    EditorPaneViewportState, EditorPaneVisibility, EditorPaneWorkspaceState,
+    EditorProfilerPaneState, EditorProject, EditorRenderRefresh, EditorSceneState,
+    EditorSelectionState, EditorSplineState, EditorTimelineState, EditorUiState, EditorUndoState,
+    EditorViewportRuntime, EditorViewportState, EditorViewportTextures, EditorWorkspaceState,
+    EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
+    InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
+    PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
+    RustScriptRuntimeBuildPolicy, ScriptEditModeState, ScriptInputState, ScriptProfilingState,
+    ScriptRegistry, ScriptRunState, ScriptRuntime, VisualScriptEditorState,
+    activate_viewport_camera, apply_scene_child_animations_system,
     apply_scene_child_pose_overrides_system, asset_scan_system, drag_drop_system,
     editor_command_system, editor_layout_apply_system, editor_layout_save_system,
     editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
@@ -77,6 +80,7 @@ fn editor_init(
     world.insert_resource(ScriptRegistry::default());
     world.insert_resource(FileWatchState::default());
     world.insert_resource(ScriptRuntime::default());
+    world.insert_resource(ScriptProfilingState::default());
     world.insert_resource(RustScriptRuntimeBuildPolicy::default());
     world.insert_resource(ScriptRunState::default());
     world.insert_resource(ScriptEditModeState::default());
@@ -108,7 +112,39 @@ fn editor_init(
     world.insert_resource(EditorPaneAutoState::default());
     world.insert_resource(EditorPaneViewportState::default());
     world.insert_resource(EditorPaneWorkspaceState::default());
+    world.insert_resource(EditorProfilerPaneState::default());
     world.insert_resource(EditorAudioDeviceCache::default());
+
+    if let Some(system_profiler) = world.get_resource::<BevySystemProfiler>() {
+        system_profiler.0.register_systems(&[
+            "helmer_editor::editor::editor_command_system",
+            "helmer_editor::editor::editor_physics_state_system",
+            "helmer_editor::editor::file_watch_system",
+            "helmer_editor::editor::asset_scan_system",
+            "helmer_editor::editor::drag_drop_system",
+            "helmer_editor::editor::editor_shortcut_system",
+            "helmer_editor::editor::scene_dirty_system",
+            "helmer_editor::editor::apply_scene_child_animations_system",
+            "helmer_editor::editor::apply_scene_child_pose_overrides_system",
+            "helmer_editor::editor::pending_scene_child_renderer_system",
+            "helmer_editor::editor::pending_skinned_mesh_system",
+            "helmer_editor::editor::script_registry_system",
+            "helmer_editor::editor::script_execution_system",
+            "helmer_editor::editor::editor_layout_apply_system",
+            "helmer_editor::editor::editor_ui_system",
+            "helmer_editor::editor::pane_manager_toggle_system",
+            "helmer_editor::editor::editor_layout_update_system",
+            "helmer_editor::editor::editor_layout_save_system",
+            "helmer_editor::editor::timeline_playback_system",
+            "helmer_editor::editor::editor_viewport_camera_mode_system",
+            "helmer_editor::editor::editor_viewport_render_requests_system",
+            "helmer_editor::editor::gizmo_system",
+            "helmer_editor::editor::editor_render_refresh_system",
+            "helmer_editor::editor::selection_system",
+            "helmer_editor::editor::editor_undo_request_system",
+            "helmer_editor::editor::freecam_system",
+        ]);
+    }
 
     if let Some(audio) = world.get_resource::<AudioBackendResource>() {
         audio.0.set_enabled(true);

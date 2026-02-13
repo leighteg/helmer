@@ -31,6 +31,7 @@ use helmer::{
 };
 use parking_lot::{Mutex, RwLock};
 
+use crate::profiling::SystemProfiler;
 use crate::provided::ui::inspector::InspectorSelectedEntityResource;
 use crate::systems::animation_system::{SkinningResource, skinning_system};
 use crate::systems::audio_system::audio_system;
@@ -114,6 +115,8 @@ pub struct BevyRuntimeConfig(pub RuntimeConfig);
 pub struct BevyRuntimeTuning(pub Arc<RuntimeTuning>);
 #[derive(Resource)]
 pub struct BevyRuntimeProfiling(pub Arc<RuntimeProfiling>);
+#[derive(Resource)]
+pub struct BevySystemProfiler(pub Arc<SystemProfiler>);
 #[derive(Resource)]
 pub struct BevyRuntimeCursorState(pub Arc<RuntimeCursorState>);
 #[derive(Resource)]
@@ -214,6 +217,7 @@ pub struct DraggedFile(pub Option<PathBuf>);
 
 pub mod egui_integration;
 pub mod physics;
+pub mod profiling;
 pub mod provided;
 pub mod systems;
 
@@ -264,6 +268,9 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<BevyRuntimeProfiling>(BevyRuntimeProfiling(
                 runtime.profiling.clone(),
             ));
+            world.insert_resource::<BevySystemProfiler>(BevySystemProfiler(Arc::new(
+                SystemProfiler::default(),
+            )));
             world.insert_resource::<BevyRuntimeCursorState>(BevyRuntimeCursorState(
                 runtime.cursor_state.clone(),
             ));
@@ -314,6 +321,33 @@ fn helmer_becs_init_impl<F>(
             )));
             world.insert_resource::<DraggedFile>(DraggedFile(None));
             world.insert_resource(InspectorSelectedEntityResource::default());
+
+            if let Some(system_profiler) = world.get_resource::<BevySystemProfiler>() {
+                system_profiler.0.register_systems(&[
+                    "helmer_becs::systems::scene_spawning_system",
+                    "helmer_becs::systems::scene_child_skinning_system",
+                    "helmer_becs::systems::apply_scene_commands_system",
+                    "helmer_becs::systems::update_scene_child_transforms",
+                    "helmer_becs::systems::spline_follow_system",
+                    "helmer_becs::systems::entity_follow_system",
+                    "helmer_becs::systems::look_at_system",
+                    "helmer_becs::systems::skinning_system",
+                    "helmer_becs::systems::render_data_system",
+                    "helmer_becs::systems::audio_system",
+                    "helmer_becs::physics::cleanup_physics_system",
+                    "helmer_becs::physics::sync_entities_to_physics_system",
+                    "helmer_becs::physics::sync_joints_to_physics_system",
+                    "helmer_becs::physics::sync_transforms_to_physics_system",
+                    "helmer_becs::physics::character_controller_system",
+                    "helmer_becs::physics::apply_transient_forces_system",
+                    "helmer_becs::physics::apply_persistent_forces_system",
+                    "helmer_becs::physics::apply_queued_impulses_system",
+                    "helmer_becs::physics::physics_step_system",
+                    "helmer_becs::physics::sync_physics_to_entities_system",
+                    "helmer_becs::physics::physics_scene_query_system",
+                    "helmer_becs::egui_integration::egui_system",
+                ]);
+            }
 
             // scene spawning/child setup should happen before skinning + render extraction
             schedule.add_systems(

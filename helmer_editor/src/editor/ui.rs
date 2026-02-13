@@ -39,6 +39,7 @@ use helmer_becs::physics::components::{
 };
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
+use helmer_becs::provided::ui::stats::draw_runtime_profiling_panel;
 use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
@@ -46,7 +47,7 @@ use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
     BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevyTransform, BevyWrapper,
+    BevySystemProfiler, BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use walkdir::WalkDir;
@@ -91,8 +92,8 @@ use crate::editor::{
     },
     scripting::{
         ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
-        ScriptRegistry, ScriptRuntime, is_script_path, normalize_script_language,
-        script_language_from_path,
+        ScriptProfilingState, ScriptRegistry, ScriptRuntime, is_script_path,
+        normalize_script_language, script_language_from_path,
     },
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
@@ -153,6 +154,52 @@ pub struct EditorPaneManagerState {
     pub open: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfilerSystemSortMode {
+    Hottest,
+    Average,
+    Calls,
+    Name,
+}
+
+impl ProfilerSystemSortMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hottest => "Hottest",
+            Self::Average => "Average",
+            Self::Calls => "Calls",
+            Self::Name => "Name",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct EditorProfilerPaneState {
+    pub system_filter: String,
+    pub show_disabled_systems: bool,
+    pub sort_mode: ProfilerSystemSortMode,
+    pub script_filter: String,
+    pub show_disabled_scripts: bool,
+    pub system_section_height: f32,
+    pub script_section_height: f32,
+    pub runtime_section_height: f32,
+}
+
+impl Default for EditorProfilerPaneState {
+    fn default() -> Self {
+        Self {
+            system_filter: String::new(),
+            show_disabled_systems: true,
+            sort_mode: ProfilerSystemSortMode::Hottest,
+            script_filter: String::new(),
+            show_disabled_scripts: true,
+            system_section_height: 280.0,
+            script_section_height: 280.0,
+            runtime_section_height: 320.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Resource)]
 pub struct EditorPaneAutoState {
     pub project_auto_hide: bool,
@@ -181,10 +228,11 @@ pub enum EditorPaneKind {
     ContentBrowser,
     Console,
     AudioMixer,
+    Profiler,
 }
 
 impl EditorPaneKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Toolbar,
         Self::Viewport,
         Self::PlayViewport,
@@ -196,6 +244,7 @@ impl EditorPaneKind {
         Self::ContentBrowser,
         Self::Console,
         Self::AudioMixer,
+        Self::Profiler,
     ];
 
     pub fn label(self) -> &'static str {
@@ -211,6 +260,7 @@ impl EditorPaneKind {
             Self::ContentBrowser => "Content Browser",
             Self::Console => "Console",
             Self::AudioMixer => "Audio Mixer",
+            Self::Profiler => "Profiler",
         }
     }
 
@@ -225,7 +275,7 @@ impl EditorPaneKind {
             Self::History => Some("History"),
             Self::ContentBrowser => Some("Content Browser"),
             Self::Console => Some("Content Browser"),
-            Self::Timeline | Self::AudioMixer => None,
+            Self::Timeline | Self::AudioMixer | Self::Profiler => None,
         }
     }
 }
@@ -1473,6 +1523,431 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
                 });
             }
         }
+    });
+}
+
+fn profiler_micros_to_ms(value: u64) -> f64 {
+    value as f64 / 1000.0
+}
+
+fn profiler_compact_label(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+
+    let side = (max_chars - 3) / 2;
+    let head = value.chars().take(side).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{}...{}", head, tail)
+}
+
+const PROFILER_SPLITTER_HEIGHT: f32 = 8.0;
+const PROFILER_SECTION_MIN_HEIGHT: f32 = 120.0;
+
+fn profiler_section(ui: &mut Ui, height: f32, add_contents: impl FnOnce(&mut Ui)) {
+    let section_height = height.max(1.0);
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), section_height),
+        Layout::top_down(Align::Min),
+        |ui| {
+            ui.set_min_height(section_height);
+            add_contents(ui);
+        },
+    );
+}
+
+fn profiler_splitter(ui: &mut Ui) -> f32 {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), PROFILER_SPLITTER_HEIGHT),
+        Sense::click_and_drag(),
+    );
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let visuals = ui.visuals();
+    let stroke_color = if response.dragged() {
+        visuals.widgets.active.fg_stroke.color
+    } else if response.hovered() {
+        visuals.widgets.hovered.fg_stroke.color
+    } else {
+        visuals.widgets.noninteractive.bg_stroke.color
+    };
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        Stroke::new(1.0, stroke_color),
+    );
+    if response.dragged() {
+        ui.ctx().input(|input| input.pointer.delta().y)
+    } else {
+        0.0
+    }
+}
+
+fn apply_profiler_splitter_delta(height: &mut f32, delta: f32) {
+    if delta == 0.0 {
+        return;
+    }
+    *height = (*height + delta).max(PROFILER_SECTION_MIN_HEIGHT);
+}
+
+fn draw_system_profiler_section(
+    ui: &mut Ui,
+    world: &mut World,
+    pane_state: &mut EditorProfilerPaneState,
+) {
+    let Some(system_profiler) = world
+        .get_resource::<BevySystemProfiler>()
+        .map(|profiler| profiler.0.clone())
+    else {
+        ui.label("System profiler is unavailable");
+        return;
+    };
+
+    ui.heading("system profiler");
+    let mut enabled = system_profiler.enabled();
+    if ui.checkbox(&mut enabled, "enabled").changed() {
+        system_profiler.set_enabled(enabled);
+    }
+
+    let mut auto_enable = system_profiler.auto_enable_new_systems();
+    if ui
+        .checkbox(&mut auto_enable, "auto-enable new systems")
+        .changed()
+    {
+        system_profiler.set_auto_enable_new_systems(auto_enable);
+    }
+
+    ui.horizontal(|ui| {
+        if ui.button("Enable All").clicked() {
+            system_profiler.set_all_systems_enabled(true);
+        }
+        if ui.button("Disable All").clicked() {
+            system_profiler.set_all_systems_enabled(false);
+        }
+        if ui.button("Reset Counters").clicked() {
+            system_profiler.reset_all();
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("filter");
+        ui.text_edit_singleline(&mut pane_state.system_filter);
+        ui.checkbox(&mut pane_state.show_disabled_systems, "show disabled");
+    });
+
+    ComboBox::from_label("sort")
+        .selected_text(pane_state.sort_mode.label())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(
+                &mut pane_state.sort_mode,
+                ProfilerSystemSortMode::Hottest,
+                ProfilerSystemSortMode::Hottest.label(),
+            );
+            ui.selectable_value(
+                &mut pane_state.sort_mode,
+                ProfilerSystemSortMode::Average,
+                ProfilerSystemSortMode::Average.label(),
+            );
+            ui.selectable_value(
+                &mut pane_state.sort_mode,
+                ProfilerSystemSortMode::Calls,
+                ProfilerSystemSortMode::Calls.label(),
+            );
+            ui.selectable_value(
+                &mut pane_state.sort_mode,
+                ProfilerSystemSortMode::Name,
+                ProfilerSystemSortMode::Name.label(),
+            );
+        });
+
+    let filter = pane_state.system_filter.trim().to_ascii_lowercase();
+    let mut snapshots = system_profiler.snapshots();
+    if !pane_state.show_disabled_systems {
+        snapshots.retain(|snapshot| snapshot.enabled);
+    }
+    if !filter.is_empty() {
+        snapshots.retain(|snapshot| snapshot.name.to_ascii_lowercase().contains(&filter));
+    }
+
+    match pane_state.sort_mode {
+        ProfilerSystemSortMode::Hottest => {
+            snapshots.sort_by(|a, b| b.last_us.cmp(&a.last_us).then(a.name.cmp(b.name)))
+        }
+        ProfilerSystemSortMode::Average => snapshots.sort_by(|a, b| {
+            b.avg_us
+                .total_cmp(&a.avg_us)
+                .then(b.calls.cmp(&a.calls))
+                .then(a.name.cmp(b.name))
+        }),
+        ProfilerSystemSortMode::Calls => {
+            snapshots.sort_by(|a, b| b.calls.cmp(&a.calls).then(a.name.cmp(b.name)))
+        }
+        ProfilerSystemSortMode::Name => snapshots.sort_by(|a, b| a.name.cmp(b.name)),
+    }
+
+    let enabled_count = snapshots.iter().filter(|snapshot| snapshot.enabled).count();
+    let total_last_ms: f64 = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.enabled)
+        .map(|snapshot| profiler_micros_to_ms(snapshot.last_us))
+        .sum();
+    ui.label(format!(
+        "registered: {}  enabled: {}  sampled total: {:.3} ms",
+        snapshots.len(),
+        enabled_count,
+        total_last_ms
+    ));
+    ui.separator();
+
+    egui::ScrollArea::both()
+        .id_salt("system_profiler_table")
+        .auto_shrink([false, false])
+        .max_height(ui.available_height().max(PROFILER_SECTION_MIN_HEIGHT))
+        .show(ui, |ui| {
+            egui::Grid::new("system_profiler_grid")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("on");
+                    ui.label("system");
+                    ui.label("last ms");
+                    ui.label("avg ms");
+                    ui.label("max ms");
+                    ui.label("calls");
+                    ui.end_row();
+
+                    for snapshot in snapshots.iter() {
+                        let mut row_enabled = snapshot.enabled;
+                        if ui.checkbox(&mut row_enabled, "").changed() {
+                            let _ = system_profiler.set_system_enabled(snapshot.name, row_enabled);
+                        }
+                        ui.label(profiler_compact_label(snapshot.name, 74))
+                            .on_hover_text(snapshot.name);
+                        ui.label(format!("{:.3}", profiler_micros_to_ms(snapshot.last_us)));
+                        ui.label(format!("{:.3}", snapshot.avg_us / 1000.0));
+                        ui.label(format!("{:.3}", profiler_micros_to_ms(snapshot.max_us)));
+                        ui.label(format!("{}", snapshot.calls));
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn draw_script_profiler_section(
+    ui: &mut Ui,
+    world: &mut World,
+    pane_state: &mut EditorProfilerPaneState,
+) {
+    ui.heading("scripting");
+
+    if let Some(registry) = world.get_resource::<ScriptRegistry>() {
+        ui.label(format!("registered scripts: {}", registry.scripts.len()));
+        ui.label(format!("dirty scripts: {}", registry.dirty_paths.len()));
+    } else {
+        ui.label("script registry unavailable");
+    }
+
+    if let Some(runtime) = world.get_resource::<ScriptRuntime>() {
+        let total_instances =
+            runtime.instances.len() + runtime.visual_instances.len() + runtime.rust_instances.len();
+        ui.label(format!("active instances: {}", total_instances));
+        ui.label(format!(
+            "lua: {}  visual: {}  rust: {}",
+            runtime.instances.len(),
+            runtime.visual_instances.len(),
+            runtime.rust_instances.len(),
+        ));
+        ui.label(format!("runtime errors: {}", runtime.errors.len()));
+        if let Some(status) = runtime.rust_status.as_deref() {
+            ui.label(format!("rust runtime: {}", status));
+        }
+    } else {
+        ui.label("script runtime unavailable");
+    }
+
+    if let Some(edit_mode) = world.get_resource::<ScriptEditModeState>() {
+        ui.label(format!(
+            "edit mode running set: {}",
+            edit_mode.running_in_edit.len()
+        ));
+    }
+
+    if let Some(system_profiler) = world
+        .get_resource::<BevySystemProfiler>()
+        .map(|profiler| profiler.0.clone())
+    {
+        if let Some(snapshot) = system_profiler
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.name == "helmer_editor::editor::script_execution_system")
+        {
+            ui.label(format!(
+                "script execution: last {:.3} ms  avg {:.3} ms  max {:.3} ms",
+                profiler_micros_to_ms(snapshot.last_us),
+                snapshot.avg_us / 1000.0,
+                profiler_micros_to_ms(snapshot.max_us)
+            ));
+        }
+    }
+
+    ui.separator();
+
+    world.resource_scope::<ScriptProfilingState, _>(|_world, mut script_profiling| {
+        ui.heading("per-script profiler");
+        ui.checkbox(&mut script_profiling.enabled, "enabled");
+        ui.checkbox(
+            &mut script_profiling.auto_enable_new_scripts,
+            "auto-enable new scripts",
+        );
+
+        ui.horizontal(|ui| {
+            if ui.button("Enable All").clicked() {
+                script_profiling.set_all_enabled(true);
+            }
+            if ui.button("Disable All").clicked() {
+                script_profiling.set_all_enabled(false);
+            }
+            if ui.button("Reset Counters").clicked() {
+                script_profiling.reset_counters();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("filter");
+            ui.text_edit_singleline(&mut pane_state.script_filter);
+            ui.checkbox(&mut pane_state.show_disabled_scripts, "show disabled");
+        });
+
+        let filter = pane_state.script_filter.trim().to_ascii_lowercase();
+        let mut entries = script_profiling
+            .entries
+            .iter_mut()
+            .map(|(key, entry)| (*key, entry))
+            .collect::<Vec<_>>();
+        if !pane_state.show_disabled_scripts {
+            entries.retain(|(_, entry)| entry.enabled);
+        }
+        if !filter.is_empty() {
+            entries.retain(|(_, entry)| {
+                entry.language.to_ascii_lowercase().contains(&filter)
+                    || entry
+                        .path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains(&filter)
+                    || format!("{}:{}", entry.entity_bits, entry.script_index).contains(&filter)
+            });
+        }
+
+        entries.sort_by(|a, b| {
+            b.1.last_us
+                .cmp(&a.1.last_us)
+                .then(b.1.calls.cmp(&a.1.calls))
+                .then(a.1.path.cmp(&b.1.path))
+        });
+
+        ui.label(format!("tracked scripts: {}", entries.len()));
+        egui::ScrollArea::both()
+            .id_salt("script_profiler_table")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height().max(PROFILER_SECTION_MIN_HEIGHT))
+            .show(ui, |ui| {
+                egui::Grid::new("script_profiler_grid")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("on");
+                        ui.label("lang");
+                        ui.label("script");
+                        ui.label("entity");
+                        ui.label("last ms");
+                        ui.label("avg ms");
+                        ui.label("max ms");
+                        ui.label("calls");
+                        ui.end_row();
+
+                        for (_key, entry) in entries.iter_mut() {
+                            ui.checkbox(&mut entry.enabled, "");
+                            ui.label(profiler_compact_label(&entry.language, 10))
+                                .on_hover_text(&entry.language);
+                            let path_label = entry.path.to_string_lossy();
+                            ui.label(profiler_compact_label(path_label.as_ref(), 64))
+                                .on_hover_text(path_label.as_ref());
+                            ui.label(format!("{}:{}", entry.entity_bits, entry.script_index));
+                            ui.label(format!("{:.3}", profiler_micros_to_ms(entry.last_us)));
+                            let avg_us = if entry.calls > 0 {
+                                entry.total_us as f64 / entry.calls as f64
+                            } else {
+                                0.0
+                            };
+                            ui.label(format!("{:.3}", avg_us / 1000.0));
+                            ui.label(format!("{:.3}", profiler_micros_to_ms(entry.max_us)));
+                            ui.label(format!("{}", entry.calls));
+                            ui.end_row();
+                        }
+                    });
+            });
+    });
+}
+
+pub fn draw_profiler_window(ui: &mut Ui, world: &mut World) {
+    with_middle_drag_blocked(ui, world, |ui, world| {
+        let pane_size = Vec2::new(
+            ui.available_width().max(1.0),
+            ui.available_height().max(1.0),
+        );
+        ui.allocate_ui_with_layout(pane_size, Layout::top_down(Align::Min), |ui| {
+            ui.set_min_width(pane_size.x);
+            ui.set_max_width(pane_size.x);
+            egui::ScrollArea::both()
+                .id_salt("editor_profiler_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    world.resource_scope::<EditorProfilerPaneState, _>(|world, mut pane_state| {
+                        let pane_state = &mut *pane_state;
+                        pane_state.system_section_height = pane_state
+                            .system_section_height
+                            .max(PROFILER_SECTION_MIN_HEIGHT);
+                        pane_state.script_section_height = pane_state
+                            .script_section_height
+                            .max(PROFILER_SECTION_MIN_HEIGHT);
+                        pane_state.runtime_section_height = pane_state
+                            .runtime_section_height
+                            .max(PROFILER_SECTION_MIN_HEIGHT);
+
+                        profiler_section(ui, pane_state.system_section_height, |ui| {
+                            draw_system_profiler_section(ui, world, pane_state);
+                        });
+                        apply_profiler_splitter_delta(
+                            &mut pane_state.system_section_height,
+                            profiler_splitter(ui),
+                        );
+
+                        profiler_section(ui, pane_state.script_section_height, |ui| {
+                            draw_script_profiler_section(ui, world, pane_state);
+                        });
+                        apply_profiler_splitter_delta(
+                            &mut pane_state.script_section_height,
+                            profiler_splitter(ui),
+                        );
+
+                        profiler_section(ui, pane_state.runtime_section_height, |ui| {
+                            draw_runtime_profiling_panel(ui, world);
+                        });
+                        apply_profiler_splitter_delta(
+                            &mut pane_state.runtime_section_height,
+                            profiler_splitter(ui),
+                        );
+                    });
+                });
+        });
     });
 }
 
@@ -5312,6 +5787,7 @@ fn default_pane_kind_for_window(window_id: &str) -> Option<EditorPaneKind> {
         "Inspector" => Some(EditorPaneKind::Inspector),
         "History" => Some(EditorPaneKind::History),
         "Content Browser" => Some(EditorPaneKind::ContentBrowser),
+        "Profiler" => Some(EditorPaneKind::Profiler),
         _ => None,
     }
 }
@@ -7270,6 +7746,7 @@ fn draw_pane_area(
                         EditorPaneKind::ContentBrowser => draw_assets_window(ui, world),
                         EditorPaneKind::Console => draw_console_window(ui, world),
                         EditorPaneKind::AudioMixer => draw_audio_mixer_window(ui, world),
+                        EditorPaneKind::Profiler => draw_profiler_window(ui, world),
                     }
                 });
             } else {

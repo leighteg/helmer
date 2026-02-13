@@ -28,7 +28,7 @@ use helmer_becs::{
     AudioBackendResource, BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera,
     BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer,
     BevyPoseOverride, BevyRuntimeCursorState, BevySkinnedMeshRenderer, BevySpline,
-    BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
+    BevySplineFollower, BevySystemProfiler, BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
 };
 use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -92,7 +92,19 @@ use crate::editor::{
     watch::configure_file_watcher,
 };
 
+#[inline]
+fn begin_system_scope(
+    world: &World,
+    system_name: &'static str,
+) -> Option<helmer_becs::profiling::SystemProfileScope> {
+    world
+        .get_resource::<BevySystemProfiler>()
+        .and_then(|profiler| profiler.0.begin_scope(system_name))
+}
+
 pub fn editor_ui_system(world: &mut World) {
+    let _system_scope = begin_system_scope(world, "helmer_editor::editor::editor_ui_system");
+
     if let Some(mut viewport_runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
         viewport_runtime.begin_frame();
     }
@@ -246,6 +258,9 @@ pub fn editor_ui_system(world: &mut World) {
 }
 
 pub fn editor_layout_apply_system(world: &mut World) {
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor::editor::editor_layout_apply_system");
+
     ensure_default_pane_workspace(world);
 
     let project_open = world
@@ -448,6 +463,9 @@ pub fn editor_layout_apply_system(world: &mut World) {
 }
 
 pub fn editor_layout_save_system(world: &mut World) {
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor::editor::editor_layout_save_system");
+
     let (request, active_name) = match world.get_resource_mut::<EditorLayoutState>() {
         Some(mut state) => (state.save_request.take(), state.active.clone()),
         None => return,
@@ -513,6 +531,9 @@ pub fn editor_layout_save_system(world: &mut World) {
 }
 
 pub fn editor_layout_update_system(world: &mut World) {
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor::editor::editor_layout_update_system");
+
     let project_open = world
         .get_resource::<crate::editor::EditorProject>()
         .and_then(|project| project.root.as_ref())
@@ -1345,7 +1366,14 @@ fn snap_edge(edge: f32, clusters: &[EdgeCluster], epsilon: f32) -> f32 {
 pub fn editor_physics_state_system(
     scene_state: Res<EditorSceneState>,
     mut phys: ResMut<PhysicsResource>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::editor_physics_state_system")
+    });
+
     let should_run = scene_state.world_state == WorldState::Play;
     if phys.running != should_run {
         phys.running = should_run;
@@ -1353,6 +1381,8 @@ pub fn editor_physics_state_system(
 }
 
 pub fn editor_command_system(world: &mut World) {
+    let _system_scope = begin_system_scope(world, "helmer_editor::editor::editor_command_system");
+
     let commands = {
         let Some(mut queue) = world.get_resource_mut::<EditorCommandQueue>() else {
             return;
@@ -1502,7 +1532,16 @@ fn collect_entity_subtree(world: &mut World, root: Entity) -> Vec<Entity> {
     ordered
 }
 
-pub fn asset_scan_system(mut state: ResMut<AssetBrowserState>) {
+pub fn asset_scan_system(
+    mut state: ResMut<AssetBrowserState>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
+) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::asset_scan_system")
+    });
+
     let root = match state.root.as_ref() {
         Some(root) => root.clone(),
         None => return,
@@ -1522,7 +1561,14 @@ pub fn drag_drop_system(
     mut dragged: ResMut<DraggedFile>,
     mut queue: ResMut<EditorCommandQueue>,
     assets: Res<AssetBrowserState>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::drag_drop_system")
+    });
+
     if let Some(path) = dragged.0.take() {
         let destination_dir = assets.current_dir.clone().or_else(|| {
             assets.selected.as_ref().and_then(|selected| {
@@ -1544,7 +1590,14 @@ pub fn drag_drop_system(
 pub fn editor_shortcut_system(
     input_manager: Res<BevyInputManager>,
     mut queue: ResMut<EditorCommandQueue>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::editor_shortcut_system")
+    });
+
     let input_manager = input_manager.0.read();
 
     if input_manager.egui_wants_key {
@@ -1579,7 +1632,14 @@ pub fn editor_shortcut_system(
 pub fn pane_manager_toggle_system(
     mut pane_manager: ResMut<EditorPaneManagerState>,
     egui_res: Res<EguiResource>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::pane_manager_toggle_system")
+    });
+
     let toggle = egui_res
         .ctx
         .input(|input| input.key_pressed(egui::Key::Tab) && input.modifiers.ctrl);
@@ -1639,7 +1699,14 @@ pub fn scene_dirty_system(
         ),
     >,
     pose_child_query: Query<(), (With<SceneChild>, Changed<BevyPoseOverride>)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::scene_dirty_system")
+    });
+
     if scene_state.world_state == WorldState::Play {
         return;
     }
@@ -1662,7 +1729,14 @@ pub fn apply_scene_child_animations_system(
     mut animator_query: Query<&mut BevyAnimator>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     name_query: Query<&Name>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::apply_scene_child_animations_system")
+    });
+
     if pending.entries.is_empty() {
         return;
     }
@@ -1733,7 +1807,14 @@ pub fn apply_scene_child_pose_overrides_system(
     child_query: Query<(Entity, &SceneChild)>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     mut pose_query: Query<&mut BevyPoseOverride>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::apply_scene_child_pose_overrides_system")
+    });
+
     if pending.entries.is_empty() {
         return;
     }
@@ -1791,6 +1872,11 @@ pub fn apply_scene_child_pose_overrides_system(
 }
 
 pub fn pending_scene_child_renderer_system(world: &mut World) {
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor::editor::pending_scene_child_renderer_system",
+    );
+
     let world_state = world
         .get_resource::<EditorSceneState>()
         .map(|state| state.world_state);
@@ -1928,6 +2014,9 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
 }
 
 pub fn pending_skinned_mesh_system(world: &mut World) {
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor::editor::pending_skinned_mesh_system");
+
     let world_state = world
         .get_resource::<EditorSceneState>()
         .map(|state| state.world_state);
@@ -2042,6 +2131,9 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
 }
 
 pub fn editor_render_refresh_system(world: &mut World) {
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor::editor::editor_render_refresh_system");
+
     let pending = world
         .get_resource::<EditorRenderRefresh>()
         .map(|refresh| refresh.pending)
@@ -2066,7 +2158,17 @@ pub fn editor_render_refresh_system(world: &mut World) {
     }
 }
 
-pub fn script_registry_system(mut registry: ResMut<ScriptRegistry>, project: Res<EditorProject>) {
+pub fn script_registry_system(
+    mut registry: ResMut<ScriptRegistry>,
+    project: Res<EditorProject>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
+) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::script_registry_system")
+    });
+
     let Some(root) = project.root.as_ref() else {
         return;
     };
@@ -2797,6 +2899,11 @@ fn viewport_request_for_entity(
 }
 
 pub fn editor_viewport_camera_mode_system(world: &mut World) {
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor::editor::editor_viewport_camera_mode_system",
+    );
+
     let world_state = world
         .get_resource::<EditorSceneState>()
         .map(|scene| scene.world_state)
@@ -2859,6 +2966,11 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
 }
 
 pub fn editor_viewport_render_requests_system(world: &mut World) {
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor::editor::editor_viewport_render_requests_system",
+    );
+
     let runtime = world
         .get_resource::<EditorViewportRuntime>()
         .cloned()
@@ -3550,23 +3662,32 @@ pub fn freecam_system(
             bevy_ecs::prelude::Without<EditorViewportCamera>,
         ),
     >,
-    viewport_camera_candidates: bevy_ecs::prelude::Query<
-        Entity,
-        (
-            bevy_ecs::prelude::With<EditorViewportCamera>,
-            bevy_ecs::prelude::Without<EditorPlayCamera>,
-        ),
-    >,
-    play_freecam_camera_candidates: bevy_ecs::prelude::Query<
-        Entity,
-        (
-            bevy_ecs::prelude::With<EditorPlayCamera>,
-            bevy_ecs::prelude::With<Freecam>,
-            bevy_ecs::prelude::Without<EditorViewportCamera>,
-        ),
-    >,
+    mut camera_candidates: bevy_ecs::system::ParamSet<(
+        bevy_ecs::prelude::Query<
+            Entity,
+            (
+                bevy_ecs::prelude::With<EditorViewportCamera>,
+                bevy_ecs::prelude::Without<EditorPlayCamera>,
+            ),
+        >,
+        bevy_ecs::prelude::Query<
+            Entity,
+            (
+                bevy_ecs::prelude::With<EditorPlayCamera>,
+                bevy_ecs::prelude::With<Freecam>,
+                bevy_ecs::prelude::Without<EditorViewportCamera>,
+            ),
+        >,
+    )>,
     freecam_components: bevy_ecs::prelude::Query<&Freecam>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::freecam_system")
+    });
+
     if state.speed == 0.0 {
         state.speed = 1.0;
         state.sensitivity = viewport_state
@@ -3675,8 +3796,7 @@ pub fn freecam_system(
                 .map(|pane| pane.camera_entity)
         });
     let can_control_active_camera = active_camera_entity.is_some_and(|entity| {
-        viewport_camera_candidates.get(entity).is_ok()
-            || play_freecam_camera_candidates.get(entity).is_ok()
+        camera_candidates.p0().get(entity).is_ok() || camera_candidates.p1().get(entity).is_ok()
     });
     let freecam_settings_pane_id = state
         .look_pane_id

@@ -20,7 +20,8 @@ use rapier3d::{
 use tracing::warn;
 
 use crate::{
-    BevyAssetServer, BevyMeshRenderer, BevySkinnedMeshRenderer, BevyTransform, DeltaTime,
+    BevyAssetServer, BevyMeshRenderer, BevySkinnedMeshRenderer, BevySystemProfiler, BevyTransform,
+    DeltaTime,
     physics::{
         components::{
             CharacterController, CharacterControllerInput, CharacterControllerOutput,
@@ -816,7 +817,14 @@ pub fn sync_entities_to_physics_system(
         ),
         With<PhysicsHandle>,
     >,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::sync_entities_to_physics_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1008,7 +1016,14 @@ pub fn sync_transforms_to_physics_system(
             Or<(With<FixedCollider>, With<KinematicRigidBody>)>,
         ),
     >,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::sync_transforms_to_physics_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1029,7 +1044,14 @@ pub fn sync_transforms_to_physics_system(
 pub fn apply_persistent_forces_system(
     mut phys: ResMut<PhysicsResource>,
     query: Query<(&PhysicsHandle, &RigidBodyForces)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::apply_persistent_forces_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1068,7 +1090,14 @@ pub fn apply_persistent_forces_system(
 pub fn apply_transient_forces_system(
     mut phys: ResMut<PhysicsResource>,
     mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyTransientForces)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::apply_transient_forces_system")
+    });
+
     for (handle, mut forces) in query.iter_mut() {
         let has_transient_force = forces.force != Vec3::ZERO
             || forces.torque != Vec3::ZERO
@@ -1111,7 +1140,14 @@ pub fn apply_transient_forces_system(
 pub fn apply_queued_impulses_system(
     mut phys: ResMut<PhysicsResource>,
     mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyImpulseQueue)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::apply_queued_impulses_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1163,7 +1199,14 @@ pub fn sync_joints_to_physics_system(
     mut phys: ResMut<PhysicsResource>,
     changed_query: Query<(Entity, &PhysicsJoint), Changed<PhysicsJoint>>,
     all_query: Query<(Entity, &PhysicsJoint)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::sync_joints_to_physics_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1256,7 +1299,14 @@ pub fn character_controller_system(
         &PhysicsHandle,
         &mut CharacterControllerOutput,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::character_controller_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1374,7 +1424,17 @@ pub fn character_controller_system(
 }
 
 #[inline]
-pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTime>) {
+pub fn physics_step_system(
+    mut phys: ResMut<PhysicsResource>,
+    time: Res<DeltaTime>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
+) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::physics_step_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1409,7 +1469,14 @@ pub fn physics_step_system(mut phys: ResMut<PhysicsResource>, time: Res<DeltaTim
 pub fn sync_physics_to_entities_system(
     phys: Res<PhysicsResource>,
     mut query: Query<(&PhysicsHandle, &mut BevyTransform)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::sync_physics_to_entities_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1446,7 +1513,14 @@ pub fn physics_scene_query_system(
         &mut PhysicsPointProjectionHit,
     )>,
     mut shape_query: Query<(Entity, &PhysicsShapeCast, &mut PhysicsShapeCastHit)>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::physics_scene_query_system")
+    });
+
     if !phys.running {
         return;
     }
@@ -1560,7 +1634,14 @@ pub fn cleanup_physics_system(
     mut phys: ResMut<PhysicsResource>,
     query: Query<Entity, With<PhysicsHandle>>,
     mut local_state: Local<CleanupState>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::physics::cleanup_physics_system")
+    });
+
     if !phys.running {
         return;
     }

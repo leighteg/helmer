@@ -35,7 +35,7 @@ use crate::systems::animation_system::SkinningResource;
 use crate::{
     BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
     BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
-    BevyStreamingTuning, BevyTransform,
+    BevyStreamingTuning, BevySystemProfiler, BevyTransform,
 };
 
 //================================================================================
@@ -2121,6 +2121,7 @@ fn apply_skinning_delta(delta: &mut RenderDelta, skinning: &SkinningResource) {
 pub fn render_data_system(
     mut worker_state: Local<RenderWorkerState>,
     resources: RenderSystemResources,
+    system_profiler: Option<Res<BevySystemProfiler>>,
     mut render_packet: ResMut<RenderPacket>,
     mut render_object_count: ResMut<RenderObjectCount>,
     mut render_reset: ResMut<RenderResetRequest>,
@@ -2166,6 +2167,12 @@ pub fn render_data_system(
     )>,
     mut removed_lights: RemovedComponents<BevyLight>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::render_data_system")
+    });
+
     let sync_active = render_sync.frames_remaining > 0;
     if render_sync.bump_epoch {
         worker_state.epoch = worker_state.epoch.wrapping_add(1);

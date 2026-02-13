@@ -9,7 +9,7 @@ use helmer::{
 
 use crate::{
     BevyAnimator, BevyAssetServerParam, BevyPoseOverride, BevyRuntimeConfig,
-    BevySkinnedMeshRenderer, DeltaTime,
+    BevySkinnedMeshRenderer, BevySystemProfiler, DeltaTime,
 };
 
 #[derive(Clone)]
@@ -277,7 +277,14 @@ pub fn skinning_system(
         Option<&mut BevyAnimator>,
         Option<&BevyPoseOverride>,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::skinning_system")
+    });
+
     let render_config = runtime_config.0.render_config;
     let mode = render_config.skinning_mode;
     skinning.begin_frame(mode);

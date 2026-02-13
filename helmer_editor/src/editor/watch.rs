@@ -7,7 +7,8 @@ use std::{
     },
 };
 
-use bevy_ecs::prelude::{ResMut, Resource};
+use bevy_ecs::prelude::{Res, ResMut, Resource};
+use helmer_becs::BevySystemProfiler;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::editor::{assets::AssetBrowserState, scripting::ScriptRegistry};
@@ -53,7 +54,14 @@ pub fn file_watch_system(
     mut state: ResMut<FileWatchState>,
     mut assets: ResMut<AssetBrowserState>,
     mut scripts: ResMut<ScriptRegistry>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::file_watch_system")
+    });
+
     let events = {
         let Some(receiver) = state.receiver.as_ref() else {
             return;

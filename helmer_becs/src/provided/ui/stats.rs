@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use bevy_ecs::prelude::Entity;
+use bevy_ecs::prelude::{Entity, World};
 use egui::{Align2, Color32, ComboBox, DragValue, Stroke, StrokeKind, TextStyle, pos2, vec2};
 use hashbrown::HashSet;
 use helmer::{
@@ -180,6 +180,27 @@ fn micros_to_ms(value: u64) -> f64 {
     value as f64 / 1000.0
 }
 
+fn compact_label(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".to_string();
+    }
+    let side = (max_chars - 3) / 2;
+    let head = value.chars().take(side).collect::<String>();
+    let tail = value
+        .chars()
+        .rev()
+        .take(side)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{}...{}", head, tail)
+}
+
 fn pass_color(name: &str) -> Color32 {
     let mut hash: u32 = 2166136261;
     for byte in name.as_bytes() {
@@ -219,6 +240,430 @@ fn window_spec(title: &str) -> EguiWindowSpec {
         id: title.to_string(),
         title: title.to_string(),
     }
+}
+
+pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
+    let runtime_profiling = world
+        .get_resource::<BevyRuntimeProfiling>()
+        .map(|profiling| profiling.0.clone());
+    let renderer_stats = world
+        .get_resource::<BevyRendererStats>()
+        .map(|stats| stats.0.clone());
+    let audio_stats = world
+        .get_resource::<AudioBackendResource>()
+        .map(|audio| audio.0.stats());
+
+    egui::ScrollArea::both()
+        .id_salt("runtime_profiling_panel")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("profiling");
+            ui.separator();
+
+            let mut profiling_enabled = runtime_profiling
+                .as_ref()
+                .map(|profiling| profiling.enabled.load(Ordering::Relaxed))
+                .unwrap_or(false);
+            let mut history_samples = runtime_profiling
+                .as_ref()
+                .map(|profiling| profiling.history_samples.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            let mut render_pass_plot_limit = runtime_profiling
+                .as_ref()
+                .map(|profiling| profiling.render_pass_plot_limit.load(Ordering::Relaxed))
+                .unwrap_or(0);
+
+            let enabled_changed = ui.checkbox(&mut profiling_enabled, "enabled").changed();
+            let history_changed = ui
+                .add(
+                    DragValue::new(&mut history_samples)
+                        .speed(1.0)
+                        .prefix("history samples: "),
+                )
+                .changed();
+            let plot_limit_changed = ui
+                .add(
+                    DragValue::new(&mut render_pass_plot_limit)
+                        .speed(1.0)
+                        .prefix("render pass plot limit: "),
+                )
+                .changed();
+            let clear_clicked = ui.button("clear history").clicked();
+
+            if let Some(profiling) = runtime_profiling.as_ref() {
+                if enabled_changed {
+                    profiling
+                        .enabled
+                        .store(profiling_enabled, Ordering::Relaxed);
+                }
+                if history_changed {
+                    profiling
+                        .history_samples
+                        .store(history_samples, Ordering::Relaxed);
+                }
+                if plot_limit_changed {
+                    profiling
+                        .render_pass_plot_limit
+                        .store(render_pass_plot_limit, Ordering::Relaxed);
+                }
+            }
+
+            if let Some(stats) = renderer_stats.as_ref() {
+                stats
+                    .profiling_enabled
+                    .store(profiling_enabled, Ordering::Relaxed);
+            }
+
+            let history_limit = history_samples as usize;
+            let mut history = world
+                .get_resource_mut::<ProfilingHistory>()
+                .expect("ProfilingHistory resource not found");
+            if clear_clicked {
+                clear_profiling_history(&mut history);
+            }
+
+            if profiling_enabled && history_limit > 0 {
+                if let Some(profiling) = runtime_profiling.as_ref() {
+                    push_history(
+                        &mut history.main_event_ms,
+                        micros_to_ms(profiling.main_event_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.main_update_ms,
+                        micros_to_ms(profiling.main_update_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.logic_tick_ms,
+                        micros_to_ms(profiling.logic_tick_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.logic_schedule_ms,
+                        micros_to_ms(profiling.logic_schedule_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_thread_frame_ms,
+                        micros_to_ms(profiling.render_thread_frame_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_thread_render_ms,
+                        micros_to_ms(profiling.render_thread_render_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                }
+
+                if let Some(stats) = renderer_stats.as_ref() {
+                    push_history(
+                        &mut history.render_prepare_globals_ms,
+                        micros_to_ms(stats.render_prepare_globals_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_streaming_plan_ms,
+                        micros_to_ms(stats.render_streaming_plan_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_occlusion_ms,
+                        micros_to_ms(stats.render_occlusion_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_graph_ms,
+                        micros_to_ms(stats.render_graph_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_graph_pass_ms,
+                        micros_to_ms(stats.render_graph_pass_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_graph_encoder_create_ms,
+                        micros_to_ms(stats.render_graph_encoder_create_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_graph_encoder_finish_ms,
+                        micros_to_ms(stats.render_graph_encoder_finish_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_graph_overhead_ms,
+                        micros_to_ms(stats.render_graph_overhead_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_resource_mgmt_ms,
+                        micros_to_ms(stats.render_resource_mgmt_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_acquire_ms,
+                        micros_to_ms(stats.render_acquire_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_submit_ms,
+                        micros_to_ms(stats.render_submit_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.render_present_ms,
+                        micros_to_ms(stats.render_present_us.load(Ordering::Relaxed)),
+                        history_limit,
+                    );
+
+                    let pass_timings = stats.pass_timings.read();
+                    if !pass_timings.is_empty() {
+                        let mut seen = HashSet::new();
+                        history.render_pass_order = pass_timings
+                            .iter()
+                            .map(|timing| timing.name.clone())
+                            .collect();
+                        for timing in pass_timings.iter() {
+                            let ms = micros_to_ms(timing.duration_us);
+                            let entry = history
+                                .render_pass_ms
+                                .entry(timing.name.clone())
+                                .or_insert_with(VecDeque::new);
+                            push_history(entry, ms, history_limit);
+                            history.render_pass_last_ms.insert(timing.name.clone(), ms);
+                            seen.insert(timing.name.clone());
+                        }
+                        history.render_pass_ms.retain(|name, _| seen.contains(name));
+                        history
+                            .render_pass_last_ms
+                            .retain(|name, _| seen.contains(name));
+                    }
+                }
+
+                if let Some(audio) = audio_stats {
+                    push_history(
+                        &mut history.audio_mix_ms,
+                        audio.mix_time_us as f64 / 1000.0,
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.audio_callback_ms,
+                        audio.callback_time_us as f64 / 1000.0,
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.audio_emitters,
+                        audio.active_emitters as f64,
+                        history_limit,
+                    );
+                    push_history(
+                        &mut history.audio_streaming_emitters,
+                        audio.streaming_emitters as f64,
+                        history_limit,
+                    );
+                }
+            }
+
+            ui.separator();
+            ui.collapsing("threads", |ui| {
+                ui.label(format!(
+                    "main update: {:.3} ms",
+                    history.main_update_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "logic tick: {:.3} ms",
+                    history.logic_tick_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "render frame: {:.3} ms",
+                    history
+                        .render_thread_frame_ms
+                        .back()
+                        .copied()
+                        .unwrap_or(0.0)
+                ));
+                draw_history_plot(
+                    ui,
+                    140.0,
+                    &[
+                        (
+                            "main update",
+                            &history.main_update_ms,
+                            Color32::from_rgb(90, 160, 240),
+                        ),
+                        (
+                            "logic tick",
+                            &history.logic_tick_ms,
+                            Color32::from_rgb(120, 210, 140),
+                        ),
+                        (
+                            "render frame",
+                            &history.render_thread_frame_ms,
+                            Color32::from_rgb(220, 150, 90),
+                        ),
+                    ],
+                );
+            });
+
+            ui.separator();
+            ui.collapsing("renderer internals", |ui| {
+                ui.label(format!(
+                    "prepare globals: {:.3} ms",
+                    history
+                        .render_prepare_globals_ms
+                        .back()
+                        .copied()
+                        .unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "streaming plan: {:.3} ms",
+                    history
+                        .render_streaming_plan_ms
+                        .back()
+                        .copied()
+                        .unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "occlusion: {:.3} ms",
+                    history.render_occlusion_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "render graph: {:.3} ms",
+                    history.render_graph_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "resource mgmt: {:.3} ms",
+                    history
+                        .render_resource_mgmt_ms
+                        .back()
+                        .copied()
+                        .unwrap_or(0.0)
+                ));
+                draw_history_plot(
+                    ui,
+                    170.0,
+                    &[
+                        (
+                            "prepare globals",
+                            &history.render_prepare_globals_ms,
+                            Color32::from_rgb(120, 210, 120),
+                        ),
+                        (
+                            "streaming plan",
+                            &history.render_streaming_plan_ms,
+                            Color32::from_rgb(90, 170, 255),
+                        ),
+                        (
+                            "occlusion",
+                            &history.render_occlusion_ms,
+                            Color32::from_rgb(240, 120, 120),
+                        ),
+                        (
+                            "render graph",
+                            &history.render_graph_ms,
+                            Color32::from_rgb(200, 180, 80),
+                        ),
+                    ],
+                );
+
+                ui.separator();
+                ui.label(format!(
+                    "acquire: {:.3} ms",
+                    history.render_acquire_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "submit: {:.3} ms",
+                    history.render_submit_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "present: {:.3} ms",
+                    history.render_present_ms.back().copied().unwrap_or(0.0)
+                ));
+            });
+
+            ui.separator();
+            ui.collapsing("render graph internals", |ui| {
+                let mut entries: Vec<(String, f64)> = history
+                    .render_pass_last_ms
+                    .iter()
+                    .map(|(name, ms)| (name.clone(), *ms))
+                    .collect();
+                entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal));
+
+                let total_ms: f64 = entries.iter().map(|(_, ms)| *ms).sum();
+                ui.label(format!("total (sum of passes): {:.3} ms", total_ms));
+
+                let plot_limit = render_pass_plot_limit as usize;
+                if plot_limit > 0 {
+                    let mut names = Vec::new();
+                    for (name, _) in entries.iter().take(plot_limit) {
+                        names.push(name.clone());
+                    }
+                    let mut series = Vec::new();
+                    for name in names.iter() {
+                        if let Some(history_series) = history.render_pass_ms.get(name) {
+                            series.push((name.as_str(), history_series, pass_color(name)));
+                        }
+                    }
+                    if !series.is_empty() {
+                        draw_history_plot(ui, 170.0, &series);
+                    }
+                }
+
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("profiling_pass_table")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("pass");
+                                ui.label("last ms");
+                                ui.label("%");
+                                ui.end_row();
+                                for (name, ms) in entries.iter() {
+                                    ui.label(compact_label(name, 72)).on_hover_text(name);
+                                    ui.label(format!("{:.3}", ms));
+                                    if total_ms > 0.0 {
+                                        ui.label(format!("{:.1}%", (ms / total_ms) * 100.0));
+                                    } else {
+                                        ui.label("-");
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+
+            ui.separator();
+            ui.collapsing("audio", |ui| {
+                ui.label(format!(
+                    "mix: {:.3} ms",
+                    history.audio_mix_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "callback: {:.3} ms",
+                    history.audio_callback_ms.back().copied().unwrap_or(0.0)
+                ));
+                ui.label(format!(
+                    "emitters: {:.0} (streaming {:.0})",
+                    history.audio_emitters.back().copied().unwrap_or(0.0),
+                    history
+                        .audio_streaming_emitters
+                        .back()
+                        .copied()
+                        .unwrap_or(0.0),
+                ));
+                if let Some(audio) = audio_stats {
+                    ui.label(format!(
+                        "output: {} Hz, {} ch, buffer {}",
+                        audio.sample_rate, audio.channels, audio.buffer_frames
+                    ));
+                }
+            });
+        });
 }
 
 pub struct StatsUI {}

@@ -52,7 +52,8 @@ use helmer_becs::systems::scene_system::SceneRoot;
 use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
-    BevyMeshRenderer, BevySpline, BevySplineFollower, BevyTransform, BevyWrapper, DeltaTime,
+    BevyMeshRenderer, BevySpline, BevySplineFollower, BevySystemProfiler, BevyTransform,
+    BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
@@ -336,6 +337,146 @@ pub struct ScriptInstanceKey {
     pub script_index: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScriptProfileEntry {
+    pub entity_bits: u64,
+    pub script_index: usize,
+    pub path: PathBuf,
+    pub language: String,
+    pub enabled: bool,
+    pub calls: u64,
+    pub total_us: u64,
+    pub last_us: u64,
+    pub max_us: u64,
+}
+
+impl ScriptProfileEntry {
+    fn new(key: ScriptInstanceKey, path: PathBuf, language: String, enabled: bool) -> Self {
+        Self {
+            entity_bits: key.entity.to_bits(),
+            script_index: key.script_index,
+            path,
+            language,
+            enabled,
+            calls: 0,
+            total_us: 0,
+            last_us: 0,
+            max_us: 0,
+        }
+    }
+
+    fn update_identity(&mut self, key: ScriptInstanceKey, path: PathBuf, language: String) {
+        self.entity_bits = key.entity.to_bits();
+        self.script_index = key.script_index;
+        self.path = path;
+        self.language = language;
+    }
+
+    fn record(&mut self, elapsed_us: u64) {
+        self.calls = self.calls.saturating_add(1);
+        self.total_us = self.total_us.saturating_add(elapsed_us);
+        self.last_us = elapsed_us;
+        self.max_us = self.max_us.max(elapsed_us);
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct ScriptProfilingState {
+    pub enabled: bool,
+    pub auto_enable_new_scripts: bool,
+    pub entries: HashMap<ScriptInstanceKey, ScriptProfileEntry>,
+}
+
+impl Default for ScriptProfilingState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_enable_new_scripts: true,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl ScriptProfilingState {
+    pub fn set_all_enabled(&mut self, enabled: bool) {
+        self.auto_enable_new_scripts = enabled;
+        for entry in self.entries.values_mut() {
+            entry.enabled = enabled;
+        }
+    }
+
+    pub fn reset_counters(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.calls = 0;
+            entry.total_us = 0;
+            entry.last_us = 0;
+            entry.max_us = 0;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScriptProfileSample {
+    key: ScriptInstanceKey,
+    path: PathBuf,
+    language: String,
+    elapsed_us: u64,
+}
+
+enum ScriptProfileSampleGuard<'a> {
+    Disabled,
+    Enabled {
+        samples: &'a mut Vec<ScriptProfileSample>,
+        start: Instant,
+        key: ScriptInstanceKey,
+        path: PathBuf,
+        language: String,
+    },
+}
+
+impl<'a> ScriptProfileSampleGuard<'a> {
+    fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    fn enabled(
+        samples: &'a mut Vec<ScriptProfileSample>,
+        key: ScriptInstanceKey,
+        path: &Path,
+        language: &str,
+    ) -> Self {
+        Self::Enabled {
+            samples,
+            start: Instant::now(),
+            key,
+            path: path.to_path_buf(),
+            language: language.to_string(),
+        }
+    }
+}
+
+impl Drop for ScriptProfileSampleGuard<'_> {
+    fn drop(&mut self) {
+        let Self::Enabled {
+            samples,
+            start,
+            key,
+            path,
+            language,
+        } = self
+        else {
+            return;
+        };
+
+        samples.push(ScriptProfileSample {
+            key: *key,
+            path: path.clone(),
+            language: language.clone(),
+            elapsed_us: start.elapsed().as_micros() as u64,
+        });
+    }
+}
+
 #[derive(Debug)]
 struct RustBuildResult {
     manifest_path: PathBuf,
@@ -558,6 +699,14 @@ impl ScriptInputState {
 }
 
 pub fn script_execution_system(world: &mut World) {
+    let _system_scope = world
+        .get_resource::<BevySystemProfiler>()
+        .and_then(|profiler| {
+            profiler
+                .0
+                .begin_scope("helmer_editor::editor::script_execution_system")
+        });
+
     let current_state = world
         .get_resource::<EditorSceneState>()
         .map(|state| state.world_state)
@@ -620,6 +769,27 @@ pub fn script_execution_system(world: &mut World) {
         })
         .collect::<HashMap<_, _>>();
     let script_keys = scripts_by_key.keys().copied().collect::<HashSet<_>>();
+    let (script_profiling_enabled, script_auto_enable_new_scripts, script_enabled_overrides) =
+        world
+            .get_resource::<ScriptProfilingState>()
+            .map(|state| {
+                let enabled_overrides = if state.enabled {
+                    state
+                        .entries
+                        .iter()
+                        .map(|(key, entry)| (*key, entry.enabled))
+                        .collect::<HashMap<_, _>>()
+                } else {
+                    HashMap::new()
+                };
+                (
+                    state.enabled,
+                    state.auto_enable_new_scripts,
+                    enabled_overrides,
+                )
+            })
+            .unwrap_or((false, true, HashMap::new()));
+    let mut script_profile_samples = script_profiling_enabled.then(Vec::<ScriptProfileSample>::new);
 
     let mut force_reload = HashSet::new();
     if let Some(mut edit_mode) = world.get_resource_mut::<ScriptEditModeState>() {
@@ -823,6 +993,20 @@ pub fn script_execution_system(world: &mut World) {
         for key in desired_active.iter().copied() {
             let Some((script, runtime_path, asset)) = scripts_by_key.get(&key) else {
                 continue;
+            };
+            let profile_this_script = script_profiling_enabled
+                && script_enabled_overrides
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(script_auto_enable_new_scripts);
+            let _script_profile_scope = if profile_this_script {
+                if let Some(samples) = script_profile_samples.as_mut() {
+                    ScriptProfileSampleGuard::enabled(samples, key, runtime_path, &asset.language)
+                } else {
+                    ScriptProfileSampleGuard::disabled()
+                }
+            } else {
+                ScriptProfileSampleGuard::disabled()
             };
             active_scripts.insert(key);
 
@@ -1173,6 +1357,43 @@ pub fn script_execution_system(world: &mut World) {
             run_state.last_executing = is_executing;
         }
     });
+
+    if let Some(mut script_profiling) = world.get_resource_mut::<ScriptProfilingState>() {
+        let auto_enable_new = script_profiling.auto_enable_new_scripts;
+
+        for (key, (_, runtime_path, asset)) in scripts_by_key.iter() {
+            let entry = script_profiling.entries.entry(*key).or_insert_with(|| {
+                ScriptProfileEntry::new(
+                    *key,
+                    runtime_path.clone(),
+                    asset.language.clone(),
+                    auto_enable_new,
+                )
+            });
+            entry.update_identity(*key, runtime_path.clone(), asset.language.clone());
+        }
+        script_profiling
+            .entries
+            .retain(|key, _| scripts_by_key.contains_key(key));
+
+        if let Some(samples) = script_profile_samples.take() {
+            for sample in samples {
+                let entry = script_profiling
+                    .entries
+                    .entry(sample.key)
+                    .or_insert_with(|| {
+                        ScriptProfileEntry::new(
+                            sample.key,
+                            sample.path.clone(),
+                            sample.language.clone(),
+                            auto_enable_new,
+                        )
+                    });
+                entry.update_identity(sample.key, sample.path, sample.language);
+                entry.record(sample.elapsed_us);
+            }
+        }
+    }
 
     if is_executing {
         if let Some(input_manager) = input_manager {

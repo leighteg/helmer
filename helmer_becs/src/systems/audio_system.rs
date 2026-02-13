@@ -7,7 +7,9 @@ use helmer::audio::{
 use helmer::provided::components::{ActiveCamera, AudioEmitter, AudioListener, Transform};
 
 use crate::systems::scene_system::{SceneChild, SceneRoot};
-use crate::{AudioBackendResource, BevyAssetServerParam, BevyWrapper, DeltaTime};
+use crate::{
+    AudioBackendResource, BevyAssetServerParam, BevySystemProfiler, BevyWrapper, DeltaTime,
+};
 
 pub fn audio_system(
     _dt: Res<DeltaTime>,
@@ -25,7 +27,12 @@ pub fn audio_system(
         Option<&SceneChild>,
         Option<&SceneRoot>,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler
+        .as_ref()
+        .and_then(|profiler| profiler.0.begin_scope("helmer_becs::systems::audio_system"));
+
     if !audio_backend.0.enabled() {
         return;
     }

@@ -4,7 +4,7 @@ use glam::{Mat3, Quat, Vec3};
 
 use helmer::provided::components::{EntityFollower, LookAt, Transform};
 
-use crate::{BevyEntityFollower, BevyLookAt, BevyTransform, DeltaTime};
+use crate::{BevyEntityFollower, BevyLookAt, BevySystemProfiler, BevyTransform, DeltaTime};
 
 fn smooth_factor(smooth_time: f32, dt: f32) -> f32 {
     if smooth_time <= 1.0e-4 || dt <= 0.0 {
@@ -31,7 +31,14 @@ pub fn entity_follow_system(
         Query<&mut BevyTransform>,
         Query<&BevyTransform>,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::entity_follow_system")
+    });
+
     let dt = time.0;
     let mut updates: Vec<(Entity, Vec3, Option<Quat>)> = Vec::new();
 
@@ -98,7 +105,14 @@ pub fn look_at_system(
         Query<&mut BevyTransform>,
         Query<&BevyTransform>,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::look_at_system")
+    });
+
     let dt = time.0;
     let mut updates: Vec<(Entity, Quat)> = Vec::new();
 

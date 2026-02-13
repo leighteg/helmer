@@ -1,6 +1,6 @@
 use crate::{
     BevyAnimator, BevyAssetServerParam, BevyMeshRenderer, BevyRuntimeProfiling,
-    BevySkinnedMeshRenderer, BevyTransform, BevyWrapper,
+    BevySkinnedMeshRenderer, BevySystemProfiler, BevyTransform, BevyWrapper,
 };
 use bevy_ecs::{
     component::Component,
@@ -141,7 +141,14 @@ pub fn scene_spawning_system(
     scene_root_query: Query<(Entity, &SceneRoot), Without<SpawnedScene>>,
     root_transforms: Query<&BevyTransform, With<SceneRoot>>,
     profiling_res: Option<Res<BevyRuntimeProfiling>>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::scene_spawning_system")
+    });
+
     let profiling = profiling_res.as_ref().map(|p| p.0.clone());
     let profiling_start = profiling.as_ref().and_then(|profiling| {
         if profiling.enabled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -326,7 +333,14 @@ pub fn scene_child_skinning_system(
         &PendingSkinnedMesh,
         Option<&BevyMeshRenderer>,
     )>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::scene_child_skinning_system")
+    });
+
     let asset_server = asset_server.0.lock();
 
     for (entity, child, pending, mesh_renderer) in pending_query.iter() {
@@ -366,6 +380,13 @@ pub fn scene_child_skinning_system(
 
 /// Flush deferred commands so downstream systems can see spawned scene entities in the same frame.
 pub fn apply_scene_commands_system(world: &mut World) {
+    let _system_scope = world
+        .get_resource::<BevySystemProfiler>()
+        .and_then(|profiler| {
+            profiler
+                .0
+                .begin_scope("helmer_becs::systems::apply_scene_commands_system")
+        });
     world.flush();
 }
 
@@ -385,7 +406,14 @@ pub fn update_scene_child_transforms(
         Query<(Entity, &EntityParent, &BevyTransform), Changed<BevyTransform>>,
     )>,
     profiling_res: Option<Res<BevyRuntimeProfiling>>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_becs::systems::update_scene_child_transforms")
+    });
+
     let profiling = profiling_res.as_ref().map(|p| p.0.clone());
     let profiling_start = profiling.as_ref().and_then(|profiling| {
         if profiling.enabled.load(std::sync::atomic::Ordering::Relaxed) {

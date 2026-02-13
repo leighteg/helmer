@@ -2,7 +2,10 @@ use bevy_ecs::prelude::{Commands, Entity, Query, Res, ResMut, Resource};
 use glam::{Quat, Vec3};
 use helmer::animation::{AnimationChannel, AnimationClip, Interpolation, Pose, Skeleton};
 use helmer::provided::components::{Camera, Light, LightType, PoseOverride, Spline, Transform};
-use helmer_becs::{BevyAnimator, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, DeltaTime};
+use helmer_becs::{
+    BevyAnimator, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler,
+    DeltaTime,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Resource)]
@@ -364,7 +367,14 @@ pub fn timeline_playback_system(
     mut spline_query: Query<&mut BevySpline>,
     skinned_query: Query<&BevySkinnedMeshRenderer>,
     animator_query: Query<&BevyAnimator>,
+    system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::timeline_playback_system")
+    });
+
     let dt = time.0;
     if timeline.playing {
         timeline.current_time += dt * timeline.playback_rate.max(0.0);

@@ -16,7 +16,7 @@ use std::{
 use winit::keyboard::KeyCode;
 
 use crate::{
-    BevyInputManager, BevyRuntimeConfig,
+    BevyInputManager, BevyRuntimeConfig, BevySystemProfiler,
     provided::ui::{inspector::InspectorUI, stats::StatsUI},
 };
 
@@ -312,6 +312,14 @@ fn apply_clipboard_commands(output: &egui::PlatformOutput, clipboard: &mut EguiC
 }
 
 pub fn egui_system(world: &mut World) {
+    let _system_scope = world
+        .get_resource::<BevySystemProfiler>()
+        .and_then(|profiler| {
+            profiler
+                .0
+                .begin_scope("helmer_becs::egui_integration::egui_system")
+        });
+
     let input_arc = world
         .get_resource::<BevyInputManager>()
         .expect("InputManager resource not found")

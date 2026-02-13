@@ -16,7 +16,7 @@ use helmer_becs::systems::render_system::RenderGizmoState;
 use helmer_becs::systems::scene_system::SceneChild;
 use helmer_becs::{
     BevyActiveCamera, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
-    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevyTransform,
+    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler, BevyTransform,
 };
 
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
@@ -508,6 +508,7 @@ pub struct GizmoSystemParams<'w, 's> {
         (Entity, Ref<'static, BevyLight>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
+    system_profiler: Option<Res<'w, BevySystemProfiler>>,
 }
 
 pub fn gizmo_system(params: GizmoSystemParams) {
@@ -534,7 +535,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         camera_component_query,
         camera_icon_query,
         light_icon_query,
+        system_profiler,
     } = params;
+
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::gizmo_system")
+    });
 
     state.suppress_selection = false;
     let input_manager = input.0.read();
@@ -1643,6 +1651,7 @@ pub struct SelectionSystemParams<'w, 's> {
         With<BevyActiveCamera>,
     >,
     camera_query: Query<'w, 's, (Entity, &'static BevyCamera, &'static BevyTransform)>,
+    system_profiler: Option<Res<'w, BevySystemProfiler>>,
 }
 
 pub fn selection_system(params: SelectionSystemParams) {
@@ -1666,7 +1675,14 @@ pub fn selection_system(params: SelectionSystemParams) {
         light_icon_query,
         active_camera_query,
         camera_query,
+        system_profiler,
     } = params;
+    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
+        profiler
+            .0
+            .begin_scope("helmer_editor::editor::selection_system")
+    });
+
     let input_manager = input.0.read();
     let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
         pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime, false);

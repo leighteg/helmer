@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use egui::{TextureHandle, TextureId};
-use glam::DVec2;
+use glam::{DVec2, Vec3};
 
 use helmer::provided::components::{ActiveCamera, AudioListener};
 use helmer::runtime::runtime::{RuntimeCursorGrabMode, RuntimeCursorStateSnapshot};
@@ -120,6 +120,242 @@ pub const FREECAM_SENSITIVITY_MAX: f32 = 2.0;
 pub const FREECAM_SMOOTHING_DEFAULT: f32 = 0.04;
 pub const FREECAM_SMOOTHING_MIN: f32 = 0.0;
 pub const FREECAM_SMOOTHING_MAX: f32 = 0.25;
+pub const FREECAM_MOVE_ACCEL_DEFAULT: f32 = 18.0;
+pub const FREECAM_MOVE_ACCEL_MIN: f32 = 0.5;
+pub const FREECAM_MOVE_ACCEL_MAX: f32 = 160.0;
+pub const FREECAM_MOVE_DECEL_DEFAULT: f32 = 12.0;
+pub const FREECAM_MOVE_DECEL_MIN: f32 = 0.5;
+pub const FREECAM_MOVE_DECEL_MAX: f32 = 200.0;
+pub const FREECAM_SPEED_STEP_DEFAULT: f32 = 2.0;
+pub const FREECAM_SPEED_STEP_MIN: f32 = 0.05;
+pub const FREECAM_SPEED_STEP_MAX: f32 = 40.0;
+pub const FREECAM_SPEED_MIN_DEFAULT: f32 = 0.5;
+pub const FREECAM_SPEED_MIN_MIN: f32 = 0.05;
+pub const FREECAM_SPEED_MIN_MAX: f32 = 20.0;
+pub const FREECAM_SPEED_MAX_DEFAULT: f32 = 80.0;
+pub const FREECAM_SPEED_MAX_MIN: f32 = 1.0;
+pub const FREECAM_SPEED_MAX_MAX: f32 = 500.0;
+pub const FREECAM_BOOST_MULTIPLIER_DEFAULT: f32 = 2.5;
+pub const FREECAM_BOOST_MULTIPLIER_MIN: f32 = 1.0;
+pub const FREECAM_BOOST_MULTIPLIER_MAX: f32 = 10.0;
+pub const FREECAM_ORBIT_DISTANCE_DEFAULT: f32 = 5.0;
+pub const FREECAM_ORBIT_DISTANCE_MIN: f32 = 0.25;
+pub const FREECAM_ORBIT_DISTANCE_MAX: f32 = 5000.0;
+
+pub const NAV_GIZMO_RADIUS_SCALE_DEFAULT: f32 = 1.0;
+pub const NAV_GIZMO_RADIUS_SCALE_MIN: f32 = 0.5;
+pub const NAV_GIZMO_RADIUS_SCALE_MAX: f32 = 2.5;
+pub const NAV_GIZMO_PADDING_DEFAULT: f32 = 12.0;
+pub const NAV_GIZMO_PADDING_MIN: f32 = 4.0;
+pub const NAV_GIZMO_PADDING_MAX: f32 = 48.0;
+pub const NAV_GIZMO_ORBIT_RADIUS_SCALE_DEFAULT: f32 = 1.0;
+pub const NAV_GIZMO_ORBIT_RADIUS_SCALE_MIN: f32 = 0.5;
+pub const NAV_GIZMO_ORBIT_RADIUS_SCALE_MAX: f32 = 1.5;
+pub const NAV_GIZMO_HOME_RADIUS_SCALE_DEFAULT: f32 = 1.0;
+pub const NAV_GIZMO_HOME_RADIUS_SCALE_MIN: f32 = 0.4;
+pub const NAV_GIZMO_HOME_RADIUS_SCALE_MAX: f32 = 2.5;
+pub const NAV_GIZMO_MARKER_RADIUS_FRONT_DEFAULT: f32 = 8.0;
+pub const NAV_GIZMO_MARKER_RADIUS_FRONT_MIN: f32 = 3.0;
+pub const NAV_GIZMO_MARKER_RADIUS_FRONT_MAX: f32 = 20.0;
+pub const NAV_GIZMO_MARKER_RADIUS_BACK_DEFAULT: f32 = 6.5;
+pub const NAV_GIZMO_MARKER_RADIUS_BACK_MIN: f32 = 2.0;
+pub const NAV_GIZMO_MARKER_RADIUS_BACK_MAX: f32 = 20.0;
+pub const NAV_GIZMO_LINE_THICKNESS_FRONT_DEFAULT: f32 = 2.0;
+pub const NAV_GIZMO_LINE_THICKNESS_FRONT_MIN: f32 = 0.5;
+pub const NAV_GIZMO_LINE_THICKNESS_FRONT_MAX: f32 = 6.0;
+pub const NAV_GIZMO_LINE_THICKNESS_BACK_DEFAULT: f32 = 1.3;
+pub const NAV_GIZMO_LINE_THICKNESS_BACK_MIN: f32 = 0.5;
+pub const NAV_GIZMO_LINE_THICKNESS_BACK_MAX: f32 = 6.0;
+pub const NAV_GIZMO_CENTER_DOT_RADIUS_DEFAULT: f32 = 2.4;
+pub const NAV_GIZMO_CENTER_DOT_RADIUS_MIN: f32 = 0.5;
+pub const NAV_GIZMO_CENTER_DOT_RADIUS_MAX: f32 = 8.0;
+pub const NAV_GIZMO_DRAG_SENSITIVITY_DEFAULT: f32 = 0.0085;
+pub const NAV_GIZMO_DRAG_SENSITIVITY_MIN: f32 = 0.001;
+pub const NAV_GIZMO_DRAG_SENSITIVITY_MAX: f32 = 0.05;
+pub const NAV_GIZMO_BACKGROUND_ALPHA_DEFAULT: f32 = 0.71;
+pub const NAV_GIZMO_BACKGROUND_ALPHA_MIN: f32 = 0.0;
+pub const NAV_GIZMO_BACKGROUND_ALPHA_MAX: f32 = 1.0;
+pub const NAV_GIZMO_OUTLINE_ALPHA_DEFAULT: f32 = 0.35;
+pub const NAV_GIZMO_OUTLINE_ALPHA_MIN: f32 = 0.0;
+pub const NAV_GIZMO_OUTLINE_ALPHA_MAX: f32 = 1.0;
+pub const NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_DEFAULT: f32 = 0.58;
+pub const NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_MIN: f32 = 0.2;
+pub const NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_MAX: f32 = 1.0;
+pub const NAV_GIZMO_HOVER_BRIGHTNESS_DEFAULT: f32 = 0.1;
+pub const NAV_GIZMO_HOVER_BRIGHTNESS_MIN: f32 = 0.0;
+pub const NAV_GIZMO_HOVER_BRIGHTNESS_MAX: f32 = 0.5;
+pub const NAV_GIZMO_TEXT_SCALE_DEFAULT: f32 = 1.0;
+pub const NAV_GIZMO_TEXT_SCALE_MIN: f32 = 0.5;
+pub const NAV_GIZMO_TEXT_SCALE_MAX: f32 = 2.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavigationGizmoSettings {
+    pub show_background: bool,
+    pub show_labels: bool,
+    pub orbit_selected_entity: bool,
+    pub radius_scale: f32,
+    pub padding: f32,
+    pub orbit_radius_scale: f32,
+    pub home_radius_scale: f32,
+    pub marker_radius_front: f32,
+    pub marker_radius_back: f32,
+    pub line_thickness_front: f32,
+    pub line_thickness_back: f32,
+    pub center_dot_radius: f32,
+    pub drag_sensitivity: f32,
+    pub background_alpha: f32,
+    pub outline_alpha: f32,
+    pub axis_color_x: [f32; 3],
+    pub axis_color_y: [f32; 3],
+    pub axis_color_z: [f32; 3],
+    pub negative_axis_brightness: f32,
+    pub hover_brightness: f32,
+    pub text_scale: f32,
+}
+
+impl Default for NavigationGizmoSettings {
+    fn default() -> Self {
+        Self {
+            show_background: true,
+            show_labels: true,
+            orbit_selected_entity: true,
+            radius_scale: NAV_GIZMO_RADIUS_SCALE_DEFAULT,
+            padding: NAV_GIZMO_PADDING_DEFAULT,
+            orbit_radius_scale: NAV_GIZMO_ORBIT_RADIUS_SCALE_DEFAULT,
+            home_radius_scale: NAV_GIZMO_HOME_RADIUS_SCALE_DEFAULT,
+            marker_radius_front: NAV_GIZMO_MARKER_RADIUS_FRONT_DEFAULT,
+            marker_radius_back: NAV_GIZMO_MARKER_RADIUS_BACK_DEFAULT,
+            line_thickness_front: NAV_GIZMO_LINE_THICKNESS_FRONT_DEFAULT,
+            line_thickness_back: NAV_GIZMO_LINE_THICKNESS_BACK_DEFAULT,
+            center_dot_radius: NAV_GIZMO_CENTER_DOT_RADIUS_DEFAULT,
+            drag_sensitivity: NAV_GIZMO_DRAG_SENSITIVITY_DEFAULT,
+            background_alpha: NAV_GIZMO_BACKGROUND_ALPHA_DEFAULT,
+            outline_alpha: NAV_GIZMO_OUTLINE_ALPHA_DEFAULT,
+            axis_color_x: [0.86, 0.27, 0.27],
+            axis_color_y: [0.27, 0.8, 0.37],
+            axis_color_z: [0.37, 0.57, 0.92],
+            negative_axis_brightness: NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_DEFAULT,
+            hover_brightness: NAV_GIZMO_HOVER_BRIGHTNESS_DEFAULT,
+            text_scale: NAV_GIZMO_TEXT_SCALE_DEFAULT,
+        }
+    }
+}
+
+impl NavigationGizmoSettings {
+    pub fn sanitize(&mut self) {
+        fn sanitize_f32(value: f32, fallback: f32, min: f32, max: f32) -> f32 {
+            if value.is_finite() {
+                value.clamp(min, max)
+            } else {
+                fallback
+            }
+        }
+        fn sanitize_rgb(rgb: &mut [f32; 3], fallback: [f32; 3]) {
+            for (channel, fallback_channel) in rgb.iter_mut().zip(fallback.iter()) {
+                let value = if channel.is_finite() {
+                    *channel
+                } else {
+                    *fallback_channel
+                };
+                *channel = value.clamp(0.0, 1.0);
+            }
+        }
+
+        self.radius_scale = sanitize_f32(
+            self.radius_scale,
+            NAV_GIZMO_RADIUS_SCALE_DEFAULT,
+            NAV_GIZMO_RADIUS_SCALE_MIN,
+            NAV_GIZMO_RADIUS_SCALE_MAX,
+        );
+        self.padding = sanitize_f32(
+            self.padding,
+            NAV_GIZMO_PADDING_DEFAULT,
+            NAV_GIZMO_PADDING_MIN,
+            NAV_GIZMO_PADDING_MAX,
+        );
+        self.orbit_radius_scale = sanitize_f32(
+            self.orbit_radius_scale,
+            NAV_GIZMO_ORBIT_RADIUS_SCALE_DEFAULT,
+            NAV_GIZMO_ORBIT_RADIUS_SCALE_MIN,
+            NAV_GIZMO_ORBIT_RADIUS_SCALE_MAX,
+        );
+        self.home_radius_scale = sanitize_f32(
+            self.home_radius_scale,
+            NAV_GIZMO_HOME_RADIUS_SCALE_DEFAULT,
+            NAV_GIZMO_HOME_RADIUS_SCALE_MIN,
+            NAV_GIZMO_HOME_RADIUS_SCALE_MAX,
+        );
+        self.marker_radius_front = sanitize_f32(
+            self.marker_radius_front,
+            NAV_GIZMO_MARKER_RADIUS_FRONT_DEFAULT,
+            NAV_GIZMO_MARKER_RADIUS_FRONT_MIN,
+            NAV_GIZMO_MARKER_RADIUS_FRONT_MAX,
+        );
+        self.marker_radius_back = sanitize_f32(
+            self.marker_radius_back,
+            NAV_GIZMO_MARKER_RADIUS_BACK_DEFAULT,
+            NAV_GIZMO_MARKER_RADIUS_BACK_MIN,
+            NAV_GIZMO_MARKER_RADIUS_BACK_MAX,
+        );
+        self.line_thickness_front = sanitize_f32(
+            self.line_thickness_front,
+            NAV_GIZMO_LINE_THICKNESS_FRONT_DEFAULT,
+            NAV_GIZMO_LINE_THICKNESS_FRONT_MIN,
+            NAV_GIZMO_LINE_THICKNESS_FRONT_MAX,
+        );
+        self.line_thickness_back = sanitize_f32(
+            self.line_thickness_back,
+            NAV_GIZMO_LINE_THICKNESS_BACK_DEFAULT,
+            NAV_GIZMO_LINE_THICKNESS_BACK_MIN,
+            NAV_GIZMO_LINE_THICKNESS_BACK_MAX,
+        );
+        self.center_dot_radius = sanitize_f32(
+            self.center_dot_radius,
+            NAV_GIZMO_CENTER_DOT_RADIUS_DEFAULT,
+            NAV_GIZMO_CENTER_DOT_RADIUS_MIN,
+            NAV_GIZMO_CENTER_DOT_RADIUS_MAX,
+        );
+        self.drag_sensitivity = sanitize_f32(
+            self.drag_sensitivity,
+            NAV_GIZMO_DRAG_SENSITIVITY_DEFAULT,
+            NAV_GIZMO_DRAG_SENSITIVITY_MIN,
+            NAV_GIZMO_DRAG_SENSITIVITY_MAX,
+        );
+        self.background_alpha = sanitize_f32(
+            self.background_alpha,
+            NAV_GIZMO_BACKGROUND_ALPHA_DEFAULT,
+            NAV_GIZMO_BACKGROUND_ALPHA_MIN,
+            NAV_GIZMO_BACKGROUND_ALPHA_MAX,
+        );
+        self.outline_alpha = sanitize_f32(
+            self.outline_alpha,
+            NAV_GIZMO_OUTLINE_ALPHA_DEFAULT,
+            NAV_GIZMO_OUTLINE_ALPHA_MIN,
+            NAV_GIZMO_OUTLINE_ALPHA_MAX,
+        );
+        self.negative_axis_brightness = sanitize_f32(
+            self.negative_axis_brightness,
+            NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_DEFAULT,
+            NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_MIN,
+            NAV_GIZMO_NEGATIVE_AXIS_BRIGHTNESS_MAX,
+        );
+        self.hover_brightness = sanitize_f32(
+            self.hover_brightness,
+            NAV_GIZMO_HOVER_BRIGHTNESS_DEFAULT,
+            NAV_GIZMO_HOVER_BRIGHTNESS_MIN,
+            NAV_GIZMO_HOVER_BRIGHTNESS_MAX,
+        );
+        self.text_scale = sanitize_f32(
+            self.text_scale,
+            NAV_GIZMO_TEXT_SCALE_DEFAULT,
+            NAV_GIZMO_TEXT_SCALE_MIN,
+            NAV_GIZMO_TEXT_SCALE_MAX,
+        );
+        sanitize_rgb(&mut self.axis_color_x, [0.86, 0.27, 0.27]);
+        sanitize_rgb(&mut self.axis_color_y, [0.27, 0.8, 0.37]);
+        sanitize_rgb(&mut self.axis_color_z, [0.37, 0.57, 0.92]);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ViewportRectPixels {
@@ -214,6 +450,7 @@ pub struct EditorViewportRuntime {
     pub pane_requests: Vec<EditorViewportPaneRequest>,
     pub active_pane_id: Option<u64>,
     pub active_camera_entity: Option<Entity>,
+    pub orbit_selected_focus: Option<Vec3>,
 }
 
 impl EditorViewportRuntime {
@@ -226,6 +463,7 @@ impl EditorViewportRuntime {
         self.pointer_over_main = false;
         self.pane_requests.clear();
         self.active_camera_entity = None;
+        self.orbit_selected_focus = None;
     }
 }
 
@@ -275,8 +513,16 @@ pub struct EditorViewportState {
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
     pub show_navigation_gizmo: bool,
+    pub navigation_gizmo: NavigationGizmoSettings,
     pub freecam_sensitivity: f32,
     pub freecam_smoothing: f32,
+    pub freecam_move_accel: f32,
+    pub freecam_move_decel: f32,
+    pub freecam_speed_step: f32,
+    pub freecam_speed_min: f32,
+    pub freecam_speed_max: f32,
+    pub freecam_boost_multiplier: f32,
+    pub freecam_orbit_distance: f32,
 }
 
 impl Default for EditorViewportState {
@@ -298,8 +544,16 @@ impl Default for EditorViewportState {
             show_spline_paths: true,
             show_spline_points: true,
             show_navigation_gizmo: true,
+            navigation_gizmo: NavigationGizmoSettings::default(),
             freecam_sensitivity: FREECAM_SENSITIVITY_DEFAULT,
             freecam_smoothing: FREECAM_SMOOTHING_DEFAULT,
+            freecam_move_accel: FREECAM_MOVE_ACCEL_DEFAULT,
+            freecam_move_decel: FREECAM_MOVE_DECEL_DEFAULT,
+            freecam_speed_step: FREECAM_SPEED_STEP_DEFAULT,
+            freecam_speed_min: FREECAM_SPEED_MIN_DEFAULT,
+            freecam_speed_max: FREECAM_SPEED_MAX_DEFAULT,
+            freecam_boost_multiplier: FREECAM_BOOST_MULTIPLIER_DEFAULT,
+            freecam_orbit_distance: FREECAM_ORBIT_DISTANCE_DEFAULT,
         }
     }
 }

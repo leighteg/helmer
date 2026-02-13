@@ -54,9 +54,17 @@ use walkdir::WalkDir;
 use crate::editor::{
     EditorLayoutState, EditorPlayCamera, EditorSplineState, EditorTimelineState, EditorUndoState,
     EditorViewportCamera, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
+    FREECAM_BOOST_MULTIPLIER_DEFAULT, FREECAM_BOOST_MULTIPLIER_MAX, FREECAM_BOOST_MULTIPLIER_MIN,
+    FREECAM_MOVE_ACCEL_DEFAULT, FREECAM_MOVE_ACCEL_MAX, FREECAM_MOVE_ACCEL_MIN,
+    FREECAM_MOVE_DECEL_DEFAULT, FREECAM_MOVE_DECEL_MAX, FREECAM_MOVE_DECEL_MIN,
+    FREECAM_ORBIT_DISTANCE_DEFAULT, FREECAM_ORBIT_DISTANCE_MAX, FREECAM_ORBIT_DISTANCE_MIN,
     FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN,
-    FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN, Freecam,
-    LayoutSaveRequest, PlayViewportKind, UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
+    FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN,
+    FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX, FREECAM_SPEED_MAX_MIN,
+    FREECAM_SPEED_MIN_DEFAULT, FREECAM_SPEED_MIN_MAX, FREECAM_SPEED_MIN_MIN,
+    FREECAM_SPEED_STEP_DEFAULT, FREECAM_SPEED_STEP_MAX, FREECAM_SPEED_STEP_MIN, Freecam,
+    LayoutSaveRequest, NavigationGizmoSettings, PlayViewportKind, UndoEntry, ViewportRectPixels,
+    ViewportResolutionPreset,
     assets::{
         AssetBrowserState, AssetEntry, AssetRenameSelection, AssetRenameView, EditorAssetCache,
         EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
@@ -262,8 +270,16 @@ pub struct EditorPaneViewportSettings {
     pub show_spline_paths: bool,
     pub show_spline_points: bool,
     pub show_navigation_gizmo: bool,
+    pub navigation_gizmo: NavigationGizmoSettings,
     pub freecam_sensitivity: f32,
     pub freecam_smoothing: f32,
+    pub freecam_move_accel: f32,
+    pub freecam_move_decel: f32,
+    pub freecam_speed_step: f32,
+    pub freecam_speed_min: f32,
+    pub freecam_speed_max: f32,
+    pub freecam_boost_multiplier: f32,
+    pub freecam_orbit_distance: f32,
 }
 
 impl EditorPaneViewportSettings {
@@ -278,8 +294,16 @@ impl EditorPaneViewportSettings {
             show_spline_paths: state.show_spline_paths,
             show_spline_points: state.show_spline_points,
             show_navigation_gizmo: state.show_navigation_gizmo,
+            navigation_gizmo: state.navigation_gizmo.clone(),
             freecam_sensitivity: state.freecam_sensitivity,
             freecam_smoothing: state.freecam_smoothing,
+            freecam_move_accel: state.freecam_move_accel,
+            freecam_move_decel: state.freecam_move_decel,
+            freecam_speed_step: state.freecam_speed_step,
+            freecam_speed_min: state.freecam_speed_min,
+            freecam_speed_max: state.freecam_speed_max,
+            freecam_boost_multiplier: state.freecam_boost_multiplier,
+            freecam_orbit_distance: state.freecam_orbit_distance,
         }
     }
 }
@@ -1608,7 +1632,10 @@ fn fit_rect_to_aspect(container: Rect, aspect_ratio: f32) -> Rect {
     }
 }
 
-fn navigation_focus_point(world: &World) -> Vec3 {
+fn navigation_focus_point(world: &World, orbit_selected_entity: bool) -> Option<Vec3> {
+    if !orbit_selected_entity {
+        return None;
+    }
     world
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selection| selection.0)
@@ -1617,7 +1644,27 @@ fn navigation_focus_point(world: &World) -> Vec3 {
                 .get::<BevyTransform>(entity)
                 .map(|transform| transform.0.position)
         })
-        .unwrap_or(Vec3::ZERO)
+}
+
+fn navigation_orbit_focus_and_distance(
+    world: &World,
+    current_transform: &helmer::provided::components::Transform,
+    orbit_selected_entity: bool,
+) -> (Vec3, f32) {
+    const DEFAULT_DISTANCE: f32 = 5.0;
+    let mut forward = current_transform.forward().normalize_or_zero();
+    if forward.length_squared() < 1.0e-6 {
+        forward = Vec3::Z;
+    }
+
+    let mut focus = navigation_focus_point(world, orbit_selected_entity)
+        .unwrap_or(current_transform.position + forward * DEFAULT_DISTANCE);
+    let mut distance = current_transform.position.distance(focus);
+    if !distance.is_finite() || distance < 0.25 {
+        distance = DEFAULT_DISTANCE;
+        focus = current_transform.position + forward * distance;
+    }
+    (focus, distance)
 }
 
 fn navigation_up_vector(forward: Vec3) -> Vec3 {
@@ -1659,6 +1706,7 @@ fn draw_viewport_navigation_gizmo(
     camera_entity: Entity,
     pane_id: Option<u64>,
     enabled: bool,
+    settings: &NavigationGizmoSettings,
 ) -> bool {
     if !enabled {
         return false;
@@ -1666,6 +1714,8 @@ fn draw_viewport_navigation_gizmo(
     if scene_rect.width() < 96.0 || scene_rect.height() < 96.0 {
         return false;
     }
+    let mut settings = settings.clone();
+    settings.sanitize();
 
     let camera_rotation = if let Some(transform) = world.get::<BevyTransform>(camera_entity) {
         transform.0.rotation
@@ -1673,24 +1723,52 @@ fn draw_viewport_navigation_gizmo(
         return false;
     };
 
-    let radius = scene_rect
+    let base_radius = scene_rect
         .width()
         .min(scene_rect.height())
         .mul_add(0.085, 0.0)
         .clamp(34.0, 58.0);
+    let max_radius = (scene_rect.width().min(scene_rect.height()) * 0.5 - 2.0).max(20.0);
+    let radius = (base_radius * settings.radius_scale).clamp(20.0, max_radius);
+    let padding = settings.padding.max(0.0);
+    let min_center_x = scene_rect.min.x + radius + 1.0;
+    let max_center_x = scene_rect.max.x - radius - 1.0;
+    let min_center_y = scene_rect.min.y + radius + 1.0;
+    let max_center_y = scene_rect.max.y - radius - 1.0;
     let center = Pos2::new(
-        scene_rect.max.x - (radius + 12.0),
-        scene_rect.min.y + (radius + 12.0),
+        (scene_rect.max.x - (radius + padding)).clamp(min_center_x, max_center_x),
+        (scene_rect.min.y + (radius + padding)).clamp(min_center_y, max_center_y),
     );
-    let orbit_radius = (radius - 14.0).max(12.0);
-    let home_radius = (radius * 0.18).clamp(7.0, 11.0);
+    let orbit_radius = ((radius - 14.0) * settings.orbit_radius_scale).clamp(10.0, radius - 2.0);
+    let home_radius = ((radius * 0.18) * settings.home_radius_scale).clamp(6.0, radius * 0.42);
     let orbit_id = ui.id().with((
         "viewport_nav_orbit",
         pane_id.unwrap_or(u64::MAX),
         camera_entity.to_bits(),
     ));
+    let orbit_anchor_id = orbit_id.with("anchor");
     let orbit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0 + 12.0).max(24.0)));
     let orbit_response = ui.interact(orbit_rect, orbit_id, Sense::click_and_drag());
+    if orbit_response.drag_started_by(PointerButton::Primary) {
+        let current_transform = world
+            .get::<BevyTransform>(camera_entity)
+            .map(|transform| transform.0)
+            .unwrap_or_default();
+        let (focus, distance) = navigation_orbit_focus_and_distance(
+            world,
+            &current_transform,
+            settings.orbit_selected_entity,
+        );
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                orbit_anchor_id,
+                NavOrbitAnchor {
+                    focus,
+                    distance: distance.max(0.25),
+                },
+            );
+        });
+    }
 
     let pointer_inside_widget = ui
         .ctx()
@@ -1702,15 +1780,32 @@ fn draw_viewport_navigation_gizmo(
         })
         .is_some_and(|pointer| pointer.distance(center) <= radius + 6.0);
 
-    ui.painter().circle_filled(
-        center,
-        radius,
-        Color32::from_rgba_unmultiplied(16, 20, 26, 180),
-    );
+    if settings.show_background {
+        ui.painter().circle_filled(
+            center,
+            radius,
+            Color32::from_rgba_unmultiplied(
+                16,
+                20,
+                26,
+                (settings.background_alpha * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ),
+        );
+    }
     ui.painter().circle_stroke(
         center,
         radius,
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(220, 220, 220, 90)),
+        Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(
+                220,
+                220,
+                220,
+                (settings.outline_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+            ),
+        ),
     );
 
     let home_id = ui.id().with((
@@ -1727,13 +1822,15 @@ fn draw_viewport_navigation_gizmo(
         Color32::from_rgb(205, 205, 205)
     };
     ui.painter().circle_filled(center, home_radius, home_color);
-    ui.painter().text(
-        center,
-        Align2::CENTER_CENTER,
-        "H",
-        FontId::proportional((home_radius + 2.0).max(9.0)),
-        Color32::from_rgb(20, 24, 30),
-    );
+    if settings.show_labels {
+        ui.painter().text(
+            center,
+            Align2::CENTER_CENTER,
+            "H",
+            FontId::proportional(((home_radius + 2.0).max(9.0)) * settings.text_scale),
+            Color32::from_rgb(20, 24, 30),
+        );
+    }
 
     struct NavMarker {
         id: usize,
@@ -1744,14 +1841,44 @@ fn draw_viewport_navigation_gizmo(
         center: Pos2,
         radius: f32,
     }
+    #[derive(Clone, Copy)]
+    struct NavOrbitAnchor {
+        focus: Vec3,
+        distance: f32,
+    }
 
+    let color_from_rgb = |rgb: [f32; 3]| -> Color32 {
+        let r = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let g = (rgb[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        let b = (rgb[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        Color32::from_rgb(r, g, b)
+    };
+    let scale_color = |color: Color32, scale: f32| -> Color32 {
+        Color32::from_rgb(
+            ((color.r() as f32) * scale).round().clamp(0.0, 255.0) as u8,
+            ((color.g() as f32) * scale).round().clamp(0.0, 255.0) as u8,
+            ((color.b() as f32) * scale).round().clamp(0.0, 255.0) as u8,
+        )
+    };
+    let brighten_color = |color: Color32, amount: f32| -> Color32 {
+        let add = (amount.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Color32::from_rgb(
+            color.r().saturating_add(add),
+            color.g().saturating_add(add),
+            color.b().saturating_add(add),
+        )
+    };
+    let axis_x = color_from_rgb(settings.axis_color_x);
+    let axis_y = color_from_rgb(settings.axis_color_y);
+    let axis_z = color_from_rgb(settings.axis_color_z);
+    let neg_scale = settings.negative_axis_brightness;
     let axis_markers = [
-        ("+X", Vec3::X, Color32::from_rgb(220, 70, 70)),
-        ("-X", -Vec3::X, Color32::from_rgb(130, 55, 55)),
-        ("+Y", Vec3::Y, Color32::from_rgb(70, 205, 95)),
-        ("-Y", -Vec3::Y, Color32::from_rgb(55, 120, 70)),
-        ("+Z", Vec3::Z, Color32::from_rgb(95, 145, 235)),
-        ("-Z", -Vec3::Z, Color32::from_rgb(55, 85, 135)),
+        ("+X", -Vec3::X, axis_x),
+        ("-X", Vec3::X, scale_color(axis_x, neg_scale)),
+        ("+Y", Vec3::Y, axis_y),
+        ("-Y", -Vec3::Y, scale_color(axis_y, neg_scale)),
+        ("+Z", -Vec3::Z, axis_z),
+        ("-Z", Vec3::Z, scale_color(axis_z, neg_scale)),
     ];
 
     let inv_camera = camera_rotation.inverse();
@@ -1761,7 +1888,11 @@ fn draw_viewport_navigation_gizmo(
         .map(|(index, (label, axis, color))| {
             let view = inv_camera * *axis;
             let marker_center = center + Vec2::new(view.x, -view.y) * orbit_radius;
-            let radius = if view.z >= 0.0 { 8.0 } else { 6.5 };
+            let radius = if view.z >= 0.0 {
+                settings.marker_radius_front
+            } else {
+                settings.marker_radius_back
+            };
             NavMarker {
                 id: index,
                 label,
@@ -1796,29 +1927,31 @@ fn draw_viewport_navigation_gizmo(
         let front = marker.depth >= 0.0;
         let mut fill = marker.base_color;
         if !front {
-            fill = Color32::from_rgba_unmultiplied(fill.r() / 2, fill.g() / 2, fill.b() / 2, 200);
+            fill = Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 200);
         }
         if response.hovered() {
             marker_hovered = true;
-            fill = Color32::from_rgb(
-                fill.r().saturating_add(24),
-                fill.g().saturating_add(24),
-                fill.b().saturating_add(24),
-            );
+            fill = brighten_color(fill, settings.hover_brightness);
         }
         let to_marker = marker.center - center;
-        let len = to_marker.length().max(1.0);
-        let line_end = center + to_marker * ((orbit_radius - marker.radius * 0.6).max(2.0) / len);
+        let len = to_marker.length();
+        let safe_len = len.max(1.0e-4);
+        let line_thickness = if front {
+            settings.line_thickness_front
+        } else {
+            settings.line_thickness_back
+        };
+        let line_gap = marker.radius + line_thickness * 1.25;
+        let line_len = (len - line_gap).max(0.0);
+        let line_end = center + to_marker * (line_len / safe_len);
         let line_color = Color32::from_rgba_unmultiplied(
             fill.r(),
             fill.g(),
             fill.b(),
             if front { 220 } else { 135 },
         );
-        ui.painter().line_segment(
-            [center, line_end],
-            Stroke::new(if front { 2.0 } else { 1.3 }, line_color),
-        );
+        ui.painter()
+            .line_segment([center, line_end], Stroke::new(line_thickness, line_color));
         ui.painter()
             .circle_filled(marker.center, marker.radius, fill);
         ui.painter().circle_stroke(
@@ -1826,19 +1959,26 @@ fn draw_viewport_navigation_gizmo(
             marker.radius,
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(16, 20, 24, 180)),
         );
-        ui.painter().text(
-            marker.center,
-            Align2::CENTER_CENTER,
-            marker.label,
-            FontId::proportional(if front { 10.0 } else { 9.0 }),
-            Color32::from_rgb(238, 238, 238),
-        );
+        if settings.show_labels {
+            ui.painter().text(
+                marker.center,
+                Align2::CENTER_CENTER,
+                marker.label,
+                FontId::proportional(
+                    (if front { 10.0 } else { 9.0 }) * settings.text_scale.max(0.01),
+                ),
+                Color32::from_rgb(238, 238, 238),
+            );
+        }
         if response.clicked() {
             target_axis = Some(marker.axis);
         }
     }
-    ui.painter()
-        .circle_filled(center, 2.4, Color32::from_rgb(236, 236, 236));
+    ui.painter().circle_filled(
+        center,
+        settings.center_dot_radius,
+        Color32::from_rgb(236, 236, 236),
+    );
 
     let drag_background = orbit_response.dragged_by(PointerButton::Primary)
         && !home_response.hovered()
@@ -1847,28 +1987,41 @@ fn draw_viewport_navigation_gizmo(
     if drag_background {
         let pointer_delta = ui.ctx().input(|input| input.pointer.delta());
         if pointer_delta.length_sq() > 0.0 {
-            let focus = navigation_focus_point(world);
             let current_transform = world
                 .get::<BevyTransform>(camera_entity)
                 .map(|transform| transform.0)
                 .unwrap_or_default();
-            let mut distance = current_transform.position.distance(focus);
-            if !distance.is_finite() || distance < 0.25 {
-                distance = 5.0;
-            }
+            let anchor = ui
+                .ctx()
+                .data(|data| data.get_temp::<NavOrbitAnchor>(orbit_anchor_id))
+                .unwrap_or_else(|| {
+                    let (focus, distance) = navigation_orbit_focus_and_distance(
+                        world,
+                        &current_transform,
+                        settings.orbit_selected_entity,
+                    );
+                    let anchor = NavOrbitAnchor {
+                        focus,
+                        distance: distance.max(0.25),
+                    };
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(orbit_anchor_id, anchor));
+                    anchor
+                });
+            let focus = anchor.focus;
+            let distance = anchor.distance;
             let mut forward = (focus - current_transform.position).normalize_or_zero();
             if forward.length_squared() < 1.0e-6 {
                 forward = current_transform.forward().normalize_or_zero();
             }
             if forward.length_squared() > 1.0e-6 {
                 let mut yaw = forward.x.atan2(forward.z);
-                let mut pitch = forward.y.clamp(-1.0, 1.0).asin();
-                let sensitivity = 0.0085;
-                yaw -= pointer_delta.x * sensitivity;
-                pitch = (pitch + pointer_delta.y * sensitivity).clamp(-1.45, 1.45);
+                let mut pitch = (-forward.y).clamp(-1.0, 1.0).asin();
+                yaw -= pointer_delta.x * settings.drag_sensitivity;
+                pitch = (pitch + pointer_delta.y * settings.drag_sensitivity).clamp(-1.45, 1.45);
                 let cos_pitch = pitch.cos();
                 let new_forward =
-                    Vec3::new(yaw.sin() * cos_pitch, pitch.sin(), yaw.cos() * cos_pitch)
+                    Vec3::new(yaw.sin() * cos_pitch, -pitch.sin(), yaw.cos() * cos_pitch)
                         .normalize_or_zero();
                 let position = focus - new_forward * distance;
                 let rotation = navigation_rotation_from_forward(new_forward);
@@ -1887,17 +2040,53 @@ fn draw_viewport_navigation_gizmo(
         }
     }
 
+    if !orbit_response.dragged_by(PointerButton::Primary) {
+        ui.ctx()
+            .data_mut(|data| data.remove::<NavOrbitAnchor>(orbit_anchor_id));
+    }
+
+    let double_clicked_origin = orbit_response.double_clicked_by(PointerButton::Primary);
     let clicked_home = home_response.clicked();
-    if !drag_background && (clicked_home || target_axis.is_some()) {
-        let focus = navigation_focus_point(world);
+    if !drag_background && double_clicked_origin {
         let current_transform = world
             .get::<BevyTransform>(camera_entity)
             .map(|transform| transform.0)
             .unwrap_or_default();
-        let mut distance = current_transform.position.distance(focus);
+        let mut forward = current_transform.forward().normalize_or_zero();
+        if forward.length_squared() < 1.0e-6 {
+            forward = Vec3::Z;
+        }
+        let mut distance = navigation_orbit_focus_and_distance(
+            world,
+            &current_transform,
+            settings.orbit_selected_entity,
+        )
+        .1;
         if !distance.is_finite() || distance < 0.25 {
             distance = 5.0;
         }
+        let position = -forward * distance.max(0.25);
+        if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
+            transform.0.position = position;
+            transform.0.rotation = navigation_rotation_from_forward(forward);
+        }
+        if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+            runtime.active_camera_entity = Some(camera_entity);
+            if let Some(pane_id) = pane_id {
+                runtime.active_pane_id = Some(pane_id);
+            }
+            runtime.keyboard_focus = true;
+        }
+    } else if !drag_background && (clicked_home || target_axis.is_some()) {
+        let current_transform = world
+            .get::<BevyTransform>(camera_entity)
+            .map(|transform| transform.0)
+            .unwrap_or_default();
+        let (focus, distance) = navigation_orbit_focus_and_distance(
+            world,
+            &current_transform,
+            settings.orbit_selected_entity,
+        );
         let offset_dir = target_axis.unwrap_or_else(|| Vec3::new(1.0, 1.0, 1.0).normalize());
         let position = focus + offset_dir * distance;
         let forward = (focus - position).normalize_or_zero();
@@ -2032,6 +2221,261 @@ fn draw_gizmo_menu_contents(
     snap_settings.sanitize();
 }
 
+fn draw_navigation_gizmo_style_contents(
+    ui: &mut Ui,
+    navigation_gizmo: &mut NavigationGizmoSettings,
+) {
+    if ui.button("Defaults").clicked() {
+        *navigation_gizmo = NavigationGizmoSettings::default();
+    }
+    ui.checkbox(&mut navigation_gizmo.show_background, "Show Background");
+    ui.checkbox(&mut navigation_gizmo.show_labels, "Show Axis Labels");
+    ui.horizontal(|ui| {
+        ui.label("Radius Scale");
+        ui.add(DragValue::new(&mut navigation_gizmo.radius_scale).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Padding");
+        ui.add(DragValue::new(&mut navigation_gizmo.padding).speed(0.25));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Orbit Radius Scale");
+        ui.add(DragValue::new(&mut navigation_gizmo.orbit_radius_scale).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Home Radius Scale");
+        ui.add(DragValue::new(&mut navigation_gizmo.home_radius_scale).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Front Marker Radius");
+        ui.add(DragValue::new(&mut navigation_gizmo.marker_radius_front).speed(0.1));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Back Marker Radius");
+        ui.add(DragValue::new(&mut navigation_gizmo.marker_radius_back).speed(0.1));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Front Line Thickness");
+        ui.add(DragValue::new(&mut navigation_gizmo.line_thickness_front).speed(0.05));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Back Line Thickness");
+        ui.add(DragValue::new(&mut navigation_gizmo.line_thickness_back).speed(0.05));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Center Dot Radius");
+        ui.add(DragValue::new(&mut navigation_gizmo.center_dot_radius).speed(0.05));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Drag Sensitivity");
+        ui.add(DragValue::new(&mut navigation_gizmo.drag_sensitivity).speed(0.0005));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Background Alpha");
+        ui.add(DragValue::new(&mut navigation_gizmo.background_alpha).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Outline Alpha");
+        ui.add(DragValue::new(&mut navigation_gizmo.outline_alpha).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Negative Axis Brightness");
+        ui.add(DragValue::new(&mut navigation_gizmo.negative_axis_brightness).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Hover Brightness");
+        ui.add(DragValue::new(&mut navigation_gizmo.hover_brightness).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Text Scale");
+        ui.add(DragValue::new(&mut navigation_gizmo.text_scale).speed(0.01));
+    });
+    ui.horizontal(|ui| {
+        ui.label("X Axis Color");
+        ui.color_edit_button_rgb(&mut navigation_gizmo.axis_color_x);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Y Axis Color");
+        ui.color_edit_button_rgb(&mut navigation_gizmo.axis_color_y);
+    });
+    ui.horizontal(|ui| {
+        ui.label("Z Axis Color");
+        ui.color_edit_button_rgb(&mut navigation_gizmo.axis_color_z);
+    });
+    navigation_gizmo.sanitize();
+}
+
+fn draw_orbit_menu_contents(
+    ui: &mut Ui,
+    navigation_gizmo: &mut NavigationGizmoSettings,
+    freecam_orbit_distance: &mut f32,
+) {
+    if ui.button("Defaults").clicked() {
+        let defaults = NavigationGizmoSettings::default();
+        navigation_gizmo.orbit_selected_entity = defaults.orbit_selected_entity;
+        navigation_gizmo.drag_sensitivity = defaults.drag_sensitivity;
+        *freecam_orbit_distance = FREECAM_ORBIT_DISTANCE_DEFAULT;
+    }
+    ui.checkbox(
+        &mut navigation_gizmo.orbit_selected_entity,
+        "Orbit Around Selection",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Drag Sensitivity");
+        ui.add(DragValue::new(&mut navigation_gizmo.drag_sensitivity).speed(0.0005));
+    });
+    let _ = edit_float_range(
+        ui,
+        "Orbit Distance",
+        freecam_orbit_distance,
+        0.1,
+        FREECAM_ORBIT_DISTANCE_MIN..=FREECAM_ORBIT_DISTANCE_MAX,
+    );
+    *freecam_orbit_distance =
+        freecam_orbit_distance.clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
+    navigation_gizmo.sanitize();
+}
+
+fn sanitize_freecam_settings(
+    freecam_sensitivity: &mut f32,
+    freecam_smoothing: &mut f32,
+    freecam_move_accel: &mut f32,
+    freecam_move_decel: &mut f32,
+    freecam_speed_step: &mut f32,
+    freecam_speed_min: &mut f32,
+    freecam_speed_max: &mut f32,
+    freecam_boost_multiplier: &mut f32,
+    freecam_orbit_distance: &mut f32,
+) {
+    *freecam_sensitivity =
+        freecam_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
+    *freecam_smoothing = freecam_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
+    *freecam_move_accel = freecam_move_accel.clamp(FREECAM_MOVE_ACCEL_MIN, FREECAM_MOVE_ACCEL_MAX);
+    *freecam_move_decel = freecam_move_decel.clamp(FREECAM_MOVE_DECEL_MIN, FREECAM_MOVE_DECEL_MAX);
+    *freecam_speed_step = freecam_speed_step.clamp(FREECAM_SPEED_STEP_MIN, FREECAM_SPEED_STEP_MAX);
+    *freecam_speed_min = freecam_speed_min.clamp(FREECAM_SPEED_MIN_MIN, FREECAM_SPEED_MIN_MAX);
+    *freecam_speed_max = freecam_speed_max.clamp(FREECAM_SPEED_MAX_MIN, FREECAM_SPEED_MAX_MAX);
+    if *freecam_speed_min > *freecam_speed_max {
+        std::mem::swap(freecam_speed_min, freecam_speed_max);
+    }
+    *freecam_boost_multiplier =
+        freecam_boost_multiplier.clamp(FREECAM_BOOST_MULTIPLIER_MIN, FREECAM_BOOST_MULTIPLIER_MAX);
+    *freecam_orbit_distance =
+        freecam_orbit_distance.clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
+}
+
+fn draw_freecam_menu_contents(
+    ui: &mut Ui,
+    freecam_sensitivity: &mut f32,
+    freecam_smoothing: &mut f32,
+    freecam_move_accel: &mut f32,
+    freecam_move_decel: &mut f32,
+    freecam_speed_step: &mut f32,
+    freecam_speed_min: &mut f32,
+    freecam_speed_max: &mut f32,
+    freecam_boost_multiplier: &mut f32,
+    freecam_orbit_distance: &mut f32,
+    include_orbit_distance: bool,
+) -> EditResponse {
+    let mut response = EditResponse::default();
+    if ui.button("Defaults").clicked() {
+        *freecam_sensitivity = FREECAM_SENSITIVITY_DEFAULT;
+        *freecam_smoothing = FREECAM_SMOOTHING_DEFAULT;
+        *freecam_move_accel = FREECAM_MOVE_ACCEL_DEFAULT;
+        *freecam_move_decel = FREECAM_MOVE_DECEL_DEFAULT;
+        *freecam_speed_step = FREECAM_SPEED_STEP_DEFAULT;
+        *freecam_speed_min = FREECAM_SPEED_MIN_DEFAULT;
+        *freecam_speed_max = FREECAM_SPEED_MAX_DEFAULT;
+        *freecam_boost_multiplier = FREECAM_BOOST_MULTIPLIER_DEFAULT;
+        if include_orbit_distance {
+            *freecam_orbit_distance = FREECAM_ORBIT_DISTANCE_DEFAULT;
+        }
+        response.changed = true;
+    }
+    ui.label("Look");
+    response.merge(edit_float_range(
+        ui,
+        "Sensitivity",
+        freecam_sensitivity,
+        0.01,
+        FREECAM_SENSITIVITY_MIN..=FREECAM_SENSITIVITY_MAX,
+    ));
+    response.merge(edit_float_range(
+        ui,
+        "Smoothing",
+        freecam_smoothing,
+        0.0025,
+        FREECAM_SMOOTHING_MIN..=FREECAM_SMOOTHING_MAX,
+    ));
+    ui.separator();
+    ui.label("Movement");
+    response.merge(edit_float_range(
+        ui,
+        "Acceleration",
+        freecam_move_accel,
+        0.5,
+        FREECAM_MOVE_ACCEL_MIN..=FREECAM_MOVE_ACCEL_MAX,
+    ));
+    response.merge(edit_float_range(
+        ui,
+        "Deceleration",
+        freecam_move_decel,
+        0.5,
+        FREECAM_MOVE_DECEL_MIN..=FREECAM_MOVE_DECEL_MAX,
+    ));
+    response.merge(edit_float_range(
+        ui,
+        "Boost Mult",
+        freecam_boost_multiplier,
+        0.05,
+        FREECAM_BOOST_MULTIPLIER_MIN..=FREECAM_BOOST_MULTIPLIER_MAX,
+    ));
+    ui.separator();
+    ui.label("Speed Controls");
+    response.merge(edit_float_range(
+        ui,
+        "Adjust Step",
+        freecam_speed_step,
+        0.05,
+        FREECAM_SPEED_STEP_MIN..=FREECAM_SPEED_STEP_MAX,
+    ));
+    response.merge(edit_float_range(
+        ui,
+        "Min Speed",
+        freecam_speed_min,
+        0.05,
+        FREECAM_SPEED_MIN_MIN..=FREECAM_SPEED_MIN_MAX,
+    ));
+    response.merge(edit_float_range(
+        ui,
+        "Max Speed",
+        freecam_speed_max,
+        0.5,
+        FREECAM_SPEED_MAX_MIN..=FREECAM_SPEED_MAX_MAX,
+    ));
+    if include_orbit_distance {
+        response.merge(edit_float_range(
+            ui,
+            "Orbit Distance",
+            freecam_orbit_distance,
+            0.1,
+            FREECAM_ORBIT_DISTANCE_MIN..=FREECAM_ORBIT_DISTANCE_MAX,
+        ));
+    }
+    sanitize_freecam_settings(
+        freecam_sensitivity,
+        freecam_smoothing,
+        freecam_move_accel,
+        freecam_move_decel,
+        freecam_speed_step,
+        freecam_speed_min,
+        freecam_speed_max,
+        freecam_boost_multiplier,
+        freecam_orbit_distance,
+    );
+    response
+}
+
 pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_viewport: bool) {
     with_middle_drag_blocked(ui, world, |ui, world| {
         let world_state = world
@@ -2092,8 +2536,20 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let mut show_spline_paths = pane_settings.show_spline_paths;
         let mut show_spline_points = pane_settings.show_spline_points;
         let mut show_navigation_gizmo = pane_settings.show_navigation_gizmo;
+        let mut navigation_gizmo = pane_settings.navigation_gizmo.clone();
+        let selected_orbit_focus = navigation_focus_point(world, true);
+        if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+            runtime.orbit_selected_focus = selected_orbit_focus;
+        }
         let mut freecam_sensitivity = pane_settings.freecam_sensitivity;
         let mut freecam_smoothing = pane_settings.freecam_smoothing;
+        let mut freecam_move_accel = pane_settings.freecam_move_accel;
+        let mut freecam_move_decel = pane_settings.freecam_move_decel;
+        let mut freecam_speed_step = pane_settings.freecam_speed_step;
+        let mut freecam_speed_min = pane_settings.freecam_speed_min;
+        let mut freecam_speed_max = pane_settings.freecam_speed_max;
+        let mut freecam_boost_multiplier = pane_settings.freecam_boost_multiplier;
+        let mut freecam_orbit_distance = pane_settings.freecam_orbit_distance;
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -2276,23 +2732,34 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                         .auto_shrink([true, true])
                         .max_height(menu_max_height)
                         .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Sensitivity");
-                                ui.add(
-                                    DragValue::new(&mut freecam_sensitivity)
-                                        .speed(0.01)
-                                        .range(FREECAM_SENSITIVITY_MIN..=FREECAM_SENSITIVITY_MAX),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Smoothing");
-                                ui.add(
-                                    DragValue::new(&mut freecam_smoothing)
-                                        .speed(0.0025)
-                                        .range(FREECAM_SMOOTHING_MIN..=FREECAM_SMOOTHING_MAX)
-                                        .suffix(" s"),
-                                );
-                            });
+                            let _ = draw_freecam_menu_contents(
+                                ui,
+                                &mut freecam_sensitivity,
+                                &mut freecam_smoothing,
+                                &mut freecam_move_accel,
+                                &mut freecam_move_decel,
+                                &mut freecam_speed_step,
+                                &mut freecam_speed_min,
+                                &mut freecam_speed_max,
+                                &mut freecam_boost_multiplier,
+                                &mut freecam_orbit_distance,
+                                false,
+                            );
+                        });
+                });
+            MenuButton::new("Orbit")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            draw_orbit_menu_contents(
+                                ui,
+                                &mut navigation_gizmo,
+                                &mut freecam_orbit_distance,
+                            );
                         });
                 });
             MenuButton::new("Advanced")
@@ -2716,6 +3183,10 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                 } else {
                                     ui.label("Gizmo settings unavailable.");
                                 }
+                                ui.separator();
+                                ui.collapsing("Navigation Gizmo", |ui| {
+                                    draw_navigation_gizmo_style_contents(ui, &mut navigation_gizmo);
+                                });
                             });
 
                             ui.separator();
@@ -3026,6 +3497,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             camera_entity,
             Some(pane_id),
             show_navigation_gizmo,
+            &navigation_gizmo,
         );
 
         let pointer_pos = ui.ctx().input(|input| {
@@ -3076,9 +3548,18 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                 .or_else(|| input.pointer.hover_pos())
                                 .is_some_and(|pos| scene_rect.contains(pos))
                     });
+                    let middle_pressed_here = ui.ctx().input(|input| {
+                        input.pointer.button_pressed(PointerButton::Middle)
+                            && input
+                                .pointer
+                                .interact_pos()
+                                .or_else(|| input.pointer.hover_pos())
+                                .is_some_and(|pos| scene_rect.contains(pos))
+                    });
                     let clicked_here = (main_response.clicked_by(PointerButton::Primary)
                         || main_response.clicked_by(PointerButton::Secondary)
-                        || secondary_pressed_here)
+                        || secondary_pressed_here
+                        || middle_pressed_here)
                         && pointer_over;
                     if clicked_here {
                         runtime.active_pane_id = Some(pane_id);
@@ -3092,7 +3573,15 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                 .or_else(|| input.pointer.hover_pos())
                                 .is_some_and(|pos| scene_rect.contains(pos))
                     });
-                    if right_down_here {
+                    let middle_down_here = ui.ctx().input(|input| {
+                        input.pointer.button_down(PointerButton::Middle)
+                            && input
+                                .pointer
+                                .interact_pos()
+                                .or_else(|| input.pointer.hover_pos())
+                                .is_some_and(|pos| scene_rect.contains(pos))
+                    });
+                    if right_down_here || middle_down_here {
                         runtime.active_pane_id = Some(pane_id);
                         runtime.keyboard_focus = true;
                         runtime.active_camera_entity = Some(camera_entity);
@@ -3148,10 +3637,18 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-            freecam_sensitivity =
-                freecam_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
-            freecam_smoothing =
-                freecam_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
+            sanitize_freecam_settings(
+                &mut freecam_sensitivity,
+                &mut freecam_smoothing,
+                &mut freecam_move_accel,
+                &mut freecam_move_decel,
+                &mut freecam_speed_step,
+                &mut freecam_speed_min,
+                &mut freecam_speed_max,
+                &mut freecam_boost_multiplier,
+                &mut freecam_orbit_distance,
+            );
+            navigation_gizmo.sanitize();
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
@@ -3167,8 +3664,16 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
             viewport_state.show_navigation_gizmo = show_navigation_gizmo;
+            viewport_state.navigation_gizmo = navigation_gizmo.clone();
             viewport_state.freecam_sensitivity = freecam_sensitivity;
             viewport_state.freecam_smoothing = freecam_smoothing;
+            viewport_state.freecam_move_accel = freecam_move_accel;
+            viewport_state.freecam_move_decel = freecam_move_decel;
+            viewport_state.freecam_speed_step = freecam_speed_step;
+            viewport_state.freecam_speed_min = freecam_speed_min;
+            viewport_state.freecam_speed_max = freecam_speed_max;
+            viewport_state.freecam_boost_multiplier = freecam_boost_multiplier;
+            viewport_state.freecam_orbit_distance = freecam_orbit_distance;
             viewport_state.show_options_panel = show_options_panel;
         }
 
@@ -3210,8 +3715,16 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                     show_spline_paths,
                     show_spline_points,
                     show_navigation_gizmo,
+                    navigation_gizmo,
                     freecam_sensitivity,
                     freecam_smoothing,
+                    freecam_move_accel,
+                    freecam_move_decel,
+                    freecam_speed_step,
+                    freecam_speed_min,
+                    freecam_speed_max,
+                    freecam_boost_multiplier,
+                    freecam_orbit_distance,
                 },
             );
         }
@@ -3284,6 +3797,14 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.show_navigation_gizmo)
             .unwrap_or(true);
+        let mut navigation_gizmo = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.navigation_gizmo.clone())
+            .unwrap_or_default();
+        let selected_orbit_focus = navigation_focus_point(world, true);
+        if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
+            runtime.orbit_selected_focus = selected_orbit_focus;
+        }
         let mut freecam_sensitivity = world
             .get_resource::<EditorViewportState>()
             .map(|state| state.freecam_sensitivity)
@@ -3292,6 +3813,34 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.freecam_smoothing)
             .unwrap_or(FREECAM_SMOOTHING_DEFAULT);
+        let mut freecam_move_accel = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_move_accel)
+            .unwrap_or(FREECAM_MOVE_ACCEL_DEFAULT);
+        let mut freecam_move_decel = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_move_decel)
+            .unwrap_or(FREECAM_MOVE_DECEL_DEFAULT);
+        let mut freecam_speed_step = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_speed_step)
+            .unwrap_or(FREECAM_SPEED_STEP_DEFAULT);
+        let mut freecam_speed_min = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_speed_min)
+            .unwrap_or(FREECAM_SPEED_MIN_DEFAULT);
+        let mut freecam_speed_max = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_speed_max)
+            .unwrap_or(FREECAM_SPEED_MAX_DEFAULT);
+        let mut freecam_boost_multiplier = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_boost_multiplier)
+            .unwrap_or(FREECAM_BOOST_MULTIPLIER_DEFAULT);
+        let mut freecam_orbit_distance = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_orbit_distance)
+            .unwrap_or(FREECAM_ORBIT_DISTANCE_DEFAULT);
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -3453,23 +4002,34 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         .auto_shrink([true, true])
                         .max_height(menu_max_height)
                         .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Sensitivity");
-                                ui.add(
-                                    DragValue::new(&mut freecam_sensitivity)
-                                        .speed(0.01)
-                                        .range(FREECAM_SENSITIVITY_MIN..=FREECAM_SENSITIVITY_MAX),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Smoothing");
-                                ui.add(
-                                    DragValue::new(&mut freecam_smoothing)
-                                        .speed(0.0025)
-                                        .range(FREECAM_SMOOTHING_MIN..=FREECAM_SMOOTHING_MAX)
-                                        .suffix(" s"),
-                                );
-                            });
+                            let _ = draw_freecam_menu_contents(
+                                ui,
+                                &mut freecam_sensitivity,
+                                &mut freecam_smoothing,
+                                &mut freecam_move_accel,
+                                &mut freecam_move_decel,
+                                &mut freecam_speed_step,
+                                &mut freecam_speed_min,
+                                &mut freecam_speed_max,
+                                &mut freecam_boost_multiplier,
+                                &mut freecam_orbit_distance,
+                                false,
+                            );
+                        });
+                });
+            MenuButton::new("Orbit")
+                .config(viewport_menu_config.clone())
+                .ui(ui, |ui| {
+                    ui.set_max_width(menu_max_width);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([true, true])
+                        .max_height(menu_max_height)
+                        .show(ui, |ui| {
+                            draw_orbit_menu_contents(
+                                ui,
+                                &mut navigation_gizmo,
+                                &mut freecam_orbit_distance,
+                            );
                         });
                 });
             MenuButton::new("Advanced")
@@ -3893,6 +4453,10 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                 } else {
                                     ui.label("Gizmo settings unavailable.");
                                 }
+                                ui.separator();
+                                ui.collapsing("Navigation Gizmo", |ui| {
+                                    draw_navigation_gizmo_style_contents(ui, &mut navigation_gizmo);
+                                });
                             });
 
                             ui.separator();
@@ -4195,6 +4759,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                         camera_entity,
                         None,
                         show_navigation_gizmo,
+                        &navigation_gizmo,
                     )
                 })
                 .unwrap_or(false);
@@ -4234,13 +4799,31 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 runtime.pointer_over_main = pointer_over_main;
                 if main_response.clicked_by(PointerButton::Primary)
                     || main_response.clicked_by(PointerButton::Secondary)
+                    || main_response.clicked_by(PointerButton::Middle)
                 {
                     if pointer_over_main {
                         runtime.keyboard_focus = true;
+                        runtime.active_camera_entity = main_camera_entity;
                     }
                 } else if ui.ctx().input(|input| input.pointer.any_pressed()) && !pointer_over_main
                 {
                     runtime.keyboard_focus = false;
+                }
+                let look_down_here = ui.ctx().input(|input| {
+                    (input.pointer.button_down(PointerButton::Secondary)
+                        || input.pointer.button_down(PointerButton::Middle))
+                        && input
+                            .pointer
+                            .interact_pos()
+                            .or_else(|| input.pointer.hover_pos())
+                            .is_some_and(|pos| scene_rect.contains(pos))
+                });
+                if look_down_here {
+                    runtime.keyboard_focus = true;
+                    runtime.active_camera_entity = main_camera_entity;
+                }
+                if runtime.active_camera_entity.is_none() {
+                    runtime.active_camera_entity = main_camera_entity;
                 }
                 keyboard_focus = runtime.keyboard_focus;
             }
@@ -4260,10 +4843,18 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         }
 
         if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
-            freecam_sensitivity =
-                freecam_sensitivity.clamp(FREECAM_SENSITIVITY_MIN, FREECAM_SENSITIVITY_MAX);
-            freecam_smoothing =
-                freecam_smoothing.clamp(FREECAM_SMOOTHING_MIN, FREECAM_SMOOTHING_MAX);
+            sanitize_freecam_settings(
+                &mut freecam_sensitivity,
+                &mut freecam_smoothing,
+                &mut freecam_move_accel,
+                &mut freecam_move_decel,
+                &mut freecam_speed_step,
+                &mut freecam_speed_min,
+                &mut freecam_speed_max,
+                &mut freecam_boost_multiplier,
+                &mut freecam_orbit_distance,
+            );
+            navigation_gizmo.sanitize();
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
             viewport_state.render_resolution = render_resolution;
@@ -4279,8 +4870,16 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             viewport_state.show_spline_paths = show_spline_paths;
             viewport_state.show_spline_points = show_spline_points;
             viewport_state.show_navigation_gizmo = show_navigation_gizmo;
+            viewport_state.navigation_gizmo = navigation_gizmo;
             viewport_state.freecam_sensitivity = freecam_sensitivity;
             viewport_state.freecam_smoothing = freecam_smoothing;
+            viewport_state.freecam_move_accel = freecam_move_accel;
+            viewport_state.freecam_move_decel = freecam_move_decel;
+            viewport_state.freecam_speed_step = freecam_speed_step;
+            viewport_state.freecam_speed_min = freecam_speed_min;
+            viewport_state.freecam_speed_max = freecam_speed_max;
+            viewport_state.freecam_boost_multiplier = freecam_boost_multiplier;
+            viewport_state.freecam_orbit_distance = freecam_orbit_distance;
             viewport_state.show_options_panel = show_options_panel;
         }
 
@@ -7814,7 +8413,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<Freecam>(entity).is_some() {
+    if let Some(freecam_snapshot) = world.get::<Freecam>(entity).copied() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Freecam");
@@ -7825,6 +8424,27 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         if remove {
             world.entity_mut(entity).remove::<Freecam>();
             push_undo_snapshot(world, "Remove Freecam");
+        } else {
+            let mut freecam = freecam_snapshot;
+            let response = draw_freecam_menu_contents(
+                ui,
+                &mut freecam.sensitivity,
+                &mut freecam.smoothing,
+                &mut freecam.move_accel,
+                &mut freecam.move_decel,
+                &mut freecam.speed_step,
+                &mut freecam.speed_min,
+                &mut freecam.speed_max,
+                &mut freecam.boost_multiplier,
+                &mut freecam.orbit_distance,
+                true,
+            );
+            begin_edit_undo(world, "Freecam", response);
+            if response.changed {
+                freecam.sanitize();
+                world.entity_mut(entity).insert(freecam);
+            }
+            end_edit_undo(world, response);
         }
         ui.separator();
     }

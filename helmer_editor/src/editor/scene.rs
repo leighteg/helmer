@@ -36,7 +36,8 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::editor::{
-    EditorPlayCamera, EditorTimelineState, EditorViewportCamera, Freecam,
+    EditorPlayCamera, EditorTimelineState, EditorViewportCamera, FREECAM_ORBIT_DISTANCE_DEFAULT,
+    Freecam,
     assets::{
         EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind,
         SceneAssetPath, cached_audio_handle, cached_scene_handle,
@@ -196,6 +197,9 @@ pub struct SceneComponents {
     #[serde(default)]
     pub freecam: bool,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freecam_settings: Option<SceneFreecamData>,
+    #[serde(default)]
     pub physics: Option<PhysicsComponentData>,
     #[serde(default)]
     pub physics_world_defaults: Option<ScenePhysicsWorldDefaultsData>,
@@ -203,6 +207,56 @@ pub struct SceneComponents {
     pub audio_emitter: Option<AudioEmitterData>,
     #[serde(default)]
     pub audio_listener: Option<AudioListenerData>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneFreecamData {
+    pub sensitivity: f32,
+    pub smoothing: f32,
+    pub move_accel: f32,
+    pub move_decel: f32,
+    pub speed_step: f32,
+    pub speed_min: f32,
+    pub speed_max: f32,
+    pub boost_multiplier: f32,
+    #[serde(default = "scene_freecam_orbit_distance_default")]
+    pub orbit_distance: f32,
+}
+
+fn scene_freecam_orbit_distance_default() -> f32 {
+    FREECAM_ORBIT_DISTANCE_DEFAULT
+}
+
+impl SceneFreecamData {
+    fn from_component(component: Freecam) -> Self {
+        Self {
+            sensitivity: component.sensitivity,
+            smoothing: component.smoothing,
+            move_accel: component.move_accel,
+            move_decel: component.move_decel,
+            speed_step: component.speed_step,
+            speed_min: component.speed_min,
+            speed_max: component.speed_max,
+            boost_multiplier: component.boost_multiplier,
+            orbit_distance: component.orbit_distance,
+        }
+    }
+
+    fn into_component(self) -> Freecam {
+        let mut component = Freecam {
+            sensitivity: self.sensitivity,
+            smoothing: self.smoothing,
+            move_accel: self.move_accel,
+            move_decel: self.move_decel,
+            speed_step: self.speed_step,
+            speed_min: self.speed_min,
+            speed_max: self.speed_max,
+            boost_multiplier: self.boost_multiplier,
+            orbit_distance: self.orbit_distance,
+        };
+        component.sanitize();
+        component
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2623,7 +2677,12 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 enabled: pose.0.enabled,
                 locals: pose_to_serialized(&pose.0.pose),
             });
-        let freecam = world.get::<Freecam>(entity).is_some();
+        let freecam_settings = world.get::<Freecam>(entity).copied().map(|component| {
+            let mut component = component;
+            component.sanitize();
+            SceneFreecamData::from_component(component)
+        });
+        let freecam = freecam_settings.is_some();
         let physics = world
             .get::<ColliderShape>(entity)
             .copied()
@@ -2744,6 +2803,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             animation,
             pose_override,
             freecam,
+            freecam_settings,
             physics,
             physics_world_defaults,
             audio_emitter,
@@ -2987,8 +3047,13 @@ pub fn spawn_scene_from_document(
             entity.insert(BevyWrapper(emitter));
         }
 
-        if entity_data.components.freecam {
-            entity.insert(Freecam::default());
+        if entity_data.components.freecam || entity_data.components.freecam_settings.is_some() {
+            let component = entity_data
+                .components
+                .freecam_settings
+                .map(SceneFreecamData::into_component)
+                .unwrap_or_default();
+            entity.insert(component);
         }
 
         if let Some(scene) = &entity_data.components.scene {

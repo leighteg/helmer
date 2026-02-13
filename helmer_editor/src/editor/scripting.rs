@@ -952,7 +952,13 @@ pub fn script_execution_system(world: &mut World) {
                     if let Some(mut old_instance) = runtime.rust_instances.remove(&key) {
                         let plugin_changed = old_instance.plugin_version_id != plugin.version_id;
                         let same_script = old_instance.manifest_path == manifest_path;
-                        if plugin_changed && same_script && !force_reload.contains(&key) {
+                        let has_owned_entities =
+                            has_script_owned_entities(world, key.entity, key.script_index);
+                        if plugin_changed
+                            && same_script
+                            && !force_reload.contains(&key)
+                            && !has_owned_entities
+                        {
                             match take_rust_script_state(&mut old_instance) {
                                 Ok(state) => carry_state = state,
                                 Err(err) => push_script_runtime_error(&mut runtime, err),
@@ -8465,6 +8471,13 @@ fn despawn_script_owned(world: &mut World, owner: Entity, script_index: usize) {
     for entity in spawned {
         let _ = world.despawn(entity);
     }
+}
+
+fn has_script_owned_entities(world: &mut World, owner: Entity, script_index: usize) -> bool {
+    world
+        .query::<&ScriptSpawned>()
+        .iter(world)
+        .any(|marker| marker.owner == owner && marker.script_index == script_index)
 }
 
 fn ensure_transform(world: &mut World, entity: Entity) {

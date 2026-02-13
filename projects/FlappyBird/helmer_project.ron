@@ -1,6 +1,8 @@
 (
     name: "Flappy Bird",
     version: 1,
+    startup_scene: Some("assets/scenes/scene_001.hscene.ron"),
+    vscode_config_dir: ".vscode",
     assets_dir: "assets",
     models_dir: "assets/models",
     textures_dir: "assets/textures",

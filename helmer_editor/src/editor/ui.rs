@@ -3881,6 +3881,9 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
                 ui.separator();
             }
 
+            let active_scene_path = world
+                .get_resource::<EditorSceneState>()
+                .and_then(|scene| scene.path.clone());
             let mut save_request: Option<(PathBuf, ProjectConfig)> = None;
             let mut close_requested = false;
 
@@ -3922,6 +3925,44 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
                     ui.label("Scripts Dir:");
                     ui.text_edit_singleline(&mut config.scripts_dir);
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Startup Scene:");
+                    let mut startup_scene_value =
+                        config.startup_scene.clone().unwrap_or_else(String::new);
+                    ui.text_edit_singleline(&mut startup_scene_value);
+
+                    let can_use_open_scene = active_scene_path
+                        .as_ref()
+                        .map(|path| is_scene_file(path) || is_model_file(path))
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(can_use_open_scene, egui::Button::new("Use Open Scene"))
+                        .clicked()
+                    {
+                        if let Some(path) = active_scene_path.as_ref() {
+                            startup_scene_value = project_relative_runtime_path(&root, path);
+                        }
+                    }
+
+                    if ui.button("Clear").clicked() {
+                        startup_scene_value.clear();
+                    }
+
+                    let trimmed = startup_scene_value.trim();
+                    config.startup_scene = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                });
+                if let Some(startup_scene) = config.startup_scene.as_deref() {
+                    if resolve_project_runtime_path(&root, config, startup_scene).is_none() {
+                        ui.colored_label(
+                            Color32::YELLOW,
+                            "Startup scene was not found. Save to keep the value anyway.",
+                        );
+                    }
+                }
 
                 ui.horizontal(|ui| {
                     if ui.button("Save Preferences").clicked() {
@@ -14888,6 +14929,37 @@ fn look_rotation(forward: Vec3, up: Vec3) -> Quat {
     let up = forward.cross(right).normalize_or_zero();
     let basis = Mat3::from_cols(right, up, forward);
     Quat::from_mat3(&basis)
+}
+
+fn project_relative_runtime_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn resolve_project_runtime_path(
+    root: &Path,
+    config: &ProjectConfig,
+    configured_path: &str,
+) -> Option<PathBuf> {
+    let trimmed = configured_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    let candidates = if candidate.is_absolute() {
+        vec![candidate]
+    } else {
+        vec![
+            root.join(&candidate),
+            config.assets_root(root).join(&candidate),
+            config.scenes_root(root).join(&candidate),
+        ]
+    };
+
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn is_scene_file(path: &Path) -> bool {

@@ -3024,6 +3024,7 @@ impl GraphRenderer {
                 self.frame_inputs.set(SwapchainFrameInput {
                     view: target_view.clone(),
                     format: self.surface_config.format,
+                    size_in_pixels: [target_width, target_height],
                 });
                 let (graph, compiled_graph) = match self.active_graph.as_ref() {
                     Some(active) => (&active.graph, &active.compiled),
@@ -3172,6 +3173,7 @@ impl GraphRenderer {
         self.frame_inputs.set(SwapchainFrameInput {
             view: output_view.clone(),
             format: self.surface_config.format,
+            size_in_pixels: [self.surface_config.width, self.surface_config.height],
         });
 
         if let Some(prev_idle_frames_before_evict) = self.prev_idle_frames_before_evict.take() {

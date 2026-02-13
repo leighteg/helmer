@@ -294,6 +294,7 @@ pub struct IndirectDrawBatch {
 pub struct SwapchainFrameInput {
     pub view: wgpu::TextureView,
     pub format: wgpu::TextureFormat,
+    pub size_in_pixels: [u32; 2],
 }
 
 #[derive(Clone)]

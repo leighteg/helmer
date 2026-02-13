@@ -17,18 +17,18 @@ use helmer_editor::editor::{
     EntityDragState, FileWatchState, HierarchyUiState, InspectorNameEditState,
     InspectorPinnedEntityResource, MaterialEditorCache, MiddleDragUiState,
     PendingSceneChildAnimations, PendingSceneChildPoseOverrides, PoseEditorState,
-    ScriptEditModeState, ScriptInputState, ScriptRegistry, ScriptRunState, ScriptRuntime,
-    VisualScriptEditorState, activate_viewport_camera, apply_scene_child_animations_system,
-    apply_scene_child_pose_overrides_system, asset_scan_system, drag_drop_system,
-    editor_command_system, editor_layout_apply_system, editor_layout_save_system,
-    editor_layout_update_system, editor_physics_state_system, editor_render_refresh_system,
-    editor_shortcut_system, editor_ui_system, editor_undo_request_system,
-    editor_viewport_camera_mode_system, editor_viewport_render_requests_system, file_watch_system,
-    freecam_system, gizmo_system, install_runtime_log_listener, load_layout_state,
-    load_recent_projects, pane_manager_toggle_system, pending_scene_child_renderer_system,
-    pending_skinned_mesh_system, scene_dirty_system, script_execution_system,
-    script_registry_system, selection_system, set_viewport_audio_listener_enabled,
-    timeline_playback_system,
+    RustScriptRuntimeBuildPolicy, ScriptEditModeState, ScriptInputState, ScriptRegistry,
+    ScriptRunState, ScriptRuntime, VisualScriptEditorState, activate_viewport_camera,
+    apply_scene_child_animations_system, apply_scene_child_pose_overrides_system,
+    asset_scan_system, drag_drop_system, editor_command_system, editor_layout_apply_system,
+    editor_layout_save_system, editor_layout_update_system, editor_physics_state_system,
+    editor_render_refresh_system, editor_shortcut_system, editor_ui_system,
+    editor_undo_request_system, editor_viewport_camera_mode_system,
+    editor_viewport_render_requests_system, file_watch_system, freecam_system, gizmo_system,
+    install_runtime_log_listener, load_layout_state, load_recent_projects,
+    pane_manager_toggle_system, pending_scene_child_renderer_system, pending_skinned_mesh_system,
+    scene_dirty_system, script_execution_system, script_registry_system, selection_system,
+    set_viewport_audio_listener_enabled, timeline_playback_system,
 };
 
 static PROJECT_ARG: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -74,6 +74,7 @@ fn editor_init(
     world.insert_resource(ScriptRegistry::default());
     world.insert_resource(FileWatchState::default());
     world.insert_resource(ScriptRuntime::default());
+    world.insert_resource(RustScriptRuntimeBuildPolicy::default());
     world.insert_resource(ScriptRunState::default());
     world.insert_resource(ScriptEditModeState::default());
     world.insert_resource(ScriptInputState::default());

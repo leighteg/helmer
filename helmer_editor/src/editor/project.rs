@@ -8,72 +8,12 @@ use bevy_ecs::prelude::Resource;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
-const PROJECT_FILE_NAME: &str = "helmer_project.ron";
 const DEFAULT_MATERIAL_FILE: &str = "default.ron";
 const LUAURC_FILE_NAME: &str = ".luaurc";
 const LUAURC_GENERATED_MARKER: &str = "\"__generated_by_helmer__\": true";
 const HELMER_LUAU_API_FILE_NAME: &str = "helmer_api.d.luau";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectConfig {
-    pub name: String,
-    pub version: u32,
-    pub vscode_config_dir: String,
-    pub assets_dir: String,
-    pub models_dir: String,
-    pub textures_dir: String,
-    pub materials_dir: String,
-    pub scenes_dir: String,
-    pub scripts_dir: String,
-}
-
-impl ProjectConfig {
-    pub fn new(name: String) -> Self {
-        Self {
-            name,
-            version: 1,
-            vscode_config_dir: ".vscode".to_string(),
-            assets_dir: "assets".to_string(),
-            models_dir: "assets/models".to_string(),
-            textures_dir: "assets/textures".to_string(),
-            materials_dir: "assets/materials".to_string(),
-            scenes_dir: "assets/scenes".to_string(),
-            scripts_dir: "assets/scripts".to_string(),
-        }
-    }
-
-    pub fn vscode_config_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.vscode_config_dir)
-    }
-
-    pub fn config_path(root: &Path) -> PathBuf {
-        root.join(PROJECT_FILE_NAME)
-    }
-
-    pub fn assets_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.assets_dir)
-    }
-
-    pub fn models_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.models_dir)
-    }
-
-    pub fn textures_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.textures_dir)
-    }
-
-    pub fn materials_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.materials_dir)
-    }
-
-    pub fn scenes_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.scenes_dir)
-    }
-
-    pub fn scripts_root(&self, root: &Path) -> PathBuf {
-        root.join(&self.scripts_dir)
-    }
-}
+pub use helmer_editor_runtime::project::ProjectConfig;
 
 #[derive(Resource, Default, Clone)]
 pub struct EditorProject {

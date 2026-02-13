@@ -16,6 +16,7 @@ use bevy_ecs::name::Name;
 use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use bevy_ecs::query::With;
 use glam::{DVec2, Quat, Vec2, Vec3};
+use helmer_editor_runtime::scripting as runtime_scripting;
 use helmer_script_sdk::{
     EntityId as RustScriptEntityId, Quat as RustScriptQuat, SCRIPT_API_ABI_VERSION,
     SCRIPT_PLUGIN_ABI_VERSION, ScriptApi as RustScriptApi, ScriptBytes as RustScriptBytes,
@@ -70,7 +71,7 @@ use crate::editor::{
     },
     visual_scripting::{
         VisualScriptApiTable, VisualScriptEvent, VisualScriptHost, VisualScriptProgram,
-        VisualScriptRuntimeState, compile_visual_script_runtime_source, is_visual_script_path,
+        VisualScriptRuntimeState, compile_visual_script_runtime_source,
     },
 };
 
@@ -108,6 +109,19 @@ pub struct ScriptEditModeState {
 impl ScriptEditModeState {
     pub fn queue(&mut self, command: ScriptEditCommand) {
         self.pending_commands.push(command);
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct RustScriptRuntimeBuildPolicy {
+    pub allow_runtime_build: bool,
+}
+
+impl Default for RustScriptRuntimeBuildPolicy {
+    fn default() -> Self {
+        Self {
+            allow_runtime_build: true,
+        }
     }
 }
 
@@ -164,101 +178,31 @@ impl ScriptRegistry {
 }
 
 pub fn is_script_path(path: &Path) -> bool {
-    if is_lua_script_path(path) {
-        return true;
-    }
-    if is_visual_script_path(path) {
-        return true;
-    }
-    is_rust_script_path(path)
+    runtime_scripting::is_script_path(path)
 }
 
 pub fn is_lua_script_path(path: &Path) -> bool {
-    let is_script_ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "lua" | "luau"))
-        .unwrap_or(false);
-    if !is_script_ext {
-        return false;
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase())
-        .unwrap_or_default();
-    !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
+    runtime_scripting::is_lua_script_path(path)
+}
+
+pub fn is_visual_script_path(path: &Path) -> bool {
+    runtime_scripting::is_visual_script_path(path)
 }
 
 pub fn is_rust_script_path(path: &Path) -> bool {
-    resolve_rust_script_manifest(path).is_some()
+    runtime_scripting::is_rust_script_path(path)
 }
 
 pub fn resolve_rust_script_manifest(path: &Path) -> Option<PathBuf> {
-    if path.is_dir() {
-        let manifest = path.join("Cargo.toml");
-        if manifest.exists() {
-            return Some(manifest);
-        }
-        return None;
-    }
-
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase());
-
-    if file_name.as_deref() == Some("cargo.toml") {
-        return Some(path.to_path_buf());
-    }
-
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("rs"))
-        .unwrap_or(false)
-    {
-        let mut current = path.parent();
-        while let Some(dir) = current {
-            let manifest = dir.join("Cargo.toml");
-            if manifest.exists() {
-                return Some(manifest);
-            }
-            current = dir.parent();
-        }
-    }
-
-    None
+    runtime_scripting::resolve_rust_script_manifest(path)
 }
 
 pub fn script_registry_key_for_path(path: &Path) -> Option<PathBuf> {
-    if is_lua_script_path(path) || is_visual_script_path(path) {
-        return Some(path.to_path_buf());
-    }
-    resolve_rust_script_manifest(path)
+    runtime_scripting::script_registry_key_for_path(path)
 }
 
 pub fn script_language_from_path(path: &Path) -> String {
-    if is_lua_script_path(path) {
-        return match path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-        {
-            Some(ext) if ext == "lua" => "lua".to_string(),
-            _ => "luau".to_string(),
-        };
-    }
-
-    if is_visual_script_path(path) {
-        return "visual".to_string();
-    }
-
-    if resolve_rust_script_manifest(path).is_some() {
-        return "rust".to_string();
-    }
-
-    "luau".to_string()
+    runtime_scripting::script_language_from_path(path)
 }
 
 pub fn normalize_script_language(language: &str, path: Option<&Path>) -> String {
@@ -622,6 +566,10 @@ pub fn script_execution_system(world: &mut World) {
         .get_resource::<EditorViewportState>()
         .map(|state| state.execute_scripts_in_edit_mode)
         .unwrap_or(false);
+    let allow_runtime_rust_build = world
+        .get_resource::<RustScriptRuntimeBuildPolicy>()
+        .map(|policy| policy.allow_runtime_build)
+        .unwrap_or(true);
     let dt = world
         .get_resource::<DeltaTime>()
         .map(|time| time.0)
@@ -909,13 +857,71 @@ pub fn script_execution_system(world: &mut World) {
                 }
 
                 let manifest_path = runtime_path.clone();
-                let build_needed = runtime
-                    .rust_plugins
-                    .get(&manifest_path)
-                    .map(|plugin| asset.modified > plugin.source_modified)
-                    .unwrap_or(true);
-                if build_needed {
-                    runtime.request_rust_build(&manifest_path);
+                if allow_runtime_rust_build {
+                    let build_needed = runtime
+                        .rust_plugins
+                        .get(&manifest_path)
+                        .map(|plugin| asset.modified > plugin.source_modified)
+                        .unwrap_or(true);
+                    if build_needed {
+                        runtime.request_rust_build(&manifest_path);
+                    }
+                } else {
+                    let prebuilt_library_path =
+                        match resolve_prebuilt_rust_plugin_path(world, &manifest_path) {
+                            Ok(path) => path,
+                            Err(err) => {
+                                runtime
+                                    .rust_build_errors
+                                    .insert(manifest_path.clone(), err.clone());
+                                push_script_runtime_error(
+                                    &mut runtime,
+                                    format!("{}: {}", script_path_label(script), err),
+                                );
+                                continue;
+                            }
+                        };
+                    let prebuilt_modified = fs::metadata(&prebuilt_library_path)
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let prebuilt_needs_load = runtime
+                        .rust_plugins
+                        .get(&manifest_path)
+                        .map(|plugin| {
+                            plugin.source_library_path != prebuilt_library_path
+                                || plugin.source_modified < prebuilt_modified
+                        })
+                        .unwrap_or(true);
+                    if prebuilt_needs_load {
+                        let version_id = runtime.next_rust_plugin_version;
+                        runtime.next_rust_plugin_version =
+                            runtime.next_rust_plugin_version.saturating_add(1);
+                        match load_rust_plugin(
+                            &manifest_path,
+                            &prebuilt_library_path,
+                            prebuilt_modified,
+                            version_id,
+                        ) {
+                            Ok(plugin) => {
+                                runtime
+                                    .rust_plugins
+                                    .insert(manifest_path.clone(), Arc::new(plugin));
+                                runtime.rust_build_errors.remove(&manifest_path);
+                            }
+                            Err(err) => {
+                                let message =
+                                    format!("Failed to load prebuilt Rust script plugin: {}", err);
+                                runtime
+                                    .rust_build_errors
+                                    .insert(manifest_path.clone(), message.clone());
+                                push_script_runtime_error(
+                                    &mut runtime,
+                                    format!("{}: {}", script_path_label(script), message),
+                                );
+                                continue;
+                            }
+                        }
+                    }
                 }
 
                 let plugin = runtime.rust_plugins.get(&manifest_path).cloned();
@@ -1435,113 +1441,48 @@ fn build_rust_script_library(manifest_path: &Path) -> RustBuildResult {
 }
 
 fn rust_target_library_path(manifest_path: &Path) -> Result<PathBuf, String> {
-    let (_, lib_name) = rust_manifest_names(manifest_path)?;
-    let Some(root) = manifest_path.parent() else {
-        return Err("Rust script manifest has no parent directory".to_string());
-    };
-
-    let file_name = format!(
-        "{}{}.{}",
-        rust_dynamic_library_prefix(),
-        lib_name,
-        rust_dynamic_library_extension()
-    );
-    Ok(root.join("target").join("debug").join(file_name))
+    runtime_scripting::rust_target_library_path(manifest_path)
 }
 
-fn rust_manifest_names(manifest_path: &Path) -> Result<(String, String), String> {
-    let manifest = fs::read_to_string(manifest_path).map_err(|err| {
+fn resolve_prebuilt_rust_plugin_path(
+    world: &World,
+    manifest_path: &Path,
+) -> Result<PathBuf, String> {
+    let Some(project) = world.get_resource::<EditorProject>() else {
+        return Err("EditorProject resource is missing".to_string());
+    };
+    let Some(project_root) = project.root.as_ref() else {
+        return Err("Project root is not set for Rust script execution".to_string());
+    };
+    let Some(project_config) = project.config.as_ref() else {
+        return Err("Project config is not set for Rust script execution".to_string());
+    };
+
+    let assets_root = project_config.assets_root(project_root);
+    let manifest_relative = manifest_path.strip_prefix(&assets_root).map_err(|_| {
         format!(
-            "Failed to read Rust script manifest {}: {}",
-            manifest_path.to_string_lossy(),
-            err
-        )
-    })?;
-
-    let mut section = String::new();
-    let mut package_name: Option<String> = None;
-    let mut lib_name: Option<String> = None;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            section = trimmed
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim()
-                .to_ascii_lowercase();
-            continue;
-        }
-
-        let Some((key, raw_value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "name" {
-            continue;
-        }
-
-        let raw_value = raw_value.split('#').next().unwrap_or("").trim();
-        let Some(value) = parse_manifest_string_literal(raw_value) else {
-            continue;
-        };
-
-        if section == "package" && package_name.is_none() {
-            package_name = Some(value);
-        } else if section == "lib" && lib_name.is_none() {
-            lib_name = Some(value);
-        }
-    }
-
-    let package_name = package_name.ok_or_else(|| {
-        format!(
-            "Rust script manifest missing [package].name: {}",
+            "Rust script manifest is outside project assets root: {}",
             manifest_path.to_string_lossy()
         )
     })?;
-    let lib_name = lib_name
-        .unwrap_or_else(|| package_name.replace('-', "_"))
-        .replace('-', "_");
-    Ok((package_name, lib_name))
-}
+    let Some(prebuilt_relative) =
+        runtime_scripting::rust_prebuilt_plugin_relative_path(manifest_relative)
+    else {
+        return Err(format!(
+            "Rust script manifest path is not valid for prebuilt plugin lookup: {}",
+            manifest_relative.to_string_lossy()
+        ));
+    };
 
-fn parse_manifest_string_literal(value: &str) -> Option<String> {
-    let mut chars = value.chars();
-    let quote = chars.next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
+    let prebuilt_path = assets_root.join(prebuilt_relative);
+    if !prebuilt_path.is_file() {
+        return Err(format!(
+            "Prebuilt Rust script plugin not found: {}. Rebuild the project with helmer_build.",
+            prebuilt_path.to_string_lossy()
+        ));
     }
-    let rest = chars.as_str();
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
-}
 
-fn rust_dynamic_library_prefix() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        ""
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "lib"
-    }
-}
-
-fn rust_dynamic_library_extension() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "dll"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "dylib"
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        "so"
-    }
+    Ok(prebuilt_path)
 }
 
 fn load_rust_plugin(

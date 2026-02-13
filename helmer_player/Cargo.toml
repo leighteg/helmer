@@ -1,0 +1,15 @@
+[package]
+name = "helmer_player"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy_ecs = "0.17.2"
+helmer = { path = "../helmer" }
+helmer_becs = { path = "../helmer_becs" }
+helmer_build_runtime = { path = "../helmer_build_runtime" }
+helmer_editor = { path = "../helmer_editor" }
+helmer_editor_runtime = { path = "../helmer_editor_runtime" }
+rayon = "1.11.0"
+ron = "0.12.0"
+serde_json = "1.0.145"

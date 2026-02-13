@@ -282,19 +282,29 @@ fn resolve_body_kind(
     }
 }
 
-fn select_lod_index(lod: MeshColliderLod, lod_count: usize) -> usize {
-    if lod_count == 0 {
-        return 0;
+fn requested_lod_index(
+    requested_lod: MeshColliderLod,
+    loaded_lod_count: usize,
+    total_lod_count: usize,
+) -> Option<usize> {
+    if loaded_lod_count == 0 || total_lod_count == 0 {
+        return None;
     }
 
-    let last = lod_count - 1;
-    match lod {
+    let total_last = total_lod_count - 1;
+    let target = match requested_lod {
         MeshColliderLod::Lod0 => 0,
-        MeshColliderLod::Lod1 => 1.min(last),
-        MeshColliderLod::Lod2 => 2.min(last),
-        MeshColliderLod::Lowest => last,
-        MeshColliderLod::Specific(index) => (index as usize).min(last),
+        MeshColliderLod::Lod1 => 1.min(total_last),
+        MeshColliderLod::Lod2 => 2.min(total_last),
+        MeshColliderLod::Lowest => total_last,
+        MeshColliderLod::Specific(index) => (index as usize).min(total_last),
+    };
+
+    if target >= loaded_lod_count {
+        return None;
     }
+
+    Some(target)
 }
 
 fn resolve_mesh_id(
@@ -321,7 +331,9 @@ fn mesh_geometry_for_collider(
         return None;
     }
 
-    let lod_index = select_lod_index(lod, lods.len());
+    // wait for the requested collider LOD to actually stream in
+    // falling back to another LOD (or shape) causes persistant incorrect physics
+    let lod_index = requested_lod_index(lod, lods.len(), mesh.total_lods)?;
     let lod = lods.get(lod_index)?;
 
     if lod.vertices.is_empty() || lod.indices.len() < 3 {
@@ -418,14 +430,19 @@ fn build_collider(
     skinned_renderer: Option<&BevySkinnedMeshRenderer>,
     asset_server: Option<&BevyAssetServer>,
 ) -> Option<ColliderBuilder> {
-    let shape = build_shared_shape(
+    let requested_shape = build_shared_shape(
         shape,
         transform.scale,
         mesh_renderer,
         skinned_renderer,
         asset_server,
-    )
-    .or_else(|| {
+    );
+    let shape = if let Some(shape) = requested_shape {
+        shape
+    } else if matches!(shape, ColliderShape::Mesh { .. }) {
+        // mesh colliders should not fall back to primitive bounds when the mesh/LOD is still streaming; skip creation and retry next frame
+        return None;
+    } else {
         warn!("Failed to build requested collider shape, falling back to cuboid");
         build_shared_shape(
             ColliderShape::Cuboid,
@@ -433,8 +450,8 @@ fn build_collider(
             mesh_renderer,
             skinned_renderer,
             asset_server,
-        )
-    })?;
+        )?
+    };
 
     let collision_groups = InteractionGroups::new(
         Group::from_bits_retain(collider_props.collision_memberships),

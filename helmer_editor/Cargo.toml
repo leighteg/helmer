@@ -9,6 +9,7 @@ gilrs = "0.11.1"
 glam = "0.30.9"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
+helmer_editor_runtime = { path = "../helmer_editor_runtime" }
 helmer_script_sdk = { path = "../helmer_script_sdk" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
 libloading = "0.8.9"

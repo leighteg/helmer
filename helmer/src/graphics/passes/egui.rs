@@ -145,8 +145,16 @@ impl RenderPass for EguiPass {
         }
 
         let last_version = self.last_texture_version.load(Ordering::Relaxed);
+        let clamped_screen_size = [
+            egui_data.screen_descriptor.size_in_pixels[0]
+                .min(swapchain.size_in_pixels[0])
+                .max(1),
+            egui_data.screen_descriptor.size_in_pixels[1]
+                .min(swapchain.size_in_pixels[1])
+                .max(1),
+        ];
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: egui_data.screen_descriptor.size_in_pixels,
+            size_in_pixels: clamped_screen_size,
             pixels_per_point: egui_data.screen_descriptor.pixels_per_point,
         };
 

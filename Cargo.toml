@@ -2,6 +2,10 @@
 members = [
     "helmer",
     "helmer_editor",
+    "helmer_editor_runtime",
+    "helmer_build_runtime",
+    "helmer_build",
+    "helmer_player",
     "helmer_script_sdk",
     "test_game", "helmer_becs", "helmer_ecs", "becs_bench", "helmer_view", "xtask",
 ]

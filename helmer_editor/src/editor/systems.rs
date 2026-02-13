@@ -82,10 +82,10 @@ use crate::editor::{
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
         AssetDragState, EditorPaneManagerState, EditorPaneWorkspaceState, EditorUiState,
-        EditorWorkspaceState, EntityDragState, InspectorPinnedEntityResource, MiddleDragUiState,
-        close_editor_window, close_pane_workspace_window, draw_editor_window,
-        draw_pane_manager_window, draw_pane_workspace_window, ensure_default_pane_workspace,
-        spawn_play_viewport_pane,
+        EntityDragState, InspectorPinnedEntityResource, MiddleDragUiState,
+        apply_pane_workspace_layout, capture_pane_workspace_layout, close_pane_workspace_window,
+        draw_pane_manager_window, draw_pane_workspace_window, draw_project_window,
+        ensure_default_pane_workspace, spawn_play_viewport_pane,
     },
     undo_action,
     visual_scripting::default_visual_script_template_full,
@@ -115,20 +115,11 @@ pub fn editor_ui_system(world: &mut World) {
     crate::editor::sync_console_diagnostics(world);
 
     ensure_default_pane_workspace(world);
+    let project_open = world
+        .get_resource::<EditorProject>()
+        .and_then(|project| project.root.as_ref())
+        .is_some();
 
-    let editor_windows = world
-        .get_resource::<EditorWorkspaceState>()
-        .map(|state| {
-            state
-                .windows
-                .iter()
-                .map(|window| (window.id, window.title.clone()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let editor_tab_dragging = world
-        .get_resource::<EditorWorkspaceState>()
-        .is_some_and(|state| state.dragging.is_some());
     let pane_windows = world
         .get_resource::<EditorPaneWorkspaceState>()
         .map(|state| {
@@ -147,9 +138,6 @@ pub fn editor_ui_system(world: &mut World) {
         .map(|state| state.open)
         .unwrap_or(false);
 
-    if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
-        workspace.drop_handled = false;
-    }
     if let Some(mut workspace) = world.get_resource_mut::<EditorPaneWorkspaceState>() {
         workspace.drop_handled = false;
     }
@@ -159,7 +147,27 @@ pub fn editor_ui_system(world: &mut World) {
         .expect("EguiResource missing");
 
     egui_res.inspector_ui = false;
-    egui_res.disable_window_drag = editor_tab_dragging || pane_tab_dragging;
+    if !project_open {
+        egui_res.disable_window_drag = false;
+        egui_res
+            .window_chrome_overrides
+            .insert("Project".to_string(), EguiWindowChrome::pane_dock());
+        egui_res
+            .window_order_overrides
+            .insert("Project".to_string(), Order::Foreground);
+        egui_res.windows.push((
+            Box::new(|ui: &mut Ui, world: &mut World, _| {
+                draw_project_window(ui, world);
+            }),
+            EguiWindowSpec {
+                id: "Project".to_string(),
+                title: String::new(),
+            },
+        ));
+        return;
+    }
+
+    egui_res.disable_window_drag = pane_tab_dragging;
     for (window_id, layout_managed) in pane_windows {
         let mut chrome = EguiWindowChrome::pane_dock();
         // detached pane windows should keep compact chrome, but still allow native title-bar drag
@@ -225,36 +233,6 @@ pub fn editor_ui_system(world: &mut World) {
             },
         ));
     }
-
-    for (window_id, title) in editor_windows {
-        let window_key = format!("editor_window_{}", window_id);
-        let is_layout_window = layout_window_ids()
-            .iter()
-            .any(|layout_id| *layout_id == title.as_str());
-        egui_res.window_order_overrides.insert(
-            window_key.clone(),
-            if is_layout_window {
-                Order::Middle
-            } else {
-                Order::Foreground
-            },
-        );
-        egui_res.close_actions.insert(
-            window_key.clone(),
-            Box::new(move |world: &mut World| {
-                close_editor_window(world, window_id);
-            }),
-        );
-        egui_res.windows.push((
-            Box::new(move |ui: &mut Ui, world: &mut World, _| {
-                draw_editor_window(ui, world, window_id);
-            }),
-            EguiWindowSpec {
-                id: window_key,
-                title,
-            },
-        ));
-    }
 }
 
 pub fn editor_layout_apply_system(world: &mut World) {
@@ -281,7 +259,8 @@ pub fn editor_layout_apply_system(world: &mut World) {
         layout,
         clear_active,
         activate_default,
-        allow_layout_edit,
+        allow_layout_move,
+        allow_layout_resize,
         apply_requested,
         layout_active,
         last_screen_rect,
@@ -300,7 +279,8 @@ pub fn editor_layout_apply_system(world: &mut World) {
                     None,
                     false,
                     None,
-                    state.allow_layout_edit,
+                    state.allow_layout_move,
+                    state.allow_layout_resize,
                     state.apply_requested,
                     true,
                     state.last_screen_rect,
@@ -338,7 +318,8 @@ pub fn editor_layout_apply_system(world: &mut World) {
                     layout,
                     clear_active,
                     activate_default,
-                    state.allow_layout_edit,
+                    state.allow_layout_move,
+                    state.allow_layout_resize,
                     state.apply_requested,
                     layout_active,
                     state.last_screen_rect,
@@ -362,6 +343,7 @@ pub fn editor_layout_apply_system(world: &mut World) {
     }
 
     let has_layout = layout.is_some();
+    let allow_layout_edit = allow_layout_move || allow_layout_resize;
     let enforce_layout = !project_open || has_layout;
     let active_changed =
         activate_default.is_some() || active_name.as_deref() != last_active_layout.as_deref();
@@ -377,9 +359,22 @@ pub fn editor_layout_apply_system(world: &mut World) {
         false
     };
 
+    let detached_pane_overrides = if hard_apply && project_open {
+        if let Some(pane_workspace) = layout
+            .as_ref()
+            .and_then(|layout| layout.pane_workspace.as_ref())
+        {
+            apply_pane_workspace_layout(world, pane_workspace, screen_rect)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     if let Some(mut egui_res) = world.get_resource_mut::<EguiResource>() {
         egui_res.layout_active = layout_active;
-        egui_res.layout_allow_move = allow_layout_edit;
+        egui_res.layout_allow_move = allow_layout_move;
         egui_res.layout_force_positions = layout_active;
         egui_res.layout_resizing_window = None;
 
@@ -405,7 +400,7 @@ pub fn editor_layout_apply_system(world: &mut World) {
                 egui_res
                     .window_order_overrides
                     .insert("Project".to_string(), Order::Foreground);
-            } else if let Some(layout) = layout {
+            } else if let Some(layout) = layout.as_ref() {
                 let rects = layout
                     .windows
                     .iter()
@@ -424,6 +419,20 @@ pub fn editor_layout_apply_system(world: &mut World) {
                             egui_res.window_collapsed_overrides.insert(id, collapsed);
                         }
                     }
+                }
+            }
+            for (window_id, rect, collapsed) in detached_pane_overrides.iter() {
+                let rect = round_rect_to_pixels(*rect, pixels_per_point, screen_rect);
+                egui_res
+                    .window_rect_overrides
+                    .insert(window_id.clone(), rect);
+                egui_res
+                    .window_positions
+                    .insert(window_id.clone(), rect.min);
+                if !allow_layout_edit || hard_apply {
+                    egui_res
+                        .window_collapsed_overrides
+                        .insert(window_id.clone(), *collapsed);
                 }
             }
             egui_res.suppress_snap = true;
@@ -497,11 +506,19 @@ pub fn editor_layout_save_system(world: &mut World) {
         return;
     };
 
+    let pane_workspace = capture_pane_workspace_layout(
+        world,
+        &egui_res.window_rects,
+        &egui_res.window_collapsed,
+        screen_rect,
+    );
+
     let layout = capture_layout(
         layout_name.clone(),
         &egui_res.window_rects,
         &egui_res.window_collapsed,
         screen_rect,
+        pane_workspace,
     );
     if layout.windows.is_empty() {
         if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
@@ -620,7 +637,9 @@ pub fn editor_layout_update_system(world: &mut World) {
         .get_resource_mut::<EditorLayoutState>()
         .expect("EditorLayoutState missing");
     let live_reflow = state.live_reflow;
-    let allow_layout_edit = state.allow_layout_edit;
+    let allow_layout_move = state.allow_layout_move;
+    let allow_layout_resize = state.allow_layout_resize;
+    let allow_layout_edit = allow_layout_move || allow_layout_resize;
 
     if state.layout_verify_pending {
         let attempts_left = state.layout_verify_attempts;
@@ -780,6 +799,8 @@ pub fn editor_layout_update_system(world: &mut World) {
                 pos,
                 grab_radius,
                 preferred_window_id.as_deref(),
+                allow_layout_move,
+                allow_layout_resize,
             ) {
                 state.layout_dragging_window = Some(id.clone());
                 state.layout_drag_mode = mode;
@@ -797,6 +818,18 @@ pub fn editor_layout_update_system(world: &mut World) {
     };
 
     let drag_mode = state.layout_drag_mode;
+    if (drag_mode == LayoutDragMode::Move && !allow_layout_move)
+        || (drag_mode == LayoutDragMode::Resize && !allow_layout_resize)
+    {
+        state.layout_dragging_window = None;
+        state.layout_drag_mode = LayoutDragMode::None;
+        state.layout_drag_start_pos = None;
+        state.layout_drag_start_rect = None;
+        state.layout_drag_start_layout = None;
+        state.layout_drag_edges = LayoutDragEdges::default();
+        state.last_screen_rect = Some(screen_rect);
+        return;
+    }
     let drag_edges = state.layout_drag_edges;
     let start_layout = state
         .layout_drag_start_layout
@@ -1077,13 +1110,15 @@ fn hit_test_layout_window(
     collapsed: bool,
     pos: Pos2,
     grab_radius: f32,
+    allow_move: bool,
+    allow_resize: bool,
 ) -> Option<(LayoutDragMode, LayoutDragEdges)> {
     let edges = drag_edges_for_pos(rect, pos, grab_radius);
     let in_rect = rect.contains(pos);
     let in_content = content_rect.is_some_and(|content| content.contains(pos));
     let title_bar_height = layout_title_bar_height(ctx, collapsed);
 
-    if edges.any() {
+    if edges.any() && allow_resize {
         if edges.top && in_rect && pos.y <= rect.min.y + title_bar_height {
             // keep title-bar move dominant except when truly on the top edge
             let top_resize_band = (grab_radius * 0.35).clamp(1.0, 3.0);
@@ -1099,7 +1134,7 @@ fn hit_test_layout_window(
         if in_content {
             return None;
         }
-        if pos.y <= rect.min.y + title_bar_height {
+        if allow_move && pos.y <= rect.min.y + title_bar_height {
             return Some((LayoutDragMode::Move, LayoutDragEdges::default()));
         }
     }
@@ -1115,14 +1150,27 @@ fn pick_layout_drag_target(
     pos: Pos2,
     grab_radius: f32,
     preferred_id: Option<&str>,
+    allow_move: bool,
+    allow_resize: bool,
 ) -> Option<(String, LayoutDragMode, LayoutDragEdges)> {
+    if !allow_move && !allow_resize {
+        return None;
+    }
+
     if let Some(id) = preferred_id {
         if let Some(rect) = window_rects.get(id) {
             let content_rect = window_content_rects.get(id).copied();
             let collapsed = window_collapsed.get(id).copied().unwrap_or(false);
-            if let Some(hit) =
-                hit_test_layout_window(ctx, *rect, content_rect, collapsed, pos, grab_radius)
-            {
+            if let Some(hit) = hit_test_layout_window(
+                ctx,
+                *rect,
+                content_rect,
+                collapsed,
+                pos,
+                grab_radius,
+                allow_move,
+                allow_resize,
+            ) {
                 return Some((id.to_string(), hit.0, hit.1));
             }
             if rect.contains(pos) || content_rect.is_some_and(|content| content.contains(pos)) {
@@ -1137,9 +1185,16 @@ fn pick_layout_drag_target(
         };
         let content_rect = window_content_rects.get(*id).copied();
         let collapsed = window_collapsed.get(*id).copied().unwrap_or(false);
-        if let Some(hit) =
-            hit_test_layout_window(ctx, *rect, content_rect, collapsed, pos, grab_radius)
-        {
+        if let Some(hit) = hit_test_layout_window(
+            ctx,
+            *rect,
+            content_rect,
+            collapsed,
+            pos,
+            grab_radius,
+            allow_move,
+            allow_resize,
+        ) {
             return Some(((*id).to_string(), hit.0, hit.1));
         }
     }
@@ -2346,15 +2401,6 @@ fn handle_close_project(world: &mut World) {
     if let Some(mut project) = world.get_resource_mut::<EditorProject>() {
         project.root = None;
         project.config = None;
-    }
-
-    if let Some(mut workspace) = world.get_resource_mut::<EditorWorkspaceState>() {
-        workspace.windows.clear();
-        workspace.dragging = None;
-        workspace.last_focused_window = None;
-        workspace.drop_handled = false;
-        workspace.next_window_id = 1;
-        workspace.next_tab_id = 1;
     }
 
     if let Some(mut assets) = world.get_resource_mut::<AssetBrowserState>() {

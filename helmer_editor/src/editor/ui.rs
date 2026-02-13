@@ -64,8 +64,9 @@ use crate::editor::{
     FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX, FREECAM_SPEED_MAX_MIN,
     FREECAM_SPEED_MIN_DEFAULT, FREECAM_SPEED_MIN_MAX, FREECAM_SPEED_MIN_MIN,
     FREECAM_SPEED_STEP_DEFAULT, FREECAM_SPEED_STEP_MAX, FREECAM_SPEED_STEP_MIN, Freecam,
-    LayoutSaveRequest, NavigationGizmoSettings, PlayViewportKind, UndoEntry, ViewportRectPixels,
-    ViewportResolutionPreset,
+    LayoutSaveRequest, NavigationGizmoSettings, NormalizedRect, PaneWorkspaceAreaLayout,
+    PaneWorkspaceLayout, PaneWorkspaceTabLayout, PaneWorkspaceWindowLayout, PlayViewportKind,
+    UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
     assets::{
         AssetBrowserState, AssetEntry, AssetRenameSelection, AssetRenameView, EditorAssetCache,
         EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
@@ -229,6 +230,8 @@ pub enum EditorPaneKind {
     Console,
     AudioMixer,
     Profiler,
+    MaterialEditor,
+    VisualScriptEditor,
 }
 
 impl EditorPaneKind {
@@ -261,6 +264,8 @@ impl EditorPaneKind {
             Self::Console => "Console",
             Self::AudioMixer => "Audio Mixer",
             Self::Profiler => "Profiler",
+            Self::MaterialEditor => "Material",
+            Self::VisualScriptEditor => "Visual Script",
         }
     }
 
@@ -275,7 +280,50 @@ impl EditorPaneKind {
             Self::History => Some("History"),
             Self::ContentBrowser => Some("Content Browser"),
             Self::Console => Some("Content Browser"),
-            Self::Timeline | Self::AudioMixer | Self::Profiler => None,
+            Self::Timeline
+            | Self::AudioMixer
+            | Self::Profiler
+            | Self::MaterialEditor
+            | Self::VisualScriptEditor => None,
+        }
+    }
+
+    fn persistence_key(self) -> &'static str {
+        match self {
+            Self::Toolbar => "toolbar",
+            Self::Viewport => "viewport",
+            Self::PlayViewport => "play_viewport",
+            Self::Project => "project",
+            Self::Hierarchy => "hierarchy",
+            Self::Inspector => "inspector",
+            Self::History => "history",
+            Self::Timeline => "timeline",
+            Self::ContentBrowser => "content_browser",
+            Self::Console => "console",
+            Self::AudioMixer => "audio_mixer",
+            Self::Profiler => "profiler",
+            Self::MaterialEditor => "material_editor",
+            Self::VisualScriptEditor => "visual_script_editor",
+        }
+    }
+
+    fn from_persistence_key(key: &str) -> Option<Self> {
+        match key {
+            "toolbar" => Some(Self::Toolbar),
+            "viewport" => Some(Self::Viewport),
+            "play_viewport" => Some(Self::PlayViewport),
+            "project" => Some(Self::Project),
+            "hierarchy" => Some(Self::Hierarchy),
+            "inspector" => Some(Self::Inspector),
+            "history" => Some(Self::History),
+            "timeline" => Some(Self::Timeline),
+            "content_browser" => Some(Self::ContentBrowser),
+            "console" => Some(Self::Console),
+            "audio_mixer" => Some(Self::AudioMixer),
+            "profiler" => Some(Self::Profiler),
+            "material_editor" => Some(Self::MaterialEditor),
+            "visual_script_editor" => Some(Self::VisualScriptEditor),
+            _ => None,
         }
     }
 }
@@ -437,6 +485,27 @@ pub struct EditorPaneTab {
     pub id: u64,
     pub title: String,
     pub kind: EditorPaneKind,
+    pub asset_path: Option<PathBuf>,
+}
+
+impl EditorPaneTab {
+    fn from_builtin(workspace: &mut EditorPaneWorkspaceState, kind: EditorPaneKind) -> Self {
+        let tab = Self {
+            id: workspace.next_tab_id,
+            title: kind.label().to_string(),
+            kind,
+            asset_path: None,
+        };
+        workspace.next_tab_id += 1;
+        tab
+    }
+
+    fn duplicate_with_new_id(&self, workspace: &mut EditorPaneWorkspaceState) -> Self {
+        let mut tab = self.clone();
+        tab.id = workspace.next_tab_id;
+        workspace.next_tab_id += 1;
+        tab
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -808,160 +877,187 @@ fn draw_layout_menu(ui: &mut Ui, world: &mut World) {
 
     let mut status_message: Option<String> = None;
 
-    ui.menu_button("Layout", |ui| {
-        ui.set_min_width(220.0);
-        let previous_allow_edit = layout_state.allow_layout_edit;
-        let mut names = layout_state.layouts.keys().cloned().collect::<Vec<_>>();
-        names.sort();
+    MenuButton::new("Layout")
+        .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
+        .ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            let previous_allow_move = layout_state.allow_layout_move;
+            let previous_allow_resize = layout_state.allow_layout_resize;
+            let mut names = layout_state.layouts.keys().cloned().collect::<Vec<_>>();
+            names.sort();
 
-        for name in names {
-            let is_active = layout_state.active.as_deref() == Some(name.as_str());
-            let label = if is_active {
-                format!("[x] {}", name)
-            } else {
-                format!("[ ] {}", name)
-            };
-            if ui.selectable_label(is_active, label).clicked() {
-                if name == "Default" {
-                    let default_layout = crate::editor::default_layout();
-                    layout_state
-                        .layouts
-                        .insert(default_layout.name.clone(), default_layout);
-                }
-                if is_active {
-                    layout_state.active = None;
-                    layout_state.apply_requested = false;
-                    layout_state.last_screen_rect = None;
+            for name in names {
+                let is_active = layout_state.active.as_deref() == Some(name.as_str());
+                let label = if is_active {
+                    format!("[x] {}", name)
                 } else {
-                    layout_state.active = Some(name.clone());
+                    format!("[ ] {}", name)
+                };
+                if ui.selectable_label(is_active, label).clicked() {
+                    if name == "Default" {
+                        let default_layout = crate::editor::default_layout();
+                        layout_state
+                            .layouts
+                            .insert(default_layout.name.clone(), default_layout);
+                    }
+                    if is_active {
+                        layout_state.active = None;
+                        layout_state.apply_requested = false;
+                        layout_state.last_screen_rect = None;
+                    } else {
+                        layout_state.active = Some(name.clone());
+                        layout_state.apply_requested = true;
+                    }
+                    if let Err(err) = save_layouts(&layout_state) {
+                        status_message = Some(format!("Failed to save layouts: {}", err));
+                    }
+                    ui.close_menu();
+                }
+            }
+
+            ui.separator();
+            let mut layout_prefs_changed = false;
+            if ui
+                .checkbox(
+                    &mut layout_state.allow_layout_move,
+                    "Allow moving while layout active",
+                )
+                .changed()
+            {
+                layout_prefs_changed = true;
+                if previous_allow_move && !layout_state.allow_layout_move {
                     layout_state.apply_requested = true;
                 }
+            }
+            if ui
+                .checkbox(
+                    &mut layout_state.allow_layout_resize,
+                    "Allow resizing while layout active",
+                )
+                .changed()
+            {
+                layout_prefs_changed = true;
+                if previous_allow_resize && !layout_state.allow_layout_resize {
+                    layout_state.apply_requested = true;
+                }
+            }
+            if ui
+                .checkbox(&mut layout_state.live_reflow, "Live reflow while resizing")
+                .changed()
+            {
+                layout_prefs_changed = true;
+            }
+            if layout_prefs_changed {
+                if let Err(err) = save_layouts(&layout_state) {
+                    status_message = Some(format!("Failed to save layouts: {}", err));
+                }
+            }
+            ui.separator();
+            let can_save_active = layout_state.active.is_some();
+            if ui
+                .add_enabled(can_save_active, egui::Button::new("Save Active Layout"))
+                .clicked()
+            {
+                layout_state.save_request = Some(LayoutSaveRequest::SaveActive);
+                ui.close_menu();
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Save As:");
+                ui.text_edit_singleline(&mut layout_state.new_layout_name);
+                if ui.button("Save").clicked() {
+                    let name = layout_state.new_layout_name.trim().to_string();
+                    if name.is_empty() {
+                        status_message = Some("Layout name cannot be empty".to_string());
+                    } else if layout_state.layouts.contains_key(&name) {
+                        status_message = Some("Layout name already exists".to_string());
+                    } else {
+                        layout_state.save_request = Some(LayoutSaveRequest::SaveAs(name));
+                        layout_state.new_layout_name.clear();
+                        ui.close_menu();
+                    }
+                }
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Rename:");
+                ui.text_edit_singleline(&mut layout_state.rename_layout_name);
+                if ui
+                    .add_enabled(
+                        layout_state.active.is_some(),
+                        egui::Button::new("Rename Active"),
+                    )
+                    .clicked()
+                {
+                    let Some(active_name) = layout_state.active.clone() else {
+                        status_message = Some("No active layout to rename".to_string());
+                        ui.close_menu();
+                        return;
+                    };
+                    if active_name == "Default" {
+                        status_message = Some("Default layout cannot be renamed".to_string());
+                        ui.close_menu();
+                        return;
+                    }
+                    let new_name = layout_state.rename_layout_name.trim().to_string();
+                    if new_name.is_empty() {
+                        status_message = Some("New layout name cannot be empty".to_string());
+                        ui.close_menu();
+                        return;
+                    }
+                    if new_name == active_name {
+                        status_message = Some("Layout already uses that name".to_string());
+                        ui.close_menu();
+                        return;
+                    }
+                    if layout_state.layouts.contains_key(&new_name) {
+                        status_message = Some("Layout name already exists".to_string());
+                        ui.close_menu();
+                        return;
+                    }
+                    if let Some(mut layout) = layout_state.layouts.remove(&active_name) {
+                        layout.name = new_name.clone();
+                        layout_state.layouts.insert(new_name.clone(), layout);
+                        layout_state.active = Some(new_name);
+                        layout_state.rename_layout_name.clear();
+                        if let Err(err) = save_layouts(&layout_state) {
+                            status_message = Some(format!("Failed to save layouts: {}", err));
+                        }
+                    } else {
+                        status_message = Some("Active layout not found".to_string());
+                    }
+                    ui.close_menu();
+                }
+            });
+
+            if ui
+                .add_enabled(
+                    layout_state.active.is_some(),
+                    egui::Button::new("Delete Active"),
+                )
+                .clicked()
+            {
+                let Some(active_name) = layout_state.active.clone() else {
+                    status_message = Some("No active layout to delete".to_string());
+                    ui.close_menu();
+                    return;
+                };
+                if active_name == "Default" {
+                    status_message = Some("Default layout cannot be deleted".to_string());
+                    ui.close_menu();
+                    return;
+                }
+                layout_state.layouts.remove(&active_name);
+                layout_state.active = None;
+                layout_state.apply_requested = false;
+                layout_state.last_screen_rect = None;
                 if let Err(err) = save_layouts(&layout_state) {
                     status_message = Some(format!("Failed to save layouts: {}", err));
                 }
                 ui.close_menu();
             }
-        }
-
-        ui.separator();
-        if ui
-            .checkbox(
-                &mut layout_state.allow_layout_edit,
-                "Allow moving/resizing while layout active",
-            )
-            .changed()
-            && previous_allow_edit
-            && !layout_state.allow_layout_edit
-        {
-            layout_state.apply_requested = true;
-        }
-        ui.checkbox(&mut layout_state.live_reflow, "Live reflow while resizing");
-        ui.separator();
-        let can_save_active = layout_state.active.is_some();
-        if ui
-            .add_enabled(can_save_active, egui::Button::new("Save Active Layout"))
-            .clicked()
-        {
-            layout_state.save_request = Some(LayoutSaveRequest::SaveActive);
-            ui.close_menu();
-        }
-
-        ui.horizontal(|ui| {
-            ui.label("Save As:");
-            ui.text_edit_singleline(&mut layout_state.new_layout_name);
-            if ui.button("Save").clicked() {
-                let name = layout_state.new_layout_name.trim().to_string();
-                if name.is_empty() {
-                    status_message = Some("Layout name cannot be empty".to_string());
-                } else if layout_state.layouts.contains_key(&name) {
-                    status_message = Some("Layout name already exists".to_string());
-                } else {
-                    layout_state.save_request = Some(LayoutSaveRequest::SaveAs(name));
-                    layout_state.new_layout_name.clear();
-                    ui.close_menu();
-                }
-            }
         });
-
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label("Rename:");
-            ui.text_edit_singleline(&mut layout_state.rename_layout_name);
-            if ui
-                .add_enabled(
-                    layout_state.active.is_some(),
-                    egui::Button::new("Rename Active"),
-                )
-                .clicked()
-            {
-                let Some(active_name) = layout_state.active.clone() else {
-                    status_message = Some("No active layout to rename".to_string());
-                    ui.close_menu();
-                    return;
-                };
-                if active_name == "Default" {
-                    status_message = Some("Default layout cannot be renamed".to_string());
-                    ui.close_menu();
-                    return;
-                }
-                let new_name = layout_state.rename_layout_name.trim().to_string();
-                if new_name.is_empty() {
-                    status_message = Some("New layout name cannot be empty".to_string());
-                    ui.close_menu();
-                    return;
-                }
-                if new_name == active_name {
-                    status_message = Some("Layout already uses that name".to_string());
-                    ui.close_menu();
-                    return;
-                }
-                if layout_state.layouts.contains_key(&new_name) {
-                    status_message = Some("Layout name already exists".to_string());
-                    ui.close_menu();
-                    return;
-                }
-                if let Some(mut layout) = layout_state.layouts.remove(&active_name) {
-                    layout.name = new_name.clone();
-                    layout_state.layouts.insert(new_name.clone(), layout);
-                    layout_state.active = Some(new_name);
-                    layout_state.rename_layout_name.clear();
-                    if let Err(err) = save_layouts(&layout_state) {
-                        status_message = Some(format!("Failed to save layouts: {}", err));
-                    }
-                } else {
-                    status_message = Some("Active layout not found".to_string());
-                }
-                ui.close_menu();
-            }
-        });
-
-        if ui
-            .add_enabled(
-                layout_state.active.is_some(),
-                egui::Button::new("Delete Active"),
-            )
-            .clicked()
-        {
-            let Some(active_name) = layout_state.active.clone() else {
-                status_message = Some("No active layout to delete".to_string());
-                ui.close_menu();
-                return;
-            };
-            if active_name == "Default" {
-                status_message = Some("Default layout cannot be deleted".to_string());
-                ui.close_menu();
-                return;
-            }
-            layout_state.layouts.remove(&active_name);
-            layout_state.active = None;
-            layout_state.apply_requested = false;
-            layout_state.last_screen_rect = None;
-            if let Err(err) = save_layouts(&layout_state) {
-                status_message = Some(format!("Failed to save layouts: {}", err));
-            }
-            ui.close_menu();
-        }
-    });
 
     drop(layout_state);
     if let Some(message) = status_message {
@@ -2222,28 +2318,10 @@ fn draw_viewport_navigation_gizmo(
         camera_entity.to_bits(),
     ));
     let orbit_anchor_id = orbit_id.with("anchor");
+    let orbit_drag_kind_id = orbit_id.with("drag_kind");
+    let orbit_drag_active_id = orbit_id.with("drag_active");
     let orbit_rect = Rect::from_center_size(center, Vec2::splat((radius * 2.0 + 12.0).max(24.0)));
     let orbit_response = ui.interact(orbit_rect, orbit_id, Sense::click_and_drag());
-    if orbit_response.drag_started_by(PointerButton::Primary) {
-        let current_transform = world
-            .get::<BevyTransform>(camera_entity)
-            .map(|transform| transform.0)
-            .unwrap_or_default();
-        let (focus, distance) = navigation_orbit_focus_and_distance(
-            world,
-            &current_transform,
-            settings.orbit_selected_entity,
-        );
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(
-                orbit_anchor_id,
-                NavOrbitAnchor {
-                    focus,
-                    distance: distance.max(0.25),
-                },
-            );
-        });
-    }
 
     let pointer_inside_widget = ui
         .ctx()
@@ -2321,6 +2399,11 @@ fn draw_viewport_navigation_gizmo(
         focus: Vec3,
         distance: f32,
     }
+    #[derive(Clone, Copy)]
+    enum NavOrbitDragKind {
+        Background,
+        MarkerPoint { axis: Vec3, hemisphere: f32 },
+    }
 
     let color_from_rgb = |rgb: [f32; 3]| -> Color32 {
         let r = (rgb[0].clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -2384,6 +2467,64 @@ fn draw_viewport_navigation_gizmo(
             .partial_cmp(&b.depth)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let pointer_pos_now = ui.ctx().input(|input| {
+        input
+            .pointer
+            .interact_pos()
+            .or_else(|| input.pointer.hover_pos())
+    });
+    let pointer_primary_pressed = ui
+        .ctx()
+        .input(|input| input.pointer.button_pressed(PointerButton::Primary));
+    if pointer_primary_pressed
+        && pointer_pos_now.is_some_and(|pointer| orbit_rect.contains(pointer))
+    {
+        let current_transform = world
+            .get::<BevyTransform>(camera_entity)
+            .map(|transform| transform.0)
+            .unwrap_or_default();
+        let (focus, distance) = navigation_orbit_focus_and_distance(
+            world,
+            &current_transform,
+            settings.orbit_selected_entity,
+        );
+        let marker_under_pointer = pointer_pos_now.and_then(|pointer| {
+            markers
+                .iter()
+                .filter_map(|marker| {
+                    let dist = pointer.distance(marker.center);
+                    if dist <= marker.radius + 4.0 {
+                        Some((dist, marker.axis, marker.depth))
+                    } else {
+                        None
+                    }
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+        });
+        let drag_kind = if let Some((_, axis, depth)) = marker_under_pointer {
+            NavOrbitDragKind::MarkerPoint {
+                axis,
+                hemisphere: if depth >= 0.0 { 1.0 } else { -1.0 },
+            }
+        } else {
+            NavOrbitDragKind::Background
+        };
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                orbit_anchor_id,
+                NavOrbitAnchor {
+                    focus,
+                    distance: distance.max(0.25),
+                },
+            );
+            data.insert_temp(orbit_drag_kind_id, drag_kind);
+            data.insert_temp(orbit_drag_active_id, true);
+        });
+    }
+    let orbit_drag_kind = ui
+        .ctx()
+        .data(|data| data.get_temp::<NavOrbitDragKind>(orbit_drag_kind_id))
+        .unwrap_or(NavOrbitDragKind::Background);
 
     let mut target_axis: Option<Vec3> = None;
     let mut marker_hovered = false;
@@ -2455,11 +2596,23 @@ fn draw_viewport_navigation_gizmo(
         Color32::from_rgb(236, 236, 236),
     );
 
-    let drag_background = orbit_response.dragged_by(PointerButton::Primary)
-        && !home_response.hovered()
-        && !marker_hovered
-        && target_axis.is_none();
-    if drag_background {
+    let pointer_primary_down = ui
+        .ctx()
+        .input(|input| input.pointer.button_down(PointerButton::Primary));
+    if !pointer_primary_down {
+        ui.ctx().data_mut(|data| {
+            data.remove::<bool>(orbit_drag_active_id);
+            data.remove::<NavOrbitAnchor>(orbit_anchor_id);
+            data.remove::<NavOrbitDragKind>(orbit_drag_kind_id);
+        });
+    }
+    let drag_orbit = pointer_primary_down
+        && target_axis.is_none()
+        && ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(orbit_drag_active_id))
+            .unwrap_or(false);
+    if drag_orbit {
         let pointer_delta = ui.ctx().input(|input| input.pointer.delta());
         if pointer_delta.length_sq() > 0.0 {
             let current_transform = world
@@ -2485,24 +2638,62 @@ fn draw_viewport_navigation_gizmo(
                 });
             let focus = anchor.focus;
             let distance = anchor.distance;
-            let mut forward = (focus - current_transform.position).normalize_or_zero();
-            if forward.length_squared() < 1.0e-6 {
-                forward = current_transform.forward().normalize_or_zero();
+            let mut next_rotation = current_transform.rotation;
+            let mut used_marker_drag = false;
+            if let NavOrbitDragKind::MarkerPoint { axis, hemisphere } = orbit_drag_kind {
+                if let Some(pointer_now) = pointer_pos_now {
+                    let map_trackball = |pointer: Pos2| -> Vec3 {
+                        let radius = orbit_radius.max(1.0);
+                        let mut x = (pointer.x - center.x) / radius;
+                        let mut y = (center.y - pointer.y) / radius;
+                        let len_sq = x * x + y * y;
+                        let z = if len_sq <= 1.0 {
+                            (1.0 - len_sq).sqrt() * hemisphere
+                        } else {
+                            let inv_len = len_sq.sqrt().recip();
+                            x *= inv_len;
+                            y *= inv_len;
+                            0.0
+                        };
+                        Vec3::new(x, y, z).normalize_or_zero()
+                    };
+                    let target_view = map_trackball(pointer_now);
+                    let current_view =
+                        (current_transform.rotation.inverse() * axis).normalize_or_zero();
+                    if current_view.length_squared() > 1.0e-6
+                        && target_view.length_squared() > 1.0e-6
+                    {
+                        let arc = Quat::from_rotation_arc(current_view, target_view);
+                        let inv_camera = current_transform.rotation.inverse();
+                        next_rotation = (arc * inv_camera).inverse().normalize();
+                        used_marker_drag = true;
+                    }
+                }
             }
-            if forward.length_squared() > 1.0e-6 {
-                let mut yaw = forward.x.atan2(forward.z);
-                let mut pitch = (-forward.y).clamp(-1.0, 1.0).asin();
-                yaw -= pointer_delta.x * settings.drag_sensitivity;
-                pitch = (pitch + pointer_delta.y * settings.drag_sensitivity).clamp(-1.45, 1.45);
-                let cos_pitch = pitch.cos();
-                let new_forward =
-                    Vec3::new(yaw.sin() * cos_pitch, -pitch.sin(), yaw.cos() * cos_pitch)
-                        .normalize_or_zero();
+            if !used_marker_drag {
+                let mut forward = (focus - current_transform.position).normalize_or_zero();
+                if forward.length_squared() < 1.0e-6 {
+                    forward = current_transform.forward().normalize_or_zero();
+                }
+                if forward.length_squared() > 1.0e-6 {
+                    let mut yaw = forward.x.atan2(forward.z);
+                    let mut pitch = (-forward.y).clamp(-1.0, 1.0).asin();
+                    yaw -= pointer_delta.x * settings.drag_sensitivity;
+                    pitch =
+                        (pitch - pointer_delta.y * settings.drag_sensitivity).clamp(-1.45, 1.45);
+                    let cos_pitch = pitch.cos();
+                    let new_forward =
+                        Vec3::new(yaw.sin() * cos_pitch, -pitch.sin(), yaw.cos() * cos_pitch)
+                            .normalize_or_zero();
+                    next_rotation = navigation_rotation_from_forward(new_forward);
+                }
+            }
+            let new_forward = (next_rotation * Vec3::Z).normalize_or_zero();
+            if new_forward.length_squared() > 1.0e-6 {
                 let position = focus - new_forward * distance;
-                let rotation = navigation_rotation_from_forward(new_forward);
                 if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
                     transform.0.position = position;
-                    transform.0.rotation = rotation;
+                    transform.0.rotation = next_rotation;
                 }
                 if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
                     runtime.active_camera_entity = Some(camera_entity);
@@ -2515,14 +2706,9 @@ fn draw_viewport_navigation_gizmo(
         }
     }
 
-    if !orbit_response.dragged_by(PointerButton::Primary) {
-        ui.ctx()
-            .data_mut(|data| data.remove::<NavOrbitAnchor>(orbit_anchor_id));
-    }
-
     let double_clicked_origin = orbit_response.double_clicked_by(PointerButton::Primary);
     let clicked_home = home_response.clicked();
-    if !drag_background && double_clicked_origin {
+    if !drag_orbit && double_clicked_origin {
         let current_transform = world
             .get::<BevyTransform>(camera_entity)
             .map(|transform| transform.0)
@@ -2552,7 +2738,7 @@ fn draw_viewport_navigation_gizmo(
             }
             runtime.keyboard_focus = true;
         }
-    } else if !drag_background && (clicked_home || target_axis.is_some()) {
+    } else if !drag_orbit && (clicked_home || target_axis.is_some()) {
         let current_transform = world
             .get::<BevyTransform>(camera_entity)
             .map(|transform| transform.0)
@@ -2580,10 +2766,7 @@ fn draw_viewport_navigation_gizmo(
         }
     }
 
-    pointer_inside_widget
-        || home_response.hovered()
-        || marker_hovered
-        || orbit_response.dragged_by(PointerButton::Primary)
+    pointer_inside_widget || home_response.hovered() || marker_hovered || drag_orbit
 }
 
 fn first_camera_with_component<T: Component>(world: &mut World) -> Option<Entity> {
@@ -5793,10 +5976,24 @@ fn default_pane_kind_for_window(window_id: &str) -> Option<EditorPaneKind> {
 }
 
 fn make_pane_tab(workspace: &mut EditorPaneWorkspaceState, kind: EditorPaneKind) -> EditorPaneTab {
+    EditorPaneTab::from_builtin(workspace, kind)
+}
+
+fn make_asset_editor_pane_tab(
+    workspace: &mut EditorPaneWorkspaceState,
+    kind: EditorPaneKind,
+    path: PathBuf,
+) -> EditorPaneTab {
+    debug_assert!(matches!(
+        kind,
+        EditorPaneKind::MaterialEditor | EditorPaneKind::VisualScriptEditor
+    ));
+    let title = asset_display_name(&path);
     let tab = EditorPaneTab {
         id: workspace.next_tab_id,
-        title: kind.label().to_string(),
+        title,
         kind,
+        asset_path: Some(path),
     };
     workspace.next_tab_id += 1;
     tab
@@ -5819,6 +6016,45 @@ fn make_pane_area(
         tabs,
         active: 0,
     }
+}
+
+fn default_layout_managed_window_ids() -> &'static [&'static str] {
+    &[
+        "Toolbar",
+        "Viewport",
+        "Content Browser",
+        "Hierarchy",
+        "Inspector",
+    ]
+}
+
+fn make_default_layout_managed_window(
+    workspace: &mut EditorPaneWorkspaceState,
+    window_id: &str,
+) -> Option<EditorPaneWindow> {
+    let mut tabs = Vec::new();
+    match window_id {
+        "Viewport" => {
+            tabs.push(make_pane_tab(workspace, EditorPaneKind::Viewport));
+            tabs.push(make_pane_tab(workspace, EditorPaneKind::PlayViewport));
+        }
+        "Content Browser" => {
+            tabs.push(make_pane_tab(workspace, EditorPaneKind::ContentBrowser));
+            tabs.push(make_pane_tab(workspace, EditorPaneKind::Console));
+        }
+        _ => {
+            let kind = default_pane_kind_for_window(window_id)?;
+            tabs.push(make_pane_tab(workspace, kind));
+        }
+    }
+
+    let area = make_pane_area(workspace, EditorPaneAreaRect::full(), tabs);
+    Some(EditorPaneWindow {
+        id: window_id.to_string(),
+        title: window_id.to_string(),
+        areas: vec![area],
+        layout_managed: true,
+    })
 }
 
 fn normalize_pane_area_rect(rect: &mut EditorPaneAreaRect) {
@@ -6176,6 +6412,264 @@ fn refresh_pane_window_titles(workspace: &mut EditorPaneWorkspaceState) {
     }
 }
 
+fn pane_area_rect_to_layout_rect(rect: EditorPaneAreaRect) -> NormalizedRect {
+    NormalizedRect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn pane_area_rect_from_layout_rect(rect: &NormalizedRect) -> EditorPaneAreaRect {
+    EditorPaneAreaRect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn pane_window_index_from_id(window_id: &str) -> Option<u64> {
+    window_id
+        .strip_prefix("pane_window_")
+        .and_then(|suffix| suffix.parse::<u64>().ok())
+}
+
+pub fn capture_pane_workspace_layout(
+    world: &World,
+    window_rects: &HashMap<String, Rect>,
+    window_collapsed: &HashMap<String, bool>,
+    screen_rect: Rect,
+) -> Option<PaneWorkspaceLayout> {
+    let workspace = world.get_resource::<EditorPaneWorkspaceState>()?;
+    let windows = workspace
+        .windows
+        .iter()
+        .map(|window| {
+            let areas = window
+                .areas
+                .iter()
+                .map(|area| {
+                    let tabs = area
+                        .tabs
+                        .iter()
+                        .filter_map(|tab| {
+                            if matches!(
+                                tab.kind,
+                                EditorPaneKind::MaterialEditor | EditorPaneKind::VisualScriptEditor
+                            ) && tab.asset_path.is_none()
+                            {
+                                return None;
+                            }
+                            Some(PaneWorkspaceTabLayout {
+                                id: tab.id,
+                                title: tab.title.clone(),
+                                kind: tab.kind.persistence_key().to_string(),
+                                path: tab.asset_path.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let active = if tabs.is_empty() {
+                        0
+                    } else {
+                        area.active.min(tabs.len().saturating_sub(1))
+                    };
+                    PaneWorkspaceAreaLayout {
+                        id: area.id,
+                        rect: pane_area_rect_to_layout_rect(area.rect),
+                        tabs,
+                        active,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let rect = window_rects
+                .get(&window.id)
+                .copied()
+                .map(|rect| NormalizedRect::from_rect(rect, screen_rect));
+            let collapsed = window_collapsed.get(&window.id).copied().unwrap_or(false);
+
+            PaneWorkspaceWindowLayout {
+                id: window.id.clone(),
+                layout_managed: window.layout_managed,
+                rect,
+                collapsed,
+                areas,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Some(PaneWorkspaceLayout {
+        windows,
+        last_focused_window: workspace.last_focused_window.clone(),
+        last_focused_area: workspace.last_focused_area,
+    })
+}
+
+pub fn apply_pane_workspace_layout(
+    world: &mut World,
+    pane_layout: &PaneWorkspaceLayout,
+    screen_rect: Rect,
+) -> Vec<(String, Rect, bool)> {
+    if pane_layout.windows.is_empty() {
+        return Vec::new();
+    }
+
+    let mut detached_window_rects = Vec::new();
+    let mut restored_windows: Vec<EditorPaneWindow> = Vec::new();
+    let mut max_window_id = 0_u64;
+    let mut max_tab_id = 0_u64;
+    let mut max_area_id = 0_u64;
+
+    for saved_window in pane_layout.windows.iter() {
+        if !saved_window.layout_managed {
+            if let Some(rect) = saved_window.rect.as_ref() {
+                detached_window_rects.push((
+                    saved_window.id.clone(),
+                    rect.to_rect(screen_rect),
+                    saved_window.collapsed,
+                ));
+            }
+        }
+        if let Some(window_index) = pane_window_index_from_id(&saved_window.id) {
+            max_window_id = max_window_id.max(window_index);
+        }
+
+        let mut areas = saved_window
+            .areas
+            .iter()
+            .map(|saved_area| {
+                max_area_id = max_area_id.max(saved_area.id);
+                let mut rect = pane_area_rect_from_layout_rect(&saved_area.rect);
+                normalize_pane_area_rect(&mut rect);
+
+                let tabs = saved_area
+                    .tabs
+                    .iter()
+                    .filter_map(|saved_tab| {
+                        let kind = EditorPaneKind::from_persistence_key(&saved_tab.kind)?;
+                        let asset_path = saved_tab.path.clone();
+                        if matches!(
+                            kind,
+                            EditorPaneKind::MaterialEditor | EditorPaneKind::VisualScriptEditor
+                        ) && asset_path.is_none()
+                        {
+                            return None;
+                        }
+
+                        max_tab_id = max_tab_id.max(saved_tab.id);
+                        let title = if saved_tab.title.trim().is_empty() {
+                            match kind {
+                                EditorPaneKind::MaterialEditor
+                                | EditorPaneKind::VisualScriptEditor => asset_path
+                                    .as_ref()
+                                    .map(|path| asset_display_name(path))
+                                    .unwrap_or_else(|| kind.label().to_string()),
+                                _ => kind.label().to_string(),
+                            }
+                        } else {
+                            saved_tab.title.clone()
+                        };
+                        Some(EditorPaneTab {
+                            id: saved_tab.id,
+                            title,
+                            kind,
+                            asset_path,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let active = if tabs.is_empty() {
+                    0
+                } else {
+                    saved_area.active.min(tabs.len().saturating_sub(1))
+                };
+                EditorPaneArea {
+                    id: saved_area.id,
+                    rect,
+                    tabs,
+                    active,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if areas.is_empty() {
+            max_area_id = max_area_id.saturating_add(1);
+            areas.push(EditorPaneArea {
+                id: max_area_id,
+                rect: EditorPaneAreaRect::full(),
+                tabs: Vec::new(),
+                active: 0,
+            });
+        }
+
+        restored_windows.push(EditorPaneWindow {
+            id: saved_window.id.clone(),
+            title: saved_window.id.clone(),
+            areas,
+            layout_managed: saved_window.layout_managed,
+        });
+    }
+
+    world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        workspace.initialized = true;
+        workspace.windows = restored_windows;
+        workspace.last_focused_window = pane_layout.last_focused_window.clone();
+        workspace.last_focused_area = pane_layout.last_focused_area;
+        workspace.dragging = None;
+        workspace.drop_handled = false;
+        workspace.next_window_id = max_window_id.saturating_add(1).max(1);
+        workspace.next_tab_id = max_tab_id.saturating_add(1).max(1);
+        workspace.next_area_id = max_area_id.saturating_add(1).max(1);
+
+        for window_id in default_layout_managed_window_ids() {
+            if workspace
+                .windows
+                .iter()
+                .any(|window| window.id == *window_id)
+            {
+                continue;
+            }
+
+            if let Some(window) = make_default_layout_managed_window(&mut workspace, window_id) {
+                workspace.windows.push(window);
+            }
+        }
+
+        compact_pane_workspace(&mut workspace);
+        refresh_pane_window_titles(&mut workspace);
+    });
+
+    let valid_viewport_tabs = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .map(|workspace| {
+            workspace
+                .windows
+                .iter()
+                .flat_map(|window| window.areas.iter())
+                .flat_map(|area| area.tabs.iter())
+                .filter(|tab| {
+                    matches!(
+                        tab.kind,
+                        EditorPaneKind::Viewport | EditorPaneKind::PlayViewport
+                    )
+                })
+                .map(|tab| tab.id)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(mut pane_viewport_state) = world.get_resource_mut::<EditorPaneViewportState>() {
+        pane_viewport_state
+            .resolutions
+            .retain(|tab_id, _| valid_viewport_tabs.contains(tab_id));
+        pane_viewport_state
+            .settings
+            .retain(|tab_id, _| valid_viewport_tabs.contains(tab_id));
+    }
+
+    detached_window_rects
+}
+
 pub fn ensure_default_pane_workspace(world: &mut World) {
     world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
         if workspace.initialized {
@@ -6186,21 +6680,10 @@ pub fn ensure_default_pane_workspace(world: &mut World) {
             return;
         }
 
-        for window_id in crate::editor::layout_window_ids() {
-            let mut tabs = Vec::new();
-            if let Some(kind) = default_pane_kind_for_window(window_id) {
-                tabs.push(make_pane_tab(&mut workspace, kind));
+        for window_id in default_layout_managed_window_ids() {
+            if let Some(window) = make_default_layout_managed_window(&mut workspace, window_id) {
+                workspace.windows.push(window);
             }
-            if *window_id == "Content Browser" {
-                tabs.push(make_pane_tab(&mut workspace, EditorPaneKind::Console));
-            }
-            let area = make_pane_area(&mut workspace, EditorPaneAreaRect::full(), tabs);
-            workspace.windows.push(EditorPaneWindow {
-                id: (*window_id).to_string(),
-                title: (*window_id).to_string(),
-                areas: vec![area],
-                layout_managed: true,
-            });
         }
 
         workspace.initialized = true;
@@ -6325,13 +6808,36 @@ fn open_pane_workspace_tab(
     split_axis: Option<SplitAxis>,
 ) {
     ensure_default_pane_workspace(world);
+    let preferred_layout_window = target_window_id
+        .map(|id| id.to_string())
+        .or_else(|| kind.default_layout_window_id().map(|id| id.to_string()));
+    let tab = world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        make_pane_tab(&mut workspace, kind)
+    });
+    open_custom_pane_workspace_tab(
+        world,
+        tab,
+        preferred_layout_window,
+        target_window_id,
+        target_area_id,
+        split_axis,
+    );
+}
+
+fn open_custom_pane_workspace_tab(
+    world: &mut World,
+    tab: EditorPaneTab,
+    preferred_layout_window: Option<String>,
+    target_window_id: Option<&str>,
+    target_area_id: Option<u64>,
+    split_axis: Option<SplitAxis>,
+) {
+    ensure_default_pane_workspace(world);
 
     world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
-        let tab = make_pane_tab(&mut workspace, kind);
-        let preferred_layout_window = target_window_id
+        let target_id = target_window_id
             .map(|id| id.to_string())
-            .or_else(|| kind.default_layout_window_id().map(|id| id.to_string()));
-        let target_id = preferred_layout_window
+            .or(preferred_layout_window.clone())
             .or_else(|| workspace.last_focused_window.clone())
             .or_else(|| workspace.windows.first().map(|window| window.id.clone()));
 
@@ -7065,7 +7571,7 @@ fn accept_pane_tab_split_drop(
                     .iter()
                     .position(|area| area.id == target_area_id)
                 {
-                    let duplicate_tab = make_pane_tab(&mut workspace, dragging.tab.kind);
+                    let duplicate_tab = dragging.tab.duplicate_with_new_id(&mut workspace);
                     if let Some(new_area_id) = split_pane_area_with_tab(
                         &mut workspace,
                         window_index,
@@ -7729,6 +8235,7 @@ fn draw_pane_area(
                 });
 
             if let Some(active_tab) = active_tab {
+                let project = world.get_resource::<EditorProject>().cloned();
                 ui.push_id((window_id, area.id, active_tab.id), |ui| {
                     match active_tab.kind {
                         EditorPaneKind::Toolbar => draw_toolbar(ui, world),
@@ -7747,6 +8254,20 @@ fn draw_pane_area(
                         EditorPaneKind::Console => draw_console_window(ui, world),
                         EditorPaneKind::AudioMixer => draw_audio_mixer_window(ui, world),
                         EditorPaneKind::Profiler => draw_profiler_window(ui, world),
+                        EditorPaneKind::MaterialEditor => {
+                            if let Some(path) = active_tab.asset_path.as_ref() {
+                                draw_material_editor_tab(ui, world, &project, path);
+                            } else {
+                                ui.label("Material asset path missing");
+                            }
+                        }
+                        EditorPaneKind::VisualScriptEditor => {
+                            if let Some(path) = active_tab.asset_path.as_ref() {
+                                draw_visual_script_editor_tab(ui, world, path);
+                            } else {
+                                ui.label("Visual script asset path missing");
+                            }
+                        }
                     }
                 });
             } else {
@@ -13975,104 +14496,98 @@ fn on_asset_double_click(world: &mut World, entry: &AssetEntry) {
 }
 
 fn open_material_editor_tab(world: &mut World, path: PathBuf) {
-    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
-        for window in workspace.windows.iter_mut() {
-            if let Some((index, _)) = window
-                .tabs
-                .iter()
-                .enumerate()
-                .find(|(_, tab)| matches!(&tab.content, EditorTabContent::Material { path: tab_path } if tab_path == &path))
-            {
-                window.active = index;
-                workspace.last_focused_window = Some(window.id);
-                return;
+    ensure_default_pane_workspace(world);
+
+    let focused_existing =
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            let mut found: Option<(usize, usize, usize)> = None;
+            for (window_index, window) in workspace.windows.iter().enumerate() {
+                for (area_index, area) in window.areas.iter().enumerate() {
+                    if let Some(tab_index) = area.tabs.iter().position(|tab| {
+                        tab.kind == EditorPaneKind::MaterialEditor
+                            && tab.asset_path.as_ref() == Some(&path)
+                    }) {
+                        found = Some((window_index, area_index, tab_index));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
             }
-        }
 
-        let title = asset_display_name(&path);
-        let tab = EditorTab {
-            id: workspace.next_tab_id,
-            title,
-            content: EditorTabContent::Material { path },
-        };
-        workspace.next_tab_id += 1;
-
-        let target_window_id = workspace.windows.last().map(|window| window.id);
-        if let Some(target_window_id) = target_window_id {
-            if let Some(window) = workspace
-                .windows
-                .iter_mut()
-                .find(|window| window.id == target_window_id)
-            {
-                window.tabs.push(tab);
-                window.active = window.tabs.len().saturating_sub(1);
-                workspace.last_focused_window = Some(window.id);
-                return;
+            if let Some((window_index, area_index, tab_index)) = found {
+                workspace.windows[window_index].areas[area_index].active = tab_index;
+                workspace.last_focused_window = Some(workspace.windows[window_index].id.clone());
+                workspace.last_focused_area =
+                    Some(workspace.windows[window_index].areas[area_index].id);
+                refresh_pane_window_titles(&mut workspace);
+                true
+            } else {
+                false
             }
-        }
-
-        let window_id = workspace.next_window_id;
-        workspace.next_window_id += 1;
-        workspace.windows.push(EditorTabWindow {
-            id: window_id,
-            title: format!("Editor {}", window_id),
-            tabs: vec![tab],
-            active: 0,
         });
-        refresh_editor_window_titles(&mut workspace);
-        workspace.last_focused_window = Some(window_id);
+    if focused_existing {
+        return;
+    }
+
+    let tab = world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        make_asset_editor_pane_tab(&mut workspace, EditorPaneKind::MaterialEditor, path)
     });
+    let preferred_window = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .and_then(|workspace| workspace.last_focused_window.clone())
+        .filter(|id| id != "Toolbar")
+        .or_else(|| Some("Content Browser".to_string()));
+    open_custom_pane_workspace_tab(world, tab, preferred_window, None, None, None);
 }
 
 fn open_visual_script_editor_tab(world: &mut World, path: PathBuf) -> Result<(), String> {
     open_visual_script_editor(world, &path)?;
-    world.resource_scope::<EditorWorkspaceState, _>(|_world, mut workspace| {
-        for window in workspace.windows.iter_mut() {
-            if let Some((index, _)) = window.tabs.iter().enumerate().find(|(_, tab)| {
-                matches!(
-                    &tab.content,
-                    EditorTabContent::VisualScript { path: tab_path } if tab_path == &path
-                )
-            }) {
-                window.active = index;
-                workspace.last_focused_window = Some(window.id);
-                return;
+    ensure_default_pane_workspace(world);
+
+    let focused_existing =
+        world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+            let mut found: Option<(usize, usize, usize)> = None;
+            for (window_index, window) in workspace.windows.iter().enumerate() {
+                for (area_index, area) in window.areas.iter().enumerate() {
+                    if let Some(tab_index) = area.tabs.iter().position(|tab| {
+                        tab.kind == EditorPaneKind::VisualScriptEditor
+                            && tab.asset_path.as_ref() == Some(&path)
+                    }) {
+                        found = Some((window_index, area_index, tab_index));
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
             }
-        }
 
-        let title = asset_display_name(&path);
-        let tab = EditorTab {
-            id: workspace.next_tab_id,
-            title,
-            content: EditorTabContent::VisualScript { path },
-        };
-        workspace.next_tab_id += 1;
-
-        let target_window_id = workspace.windows.last().map(|window| window.id);
-        if let Some(target_window_id) = target_window_id {
-            if let Some(window) = workspace
-                .windows
-                .iter_mut()
-                .find(|window| window.id == target_window_id)
-            {
-                window.tabs.push(tab);
-                window.active = window.tabs.len().saturating_sub(1);
-                workspace.last_focused_window = Some(window.id);
-                return;
+            if let Some((window_index, area_index, tab_index)) = found {
+                workspace.windows[window_index].areas[area_index].active = tab_index;
+                workspace.last_focused_window = Some(workspace.windows[window_index].id.clone());
+                workspace.last_focused_area =
+                    Some(workspace.windows[window_index].areas[area_index].id);
+                refresh_pane_window_titles(&mut workspace);
+                true
+            } else {
+                false
             }
-        }
-
-        let window_id = workspace.next_window_id;
-        workspace.next_window_id += 1;
-        workspace.windows.push(EditorTabWindow {
-            id: window_id,
-            title: format!("Editor {}", window_id),
-            tabs: vec![tab],
-            active: 0,
         });
-        refresh_editor_window_titles(&mut workspace);
-        workspace.last_focused_window = Some(window_id);
+    if focused_existing {
+        return Ok(());
+    }
+
+    let tab = world.resource_scope::<EditorPaneWorkspaceState, _>(|_world, mut workspace| {
+        make_asset_editor_pane_tab(&mut workspace, EditorPaneKind::VisualScriptEditor, path)
     });
+    let preferred_window = world
+        .get_resource::<EditorPaneWorkspaceState>()
+        .and_then(|workspace| workspace.last_focused_window.clone())
+        .filter(|id| id != "Toolbar")
+        .or_else(|| Some("Content Browser".to_string()));
+    open_custom_pane_workspace_tab(world, tab, preferred_window, None, None, None);
     Ok(())
 }
 
@@ -14779,90 +15294,96 @@ fn draw_material_editor_tab(
         let mut changed = false;
         let mut edit_response = EditResponse::default();
         let undo_label = format!("Material {}", project_relative_path(project, &path));
+        egui::ScrollArea::vertical()
+            .id_salt(("material_editor_scroll", path.clone()))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.separator();
+                ui.label("Surface");
+                let albedo_response = ui.horizontal(|ui| {
+                    ui.label("Albedo");
+                    let mut albedo = data.albedo;
+                    let response = ui.color_edit_button_rgba_unmultiplied(&mut albedo);
+                    if response.changed() {
+                        data.albedo = albedo;
+                        changed = true;
+                    }
+                    response
+                });
+                let mut albedo_response = EditResponse::from_response(&albedo_response.inner);
+                if albedo_response.changed {
+                    albedo_response.lost_focus = true;
+                }
+                edit_response.merge(albedo_response);
 
-        ui.separator();
-        ui.label("Surface");
-        let albedo_response = ui.horizontal(|ui| {
-            ui.label("Albedo");
-            let mut albedo = data.albedo;
-            let response = ui.color_edit_button_rgba_unmultiplied(&mut albedo);
-            if response.changed() {
-                data.albedo = albedo;
-                changed = true;
-            }
-            response
-        });
-        let mut albedo_response = EditResponse::from_response(&albedo_response.inner);
-        if albedo_response.changed {
-            albedo_response.lost_focus = true;
-        }
-        edit_response.merge(albedo_response);
+                let metallic_response =
+                    edit_float_range(ui, "Metallic", &mut data.metallic, 0.01, 0.0..=1.0);
+                changed |= metallic_response.changed;
+                edit_response.merge(metallic_response);
 
-        let metallic_response =
-            edit_float_range(ui, "Metallic", &mut data.metallic, 0.01, 0.0..=1.0);
-        changed |= metallic_response.changed;
-        edit_response.merge(metallic_response);
+                let roughness_response =
+                    edit_float_range(ui, "Roughness", &mut data.roughness, 0.01, 0.0..=1.0);
+                changed |= roughness_response.changed;
+                edit_response.merge(roughness_response);
 
-        let roughness_response =
-            edit_float_range(ui, "Roughness", &mut data.roughness, 0.01, 0.0..=1.0);
-        changed |= roughness_response.changed;
-        edit_response.merge(roughness_response);
+                let ao_response = edit_float_range(ui, "AO", &mut data.ao, 0.01, 0.0..=1.0);
+                changed |= ao_response.changed;
+                edit_response.merge(ao_response);
 
-        let ao_response = edit_float_range(ui, "AO", &mut data.ao, 0.01, 0.0..=1.0);
-        changed |= ao_response.changed;
-        edit_response.merge(ao_response);
+                ui.separator();
+                ui.label("Emission");
+                let emission_color_response = ui.horizontal(|ui| {
+                    ui.label("Color");
+                    let mut color = data.emission_color;
+                    let response = ui.color_edit_button_rgb(&mut color);
+                    if response.changed() {
+                        data.emission_color = color;
+                        changed = true;
+                    }
+                    response
+                });
+                let mut emission_color_response =
+                    EditResponse::from_response(&emission_color_response.inner);
+                if emission_color_response.changed {
+                    emission_color_response.lost_focus = true;
+                }
+                edit_response.merge(emission_color_response);
 
-        ui.separator();
-        ui.label("Emission");
-        let emission_color_response = ui.horizontal(|ui| {
-            ui.label("Color");
-            let mut color = data.emission_color;
-            let response = ui.color_edit_button_rgb(&mut color);
-            if response.changed() {
-                data.emission_color = color;
-                changed = true;
-            }
-            response
-        });
-        let mut emission_color_response =
-            EditResponse::from_response(&emission_color_response.inner);
-        if emission_color_response.changed {
-            emission_color_response.lost_focus = true;
-        }
-        edit_response.merge(emission_color_response);
+                let emission_strength_response = edit_float_range(
+                    ui,
+                    "Strength",
+                    &mut data.emission_strength,
+                    0.05,
+                    0.0..=100.0,
+                );
+                changed |= emission_strength_response.changed;
+                edit_response.merge(emission_strength_response);
 
-        let emission_strength_response = edit_float_range(
-            ui,
-            "Strength",
-            &mut data.emission_strength,
-            0.05,
-            0.0..=100.0,
-        );
-        changed |= emission_strength_response.changed;
-        edit_response.merge(emission_strength_response);
+                ui.separator();
+                ui.label("Textures");
+                let albedo_texture_response =
+                    edit_material_texture(ui, "Albedo", &mut data.albedo_texture);
+                changed |= albedo_texture_response.changed;
+                edit_response.merge(albedo_texture_response);
 
-        ui.separator();
-        ui.label("Textures");
-        let albedo_texture_response = edit_material_texture(ui, "Albedo", &mut data.albedo_texture);
-        changed |= albedo_texture_response.changed;
-        edit_response.merge(albedo_texture_response);
+                let normal_texture_response =
+                    edit_material_texture(ui, "Normal", &mut data.normal_texture);
+                changed |= normal_texture_response.changed;
+                edit_response.merge(normal_texture_response);
 
-        let normal_texture_response = edit_material_texture(ui, "Normal", &mut data.normal_texture);
-        changed |= normal_texture_response.changed;
-        edit_response.merge(normal_texture_response);
+                let metallic_texture_response = edit_material_texture(
+                    ui,
+                    "Metallic/Roughness",
+                    &mut data.metallic_roughness_texture,
+                );
+                changed |= metallic_texture_response.changed;
+                edit_response.merge(metallic_texture_response);
 
-        let metallic_texture_response = edit_material_texture(
-            ui,
-            "Metallic/Roughness",
-            &mut data.metallic_roughness_texture,
-        );
-        changed |= metallic_texture_response.changed;
-        edit_response.merge(metallic_texture_response);
-
-        let emission_texture_response =
-            edit_material_texture(ui, "Emission", &mut data.emission_texture);
-        changed |= emission_texture_response.changed;
-        edit_response.merge(emission_texture_response);
+                let emission_texture_response =
+                    edit_material_texture(ui, "Emission", &mut data.emission_texture);
+                changed |= emission_texture_response.changed;
+                edit_response.merge(emission_texture_response);
+            });
 
         begin_material_edit_undo(world, &path, &undo_label, edit_response);
 

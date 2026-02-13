@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 
 const LAYOUTS_FILE_NAME: &str = "layouts.ron";
 
+const fn default_layout_move_enabled() -> bool {
+    true
+}
+
+const fn default_layout_resize_enabled() -> bool {
+    true
+}
+
+const fn default_live_reflow_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedRect {
     pub x: f32,
@@ -47,15 +59,65 @@ pub struct LayoutWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneWorkspaceLayout {
+    #[serde(default)]
+    pub windows: Vec<PaneWorkspaceWindowLayout>,
+    #[serde(default)]
+    pub last_focused_window: Option<String>,
+    #[serde(default)]
+    pub last_focused_area: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneWorkspaceWindowLayout {
+    pub id: String,
+    #[serde(default)]
+    pub layout_managed: bool,
+    #[serde(default)]
+    pub rect: Option<NormalizedRect>,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default)]
+    pub areas: Vec<PaneWorkspaceAreaLayout>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneWorkspaceAreaLayout {
+    pub id: u64,
+    pub rect: NormalizedRect,
+    #[serde(default)]
+    pub tabs: Vec<PaneWorkspaceTabLayout>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneWorkspaceTabLayout {
+    pub id: u64,
+    pub title: String,
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorLayout {
     pub name: String,
     pub windows: HashMap<String, LayoutWindow>,
+    #[serde(default)]
+    pub pane_workspace: Option<PaneWorkspaceLayout>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LayoutsFile {
     active: Option<String>,
     layouts: Vec<EditorLayout>,
+    #[serde(default = "default_layout_move_enabled")]
+    allow_layout_move: bool,
+    #[serde(default = "default_layout_resize_enabled")]
+    allow_layout_resize: bool,
+    #[serde(default = "default_live_reflow_enabled")]
+    live_reflow: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +159,8 @@ pub struct EditorLayoutState {
     pub last_project_open: Option<bool>,
     pub last_active_layout: Option<String>,
     pub default_runtime_layout: Option<EditorLayout>,
-    pub allow_layout_edit: bool,
+    pub allow_layout_move: bool,
+    pub allow_layout_resize: bool,
     pub live_reflow: bool,
     pub layout_applied_this_frame: bool,
     pub layout_verify_pending: bool,
@@ -123,8 +186,9 @@ impl Default for EditorLayoutState {
             last_project_open: None,
             last_active_layout: None,
             default_runtime_layout: None,
-            allow_layout_edit: true,
-            live_reflow: false,
+            allow_layout_move: default_layout_move_enabled(),
+            allow_layout_resize: default_layout_resize_enabled(),
+            live_reflow: default_live_reflow_enabled(),
             layout_applied_this_frame: false,
             layout_verify_pending: false,
             layout_verify_attempts: 0,
@@ -143,7 +207,6 @@ pub fn default_layout() -> EditorLayout {
     let center_top = top;
     let bottom: f32 = 0.28;
     let side: f32 = 0.22;
-    let stack_offset: f32 = 0.03;
     let center_height = (1.0_f32 - center_top - bottom).max(0.2_f32);
     let left_height = (1.0_f32 - bottom).max(0.2_f32);
     let center_width = (1.0_f32 - side - side).max(0.2_f32);
@@ -210,33 +273,143 @@ pub fn default_layout() -> EditorLayout {
             collapsed: false,
         },
     );
-    windows.insert(
-        "Project".to_string(),
-        LayoutWindow {
-            rect: NormalizedRect {
-                x: side,
-                y: center_top + stack_offset,
-                w: center_width,
-                h: center_height,
+
+    let pane_workspace = PaneWorkspaceLayout {
+        windows: vec![
+            PaneWorkspaceWindowLayout {
+                id: "Toolbar".to_string(),
+                layout_managed: true,
+                rect: None,
+                collapsed: false,
+                areas: vec![PaneWorkspaceAreaLayout {
+                    id: 1,
+                    rect: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    tabs: vec![PaneWorkspaceTabLayout {
+                        id: 1,
+                        title: "Toolbar".to_string(),
+                        kind: "toolbar".to_string(),
+                        path: None,
+                    }],
+                    active: 0,
+                }],
             },
-            collapsed: true,
-        },
-    );
-    windows.insert(
-        "History".to_string(),
-        LayoutWindow {
-            rect: NormalizedRect {
-                x: side,
-                y: center_top + stack_offset * 2.0,
-                w: center_width,
-                h: center_height,
+            PaneWorkspaceWindowLayout {
+                id: "Viewport".to_string(),
+                layout_managed: true,
+                rect: None,
+                collapsed: false,
+                areas: vec![PaneWorkspaceAreaLayout {
+                    id: 2,
+                    rect: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    tabs: vec![
+                        PaneWorkspaceTabLayout {
+                            id: 2,
+                            title: "Viewport".to_string(),
+                            kind: "viewport".to_string(),
+                            path: None,
+                        },
+                        PaneWorkspaceTabLayout {
+                            id: 3,
+                            title: "Play Viewport".to_string(),
+                            kind: "play_viewport".to_string(),
+                            path: None,
+                        },
+                    ],
+                    active: 0,
+                }],
             },
-            collapsed: true,
-        },
-    );
+            PaneWorkspaceWindowLayout {
+                id: "Content Browser".to_string(),
+                layout_managed: true,
+                rect: None,
+                collapsed: false,
+                areas: vec![PaneWorkspaceAreaLayout {
+                    id: 3,
+                    rect: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    tabs: vec![
+                        PaneWorkspaceTabLayout {
+                            id: 4,
+                            title: "Content Browser".to_string(),
+                            kind: "content_browser".to_string(),
+                            path: None,
+                        },
+                        PaneWorkspaceTabLayout {
+                            id: 5,
+                            title: "Console".to_string(),
+                            kind: "console".to_string(),
+                            path: None,
+                        },
+                    ],
+                    active: 0,
+                }],
+            },
+            PaneWorkspaceWindowLayout {
+                id: "Hierarchy".to_string(),
+                layout_managed: true,
+                rect: None,
+                collapsed: false,
+                areas: vec![PaneWorkspaceAreaLayout {
+                    id: 4,
+                    rect: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    tabs: vec![PaneWorkspaceTabLayout {
+                        id: 6,
+                        title: "Hierarchy".to_string(),
+                        kind: "hierarchy".to_string(),
+                        path: None,
+                    }],
+                    active: 0,
+                }],
+            },
+            PaneWorkspaceWindowLayout {
+                id: "Inspector".to_string(),
+                layout_managed: true,
+                rect: None,
+                collapsed: false,
+                areas: vec![PaneWorkspaceAreaLayout {
+                    id: 5,
+                    rect: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 1.0,
+                        h: 1.0,
+                    },
+                    tabs: vec![PaneWorkspaceTabLayout {
+                        id: 7,
+                        title: "Inspector".to_string(),
+                        kind: "inspector".to_string(),
+                        path: None,
+                    }],
+                    active: 0,
+                }],
+            },
+        ],
+        last_focused_window: Some("Viewport".to_string()),
+        last_focused_area: Some(2),
+    };
     EditorLayout {
         name: "Default".to_string(),
         windows,
+        pane_workspace: Some(pane_workspace),
     }
 }
 
@@ -252,6 +425,9 @@ pub fn load_layout_state() -> EditorLayoutState {
                     state.layouts.insert(layout.name.clone(), layout);
                 }
                 state.active = file.active;
+                state.allow_layout_move = file.allow_layout_move;
+                state.allow_layout_resize = file.allow_layout_resize;
+                state.live_reflow = file.live_reflow;
             }
         }
     }
@@ -290,6 +466,9 @@ pub fn save_layouts(state: &EditorLayoutState) -> Result<(), String> {
     let payload = LayoutsFile {
         active: state.active.clone(),
         layouts,
+        allow_layout_move: state.allow_layout_move,
+        allow_layout_resize: state.allow_layout_resize,
+        live_reflow: state.live_reflow,
     };
 
     let pretty = PrettyConfig::new()
@@ -305,6 +484,7 @@ pub fn capture_layout(
     window_rects: &HashMap<String, Rect>,
     window_collapsed: &HashMap<String, bool>,
     screen_rect: Rect,
+    pane_workspace: Option<PaneWorkspaceLayout>,
 ) -> EditorLayout {
     let mut windows = HashMap::new();
     for id in layout_window_ids() {
@@ -320,7 +500,11 @@ pub fn capture_layout(
         }
     }
 
-    EditorLayout { name, windows }
+    EditorLayout {
+        name,
+        windows,
+        pane_workspace,
+    }
 }
 
 pub fn layout_window_ids() -> &'static [&'static str] {

@@ -104,6 +104,7 @@ const ICON_KIND_CAMERA: u32 = 0u;
 const ICON_KIND_LIGHT_DIRECTIONAL: u32 = 1u;
 const ICON_KIND_LIGHT_POINT: u32 = 2u;
 const ICON_KIND_LIGHT_SPOT: u32 = 3u;
+const ICON_KIND_AUDIO_EMITTER: u32 = 4u;
 
 fn safe_normalize(v: vec3<f32>) -> vec3<f32> {
     let len = length(v);
@@ -450,6 +451,65 @@ fn icon_edge(kind: u32, edge_index: u32, size: f32, params: vec4<f32>) -> IconEd
         } else if (edge_index == 6u) {
             edge.start = d3;
             edge.end = d0;
+        } else {
+            edge.valid = false;
+        }
+    } else if (kind == ICON_KIND_AUDIO_EMITTER) {
+        let half_h = max(size * 0.32, 0.001);
+        let body_x = -max(size * 0.24, 0.001);
+        let cone_x = max(size * 0.25, 0.001);
+        let mid = half_h * 0.65;
+        let p0 = vec3<f32>(body_x, -half_h, 0.0);
+        let p1 = vec3<f32>(body_x, half_h, 0.0);
+        let p2 = vec3<f32>(0.0, mid, 0.0);
+        let p3 = vec3<f32>(cone_x, 0.0, 0.0);
+        let p4 = vec3<f32>(0.0, -mid, 0.0);
+        let r1 = max(size * 0.24, 0.001);
+        let r2 = max(size * 0.36, 0.001);
+        let r3 = max(size * 0.48, 0.001);
+        let w1a = p3 + vec3<f32>(r1 * 0.72, r1 * 0.72, 0.0);
+        let w1m = p3 + vec3<f32>(r1, 0.0, 0.0);
+        let w1b = p3 + vec3<f32>(r1 * 0.72, -r1 * 0.72, 0.0);
+        let w2a = p3 + vec3<f32>(r2 * 0.72, r2 * 0.72, 0.0);
+        let w2m = p3 + vec3<f32>(r2, 0.0, 0.0);
+        let w2b = p3 + vec3<f32>(r2 * 0.72, -r2 * 0.72, 0.0);
+        let w3a = p3 + vec3<f32>(r3 * 0.72, r3 * 0.72, 0.0);
+        let w3m = p3 + vec3<f32>(r3, 0.0, 0.0);
+        let w3b = p3 + vec3<f32>(r3 * 0.72, -r3 * 0.72, 0.0);
+
+        if (edge_index == 0u) {
+            edge.start = p0;
+            edge.end = p1;
+        } else if (edge_index == 1u) {
+            edge.start = p1;
+            edge.end = p2;
+        } else if (edge_index == 2u) {
+            edge.start = p2;
+            edge.end = p3;
+        } else if (edge_index == 3u) {
+            edge.start = p3;
+            edge.end = p4;
+        } else if (edge_index == 4u) {
+            edge.start = p4;
+            edge.end = p0;
+        } else if (edge_index == 5u) {
+            edge.start = w1a;
+            edge.end = w1m;
+        } else if (edge_index == 6u) {
+            edge.start = w1m;
+            edge.end = w1b;
+        } else if (edge_index == 7u) {
+            edge.start = w2a;
+            edge.end = w2m;
+        } else if (edge_index == 8u) {
+            edge.start = w2m;
+            edge.end = w2b;
+        } else if (edge_index == 9u) {
+            edge.start = w3a;
+            edge.end = w3m;
+        } else if (edge_index == 10u) {
+            edge.start = w3m;
+            edge.end = w3b;
         } else {
             edge.valid = false;
         }

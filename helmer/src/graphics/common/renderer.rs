@@ -610,6 +610,7 @@ pub enum GizmoIconKind {
     LightDirectional = 1,
     LightPoint = 2,
     LightSpot = 3,
+    AudioEmitter = 4,
 }
 
 impl Default for GizmoIconKind {

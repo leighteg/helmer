@@ -15,8 +15,9 @@ use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::RenderGizmoState;
 use helmer_becs::systems::scene_system::SceneChild;
 use helmer_becs::{
-    BevyActiveCamera, BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
-    BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler, BevyTransform,
+    BevyActiveCamera, BevyAssetServer, BevyAudioEmitter, BevyCamera, BevyInputManager, BevyLight,
+    BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler,
+    BevyTransform,
 };
 
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
@@ -508,6 +509,12 @@ pub struct GizmoSystemParams<'w, 's> {
         (Entity, Ref<'static, BevyLight>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
+    audio_icon_query: Query<
+        'w,
+        's,
+        (Entity, Ref<'static, BevyAudioEmitter>),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
     system_profiler: Option<Res<'w, BevySystemProfiler>>,
 }
 
@@ -535,6 +542,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         camera_component_query,
         camera_icon_query,
         light_icon_query,
+        audio_icon_query,
         system_profiler,
     } = params;
 
@@ -621,6 +629,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             &mut transforms,
             &camera_icon_query,
             &light_icon_query,
+            &audio_icon_query,
             &mut icons_dirty,
         );
         (camera_transform, icons, icons_dirty)
@@ -768,6 +777,10 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         || state.drag.is_some()
         || state.key_drag_active
         || spline_state.key_dragging;
+    let drag_outside_viewport = state.drag.is_some()
+        || state.key_drag_active
+        || spline_state.dragging
+        || spline_state.key_dragging;
     let ray = if wants_pointer && !allow_ui_raycast {
         None
     } else {
@@ -777,6 +790,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             input_manager.window_size,
             inv_view_proj,
             camera_transform.position,
+            drag_outside_viewport,
         )
     };
 
@@ -1644,6 +1658,12 @@ pub struct SelectionSystemParams<'w, 's> {
     >,
     light_icon_query:
         Query<'w, 's, (Entity, &'static BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_icon_query: Query<
+        'w,
+        's,
+        (Entity, &'static BevyAudioEmitter),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
     active_camera_query: Query<
         'w,
         's,
@@ -1673,6 +1693,7 @@ pub fn selection_system(params: SelectionSystemParams) {
         transform_query,
         camera_icon_query,
         light_icon_query,
+        audio_icon_query,
         active_camera_query,
         camera_query,
         system_profiler,
@@ -1753,6 +1774,7 @@ pub fn selection_system(params: SelectionSystemParams) {
         input_manager.window_size,
         inv_view_proj,
         camera_transform.0.position,
+        false,
     ) else {
         return;
     };
@@ -1795,6 +1817,7 @@ pub fn selection_system(params: SelectionSystemParams) {
         &transform_query,
         &camera_icon_query,
         &light_icon_query,
+        &audio_icon_query,
     ) {
         if best.map_or(true, |(_, best_distance)| distance < best_distance) {
             best = Some((entity, distance));
@@ -1981,17 +2004,13 @@ fn collect_icon_gizmos(
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
     light_query: &Query<(Entity, Ref<BevyLight>), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_query: &Query<
+        (Entity, Ref<BevyAudioEmitter>),
+        Or<(With<EditorEntity>, With<SceneChild>)>,
+    >,
     icons_dirty: &mut bool,
 ) -> Vec<GizmoIcon> {
     let mut icons = Vec::new();
-    if !viewport_state.show_camera_gizmos
-        && !viewport_state.show_directional_light_gizmos
-        && !viewport_state.show_point_light_gizmos
-        && !viewport_state.show_spot_light_gizmos
-    {
-        return icons;
-    }
-
     let icon_scale = settings.icon_size_scale.max(0.0);
     if icon_scale <= 0.0 {
         return icons;
@@ -2103,6 +2122,32 @@ fn collect_icon_gizmos(
         }
     }
 
+    for (entity, emitter) in audio_query.iter() {
+        let Ok(transform) = transforms.get_mut(entity) else {
+            continue;
+        };
+        if emitter.is_changed() || transform.is_changed() {
+            *icons_dirty = true;
+        }
+
+        let distance = camera_transform
+            .position
+            .distance(transform.0.position)
+            .max(0.001);
+        let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
+
+        let icon = GizmoIcon {
+            position: transform.0.position,
+            rotation: transform.0.rotation,
+            size,
+            color: Vec3::new(1.0, 0.72, 0.28),
+            alpha: light_alpha,
+            kind: GizmoIconKind::AudioEmitter,
+            params: [0.0; 4],
+        };
+        icons.push(icon);
+    }
+
     icons
 }
 
@@ -2118,15 +2163,8 @@ fn pick_icon_entity(
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
     light_query: &Query<(Entity, &BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_query: &Query<(Entity, &BevyAudioEmitter), Or<(With<EditorEntity>, With<SceneChild>)>>,
 ) -> Option<(Entity, f32)> {
-    if !viewport_state.show_camera_gizmos
-        && !viewport_state.show_directional_light_gizmos
-        && !viewport_state.show_point_light_gizmos
-        && !viewport_state.show_spot_light_gizmos
-    {
-        return None;
-    }
-
     let icon_scale = settings.icon_size_scale.max(0.0);
     if icon_scale <= 0.0 {
         return None;
@@ -2195,6 +2233,25 @@ fn pick_icon_entity(
                 if best.map_or(true, |(_, best_distance)| hit < best_distance) {
                     best = Some((entity, hit));
                 }
+            }
+        }
+    }
+
+    for (entity, _) in audio_query.iter() {
+        let Ok(transform) = transforms.get(entity) else {
+            continue;
+        };
+        let distance = camera_transform
+            .position
+            .distance(transform.0.position)
+            .max(0.001);
+        let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
+        let radius = (size * pick_scale).max(pick_min);
+        if let Some(hit) =
+            ray_sphere_intersection(ray_origin, ray_dir, transform.0.position, radius)
+        {
+            if best.map_or(true, |(_, best_distance)| hit < best_distance) {
+                best = Some((entity, hit));
             }
         }
     }
@@ -2351,16 +2408,22 @@ fn screen_ray(
     window_size: glam::UVec2,
     inv_view_proj: Mat4,
     camera_position: Vec3,
+    allow_outside_viewport: bool,
 ) -> Option<(Vec3, Vec3)> {
     let (cursor_x, cursor_y, width, height) = if let Some(rect) = viewport_rect {
-        if !rect.contains(cursor) {
+        let width = rect.width();
+        let height = rect.height();
+        let local_x = cursor.x as f32 - rect.min_x;
+        let local_y = cursor.y as f32 - rect.min_y;
+        let outside = local_x < 0.0 || local_x > width || local_y < 0.0 || local_y > height;
+        if outside && !allow_outside_viewport {
             return None;
         }
         (
-            cursor.x as f32 - rect.min_x,
-            cursor.y as f32 - rect.min_y,
-            rect.width(),
-            rect.height(),
+            local_x.clamp(0.0, width),
+            local_y.clamp(0.0, height),
+            width,
+            height,
         )
     } else {
         if window_size.x == 0 || window_size.y == 0 {

@@ -40,9 +40,11 @@ use crate::editor::{
     FREECAM_BOOST_MULTIPLIER_MIN, FREECAM_MOVE_ACCEL_DEFAULT, FREECAM_MOVE_ACCEL_MAX,
     FREECAM_MOVE_ACCEL_MIN, FREECAM_MOVE_DECEL_DEFAULT, FREECAM_MOVE_DECEL_MAX,
     FREECAM_MOVE_DECEL_MIN, FREECAM_ORBIT_DISTANCE_DEFAULT, FREECAM_ORBIT_DISTANCE_MAX,
-    FREECAM_ORBIT_DISTANCE_MIN, FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX,
-    FREECAM_SENSITIVITY_MIN, FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX,
-    FREECAM_SMOOTHING_MIN, FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX, FREECAM_SPEED_MAX_MIN,
+    FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    FREECAM_ORBIT_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX, FREECAM_PAN_SENSITIVITY_MIN,
+    FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN,
+    FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN,
+    FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX, FREECAM_SPEED_MAX_MIN,
     FREECAM_SPEED_MIN_DEFAULT, FREECAM_SPEED_MIN_MAX, FREECAM_SPEED_MIN_MIN,
     FREECAM_SPEED_STEP_DEFAULT, FREECAM_SPEED_STEP_MAX, FREECAM_SPEED_STEP_MIN, LayoutDragEdges,
     LayoutDragMode, LayoutSaveRequest, NormalizedRect, PlayViewportKind, VIEWPORT_ID_EDITOR,
@@ -3000,6 +3002,9 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
         .next()
         .map(|(entity, _)| entity);
     if current == Some(desired) {
+        if world_state == WorldState::Edit {
+            set_viewport_audio_listener_enabled(world, true);
+        }
         return;
     }
 
@@ -3008,6 +3013,10 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
     } else {
         set_play_camera(world, desired);
         activate_play_camera(world);
+    }
+
+    if world_state == WorldState::Edit {
+        set_viewport_audio_listener_enabled(world, true);
     }
 }
 
@@ -3858,7 +3867,8 @@ pub fn freecam_system(
     let mut configured_speed_max = viewport_state.freecam_speed_max;
     let mut configured_boost_multiplier = viewport_state.freecam_boost_multiplier;
     let mut configured_orbit_distance = viewport_state.freecam_orbit_distance;
-    let mut configured_nav_drag_sensitivity = viewport_state.navigation_gizmo.drag_sensitivity;
+    let mut configured_orbit_sensitivity = viewport_state.freecam_orbit_pan_sensitivity;
+    let mut configured_pan_sensitivity = viewport_state.freecam_pan_sensitivity;
     let mut configured_nav_orbit_selected = viewport_state.navigation_gizmo.orbit_selected_entity;
     if let (Some(pane_id), Some(pane_state)) =
         (freecam_settings_pane_id, pane_viewport_state.as_deref())
@@ -3873,7 +3883,8 @@ pub fn freecam_system(
             configured_speed_max = pane_settings.freecam_speed_max;
             configured_boost_multiplier = pane_settings.freecam_boost_multiplier;
             configured_orbit_distance = pane_settings.freecam_orbit_distance;
-            configured_nav_drag_sensitivity = pane_settings.navigation_gizmo.drag_sensitivity;
+            configured_orbit_sensitivity = pane_settings.freecam_orbit_pan_sensitivity;
+            configured_pan_sensitivity = pane_settings.freecam_pan_sensitivity;
             configured_nav_orbit_selected = pane_settings.navigation_gizmo.orbit_selected_entity;
         }
     }
@@ -3915,10 +3926,12 @@ pub fn freecam_system(
         state.configured_orbit_distance = configured_orbit_distance;
         state.middle_orbit_distance = configured_orbit_distance;
     }
-    let middle_look_scale =
-        (state.sensitivity / FREECAM_SENSITIVITY_DEFAULT.max(1.0e-4)).clamp(0.1, 12.0);
-    let middle_look_sensitivity =
-        (configured_nav_drag_sensitivity * middle_look_scale).clamp(0.001, 0.12);
+    configured_orbit_sensitivity = configured_orbit_sensitivity.clamp(
+        FREECAM_ORBIT_PAN_SENSITIVITY_MIN,
+        FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    );
+    configured_pan_sensitivity =
+        configured_pan_sensitivity.clamp(FREECAM_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX);
     let orbit_selected_focus = if configured_nav_orbit_selected {
         viewport_runtime.orbit_selected_focus
     } else {
@@ -3955,10 +3968,13 @@ pub fn freecam_system(
     const CONTROLLER_SENSITIVITY: f32 = 2.0;
 
     let maybe_gamepad_id = input_manager.first_gamepad_id();
+    let shift_active = input_manager.is_key_active(KeyCode::ShiftLeft)
+        || input_manager.is_key_active(KeyCode::ShiftRight);
     let was_looking = state.is_looking;
 
     let mut yaw_delta = 0.0;
     let mut pitch_delta = 0.0;
+    let mut middle_pan_delta = DVec2::ZERO;
     let mut started_middle_look = false;
 
     let can_pointer_look = !gizmo_blocking
@@ -4026,8 +4042,12 @@ pub fn freecam_system(
             started_middle_look = true;
         } else {
             let cursor_delta = next_look_delta(&mut state);
-            yaw_delta -= cursor_delta.x as f32 * middle_look_sensitivity;
-            pitch_delta += cursor_delta.y as f32 * middle_look_sensitivity;
+            if shift_active {
+                middle_pan_delta = cursor_delta;
+            } else {
+                yaw_delta -= cursor_delta.x as f32 * configured_orbit_sensitivity;
+                pitch_delta += cursor_delta.y as f32 * configured_orbit_sensitivity;
+            }
         }
     } else {
         state.is_middle_looking = false;
@@ -4066,6 +4086,11 @@ pub fn freecam_system(
         state.speed += input_manager.mouse_wheel.y * state.speed_step;
     }
     let mut orbit_distance_input_changed = orbit_distance_config_changed;
+    let orbit_distance_before_input = if state.middle_orbit_distance.is_finite() {
+        state.middle_orbit_distance
+    } else {
+        state.configured_orbit_distance
+    };
     let orbit_zoom_wheel = input_manager.mouse_wheel.y;
     let apply_orbit_zoom = |distance: &mut f32, wheel: f32| -> bool {
         if wheel.abs() <= f32::EPSILON {
@@ -4080,12 +4105,7 @@ pub fn freecam_system(
             orbit_distance_input_changed = true;
         }
     }
-    if !wants_pointer
-        && !state.is_looking
-        && !state.is_middle_looking
-        && pointer_in_viewport
-        && orbit_selected_focus.is_some()
-    {
+    if !wants_pointer && !state.is_looking && !state.is_middle_looking && pointer_in_viewport {
         if apply_orbit_zoom(&mut state.middle_orbit_distance, orbit_zoom_wheel) {
             orbit_distance_input_changed = true;
         }
@@ -4111,9 +4131,7 @@ pub fn freecam_system(
         .clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
     let mut speed = state.speed;
 
-    let mut boost_active = keyboard_active
-        && (input_manager.is_key_active(KeyCode::ShiftLeft)
-            || input_manager.is_key_active(KeyCode::ShiftRight));
+    let mut boost_active = keyboard_active && shift_active;
 
     if !gizmo_blocking {
         if let Some(gamepad_id) = maybe_gamepad_id {
@@ -4127,154 +4145,163 @@ pub fn freecam_system(
         speed *= state.boost_multiplier;
     }
 
-    let mut apply_freecam =
-        |entity: Entity, transform: &mut BevyTransform, camera: &mut BevyCamera| {
-            if state.active_entity != Some(entity) {
-                state.active_entity = Some(entity);
-                state.current_fov_multiplier = 1.0;
-                state.is_looking = false;
-                state.is_middle_looking = false;
-                state.look_start_cursor_position = None;
-                state.look_pane_id = None;
-                state.last_cursor_position = cursor_position;
-                state.smoothed_cursor_delta = DVec2::ZERO;
-                state.move_velocity = Vec3::ZERO;
-                state.middle_orbit_focus = None;
-            }
+    let mut apply_freecam = |entity: Entity,
+                             transform: &mut BevyTransform,
+                             camera: &mut BevyCamera| {
+        if state.active_entity != Some(entity) {
+            state.active_entity = Some(entity);
+            state.current_fov_multiplier = 1.0;
+            state.is_looking = false;
+            state.is_middle_looking = false;
+            state.look_start_cursor_position = None;
+            state.look_pane_id = None;
+            state.last_cursor_position = cursor_position;
+            state.smoothed_cursor_delta = DVec2::ZERO;
+            state.move_velocity = Vec3::ZERO;
+            state.middle_orbit_focus = None;
+        }
 
-            let transform = &mut transform.0;
-            let camera = &mut camera.0;
-            let previous_forward = transform.forward().normalize_or_zero();
-            let middle_orbit_active = state.is_middle_looking && !state.is_looking;
+        let transform = &mut transform.0;
+        let camera = &mut camera.0;
+        let previous_forward = transform.forward().normalize_or_zero();
+        let middle_orbit_active = state.is_middle_looking && !state.is_looking;
+        let middle_pan_active = middle_orbit_active && shift_active;
 
-            let (mut yaw, mut pitch) = extract_yaw_pitch(transform.rotation);
+        let (mut yaw, mut pitch) = extract_yaw_pitch(transform.rotation);
 
-            yaw += yaw_delta;
-            pitch += pitch_delta;
+        yaw += yaw_delta;
+        pitch += pitch_delta;
 
-            pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
 
-            let yaw_rot = Quat::from_axis_angle(Vec3::Y, yaw);
-            let pitch_rot = Quat::from_axis_angle(Vec3::X, pitch);
-            let orientation = yaw_rot * pitch_rot;
+        let yaw_rot = Quat::from_axis_angle(Vec3::Y, yaw);
+        let pitch_rot = Quat::from_axis_angle(Vec3::X, pitch);
+        let orientation = yaw_rot * pitch_rot;
 
-            transform.rotation = orientation;
+        transform.rotation = orientation;
 
-            let forward = orientation * Vec3::Z;
-            let right = orientation * -Vec3::X;
+        let forward = orientation * Vec3::Z;
+        let right = orientation * -Vec3::X;
 
-            if !middle_orbit_active {
-                let focus = orbit_selected_focus
-                    .unwrap_or(transform.position + forward * state.middle_orbit_distance);
-                state.middle_orbit_focus = if focus.is_finite() { Some(focus) } else { None };
-            }
+        if !middle_orbit_active {
+            let fallback_focus = state
+                .middle_orbit_focus
+                .filter(|focus| focus.is_finite())
+                .unwrap_or(transform.position + forward * orbit_distance_before_input);
+            let focus = orbit_selected_focus.unwrap_or(fallback_focus);
+            state.middle_orbit_focus = if focus.is_finite() { Some(focus) } else { None };
+        }
 
-            if orbit_distance_input_changed
-                && !state.is_looking
-                && !middle_orbit_active
-                && orbit_selected_focus.is_some()
-            {
-                if let Some(orbit_focus) = orbit_selected_focus.filter(|focus| focus.is_finite()) {
-                    let orbit_distance = state.middle_orbit_distance;
-                    state.middle_orbit_focus = Some(orbit_focus);
-                    transform.position = orbit_focus - forward * orbit_distance;
-                    state.move_velocity = Vec3::ZERO;
-                }
-            }
-
-            if middle_orbit_active {
-                if configured_nav_orbit_selected {
-                    if let Some(selected_focus) = orbit_selected_focus {
-                        if started_middle_look {
-                            let selected_distance = transform.position.distance(selected_focus);
-                            if selected_distance.is_finite() {
-                                state.middle_orbit_distance = selected_distance
-                                    .clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
-                            }
-                        }
-                        state.middle_orbit_focus = Some(selected_focus);
-                    }
-                }
-                let anchor_forward = if previous_forward.length_squared() > 1.0e-6 {
-                    previous_forward
-                } else {
-                    forward
-                };
+        if orbit_distance_input_changed && !state.is_looking && !middle_orbit_active {
+            if let Some(orbit_focus) = state.middle_orbit_focus.filter(|focus| focus.is_finite()) {
                 let orbit_distance = state.middle_orbit_distance;
-                let orbit_focus = state
-                    .middle_orbit_focus
-                    .filter(|focus| focus.is_finite())
-                    .unwrap_or(transform.position + anchor_forward * orbit_distance);
-                state.middle_orbit_focus = Some(orbit_focus);
                 transform.position = orbit_focus - forward * orbit_distance;
                 state.move_velocity = Vec3::ZERO;
             }
+        }
 
-            let mut move_input = Vec3::ZERO;
-
-            if keyboard_active {
-                for key in &input_manager.active_keys {
-                    match key {
-                        KeyCode::KeyW => move_input += forward,
-                        KeyCode::KeyS => move_input -= forward,
-                        KeyCode::KeyA => move_input -= right,
-                        KeyCode::KeyD => move_input += right,
-                        KeyCode::Space => move_input += Vec3::Y,
-                        KeyCode::KeyC => move_input -= Vec3::Y,
-                        _ => {}
+        if middle_orbit_active {
+            if configured_nav_orbit_selected && !middle_pan_active {
+                if let Some(selected_focus) = orbit_selected_focus {
+                    if started_middle_look {
+                        let selected_distance = transform.position.distance(selected_focus);
+                        if selected_distance.is_finite() {
+                            state.middle_orbit_distance = selected_distance
+                                .clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
+                        }
                     }
+                    state.middle_orbit_focus = Some(selected_focus);
                 }
             }
-
-            if !gizmo_blocking {
-                if let Some(gamepad_id) = maybe_gamepad_id {
-                    let lx = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
-                    let ly = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
-                    move_input += right * lx;
-                    move_input += forward * ly;
-
-                    let up = input_manager.get_right_trigger_value(gamepad_id);
-                    let down = input_manager.get_left_trigger_value(gamepad_id);
-                    move_input += Vec3::Y * up;
-                    move_input -= Vec3::Y * down;
+            let anchor_forward = if previous_forward.length_squared() > 1.0e-6 {
+                previous_forward
+            } else {
+                forward
+            };
+            let orbit_distance = state.middle_orbit_distance;
+            let mut orbit_focus = state
+                .middle_orbit_focus
+                .filter(|focus| focus.is_finite())
+                .unwrap_or(transform.position + anchor_forward * orbit_distance);
+            if middle_pan_active && middle_pan_delta.length_squared() > f64::EPSILON {
+                let up = orientation * Vec3::Y;
+                let pan_speed = (orbit_distance * configured_pan_sensitivity).max(1.0e-4);
+                let pan = right * (-(middle_pan_delta.x as f32) * pan_speed)
+                    + up * ((middle_pan_delta.y as f32) * pan_speed);
+                if pan.is_finite() {
+                    orbit_focus += pan;
                 }
             }
+            state.middle_orbit_focus = Some(orbit_focus);
+            transform.position = orbit_focus - forward * orbit_distance;
+            state.move_velocity = Vec3::ZERO;
+        }
 
-            let move_input_len = if middle_orbit_active {
-                0.0
-            } else {
-                move_input.length()
-            };
-            let move_dir = if move_input_len > 1.0e-6 {
-                move_input / move_input_len
-            } else {
-                Vec3::ZERO
-            };
-            let move_scale = move_input_len.min(1.0);
-            let target_velocity = move_dir * (speed * move_scale);
-            let response = if move_input_len > 1.0e-6 {
-                state.move_accel
-            } else {
-                state.move_decel
-            };
-            let alpha = (1.0 - (-(response * dt.max(0.0))).exp()).clamp(0.0, 1.0);
-            let current_velocity = state.move_velocity;
-            state.move_velocity = current_velocity + (target_velocity - current_velocity) * alpha;
-            if !state.move_velocity.is_finite() {
-                state.move_velocity = Vec3::ZERO;
-            }
-            if move_input_len <= 1.0e-6 && state.move_velocity.length_squared() < 1.0e-6 {
-                state.move_velocity = Vec3::ZERO;
-            }
-            transform.position += state.move_velocity * dt;
+        let mut move_input = Vec3::ZERO;
 
-            let target_multiplier = if boost_active { BOOST_AMOUNT } else { 1.0 };
-            let safe_multiplier = state.current_fov_multiplier.clamp(0.01, BOOST_AMOUNT);
-            let base_fov = camera.fov_y_rad / safe_multiplier;
-            let t = 1.0 - (-state.fov_lerp_speed * dt).exp();
-            state.current_fov_multiplier += (target_multiplier - state.current_fov_multiplier) * t;
-            camera.fov_y_rad = base_fov * state.current_fov_multiplier;
+        if keyboard_active {
+            for key in &input_manager.active_keys {
+                match key {
+                    KeyCode::KeyW => move_input += forward,
+                    KeyCode::KeyS => move_input -= forward,
+                    KeyCode::KeyA => move_input -= right,
+                    KeyCode::KeyD => move_input += right,
+                    KeyCode::Space => move_input += Vec3::Y,
+                    KeyCode::KeyC => move_input -= Vec3::Y,
+                    _ => {}
+                }
+            }
+        }
+
+        if !gizmo_blocking {
+            if let Some(gamepad_id) = maybe_gamepad_id {
+                let lx = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickX);
+                let ly = input_manager.get_controller_axis(gamepad_id, gilrs::Axis::LeftStickY);
+                move_input += right * lx;
+                move_input += forward * ly;
+
+                let up = input_manager.get_right_trigger_value(gamepad_id);
+                let down = input_manager.get_left_trigger_value(gamepad_id);
+                move_input += Vec3::Y * up;
+                move_input -= Vec3::Y * down;
+            }
+        }
+
+        let move_input_len = if middle_orbit_active {
+            0.0
+        } else {
+            move_input.length()
         };
+        let move_dir = if move_input_len > 1.0e-6 {
+            move_input / move_input_len
+        } else {
+            Vec3::ZERO
+        };
+        let move_scale = move_input_len.min(1.0);
+        let target_velocity = move_dir * (speed * move_scale);
+        let response = if move_input_len > 1.0e-6 {
+            state.move_accel
+        } else {
+            state.move_decel
+        };
+        let alpha = (1.0 - (-(response * dt.max(0.0))).exp()).clamp(0.0, 1.0);
+        let current_velocity = state.move_velocity;
+        state.move_velocity = current_velocity + (target_velocity - current_velocity) * alpha;
+        if !state.move_velocity.is_finite() {
+            state.move_velocity = Vec3::ZERO;
+        }
+        if move_input_len <= 1.0e-6 && state.move_velocity.length_squared() < 1.0e-6 {
+            state.move_velocity = Vec3::ZERO;
+        }
+        transform.position += state.move_velocity * dt;
+
+        let target_multiplier = if boost_active { BOOST_AMOUNT } else { 1.0 };
+        let safe_multiplier = state.current_fov_multiplier.clamp(0.01, BOOST_AMOUNT);
+        let base_fov = camera.fov_y_rad / safe_multiplier;
+        let t = 1.0 - (-state.fov_lerp_speed * dt).exp();
+        state.current_fov_multiplier += (target_multiplier - state.current_fov_multiplier) * t;
+        camera.fov_y_rad = base_fov * state.current_fov_multiplier;
+    };
 
     if let Some(active_entity) = active_camera_entity {
         if let Ok((entity, mut transform, mut camera)) = viewport_query.get_mut(active_entity) {

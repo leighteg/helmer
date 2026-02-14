@@ -4861,6 +4861,7 @@ impl GraphRenderer {
             GizmoIconKind::LightDirectional => options.show_directional_light_gizmos,
             GizmoIconKind::LightPoint => options.show_point_light_gizmos,
             GizmoIconKind::LightSpot => options.show_spot_light_gizmos,
+            GizmoIconKind::AudioEmitter => true,
         });
         filtered.icons_revision = 0;
         filtered

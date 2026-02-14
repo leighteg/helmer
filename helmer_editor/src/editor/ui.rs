@@ -59,10 +59,12 @@ use crate::editor::{
     FREECAM_MOVE_ACCEL_DEFAULT, FREECAM_MOVE_ACCEL_MAX, FREECAM_MOVE_ACCEL_MIN,
     FREECAM_MOVE_DECEL_DEFAULT, FREECAM_MOVE_DECEL_MAX, FREECAM_MOVE_DECEL_MIN,
     FREECAM_ORBIT_DISTANCE_DEFAULT, FREECAM_ORBIT_DISTANCE_MAX, FREECAM_ORBIT_DISTANCE_MIN,
-    FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN,
-    FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN,
-    FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX, FREECAM_SPEED_MAX_MIN,
-    FREECAM_SPEED_MIN_DEFAULT, FREECAM_SPEED_MIN_MAX, FREECAM_SPEED_MIN_MIN,
+    FREECAM_ORBIT_PAN_SENSITIVITY_DEFAULT, FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    FREECAM_ORBIT_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_DEFAULT,
+    FREECAM_PAN_SENSITIVITY_MAX, FREECAM_PAN_SENSITIVITY_MIN, FREECAM_SENSITIVITY_DEFAULT,
+    FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN, FREECAM_SMOOTHING_DEFAULT,
+    FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN, FREECAM_SPEED_MAX_DEFAULT, FREECAM_SPEED_MAX_MAX,
+    FREECAM_SPEED_MAX_MIN, FREECAM_SPEED_MIN_DEFAULT, FREECAM_SPEED_MIN_MAX, FREECAM_SPEED_MIN_MIN,
     FREECAM_SPEED_STEP_DEFAULT, FREECAM_SPEED_STEP_MAX, FREECAM_SPEED_STEP_MIN, Freecam,
     LayoutSaveRequest, NavigationGizmoSettings, NormalizedRect, PaneWorkspaceAreaLayout,
     PaneWorkspaceLayout, PaneWorkspaceTabLayout, PaneWorkspaceWindowLayout, PlayViewportKind,
@@ -378,6 +380,8 @@ pub struct EditorPaneViewportSettings {
     pub freecam_speed_max: f32,
     pub freecam_boost_multiplier: f32,
     pub freecam_orbit_distance: f32,
+    pub freecam_orbit_pan_sensitivity: f32,
+    pub freecam_pan_sensitivity: f32,
 }
 
 impl EditorPaneViewportSettings {
@@ -402,6 +406,8 @@ impl EditorPaneViewportSettings {
             freecam_speed_max: state.freecam_speed_max,
             freecam_boost_multiplier: state.freecam_boost_multiplier,
             freecam_orbit_distance: state.freecam_orbit_distance,
+            freecam_orbit_pan_sensitivity: state.freecam_orbit_pan_sensitivity,
+            freecam_pan_sensitivity: state.freecam_pan_sensitivity,
         }
     }
 }
@@ -2967,21 +2973,34 @@ fn draw_orbit_menu_contents(
     ui: &mut Ui,
     navigation_gizmo: &mut NavigationGizmoSettings,
     freecam_orbit_distance: &mut f32,
+    freecam_orbit_sensitivity: &mut f32,
+    freecam_pan_sensitivity: &mut f32,
 ) {
     if ui.button("Defaults").clicked() {
         let defaults = NavigationGizmoSettings::default();
         navigation_gizmo.orbit_selected_entity = defaults.orbit_selected_entity;
-        navigation_gizmo.drag_sensitivity = defaults.drag_sensitivity;
         *freecam_orbit_distance = FREECAM_ORBIT_DISTANCE_DEFAULT;
+        *freecam_orbit_sensitivity = FREECAM_ORBIT_PAN_SENSITIVITY_DEFAULT;
+        *freecam_pan_sensitivity = FREECAM_PAN_SENSITIVITY_DEFAULT;
     }
     ui.checkbox(
         &mut navigation_gizmo.orbit_selected_entity,
         "Orbit Around Selection",
     );
-    ui.horizontal(|ui| {
-        ui.label("Drag Sensitivity");
-        ui.add(DragValue::new(&mut navigation_gizmo.drag_sensitivity).speed(0.0005));
-    });
+    let _ = edit_float_range(
+        ui,
+        "Orbit Sensitivity",
+        freecam_orbit_sensitivity,
+        0.0001,
+        FREECAM_ORBIT_PAN_SENSITIVITY_MIN..=FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Pan Sensitivity",
+        freecam_pan_sensitivity,
+        0.00005,
+        FREECAM_PAN_SENSITIVITY_MIN..=FREECAM_PAN_SENSITIVITY_MAX,
+    );
     let _ = edit_float_range(
         ui,
         "Orbit Distance",
@@ -2989,6 +3008,12 @@ fn draw_orbit_menu_contents(
         0.1,
         FREECAM_ORBIT_DISTANCE_MIN..=FREECAM_ORBIT_DISTANCE_MAX,
     );
+    *freecam_orbit_sensitivity = freecam_orbit_sensitivity.clamp(
+        FREECAM_ORBIT_PAN_SENSITIVITY_MIN,
+        FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    );
+    *freecam_pan_sensitivity =
+        freecam_pan_sensitivity.clamp(FREECAM_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX);
     *freecam_orbit_distance =
         freecam_orbit_distance.clamp(FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_DISTANCE_MAX);
     navigation_gizmo.sanitize();
@@ -3204,6 +3229,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let mut freecam_speed_max = pane_settings.freecam_speed_max;
         let mut freecam_boost_multiplier = pane_settings.freecam_boost_multiplier;
         let mut freecam_orbit_distance = pane_settings.freecam_orbit_distance;
+        let mut freecam_orbit_pan_sensitivity = pane_settings.freecam_orbit_pan_sensitivity;
+        let mut freecam_pan_sensitivity = pane_settings.freecam_pan_sensitivity;
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -3402,6 +3429,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                 ui,
                                 &mut navigation_gizmo,
                                 &mut freecam_orbit_distance,
+                                &mut freecam_orbit_pan_sensitivity,
+                                &mut freecam_pan_sensitivity,
                             );
                         });
                 });
@@ -4292,6 +4321,12 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                 &mut freecam_boost_multiplier,
                 &mut freecam_orbit_distance,
             );
+            freecam_orbit_pan_sensitivity = freecam_orbit_pan_sensitivity.clamp(
+                FREECAM_ORBIT_PAN_SENSITIVITY_MIN,
+                FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+            );
+            freecam_pan_sensitivity = freecam_pan_sensitivity
+                .clamp(FREECAM_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX);
             navigation_gizmo.sanitize();
             viewport_state.graph_template = graph_template.clone();
             viewport_state.render_resolution = render_resolution;
@@ -4317,6 +4352,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             viewport_state.freecam_speed_max = freecam_speed_max;
             viewport_state.freecam_boost_multiplier = freecam_boost_multiplier;
             viewport_state.freecam_orbit_distance = freecam_orbit_distance;
+            viewport_state.freecam_orbit_pan_sensitivity = freecam_orbit_pan_sensitivity;
+            viewport_state.freecam_pan_sensitivity = freecam_pan_sensitivity;
             viewport_state.show_options_panel = show_options_panel;
         }
 
@@ -4368,6 +4405,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                     freecam_speed_max,
                     freecam_boost_multiplier,
                     freecam_orbit_distance,
+                    freecam_orbit_pan_sensitivity,
+                    freecam_pan_sensitivity,
                 },
             );
         }
@@ -4484,6 +4523,14 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             .get_resource::<EditorViewportState>()
             .map(|state| state.freecam_orbit_distance)
             .unwrap_or(FREECAM_ORBIT_DISTANCE_DEFAULT);
+        let mut freecam_orbit_pan_sensitivity = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_orbit_pan_sensitivity)
+            .unwrap_or(FREECAM_ORBIT_PAN_SENSITIVITY_DEFAULT);
+        let mut freecam_pan_sensitivity = world
+            .get_resource::<EditorViewportState>()
+            .map(|state| state.freecam_pan_sensitivity)
+            .unwrap_or(FREECAM_PAN_SENSITIVITY_DEFAULT);
         let mut gizmo_mode = world
             .get_resource::<EditorGizmoState>()
             .map(|state| state.mode)
@@ -4672,6 +4719,8 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                 ui,
                                 &mut navigation_gizmo,
                                 &mut freecam_orbit_distance,
+                                &mut freecam_orbit_pan_sensitivity,
+                                &mut freecam_pan_sensitivity,
                             );
                         });
                 });
@@ -5497,6 +5546,12 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                 &mut freecam_boost_multiplier,
                 &mut freecam_orbit_distance,
             );
+            freecam_orbit_pan_sensitivity = freecam_orbit_pan_sensitivity.clamp(
+                FREECAM_ORBIT_PAN_SENSITIVITY_MIN,
+                FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+            );
+            freecam_pan_sensitivity = freecam_pan_sensitivity
+                .clamp(FREECAM_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX);
             navigation_gizmo.sanitize();
             viewport_state.graph_template = graph_template.clone();
             viewport_state.play_mode_view = play_mode_view;
@@ -5523,6 +5578,8 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             viewport_state.freecam_speed_max = freecam_speed_max;
             viewport_state.freecam_boost_multiplier = freecam_boost_multiplier;
             viewport_state.freecam_orbit_distance = freecam_orbit_distance;
+            viewport_state.freecam_orbit_pan_sensitivity = freecam_orbit_pan_sensitivity;
+            viewport_state.freecam_pan_sensitivity = freecam_pan_sensitivity;
             viewport_state.show_options_panel = show_options_panel;
         }
 

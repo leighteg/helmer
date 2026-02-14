@@ -141,6 +141,12 @@ pub const FREECAM_BOOST_MULTIPLIER_MAX: f32 = 10.0;
 pub const FREECAM_ORBIT_DISTANCE_DEFAULT: f32 = 5.0;
 pub const FREECAM_ORBIT_DISTANCE_MIN: f32 = 0.25;
 pub const FREECAM_ORBIT_DISTANCE_MAX: f32 = 5000.0;
+pub const FREECAM_ORBIT_PAN_SENSITIVITY_DEFAULT: f32 = 0.0020;
+pub const FREECAM_ORBIT_PAN_SENSITIVITY_MIN: f32 = 0.0001;
+pub const FREECAM_ORBIT_PAN_SENSITIVITY_MAX: f32 = 0.05;
+pub const FREECAM_PAN_SENSITIVITY_DEFAULT: f32 = 0.0008;
+pub const FREECAM_PAN_SENSITIVITY_MIN: f32 = 0.00005;
+pub const FREECAM_PAN_SENSITIVITY_MAX: f32 = 0.05;
 
 pub const NAV_GIZMO_RADIUS_SCALE_DEFAULT: f32 = 1.0;
 pub const NAV_GIZMO_RADIUS_SCALE_MIN: f32 = 0.5;
@@ -523,6 +529,8 @@ pub struct EditorViewportState {
     pub freecam_speed_max: f32,
     pub freecam_boost_multiplier: f32,
     pub freecam_orbit_distance: f32,
+    pub freecam_orbit_pan_sensitivity: f32,
+    pub freecam_pan_sensitivity: f32,
 }
 
 impl Default for EditorViewportState {
@@ -554,6 +562,8 @@ impl Default for EditorViewportState {
             freecam_speed_max: FREECAM_SPEED_MAX_DEFAULT,
             freecam_boost_multiplier: FREECAM_BOOST_MULTIPLIER_DEFAULT,
             freecam_orbit_distance: FREECAM_ORBIT_DISTANCE_DEFAULT,
+            freecam_orbit_pan_sensitivity: FREECAM_ORBIT_PAN_SENSITIVITY_DEFAULT,
+            freecam_pan_sensitivity: FREECAM_PAN_SENSITIVITY_DEFAULT,
         }
     }
 }
@@ -587,14 +597,28 @@ pub fn ensure_viewport_camera_for_pane(world: &mut World, pane_id: u64) -> Entit
         format!("Viewport Camera {}", pane_id)
     };
 
-    world
+    let inherited_listener_enabled = world
+        .query::<(&EditorViewportCamera, &BevyAudioListener)>()
+        .iter(world)
+        .next()
+        .map(|(_, listener)| listener.0.enabled);
+
+    let entity = world
         .spawn((
             EditorViewportCamera { pane_id },
             BevyTransform::default(),
             BevyCamera::default(),
             Name::new(name),
         ))
-        .id()
+        .id();
+
+    if let Some(enabled) = inherited_listener_enabled {
+        world
+            .entity_mut(entity)
+            .insert(BevyWrapper(AudioListener { enabled }));
+    }
+
+    entity
 }
 
 pub fn activate_viewport_camera(world: &mut World) -> Entity {
@@ -616,6 +640,11 @@ pub fn set_viewport_audio_listener_enabled(world: &mut World, enabled: bool) {
         .iter(world)
         .map(|(entity, _)| entity)
         .collect();
+    let active_viewport_entity = world
+        .query::<(Entity, &EditorViewportCamera, Option<&BevyActiveCamera>)>()
+        .iter(world)
+        .find_map(|(entity, _, active)| active.map(|_| entity));
+    let listener_entity = active_viewport_entity.or_else(|| entities.first().copied());
 
     if entities.is_empty() && enabled {
         let entity = ensure_viewport_camera(world);
@@ -626,12 +655,13 @@ pub fn set_viewport_audio_listener_enabled(world: &mut World, enabled: bool) {
     }
 
     for entity in entities {
-        if enabled {
+        let should_enable = enabled && Some(entity) == listener_entity;
+        if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
+            listener.0.enabled = should_enable;
+        } else if should_enable {
             world
                 .entity_mut(entity)
                 .insert(BevyWrapper(AudioListener { enabled: true }));
-        } else if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
-            listener.0.enabled = false;
         }
     }
 }

@@ -3613,17 +3613,7 @@ fn load_primitive_mesh(
         return handle;
     }
 
-    let mesh_asset = match kind {
-        PrimitiveKind::Cube => helmer::provided::components::MeshAsset::cube("cube".to_string()),
-        PrimitiveKind::UvSphere(segments, rings) => {
-            helmer::provided::components::MeshAsset::uv_sphere(
-                "uv sphere".to_string(),
-                segments,
-                rings,
-            )
-        }
-        PrimitiveKind::Plane => helmer::provided::components::MeshAsset::plane("plane".to_string()),
-    };
+    let mesh_asset = kind.to_mesh_asset();
 
     let handle = asset_server
         .0

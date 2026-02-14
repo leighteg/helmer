@@ -5889,7 +5889,34 @@ pub fn draw_scene_window(ui: &mut Ui, world: &mut World) {
                         push_command(
                             world,
                             EditorCommand::CreateEntity {
-                                kind: SpawnKind::Primitive(PrimitiveKind::UvSphere(12, 12)),
+                                kind: SpawnKind::Primitive(PrimitiveKind::default_uv_sphere()),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Icosphere").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::default_icosphere()),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Cylinder").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::default_cylinder()),
+                            },
+                        );
+                        ui.close_menu();
+                    }
+                    if ui.button("Capsule").clicked() {
+                        push_command(
+                            world,
+                            EditorCommand::CreateEntity {
+                                kind: SpawnKind::Primitive(PrimitiveKind::default_capsule()),
                             },
                         );
                         ui.close_menu();
@@ -8784,9 +8811,7 @@ fn collect_hierarchy_entries(world: &mut World) -> HierarchyData {
         if mesh.is_some() {
             let mesh_tag = editor_mesh
                 .map(|mesh| match &mesh.source {
-                    MeshSource::Primitive(PrimitiveKind::Cube) => "Cube",
-                    MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => "UV Sphere",
-                    MeshSource::Primitive(PrimitiveKind::Plane) => "Plane",
+                    MeshSource::Primitive(kind) => kind.display_name(),
                     MeshSource::Asset { .. } => "Mesh",
                 })
                 .unwrap_or("Mesh");
@@ -9875,11 +9900,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 .unwrap_or(true);
 
             let mesh_label = match &mesh_source {
-                MeshSource::Primitive(PrimitiveKind::Cube) => "Mesh: Cube".to_string(),
-                MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => {
-                    "Mesh: UV Sphere".to_string()
-                }
-                MeshSource::Primitive(PrimitiveKind::Plane) => "Mesh: Plane".to_string(),
+                MeshSource::Primitive(kind) => format!("Mesh: {}", kind.display_name()),
                 MeshSource::Asset { path } => {
                     let relative = project_relative_path(&project, Path::new(path));
                     format!("Mesh: {}", relative)
@@ -9896,14 +9917,40 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             let mut mesh_changed = false;
             let mut material_changed = false;
-            let mut uv_edit_response = EditResponse::default();
+            let mut mesh_edit_response = EditResponse::default();
 
             let mesh_source_button = ui.menu_button(mesh_label, |ui| {
-                let (mut segments, mut rings) = match mesh_source {
+                let (uv_segments, uv_rings) = match mesh_source {
                     MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings)) => {
                         (segments, rings)
                     }
-                    _ => (12, 12),
+                    _ => (
+                        PrimitiveKind::DEFAULT_UV_SPHERE_SEGMENTS,
+                        PrimitiveKind::DEFAULT_UV_SPHERE_RINGS,
+                    ),
+                };
+                let icosphere_subdivisions = match mesh_source {
+                    MeshSource::Primitive(PrimitiveKind::Icosphere(subdivisions)) => subdivisions,
+                    _ => PrimitiveKind::DEFAULT_ICOSPHERE_SUBDIVISIONS,
+                };
+                let (cylinder_radial_segments, cylinder_height_segments) = match mesh_source {
+                    MeshSource::Primitive(PrimitiveKind::Cylinder(
+                        radial_segments,
+                        height_segments,
+                    )) => (radial_segments, height_segments),
+                    _ => (
+                        PrimitiveKind::DEFAULT_CYLINDER_RADIAL_SEGMENTS,
+                        PrimitiveKind::DEFAULT_CYLINDER_HEIGHT_SEGMENTS,
+                    ),
+                };
+                let (capsule_segments, capsule_rings) = match mesh_source {
+                    MeshSource::Primitive(PrimitiveKind::Capsule(segments, rings)) => {
+                        (segments, rings)
+                    }
+                    _ => (
+                        PrimitiveKind::DEFAULT_CAPSULE_SEGMENTS,
+                        PrimitiveKind::DEFAULT_CAPSULE_RINGS,
+                    ),
                 };
 
                 if ui.button("Cube").clicked() {
@@ -9912,7 +9959,30 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.close_menu();
                 }
                 if ui.button("UV Sphere").clicked() {
-                    mesh_source = MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings));
+                    mesh_source =
+                        MeshSource::Primitive(PrimitiveKind::UvSphere(uv_segments, uv_rings));
+                    mesh_changed = true;
+                    ui.close_menu();
+                }
+                if ui.button("Icosphere").clicked() {
+                    mesh_source =
+                        MeshSource::Primitive(PrimitiveKind::Icosphere(icosphere_subdivisions));
+                    mesh_changed = true;
+                    ui.close_menu();
+                }
+                if ui.button("Cylinder").clicked() {
+                    mesh_source = MeshSource::Primitive(PrimitiveKind::Cylinder(
+                        cylinder_radial_segments,
+                        cylinder_height_segments,
+                    ));
+                    mesh_changed = true;
+                    ui.close_menu();
+                }
+                if ui.button("Capsule").clicked() {
+                    mesh_source = MeshSource::Primitive(PrimitiveKind::Capsule(
+                        capsule_segments,
+                        capsule_rings,
+                    ));
                     mesh_changed = true;
                     ui.close_menu();
                 }
@@ -9956,36 +10026,138 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             }
             highlight_drop_target(ui, &mesh_source_button.response);
 
-            if let MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings)) = mesh_source {
-                let mut next_segments = segments;
-                let mut next_rings = rings;
-                ui.indent("uv_sphere_settings", |ui| {
-                    ui.label("UV Sphere");
-                    ui.horizontal(|ui| {
-                        ui.label("Segments");
-                        let response = ui.add(
-                            egui::DragValue::new(&mut next_segments)
-                                .range(3..=128)
-                                .speed(1),
-                        );
-                        uv_edit_response.merge(EditResponse::from_response(&response));
+            match &mesh_source {
+                MeshSource::Primitive(PrimitiveKind::UvSphere(segments, rings)) => {
+                    let mut next_segments = *segments;
+                    let mut next_rings = *rings;
+                    let mut edit_response = EditResponse::default();
+                    ui.indent("uv_sphere_settings", |ui| {
+                        ui.label("UV Sphere");
+                        ui.horizontal(|ui| {
+                            ui.label("Segments");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_segments)
+                                    .range(3..=128)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Rings");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_rings)
+                                    .range(3..=128)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Rings");
-                        let response = ui.add(
-                            egui::DragValue::new(&mut next_rings)
-                                .range(3..=128)
-                                .speed(1),
-                        );
-                        uv_edit_response.merge(EditResponse::from_response(&response));
-                    });
-                });
-                begin_edit_undo(world, "Mesh", uv_edit_response);
-                if next_segments != segments || next_rings != rings {
-                    mesh_source =
-                        MeshSource::Primitive(PrimitiveKind::UvSphere(next_segments, next_rings));
-                    mesh_changed = true;
+                    begin_edit_undo(world, "Mesh", edit_response);
+                    mesh_edit_response.merge(edit_response);
+                    if next_segments != *segments || next_rings != *rings {
+                        mesh_source = MeshSource::Primitive(PrimitiveKind::UvSphere(
+                            next_segments,
+                            next_rings,
+                        ));
+                        mesh_changed = true;
+                    }
                 }
+                MeshSource::Primitive(PrimitiveKind::Icosphere(subdivisions)) => {
+                    let mut next_subdivisions = *subdivisions;
+                    let mut edit_response = EditResponse::default();
+                    ui.indent("icosphere_settings", |ui| {
+                        ui.label("Icosphere");
+                        ui.horizontal(|ui| {
+                            ui.label("Subdivisions");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_subdivisions)
+                                    .range(0..=6)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                    });
+                    begin_edit_undo(world, "Mesh", edit_response);
+                    mesh_edit_response.merge(edit_response);
+                    if next_subdivisions != *subdivisions {
+                        mesh_source =
+                            MeshSource::Primitive(PrimitiveKind::Icosphere(next_subdivisions));
+                        mesh_changed = true;
+                    }
+                }
+                MeshSource::Primitive(PrimitiveKind::Cylinder(
+                    radial_segments,
+                    height_segments,
+                )) => {
+                    let mut next_radial_segments = *radial_segments;
+                    let mut next_height_segments = *height_segments;
+                    let mut edit_response = EditResponse::default();
+                    ui.indent("cylinder_settings", |ui| {
+                        ui.label("Cylinder");
+                        ui.horizontal(|ui| {
+                            ui.label("Radial Segments");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_radial_segments)
+                                    .range(3..=128)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Height Segments");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_height_segments)
+                                    .range(1..=64)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                    });
+                    begin_edit_undo(world, "Mesh", edit_response);
+                    mesh_edit_response.merge(edit_response);
+                    if next_radial_segments != *radial_segments
+                        || next_height_segments != *height_segments
+                    {
+                        mesh_source = MeshSource::Primitive(PrimitiveKind::Cylinder(
+                            next_radial_segments,
+                            next_height_segments,
+                        ));
+                        mesh_changed = true;
+                    }
+                }
+                MeshSource::Primitive(PrimitiveKind::Capsule(segments, rings)) => {
+                    let mut next_segments = *segments;
+                    let mut next_rings = *rings;
+                    let mut edit_response = EditResponse::default();
+                    ui.indent("capsule_settings", |ui| {
+                        ui.label("Capsule");
+                        ui.horizontal(|ui| {
+                            ui.label("Segments");
+                            let response = ui.add(
+                                egui::DragValue::new(&mut next_segments)
+                                    .range(3..=128)
+                                    .speed(1),
+                            );
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Rings");
+                            let response = ui
+                                .add(egui::DragValue::new(&mut next_rings).range(2..=64).speed(1));
+                            edit_response.merge(EditResponse::from_response(&response));
+                        });
+                    });
+                    begin_edit_undo(world, "Mesh", edit_response);
+                    mesh_edit_response.merge(edit_response);
+                    if next_segments != *segments || next_rings != *rings {
+                        mesh_source = MeshSource::Primitive(PrimitiveKind::Capsule(
+                            next_segments,
+                            next_rings,
+                        ));
+                        mesh_changed = true;
+                    }
+                }
+                _ => {}
             }
 
             let material_button = ui.menu_button(material_label, |ui| {
@@ -10064,14 +10236,14 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 );
             }
 
-            let uv_editing = uv_edit_response.changed
-                || uv_edit_response.drag_started
-                || uv_edit_response.drag_released
-                || uv_edit_response.lost_focus;
-            if uv_editing {
-                end_edit_undo(world, uv_edit_response);
+            let mesh_editing = mesh_edit_response.changed
+                || mesh_edit_response.drag_started
+                || mesh_edit_response.drag_released
+                || mesh_edit_response.lost_focus;
+            if mesh_editing {
+                end_edit_undo(world, mesh_edit_response);
             }
-            if (mesh_changed || material_changed) && !uv_editing {
+            if (mesh_changed || material_changed) && !mesh_editing {
                 let label = if mesh_changed { "Mesh" } else { "Material" };
                 push_undo_snapshot(world, label);
             }
@@ -17254,17 +17426,7 @@ fn load_primitive_mesh(
         return handle;
     }
 
-    let mesh_asset = match kind {
-        PrimitiveKind::Cube => helmer::provided::components::MeshAsset::cube("cube".to_string()),
-        PrimitiveKind::UvSphere(segments, rings) => {
-            helmer::provided::components::MeshAsset::uv_sphere(
-                "uv sphere".to_string(),
-                segments,
-                rings,
-            )
-        }
-        PrimitiveKind::Plane => helmer::provided::components::MeshAsset::plane("plane".to_string()),
-    };
+    let mesh_asset = kind.to_mesh_asset();
 
     let handle = asset_server
         .0

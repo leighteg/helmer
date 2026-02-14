@@ -20,7 +20,7 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
-use crate::editor::AssetDragPayload;
+use crate::editor::{AssetDragPayload, assets::PrimitiveKind};
 
 pub const VISUAL_SCRIPT_EXTENSION: &str = "hvs";
 pub const VISUAL_SCRIPT_FUNCTION_EXTENSION: &str = "hvsf";
@@ -35,6 +35,14 @@ const PHYSICS_QUERY_FLAG_EXCLUDE_KINEMATIC: u32 = 1 << 1;
 const PHYSICS_QUERY_FLAG_EXCLUDE_DYNAMIC: u32 = 1 << 2;
 const PHYSICS_QUERY_FLAG_EXCLUDE_SENSORS: u32 = 1 << 3;
 const PHYSICS_QUERY_FLAG_EXCLUDE_SOLIDS: u32 = 1 << 4;
+const VISUAL_MESH_PRIMITIVE_CHOICES: [&str; 6] = [
+    "Cube",
+    "UV Sphere",
+    "Icosphere",
+    "Cylinder",
+    "Capsule",
+    "Plane",
+];
 
 const PIN_COLOR_EVENT: Color32 = Color32::from_rgb(67, 160, 71);
 const PIN_COLOR_EXEC: Color32 = Color32::from_rgb(74, 144, 226);
@@ -14156,9 +14164,7 @@ fn draw_mesh_renderer_data_editor(
     if source.is_empty() {
         source = "Cube".to_string();
     }
-    let is_primitive = source.eq_ignore_ascii_case("cube")
-        || source.eq_ignore_ascii_case("uv sphere")
-        || source.eq_ignore_ascii_case("plane");
+    let is_primitive = PrimitiveKind::from_source_label(&source).is_some();
     let mut source_mode_asset = !is_primitive;
     let mut material = json_object_string(&object, "material", "");
     let mut casts_shadow = json_object_bool(&object, "casts_shadow", true);
@@ -14198,7 +14204,7 @@ fn draw_mesh_renderer_data_editor(
             ComboBox::from_id_salt(("visual_mesh_source_primitive_inline", ui.id()))
                 .selected_text(source.clone())
                 .show_ui(ui, |ui| {
-                    for primitive in ["Cube", "UV Sphere", "Plane"] {
+                    for primitive in VISUAL_MESH_PRIMITIVE_CHOICES {
                         changed |= ui
                             .selectable_value(&mut source, primitive.to_string(), primitive)
                             .changed();

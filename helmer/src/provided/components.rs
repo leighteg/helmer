@@ -2,6 +2,7 @@ use crate::animation::{Pose, Skeleton, Skin};
 use crate::audio::{AudioBus, AudioPlaybackState};
 use crate::graphics::common::renderer::{AlphaMode, Vertex};
 use glam::{Mat4, Quat, Vec2, Vec3};
+use hashbrown::HashMap;
 use std::sync::Arc;
 
 // --- Core Transform Component ---
@@ -597,6 +598,24 @@ fn cubic_bezier(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
     p0 * uuu + p1 * (3.0 * uu * t) + p2 * (3.0 * u * tt) + p3 * ttt
 }
 
+fn icosphere_midpoint(
+    a: u32,
+    b: u32,
+    vertices: &mut Vec<Vec3>,
+    cache: &mut HashMap<(u32, u32), u32>,
+) -> u32 {
+    let key = if a < b { (a, b) } else { (b, a) };
+    if let Some(idx) = cache.get(&key) {
+        return *idx;
+    }
+
+    let midpoint = (vertices[a as usize] + vertices[b as usize]).normalize_or_zero();
+    let idx = vertices.len() as u32;
+    vertices.push(midpoint);
+    cache.insert(key, idx);
+    idx
+}
+
 impl MeshAsset {
     // New constructor for already generated/loaded raw data
     pub fn new_raw(name: String, vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
@@ -619,7 +638,6 @@ impl MeshAsset {
     }
 
     // --- Default Primitive Mesh Generation Methods ---
-    // These now use `Self::new_raw` to create the MeshAsset
 
     pub fn cube(name: String) -> Self {
         let vertices = vec![
@@ -818,12 +836,8 @@ impl MeshAsset {
         ];
 
         let indices = vec![
-            0, 1, 2, 2, 3, 0, // Front
-            4, 7, 6, 6, 5, 4, // Back (was 4,6,5,6,4,7)
-            8, 9, 10, 10, 11, 8, // Top
-            12, 15, 14, 14, 13, 12, // Bottom (was 12,14,13,14,12,15)
-            16, 17, 18, 18, 19, 16, // Right
-            20, 23, 22, 22, 21, 20, // Left (was 20,22,21,22,20,23)
+            0, 1, 2, 2, 3, 0, 4, 7, 6, 6, 5, 4, 8, 9, 10, 10, 11, 8, 12, 15, 14, 14, 13, 12, 16,
+            17, 18, 18, 19, 16, 20, 23, 22, 22, 21, 20,
         ];
         Self::new_raw(name, vertices, indices)
     }
@@ -917,6 +931,254 @@ impl MeshAsset {
                 indices.push(p3);
             }
         }
+        Self::new_raw(name, vertices, indices)
+    }
+
+    pub fn cylinder(name: String, radial_segments: u32, height_segments: u32) -> Self {
+        let radial_segments = radial_segments.max(3);
+        let height_segments = height_segments.max(1);
+        let radius = 0.5f32;
+        let half_height = 0.5f32;
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        for y in 0..=height_segments {
+            let v = y as f32 / height_segments as f32;
+            let y_pos = half_height - (v * 2.0 * half_height);
+
+            for s in 0..=radial_segments {
+                let u = s as f32 / radial_segments as f32;
+                let theta = u * std::f32::consts::TAU;
+                let (sin_theta, cos_theta) = theta.sin_cos();
+                let x = sin_theta * radius;
+                let z = cos_theta * radius;
+
+                let normal = Vec3::new(sin_theta, 0.0, cos_theta);
+                let tangent = Vec3::new(cos_theta, 0.0, -sin_theta);
+
+                vertices.push(Vertex::new(
+                    [x, y_pos, z],
+                    normal.into(),
+                    [u, v],
+                    tangent.extend(0.0).into(),
+                ));
+            }
+        }
+
+        let stride = radial_segments + 1;
+        for y in 0..height_segments {
+            for s in 0..radial_segments {
+                let p0 = y * stride + s;
+                let p1 = p0 + 1;
+                let p2 = (y + 1) * stride + s;
+                let p3 = p2 + 1;
+
+                indices.extend_from_slice(&[p0, p2, p1, p2, p3, p1]);
+            }
+        }
+
+        let top_center = vertices.len() as u32;
+        vertices.push(Vertex::new(
+            [0.0, half_height, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.5],
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+        for s in 0..=radial_segments {
+            let u = s as f32 / radial_segments as f32;
+            let theta = u * std::f32::consts::TAU;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            vertices.push(Vertex::new(
+                [sin_theta * radius, half_height, cos_theta * radius],
+                [0.0, 1.0, 0.0],
+                [0.5 + (sin_theta * 0.5), 0.5 - (cos_theta * 0.5)],
+                [1.0, 0.0, 0.0, 1.0],
+            ));
+        }
+        for s in 0..radial_segments {
+            let current = top_center + 1 + s;
+            let next = current + 1;
+            indices.extend_from_slice(&[top_center, current, next]);
+        }
+
+        let bottom_center = vertices.len() as u32;
+        vertices.push(Vertex::new(
+            [0.0, -half_height, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.5, 0.5],
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+        for s in 0..=radial_segments {
+            let u = s as f32 / radial_segments as f32;
+            let theta = u * std::f32::consts::TAU;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            vertices.push(Vertex::new(
+                [sin_theta * radius, -half_height, cos_theta * radius],
+                [0.0, -1.0, 0.0],
+                [0.5 + (sin_theta * 0.5), 0.5 + (cos_theta * 0.5)],
+                [1.0, 0.0, 0.0, 1.0],
+            ));
+        }
+        for s in 0..radial_segments {
+            let current = bottom_center + 1 + s;
+            let next = current + 1;
+            indices.extend_from_slice(&[bottom_center, next, current]);
+        }
+
+        Self::new_raw(name, vertices, indices)
+    }
+
+    pub fn icosphere(name: String, subdivisions: u32) -> Self {
+        let subdivisions = subdivisions.min(6);
+        let t = (1.0 + 5.0f32.sqrt()) * 0.5;
+        let mut positions = vec![
+            Vec3::new(-1.0, t, 0.0),
+            Vec3::new(1.0, t, 0.0),
+            Vec3::new(-1.0, -t, 0.0),
+            Vec3::new(1.0, -t, 0.0),
+            Vec3::new(0.0, -1.0, t),
+            Vec3::new(0.0, 1.0, t),
+            Vec3::new(0.0, -1.0, -t),
+            Vec3::new(0.0, 1.0, -t),
+            Vec3::new(t, 0.0, -1.0),
+            Vec3::new(t, 0.0, 1.0),
+            Vec3::new(-t, 0.0, -1.0),
+            Vec3::new(-t, 0.0, 1.0),
+        ];
+        for position in &mut positions {
+            *position = position.normalize_or_zero();
+        }
+
+        let mut faces = vec![
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ];
+
+        for _ in 0..subdivisions {
+            let mut midpoint_cache = HashMap::new();
+            let mut next_faces = Vec::with_capacity(faces.len() * 4);
+
+            for [a, b, c] in faces {
+                let ab = icosphere_midpoint(a, b, &mut positions, &mut midpoint_cache);
+                let bc = icosphere_midpoint(b, c, &mut positions, &mut midpoint_cache);
+                let ca = icosphere_midpoint(c, a, &mut positions, &mut midpoint_cache);
+
+                next_faces.push([a, ab, ca]);
+                next_faces.push([b, bc, ab]);
+                next_faces.push([c, ca, bc]);
+                next_faces.push([ab, bc, ca]);
+            }
+
+            faces = next_faces;
+        }
+
+        let vertices = positions
+            .iter()
+            .map(|position| {
+                let normal = position.normalize_or_zero();
+                let u = 0.5 + (-normal.x).atan2(normal.z) / std::f32::consts::TAU;
+                let v = 0.5 - normal.y.asin() / std::f32::consts::PI;
+                let tangent = if normal.y.abs() > 0.999 {
+                    Vec3::X
+                } else {
+                    Vec3::new(normal.z, 0.0, -normal.x).normalize_or_zero()
+                };
+                Vertex::new(
+                    normal.into(),
+                    normal.into(),
+                    [u, v],
+                    tangent.extend(0.0).into(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let indices = faces
+            .iter()
+            .flat_map(|face| [face[0], face[1], face[2]])
+            .collect::<Vec<_>>();
+
+        Self::new_raw(name, vertices, indices)
+    }
+
+    pub fn capsule(name: String, segments: u32, rings: u32) -> Self {
+        let segments = segments.max(3);
+        let rings = rings.max(2);
+        let radius = 0.5f32;
+        let half_length = 0.5f32;
+
+        let mut ring_data = Vec::with_capacity((rings * 2 + 2) as usize);
+        for i in 0..=rings {
+            let t = i as f32 / rings as f32;
+            let phi = t * std::f32::consts::FRAC_PI_2;
+            ring_data.push((half_length + (radius * phi.cos()), radius * phi.sin()));
+        }
+        for i in 0..=rings {
+            let t = i as f32 / rings as f32;
+            let phi = std::f32::consts::FRAC_PI_2 + (t * std::f32::consts::FRAC_PI_2);
+            ring_data.push((-half_length + (radius * phi.cos()), radius * phi.sin()));
+        }
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let ring_count = ring_data.len() as u32;
+        let stride = segments + 1;
+
+        for (ring_index, (y, ring_radius)) in ring_data.iter().enumerate() {
+            let v = ring_index as f32 / (ring_data.len().saturating_sub(1)) as f32;
+            for s in 0..=segments {
+                let u = s as f32 / segments as f32;
+                let theta = u * std::f32::consts::TAU;
+                let (sin_theta, cos_theta) = theta.sin_cos();
+
+                let position = Vec3::new(sin_theta * *ring_radius, *y, cos_theta * *ring_radius);
+                let normal = if *y > half_length {
+                    (position - Vec3::new(0.0, half_length, 0.0)).normalize_or_zero()
+                } else if *y < -half_length {
+                    (position - Vec3::new(0.0, -half_length, 0.0)).normalize_or_zero()
+                } else {
+                    Vec3::new(sin_theta, 0.0, cos_theta)
+                };
+                let tangent = Vec3::new(cos_theta, 0.0, -sin_theta);
+
+                vertices.push(Vertex::new(
+                    position.into(),
+                    normal.into(),
+                    [u, v],
+                    tangent.extend(0.0).into(),
+                ));
+            }
+        }
+
+        for r in 0..(ring_count - 1) {
+            for s in 0..segments {
+                let p0 = r * stride + s;
+                let p1 = p0 + 1;
+                let p2 = (r + 1) * stride + s;
+                let p3 = p2 + 1;
+
+                indices.extend_from_slice(&[p0, p2, p1, p2, p3, p1]);
+            }
+        }
+
         Self::new_raw(name, vertices, indices)
     }
 }

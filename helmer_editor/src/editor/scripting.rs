@@ -31,8 +31,8 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 
 use helmer::audio::{AudioBus, AudioPlaybackState};
 use helmer::provided::components::{
-    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshAsset, MeshRenderer,
-    Spline, SplineFollower, SplineMode,
+    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer, Spline,
+    SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
@@ -3740,14 +3740,8 @@ fn build_ecs_table(
 
             if let Some(editor_mesh) = world.get::<EditorMesh>(entity) {
                 match &editor_mesh.source {
-                    MeshSource::Primitive(PrimitiveKind::Cube) => {
-                        table.set("source", "Cube")?;
-                    }
-                    MeshSource::Primitive(PrimitiveKind::UvSphere(_, _)) => {
-                        table.set("source", "UV Sphere")?;
-                    }
-                    MeshSource::Primitive(PrimitiveKind::Plane) => {
-                        table.set("source", "Plane")?;
+                    MeshSource::Primitive(kind) => {
+                        table.set("source", kind.display_name())?;
                     }
                     MeshSource::Asset { path } => {
                         table.set("source", path.clone())?;
@@ -8833,12 +8827,8 @@ fn parse_mesh_source(value: Value, project: Option<&EditorProject>) -> Option<Me
     match value {
         Value::String(value) => {
             let raw = value.to_string_lossy().to_string();
-            if raw.eq_ignore_ascii_case("cube") {
-                Some(MeshSource::Primitive(PrimitiveKind::Cube))
-            } else if raw.eq_ignore_ascii_case("uv sphere") {
-                Some(MeshSource::Primitive(PrimitiveKind::UvSphere(12, 12)))
-            } else if raw.eq_ignore_ascii_case("plane") {
-                Some(MeshSource::Primitive(PrimitiveKind::Plane))
+            if let Some(kind) = PrimitiveKind::from_source_label(&raw) {
+                Some(MeshSource::Primitive(kind))
             } else {
                 Some(MeshSource::Asset {
                     path: normalize_project_path(project, Path::new(&raw)),
@@ -8847,14 +8837,8 @@ fn parse_mesh_source(value: Value, project: Option<&EditorProject>) -> Option<Me
         }
         Value::Table(table) => {
             if let Ok(kind) = table.get::<String>("primitive") {
-                if kind.eq_ignore_ascii_case("cube") {
-                    return Some(MeshSource::Primitive(PrimitiveKind::Cube));
-                }
-                if kind.eq_ignore_ascii_case("uv sphere") {
-                    return Some(MeshSource::Primitive(PrimitiveKind::UvSphere(12, 12)));
-                }
-                if kind.eq_ignore_ascii_case("plane") {
-                    return Some(MeshSource::Primitive(PrimitiveKind::Plane));
+                if let Some(parsed) = PrimitiveKind::from_source_label(&kind) {
+                    return Some(MeshSource::Primitive(parsed));
                 }
             }
             if let Ok(path) = table.get::<String>("path") {
@@ -9037,13 +9021,7 @@ fn load_primitive_mesh(
         return handle;
     }
 
-    let mesh_asset = match kind {
-        PrimitiveKind::Cube => MeshAsset::cube("cube".to_string()),
-        PrimitiveKind::UvSphere(segments, rings) => {
-            MeshAsset::uv_sphere("uv sphere".to_string(), segments, rings)
-        }
-        PrimitiveKind::Plane => MeshAsset::plane("plane".to_string()),
-    };
+    let mesh_asset = kind.to_mesh_asset();
 
     let handle = asset_server
         .0

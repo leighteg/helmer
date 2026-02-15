@@ -3171,8 +3171,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             .cloned()
             .unwrap_or_default();
         let fallback_resolution = fallback_viewport_state.render_resolution;
-        let fallback_pane_settings =
+        let mut fallback_pane_settings =
             EditorPaneViewportSettings::from_viewport_state(&fallback_viewport_state);
+        fallback_pane_settings.gizmos_in_play = !play_viewport;
         let (mut render_resolution, pane_settings) =
             if let Some(mut pane_state) = world.get_resource_mut::<EditorPaneViewportState>() {
                 let render_resolution = pane_state
@@ -5616,9 +5617,6 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
 
     with_middle_drag_blocked(ui, world, |ui, world| {
         if !project_loaded {
-            ui.label("No project loaded");
-            ui.separator();
-
             let mut open_request: Option<PathBuf> = None;
             let mut create_request: Option<(String, PathBuf)> = None;
             let mut browse_requested = false;

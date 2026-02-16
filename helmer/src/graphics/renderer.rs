@@ -1302,6 +1302,9 @@ struct GraphCacheKey {
     config_signature: RenderGraphConfigSignature,
 }
 
+const MIN_CACHED_GRAPH_VARIANTS_PER_SIGNATURE: usize = 2;
+const MAX_CACHED_GRAPH_VARIANTS_PER_SIGNATURE: usize = 3;
+
 struct OffscreenViewportTarget {
     size: PhysicalSize<u32>,
     view: wgpu::TextureView,
@@ -1970,7 +1973,15 @@ impl GraphRenderer {
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
+            .or_else(|| {
+                surface_caps
+                    .formats
+                    .iter()
+                    .copied()
+                    .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
+            })
+            .or_else(|| surface_caps.formats.iter().copied().find(|f| !f.is_srgb()))
             .unwrap_or(surface_caps.formats[0]);
 
         let surface_config = wgpu::SurfaceConfiguration {
@@ -2875,11 +2886,13 @@ impl GraphRenderer {
         }
 
         let main_render_config = scene.data.render_config;
+        let max_texture_dimension = self.device_caps.limits.max_texture_dimension_2d.max(1);
         let (desired_graph_surface_size, allow_graph_resize_debounce) =
             Self::desired_graph_surface_size(
                 self.surface_size,
                 &scene.data.viewports,
                 scene.data.render_main_scene_to_swapchain,
+                max_texture_dimension,
             );
         let viewport_resize_debounce_ms = main_render_config.viewport_resize_debounce_ms;
         let graph_surface_size = self.debounced_graph_surface_size(
@@ -2927,8 +2940,10 @@ impl GraphRenderer {
 
         for viewport in scene.data.viewports.clone() {
             active_offscreen_ids.insert(viewport.id);
-            let target_width = viewport.target_size[0].max(1);
-            let target_height = viewport.target_size[1].max(1);
+            let clamped_target_size =
+                self.clamp_render_target_extent(viewport.target_size[0], viewport.target_size[1]);
+            let target_width = clamped_target_size.width;
+            let target_height = clamped_target_size.height;
             let target_view = self.ensure_offscreen_viewport_target(
                 viewport.id,
                 target_width,
@@ -2940,7 +2955,7 @@ impl GraphRenderer {
                 .offscreen_viewports
                 .get(&viewport.id)
                 .map(|target| target.size)
-                .unwrap_or_else(|| PhysicalSize::new(target_width, target_height));
+                .unwrap_or(clamped_target_size);
             let prev_transform = self
                 .offscreen_viewport_prev_cameras
                 .get(&viewport.id)
@@ -4643,6 +4658,41 @@ impl GraphRenderer {
         }
     }
 
+    fn graph_variant_cache_limit(&self) -> usize {
+        self.offscreen_viewports.len().saturating_add(2).clamp(
+            MIN_CACHED_GRAPH_VARIANTS_PER_SIGNATURE,
+            MAX_CACHED_GRAPH_VARIANTS_PER_SIGNATURE,
+        )
+    }
+
+    fn prune_cached_graph_variants(&mut self, requested_key: GraphCacheKey) {
+        let limit = self.graph_variant_cache_limit();
+        let mut keys: Vec<GraphCacheKey> = self
+            .cached_graphs
+            .keys()
+            .copied()
+            .filter(|key| {
+                key.spec_version == requested_key.spec_version
+                    && key.config_signature == requested_key.config_signature
+            })
+            .collect();
+        if keys.len() <= limit {
+            return;
+        }
+
+        keys.sort_by_key(|key| {
+            let dw = key.surface_width.abs_diff(requested_key.surface_width) as u64;
+            let dh = key.surface_height.abs_diff(requested_key.surface_height) as u64;
+            dw.saturating_mul(dw).saturating_add(dh.saturating_mul(dh))
+        });
+
+        for key in keys.into_iter().skip(limit) {
+            if let Some(graph) = self.cached_graphs.remove(&key) {
+                self.evict_graph_resources(&graph);
+            }
+        }
+    }
+
     fn apply_active_graph_aliases(&mut self) {
         let alias_state = self.active_graph.as_ref().map(|active| {
             (
@@ -4680,6 +4730,7 @@ impl GraphRenderer {
             if let Some(previous) = self.cached_graphs.insert(active.cache_key, active) {
                 self.evict_graph_resources(&previous);
             }
+            self.prune_cached_graph_variants(requested_key);
         }
 
         if let Some(cached) = self.cached_graphs.remove(&requested_key) {
@@ -4911,11 +4962,21 @@ impl GraphRenderer {
         }
     }
 
+    fn clamp_render_target_extent(&self, width: u32, height: u32) -> PhysicalSize<u32> {
+        let max_dimension = self.device_caps.limits.max_texture_dimension_2d.max(1);
+        PhysicalSize::new(
+            width.max(1).min(max_dimension),
+            height.max(1).min(max_dimension),
+        )
+    }
+
     fn desired_graph_surface_size(
         surface_size: PhysicalSize<u32>,
         viewports: &[RenderViewportRequest],
         render_main_scene_to_swapchain: bool,
+        max_texture_dimension: u32,
     ) -> (PhysicalSize<u32>, bool) {
+        let max_texture_dimension = max_texture_dimension.max(1);
         let mut width = if render_main_scene_to_swapchain {
             surface_size.width.max(1)
         } else {
@@ -4928,8 +4989,8 @@ impl GraphRenderer {
         };
         let mut allow_debounce = true;
         for viewport in viewports {
-            width = width.max(viewport.target_size[0].max(1));
-            height = height.max(viewport.target_size[1].max(1));
+            width = width.max(viewport.target_size[0].max(1).min(max_texture_dimension));
+            height = height.max(viewport.target_size[1].max(1).min(max_texture_dimension));
             if viewport.immediate_resize {
                 allow_debounce = false;
             }
@@ -4938,6 +4999,8 @@ impl GraphRenderer {
             width = surface_size.width.max(1);
             height = surface_size.height.max(1);
         }
+        width = width.min(max_texture_dimension);
+        height = height.min(max_texture_dimension);
         (PhysicalSize::new(width, height), allow_debounce)
     }
 
@@ -4949,7 +5012,7 @@ impl GraphRenderer {
         debounce_ms: u32,
         allow_debounce: bool,
     ) -> wgpu::TextureView {
-        let desired_size = PhysicalSize::new(width.max(1), height.max(1));
+        let desired_size = self.clamp_render_target_extent(width, height);
         let (size, needs_recreate) = match self.offscreen_viewports.get(&id) {
             Some(target) if target.size == desired_size => {
                 self.offscreen_viewport_pending_resizes.remove(&id);

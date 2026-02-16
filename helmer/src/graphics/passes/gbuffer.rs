@@ -317,10 +317,10 @@ impl GBufferPass {
                 hints.flags |= ResourceFlags::TRANSIENT;
             }
             let id = pool.create_logical(desc, Some(hints), 0, None);
-            tracing::debug!(
+            /*tracing::debug!(
                 "Allocated logical G-buffer target '{label}' with id {:?}",
                 id
-            );
+            );*/
             id
         };
 

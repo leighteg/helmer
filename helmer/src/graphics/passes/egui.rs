@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -126,6 +126,16 @@ impl RenderPass for EguiPass {
         };
         let cached_delta = ctx.rpctx.frame_inputs.get::<EguiTextureCache>();
         let native_textures = ctx.rpctx.frame_inputs.get::<EguiNativeTextures>();
+        let active_native_ids: HashSet<egui::TextureId> = native_textures
+            .as_ref()
+            .map(|textures| {
+                textures
+                    .bindings
+                    .iter()
+                    .map(|binding| binding.texture_id)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let recreated = self.ensure_renderer(ctx.device(), swapchain.format);
         let mut renderer_guard = self.renderer.write();
@@ -219,7 +229,9 @@ impl RenderPass for EguiPass {
                 renderer.update_texture(ctx.device(), ctx.queue(), *id, d);
             }
             for id in &delta.free {
-                renderer.free_texture(id);
+                if !active_native_ids.contains(id) {
+                    renderer.free_texture(id);
+                }
             }
             self.last_texture_version
                 .store(egui_data.version, Ordering::Relaxed);
@@ -229,7 +241,22 @@ impl RenderPass for EguiPass {
         }
 
         if let Some(native_textures) = native_textures.as_ref() {
+            let placeholder_native_texture = egui::epaint::ImageDelta::full(
+                egui::ImageData::Color(Arc::new(egui::ColorImage::filled(
+                    [1, 1],
+                    egui::Color32::TRANSPARENT,
+                ))),
+                egui::TextureOptions::LINEAR,
+            );
             for binding in &native_textures.bindings {
+                if renderer.texture(&binding.texture_id).is_none() {
+                    renderer.update_texture(
+                        ctx.device(),
+                        ctx.queue(),
+                        binding.texture_id,
+                        &placeholder_native_texture,
+                    );
+                }
                 renderer.update_egui_texture_from_wgpu_texture(
                     ctx.device(),
                     &binding.texture_view,

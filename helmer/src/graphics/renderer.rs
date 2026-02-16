@@ -2018,7 +2018,7 @@ impl GraphRenderer {
             );
         }
         if use_uniform_materials {
-            warn!("Fragment storage buffers unavailable; forcing bind group materials.");
+            warn!("Fragment storage buffers unavailable; forcing bind group materials");
         }
         let bindless_config =
             BindlessConfig::default().clamp_to_device(device_features, &device.limits());
@@ -5925,12 +5925,12 @@ impl GraphRenderer {
             build_mip_uploads(format, width, height, data.len(), full_mip_levels);
         if uploads.is_empty() {
             return Err(RendererError::ResourceCreation(
-                "Texture upload missing mip data.".into(),
+                "Texture upload missing mip data".into(),
             ));
         }
         if used_bytes != data.len() {
             warn!(
-                "Texture upload size mismatch (used {}, provided {}).",
+                "Texture upload size mismatch (used {}, provided {})",
                 used_bytes,
                 data.len()
             );
@@ -5939,7 +5939,7 @@ impl GraphRenderer {
         let mut mip_level_count = full_mip_levels;
         if is_compressed && provided_levels < full_mip_levels {
             warn!(
-                "Compressed texture {} missing mip data ({} of {}).",
+                "Compressed texture {} missing mip data ({} of {})",
                 id, provided_levels, full_mip_levels
             );
             mip_level_count = provided_levels.max(1);
@@ -7643,7 +7643,7 @@ impl GraphRenderer {
                     .device_caps
                     .limits
                     .max_sampled_textures_per_shader_stage,
-                "Bindless backend disabled: texture array limit exceeded; switching to bind groups."
+                "Bindless backend disabled: texture array limit exceeded; switching to bind groups"
             );
         }
 

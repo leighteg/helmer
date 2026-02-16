@@ -1263,7 +1263,7 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
         {
             Some(audio) => audio,
             None => {
-                ui.label("Audio backend not available.");
+                ui.label("Audio backend not available");
                 return;
             }
         };
@@ -3280,7 +3280,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             .filter(|entity| world.get::<BevyCamera>(*entity).is_some());
 
         let Some(texture_id) = ensure_pane_viewport_texture_id(ui, world, pane_id) else {
-            ui.label("Viewport texture allocation failed.");
+            ui.label("Viewport texture allocation failed!");
             return;
         };
         let preview_texture_id = ensure_viewport_texture_ids(ui, world).map(|(_, _, id)| id);
@@ -3857,7 +3857,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
 
                                     gizmo_settings.sanitize();
                                 } else {
-                                    ui.label("Gizmo settings unavailable.");
+                                    ui.label("Gizmo settings unavailable");
                                 }
                                 ui.separator();
                                 ui.collapsing("Navigation Gizmo", |ui| {
@@ -3917,7 +3917,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                     });
                                     runtime_config.0.render_config = render_config;
                                 } else {
-                                    ui.label("Runtime config unavailable.");
+                                    ui.label("Runtime config unavailable");
                                 }
                             });
 
@@ -3975,7 +3975,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                         }
                                     }
                                 } else {
-                                    ui.label("Viewport camera missing.");
+                                    ui.label("Viewport camera missing");
                                 }
                             });
                         });
@@ -5148,7 +5148,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
 
                                     gizmo_settings.sanitize();
                                 } else {
-                                    ui.label("Gizmo settings unavailable.");
+                                    ui.label("Gizmo settings unavailable");
                                 }
                                 ui.separator();
                                 ui.collapsing("Navigation Gizmo", |ui| {
@@ -5208,7 +5208,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                     });
                                     runtime_config.0.render_config = render_config;
                                 } else {
-                                    ui.label("Runtime config unavailable.");
+                                    ui.label("Runtime config unavailable");
                                 }
                             });
 
@@ -5239,7 +5239,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                         transform.position = position;
                                     }
                                 } else {
-                                    ui.label("Viewport camera missing.");
+                                    ui.label("Viewport camera missing");
                                 }
                             });
                         });
@@ -5652,7 +5652,7 @@ pub fn draw_project_window(ui: &mut Ui, world: &mut World) {
                 ui.separator();
                 ui.heading("Recent Projects");
                 if state.recent_projects.is_empty() {
-                    ui.label("No recent projects yet.");
+                    ui.label("No recent projects yet");
                 } else {
                     for path in state.recent_projects.clone() {
                         if ui.button(path.display().to_string()).clicked() {
@@ -8439,7 +8439,7 @@ pub fn draw_editor_window(ui: &mut Ui, world: &mut World, window_id: u64) {
 fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
     let (tabs_snapshot, active_index, window_index, window_count) = {
         let Some(state) = world.get_resource::<EditorWorkspaceState>() else {
-            ui.label("No editors available.");
+            ui.label("No editors available");
             return;
         };
         let Some((index, window)) = state
@@ -8448,7 +8448,7 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
             .enumerate()
             .find(|(_, window)| window.id == window_id)
         else {
-            ui.label("Editor window missing.");
+            ui.label("Editor window missing");
             return;
         };
         (
@@ -8686,9 +8686,9 @@ fn draw_editor_window_contents(ui: &mut Ui, world: &mut World, window_id: u64) {
             .map(|drag| drag.source_window_id == window_id)
             .unwrap_or(false)
         {
-            ui.label("Drop tab to close this editor.");
+            ui.label("Drop tab to close this editor");
         } else {
-            ui.label("No tabs open.");
+            ui.label("No tabs open");
         }
         return;
     };
@@ -10004,7 +10004,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                 }
 
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse..").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Model", &["glb", "gltf"])
                         .pick_file()
@@ -10178,7 +10178,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                 }
 
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse..").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Material", &["ron"])
                         .pick_file()
@@ -10313,7 +10313,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label("Select a glb/gltf asset");
                 }
 
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse..").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Scene", &["glb", "gltf"])
                         .pick_file()
@@ -10416,7 +10416,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let mut animator_changed = false;
             ui.horizontal(|ui| {
                 ui.label("Animation Asset");
-                let apply_button = ui.button("Apply...");
+                let apply_button = ui.button("Apply..");
                 if apply_button.clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Animation", &["ron"])
@@ -12558,7 +12558,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         }
                     }
 
-                    if ui.button("Browse...").clicked() {
+                    if ui.button("Browse..").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Model", &["glb", "gltf"])
                             .pick_file()
@@ -13176,7 +13176,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label("Select a scene asset");
                 }
 
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse..").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Scene", &["glb", "gltf"])
                         .pick_file()
@@ -13289,7 +13289,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     scripts_changed = true;
                 }
 
-                if ui.button("Browse...").clicked() {
+                if ui.button("Browse..").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Script", &["lua", "luau", "hvs", "rs", "toml"])
                         .pick_file()
@@ -13510,7 +13510,7 @@ pub fn draw_assets_window(ui: &mut Ui, world: &mut World) {
         Some(root) => root,
         None => {
             with_middle_drag_blocked(ui, world, |ui, _world| {
-                ui.label("Open a project to browse assets.");
+                ui.label("Open a project to browse assets");
             });
             return;
         }
@@ -17168,7 +17168,7 @@ fn draw_dynamic_components_section(ui: &mut Ui, world: &mut World, entity: Entit
 
     world.resource_scope::<HierarchyUiState, _>(|world, mut ui_state| {
         if dynamic.components.is_empty() {
-            ui.label("No dynamic components yet.");
+            ui.label("No dynamic components yet");
         }
 
         let mut remove_component_index = None;
@@ -17433,7 +17433,7 @@ fn edit_material_texture(ui: &mut Ui, label: &str, value: &mut Option<String>) -
                 *value = Some(trimmed.to_string());
             }
         }
-        if ui.button("Browse...").clicked() {
+        if ui.button("Browse..").clicked() {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Texture", &["ktx2", "png", "jpg", "jpeg", "tga"])
                 .pick_file()
@@ -17932,24 +17932,24 @@ fn apply_skinned_mesh_renderer_from_asset(
         .or_else(|| skinned_nodes.first().map(|(index, _)| *index));
 
     let Some(node_index) = node_index else {
-        set_status(world, "Scene has no skinned nodes.".to_string());
+        set_status(world, "Scene has no skinned nodes".to_string());
         return false;
     };
 
     let Some(node) = scene.nodes.get(node_index) else {
-        set_status(world, "Selected skinned node missing.".to_string());
+        set_status(world, "Selected skinned node missing".to_string());
         return false;
     };
 
     if skinned_nodes.len() > 1 {
         set_status(
             world,
-            format!("Multiple skinned nodes found; using node {}.", node_index),
+            format!("Multiple skinned nodes found; using node {}", node_index),
         );
     }
 
     let Some(skin_index) = node.skin_index else {
-        set_status(world, "Selected node has no skin.".to_string());
+        set_status(world, "Selected node has no skin".to_string());
         return false;
     };
 
@@ -17964,7 +17964,7 @@ fn apply_skinned_mesh_renderer_from_asset(
         });
         set_status(
             world,
-            "Skin data not ready yet; will apply when loaded.".to_string(),
+            "Skin data not ready yet; will apply when loaded".to_string(),
         );
         return true;
     };
@@ -21055,7 +21055,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     }
                 }
             } else {
-                ui.label("Select or pin an entity to edit timeline tracks.");
+                ui.label("Select or pin an entity to edit timeline tracks");
             }
 
             if !*middle_drag_active {

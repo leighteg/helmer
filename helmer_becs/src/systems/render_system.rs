@@ -2417,7 +2417,7 @@ pub fn render_data_system(
             }
         }
     } else {
-        warn!("No active camera found in scene for rendering.");
+        warn!("No active camera found in scene for rendering!");
         worker_state.camera_sent = false;
     }
 

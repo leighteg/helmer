@@ -167,7 +167,7 @@ impl InspectorUI {
                     if let Some(r) = world.get_resource::<bevy_ecs::prelude::AppTypeRegistry>() {
                         r.clone()
                     } else {
-                        ui.label("AppTypeRegistry resource is missing.");
+                        ui.label("AppTypeRegistry resource is missing");
                         return;
                     };
 

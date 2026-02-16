@@ -172,10 +172,10 @@ pub async fn initialize_renderer(
         && supported_features
             .contains(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING)
     {
-        info!("Adapter supports bindless texturing.");
+        info!("adapter supports bindless texturing");
         true
     } else {
-        info!("Adapter does not support bindless texturing.");
+        info!("adapter does not support bindless texturing");
         false
     };
 

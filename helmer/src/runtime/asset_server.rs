@@ -453,7 +453,7 @@ fn decode_texture_asset(
             Ok(None) => return None,
             Err(e) => {
                 warn!(
-                    "Failed to process texture '{}': {}. Using fallback.",
+                    "Failed to process texture '{}': {}. Using fallback",
                     name, e
                 );
                 return None;
@@ -468,10 +468,7 @@ fn decode_texture_asset(
     ) {
         Ok((data, format, dimensions)) => Some((name, kind, data, format, dimensions)),
         Err(e) => {
-            warn!(
-                "Failed to decode texture '{}': {}. Using fallback.",
-                name, e
-            );
+            warn!("Failed to decode texture '{}': {}. Using fallback", name, e);
             None
         }
     }
@@ -1087,7 +1084,7 @@ impl WebAssetIo {
             .map(|value| value.is_function())
             .unwrap_or(false);
         if !has_get_directory {
-            warn!("OPFS getDirectory unavailable; disabling OPFS cache.");
+            warn!("OPFS getDirectory unavailable; disabling OPFS cache");
             self.opfs_enabled.store(false, AtomicOrdering::Relaxed);
             return None;
         }
@@ -1272,12 +1269,9 @@ impl WebWorkerBridge {
             self.status.store(Self::READY, AtomicOrdering::Relaxed);
             self.worker_count
                 .store(threads.max(1), AtomicOrdering::Relaxed);
-            info!(
-                "Web asset worker pool initialized with {} workers.",
-                threads
-            );
+            info!("Web asset worker pool initialized with {} workers", threads);
         } else {
-            warn!("Web asset worker pool init failed; asset loading will stall.");
+            warn!("Web asset worker pool init failed; asset loading will stall");
             self.status.store(Self::FAILED, AtomicOrdering::Relaxed);
             self.worker_count.store(0, AtomicOrdering::Relaxed);
         }
@@ -1637,7 +1631,7 @@ pub fn helmer_worker_response(bytes: Vec<u8>) {
     WEB_ASSET_SERVER.with(|slot| {
         let binding = slot.borrow();
         let Some(server) = binding.as_ref() else {
-            warn!("Web asset server not initialized; dropping worker response.");
+            warn!("Web asset server not initialized; dropping worker response");
             return;
         };
         let guard = server.lock();
@@ -1669,7 +1663,7 @@ fn worker_response_to_result(response: WorkerResponse) -> Option<AssetLoadResult
                     })
                 } else {
                     warn!(
-                        "Dropped worker mesh payload for asset {} (decode failed).",
+                        "Dropped worker mesh payload for asset {} (decode failed)",
                         id
                     );
                     None
@@ -1764,7 +1758,7 @@ fn vertices_from_worker_bytes(bytes: &[u8]) -> Option<Vec<Vertex>> {
     let elem_size = std::mem::size_of::<Vertex>();
     if bytes.len() % elem_size != 0 {
         warn!(
-            "Worker mesh payload vertex buffer size mismatch ({} bytes, expected multiple of {}).",
+            "Worker mesh payload vertex buffer size mismatch ({} bytes, expected multiple of {})",
             bytes.len(),
             elem_size
         );
@@ -2096,7 +2090,7 @@ impl AssetServer {
             }
 
             info!(
-                "AssetServer initialized with {} worker threads.",
+                "AssetServer initialized with {} worker threads",
                 num_workers
             );
         }
@@ -3289,7 +3283,7 @@ impl AssetServer {
             };
 
             if !sent {
-                warn!("Failed to enqueue worker request; deferring.");
+                warn!("Failed to enqueue worker request; deferring");
                 pending.push_front(request);
                 self.web_worker_bridge.mark_failed();
                 break;
@@ -3995,7 +3989,7 @@ impl AssetServer {
     #[cfg(not(target_arch = "wasm32"))]
     fn register_scene(&self, scene_id: usize, data: ParsedGltfScene) {
         info!(
-            "Scene {} parsed; registering layout for streaming-based loading.",
+            "Scene {} parsed; registering layout for streaming-based loading",
             scene_id
         );
 
@@ -4296,7 +4290,7 @@ impl AssetServer {
         data: crate::runtime::asset_worker::WorkerSceneSummary,
     ) {
         info!(
-            "Scene {} parsed; registering layout for streaming-based loading.",
+            "Scene {} parsed; registering layout for streaming-based loading",
             scene_id
         );
 
@@ -5703,7 +5697,7 @@ pub(crate) async fn decode_texture_asset_web(
             Ok(None) => return None,
             Err(e) => {
                 warn!(
-                    "Failed to process texture '{}': {}. Using fallback.",
+                    "Failed to process texture '{}': {}. Using fallback",
                     name, e
                 );
                 return None;
@@ -5718,10 +5712,7 @@ pub(crate) async fn decode_texture_asset_web(
     ) {
         Ok((data, format, dimensions)) => Some((name, kind, data, format, dimensions)),
         Err(e) => {
-            warn!(
-                "Failed to decode texture '{}': {}. Using fallback.",
-                name, e
-            );
+            warn!("Failed to decode texture '{}': {}. Using fallback", name, e);
             None
         }
     }
@@ -5748,7 +5739,7 @@ fn encode_basis_with_mips(
 ) -> Result<Vec<u8>, String> {
     let expected_len = width.saturating_mul(height).saturating_mul(4) as usize;
     if rgba.len() != expected_len {
-        return Err("Basis mip generation input size mismatch.".to_string());
+        return Err("Basis mip generation input size mismatch".to_string());
     }
 
     let mut params = CompressorParams::new();
@@ -5776,7 +5767,7 @@ fn encode_basis_with_mips(
     let thread_count = 1;
     let mut compressor = Compressor::new(thread_count);
     if !unsafe { compressor.init(&params) } {
-        return Err("Failed to initialize Basis compressor.".to_string());
+        return Err("Failed to initialize Basis compressor".to_string());
     }
     unsafe {
         compressor
@@ -5833,7 +5824,7 @@ pub(crate) fn decode_ktx2(
                     dimensions = (FORWARD_TA_TARGET_RES, FORWARD_TA_TARGET_RES);
                 } else {
                     warn!(
-                        "Failed to create image buffer for resizing KTX2 texture. Data length mismatch."
+                        "Failed to create image buffer for resizing KTX2 texture. Data length mismatch"
                     );
                 }
             }
@@ -5844,7 +5835,7 @@ pub(crate) fn decode_ktx2(
     // Handle compressed Basis Universal formats
     let mut transcoder = Transcoder::new();
     if transcoder.prepare_transcoding(bytes).is_err() {
-        return Err("Failed to prepare Basis Universal transcoder.".to_string());
+        return Err("Failed to prepare Basis Universal transcoder".to_string());
     }
 
     let (target_transcode_format, target_wgpu_format) = if cfg!(target_arch = "wasm32") {
@@ -5943,7 +5934,7 @@ pub(crate) fn decode_ktx2(
 
         let mut mip_transcoder = Transcoder::new();
         if mip_transcoder.prepare_transcoding(&basis_data).is_err() {
-            return Err("Failed to prepare Basis transcoder for mip generation.".to_string());
+            return Err("Failed to prepare Basis transcoder for mip generation".to_string());
         }
 
         let mip_level_count = mip_transcoder.image_level_count(&basis_data, 0).max(1);
@@ -6033,7 +6024,7 @@ fn meshopt_vertex_cache_enabled() -> bool {
     {
         let requested = web_global_bool("HELMER_WASM_MESHOPT_VCACHE").unwrap_or(false);
         if requested && !MESHOPT_VCACHE_WARNED.swap(true, AtomicOrdering::Relaxed) {
-            warn!("HELMER_WASM_MESHOPT_VCACHE is disabled on wasm (known to break meshes).");
+            warn!("HELMER_WASM_MESHOPT_VCACHE is disabled on wasm (known to break meshes)");
         }
         false
     }
@@ -6256,7 +6247,7 @@ impl MeshoptPrepared {
                 Some(&global) => out.push(global),
                 None => {
                     warn!(
-                        "meshopt: local index {} out of range ({}).",
+                        "meshopt: local index {} out of range ({})",
                         idx,
                         self.local_to_global.len()
                     );
@@ -6277,7 +6268,7 @@ fn meshopt_prepare_mesh(vertices: &[Vertex], indices: &[u32]) -> Option<MeshoptP
         return None;
     }
     if vertices.len() > u32::MAX as usize {
-        warn!("meshopt: vertex count exceeds u32::MAX; skipping.");
+        warn!("meshopt: vertex count exceeds u32::MAX; skipping");
         return None;
     }
 
@@ -6334,7 +6325,7 @@ fn meshopt_prepare_mesh(vertices: &[Vertex], indices: &[u32]) -> Option<MeshoptP
         return None;
     }
     if local_to_global.len() > u32::MAX as usize {
-        warn!("meshopt: remapped vertex count exceeds u32::MAX; skipping.");
+        warn!("meshopt: remapped vertex count exceeds u32::MAX; skipping");
         return None;
     }
 
@@ -6361,14 +6352,14 @@ fn fallback_render_indices(vertex_count: usize, indices: &[u32]) -> Option<Vec<u
     let max_index = slice.iter().copied().max().unwrap_or(0) as usize;
     if max_index >= vertex_count {
         warn!(
-            "meshopt: fallback indices out of range (max {}, vertex_count {}).",
+            "meshopt: fallback indices out of range (max {}, vertex_count {})",
             max_index, vertex_count
         );
         return None;
     }
     if trimmed != indices.len() {
         warn!(
-            "meshopt: trimming {} trailing indices for fallback.",
+            "meshopt: trimming {} trailing indices for fallback",
             indices.len() - trimmed
         );
     }
@@ -6483,7 +6474,7 @@ fn meshopt_optimize_local_indices(
             disable_meshopt_runtime("vertex cache optimization returned invalid indices");
         }
         warn!(
-            "meshopt: optimized indices invalid (len {}, vertices {}); falling back.",
+            "meshopt: optimized indices invalid (len {}, vertices {}); falling back",
             optimized.len(),
             local_vertex_count
         );
@@ -6560,7 +6551,7 @@ fn simplify_chunked(
                     disable_meshopt_runtime("mesh simplification returned invalid indices");
                 }
                 warn!(
-                    "meshopt simplify: invalid indices (len {}, vertices {}); falling back.",
+                    "meshopt simplify: invalid indices (len {}, vertices {}); falling back",
                     simplified_local.len(),
                     local_to_global.len()
                 );
@@ -6627,7 +6618,7 @@ fn maybe_optimize_vertex_cache(vertices: &[Vertex], indices: &[u32]) -> Vec<u32>
         Some(prepared) => prepared,
         None => {
             if fallback.is_none() {
-                warn!("meshopt: unable to prepare mesh; falling back to empty indices.");
+                warn!("meshopt: unable to prepare mesh; falling back to empty indices");
             }
             return fallback.unwrap_or_default();
         }
@@ -6635,14 +6626,14 @@ fn maybe_optimize_vertex_cache(vertices: &[Vertex], indices: &[u32]) -> Vec<u32>
 
     if prepared.dropped_trailing > 0 {
         warn!(
-            "meshopt: dropped {} trailing index values (index count not divisible by 3).",
+            "meshopt: dropped {} trailing index values (index count not divisible by 3)",
             prepared.dropped_trailing
         );
     }
     let dropped = prepared.dropped_total();
     if dropped > 0 {
         warn!(
-            "meshopt: dropped {} invalid/degenerate triangles out of {}.",
+            "meshopt: dropped {} invalid/degenerate triangles out of {}",
             dropped,
             (indices.len() / 3) + dropped
         );
@@ -6668,7 +6659,7 @@ fn maybe_optimize_vertex_cache(vertices: &[Vertex], indices: &[u32]) -> Vec<u32>
         mapped
     } else {
         warn!(
-            "meshopt: invalid cached indices (len {}, vertices {}); falling back.",
+            "meshopt: invalid cached indices (len {}, vertices {}); falling back",
             mapped.len(),
             vertices.len()
         );
@@ -6712,21 +6703,21 @@ fn generate_lods(
             if let Some(fallback) = fallback {
                 lods.push(fallback);
             } else {
-                warn!("meshopt: no valid indices for LOD generation.");
+                warn!("meshopt: no valid indices for LOD generation");
             }
             return lods;
         }
     };
     if prepared.dropped_trailing > 0 {
         warn!(
-            "meshopt: dropped {} trailing index values (index count not divisible by 3).",
+            "meshopt: dropped {} trailing index values (index count not divisible by 3)",
             prepared.dropped_trailing
         );
     }
     let dropped = prepared.dropped_total();
     if dropped > 0 {
         warn!(
-            "meshopt simplify: dropped {} invalid/degenerate triangles out of {}.",
+            "meshopt simplify: dropped {} invalid/degenerate triangles out of {}",
             dropped,
             (indices.len() / 3) + dropped
         );
@@ -6736,7 +6727,7 @@ fn generate_lods(
         if let Some(fallback) = fallback {
             lods.push(fallback);
         } else {
-            warn!("meshopt: all triangles dropped; no LODs produced.");
+            warn!("meshopt: all triangles dropped; no LODs produced");
         }
         return lods;
     }
@@ -6764,7 +6755,7 @@ fn generate_lods(
         lod0
     } else {
         warn!(
-            "meshopt: LOD0 indices invalid (len {}, vertices {}); using original.",
+            "meshopt: LOD0 indices invalid (len {}, vertices {}); using original",
             lod0.len(),
             vertices.len()
         );
@@ -6828,7 +6819,7 @@ fn generate_lods(
                     })) {
                         Ok(data) => data,
                         Err(_) => {
-                            warn!("meshopt simplification panicked; keeping previous LODs only.");
+                            warn!("meshopt simplification panicked; keeping previous LODs only");
                             break;
                         }
                     }
@@ -6854,7 +6845,7 @@ fn generate_lods(
                     lods.push(simplified_global);
                 } else if let Some(prev_lod) = lods.last() {
                     warn!(
-                        "meshopt: simplified indices invalid (len {}, vertices {}); reusing previous LOD.",
+                        "meshopt: simplified indices invalid (len {}, vertices {}); reusing previous LOD",
                         simplified_global.len(),
                         vertices.len()
                     );
@@ -6938,7 +6929,7 @@ pub(crate) fn build_mesh_payload(
         }
     }
     if lods.is_empty() {
-        warn!("meshopt produced no valid LODs; falling back to original mesh.");
+        warn!("meshopt produced no valid LODs; falling back to original mesh");
         if let Some(lod) = compact_mesh_lod(&vertices, &indices, 0) {
             lods.push(lod);
         }
@@ -7055,7 +7046,7 @@ pub(crate) fn process_primitive<B: BufferSource>(
         let normal_count = normals_accessor.count();
         if normal_count != vertex_count {
             warn!(
-                "Primitive {} normal count ({}) does not match position count ({}); padding.",
+                "Primitive {} normal count ({}) does not match position count ({}); padding",
                 primitive.index(),
                 normal_count,
                 vertex_count
@@ -7067,7 +7058,7 @@ pub(crate) fn process_primitive<B: BufferSource>(
         let tex_count = tex_accessor.count();
         if tex_count != vertex_count {
             warn!(
-                "Primitive {} texcoord count ({}) does not match position count ({}); padding.",
+                "Primitive {} texcoord count ({}) does not match position count ({}); padding",
                 primitive.index(),
                 tex_count,
                 vertex_count
@@ -7150,7 +7141,7 @@ pub(crate) fn process_primitive<B: BufferSource>(
             }
             if trimmed != indices.len() {
                 warn!(
-                    "Primitive {} has {} indices (trimming to {}).",
+                    "Primitive {} has {} indices (trimming to {})",
                     primitive.index(),
                     indices.len(),
                     trimmed
@@ -7166,7 +7157,7 @@ pub(crate) fn process_primitive<B: BufferSource>(
         | gltf::mesh::Mode::LineStrip
         | gltf::mesh::Mode::LineLoop => {
             warn!(
-                "Primitive {} has unsupported mode {:?}; skipping.",
+                "Primitive {} has unsupported mode {:?}; skipping",
                 primitive.index(),
                 mode
             );
@@ -7179,7 +7170,7 @@ pub(crate) fn process_primitive<B: BufferSource>(
     let max_index = indices.iter().copied().max().unwrap_or(0) as usize;
     if max_index >= vertices.len() {
         warn!(
-            "Primitive {} index {} out of bounds for {} vertices; skipping.",
+            "Primitive {} index {} out of bounds for {} vertices; skipping",
             primitive.index(),
             max_index,
             vertices.len()
@@ -7309,7 +7300,7 @@ pub(crate) fn parse_mesh_document<B: BufferSource>(
     }
 
     if all_vertices.is_empty() {
-        return Err("GLTF contains no valid mesh primitives.".to_string());
+        return Err("GLTF contains no valid mesh primitives".to_string());
     }
     let bounds = Aabb::calculate(&all_vertices);
     let base = optimize_base_lod(&all_vertices, &all_indices);

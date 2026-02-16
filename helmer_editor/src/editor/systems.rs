@@ -2139,7 +2139,7 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
 
         let Some(node_index) = node_index else {
             world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
-            set_status(world, "Scene has no skinned nodes.".to_string());
+            set_status(world, "Scene has no skinned nodes".to_string());
             continue;
         };
 

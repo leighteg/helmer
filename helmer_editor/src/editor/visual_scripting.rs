@@ -11523,7 +11523,7 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     if state.documents.is_empty() {
-                        ui.label("No visual script is open.");
+                        ui.label("No visual script is open");
                         return;
                     }
 
@@ -11540,7 +11540,7 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                         if let Some(first) = document_paths.first() {
                             active_path = first.clone();
                         } else {
-                            ui.label("No visual script is open.");
+                            ui.label("No visual script is open");
                             return;
                         }
                     }
@@ -11914,7 +11914,7 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                 let mut preview = if document.compile_error.is_none() {
                                     document.compile_preview.clone()
                                 } else {
-                                    "Validation failed. Fix graph issues to view the runtime plan."
+                                    "Validation failed. Fix graph issues to view the runtime plan"
                                         .to_string()
                                 };
                                 ui.add(
@@ -17245,7 +17245,7 @@ impl VisualScriptViewer {
             results.sort_by_key(|(label, _)| label.to_ascii_lowercase());
             if results.is_empty() {
                 if force_compatible_only {
-                    ui.small("No compatible nodes for this wire.");
+                    ui.small("No compatible nodes for this wire");
                 } else {
                     ui.small("No nodes match the current search");
                 }
@@ -17444,7 +17444,7 @@ impl VisualScriptViewer {
             }
             if !sections_visible && add_node_search_matches_any(&search, &["api"]) {
                 has_visible = true;
-                ui.small("No API nodes match the current search.");
+                ui.small("No API nodes match the current search");
             }
         });
 
@@ -17488,7 +17488,7 @@ impl VisualScriptViewer {
             if self.variables.is_empty() {
                 if add_node_search_matches_any(&search, &["variables", "variable"]) {
                     has_visible = true;
-                    ui.small("Define variables in the side panel to add getter/setter nodes.");
+                    ui.small("Define variables in the side panel to add getter/setter nodes");
                 }
                 return;
             }
@@ -17556,7 +17556,7 @@ impl VisualScriptViewer {
             if self.functions.is_empty() {
                 if add_node_search_matches_any(&search, &["function", "subgraph"]) {
                     has_visible = true;
-                    ui.small("Create a function in the side panel to add call nodes.");
+                    ui.small("Create a function in the side panel to add call nodes");
                 }
                 return;
             }
@@ -19082,7 +19082,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 VisualScriptNodeKind::Statement { code } => {
                     ui.colored_label(
                         Color32::from_rgb(214, 89, 89),
-                        "Legacy node: script text execution is disabled.",
+                        "Legacy node: script text execution is disabled",
                     );
                     if ui
                         .add(
@@ -19374,7 +19374,7 @@ fn draw_variable_binding_selector<T: std::hash::Hash>(
     }
 
     if variables.is_empty() {
-        ui.small("No variables are defined.");
+        ui.small("No variables are defined");
         return changed;
     }
 

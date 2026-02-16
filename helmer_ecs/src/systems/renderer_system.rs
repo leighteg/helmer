@@ -598,7 +598,7 @@ impl System for RenderDataSystem {
             {
                 (*cam, *trans)
             } else {
-                warn!("No active camera found in scene for rendering.");
+                warn!("No active camera found in scene for rendering!");
                 return;
             };
 

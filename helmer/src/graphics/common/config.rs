@@ -1,6 +1,8 @@
 use crate::graphics::common::{constants::MAX_SHADOW_CASCADES, renderer::ShaderConstants};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkinningMode {
     Auto,
     Gpu,
@@ -13,7 +15,8 @@ impl Default for SkinningMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransparentSortMode {
     None,
     BackToFront,
@@ -26,7 +29,7 @@ impl Default for TransparentSortMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RenderConfig {
     pub gbuffer_pass: bool,
     pub shadow_pass: bool,

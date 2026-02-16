@@ -90,6 +90,7 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_mesh_renderer",
     "get_mesh_renderer_material_path",
     "get_mesh_renderer_source_path",
+    "get_graph_template",
     "get_physics",
     "get_physics_gravity",
     "get_physics_point_projection_hit",
@@ -104,6 +105,15 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_script_field",
     "get_script_language",
     "get_script_path",
+    "get_runtime_tuning",
+    "get_runtime_config",
+    "get_render_config",
+    "get_shader_constants",
+    "get_streaming_tuning",
+    "get_render_passes",
+    "get_gpu_budget",
+    "get_asset_budgets",
+    "get_window_settings",
     "get_self_script_field",
     "get_spline",
     "get_transform",
@@ -121,6 +131,7 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "list_audio_buses",
     "list_dynamic_components",
     "list_entities",
+    "list_graph_templates",
     "list_script_fields",
     "list_self_script_fields",
     "open_scene",
@@ -182,6 +193,16 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "set_scene_asset",
     "set_script",
     "set_script_field",
+    "set_runtime_tuning",
+    "set_runtime_config",
+    "set_render_config",
+    "set_shader_constants",
+    "set_streaming_tuning",
+    "set_render_passes",
+    "set_gpu_budget",
+    "set_asset_budgets",
+    "set_window_settings",
+    "set_graph_template",
     "set_self_script_field",
     "set_character_controller_desired_translation",
     "set_spline",
@@ -1556,6 +1577,246 @@ pub struct PhysicsPatch {
     pub world_defaults: Option<PhysicsWorldDefaultsPatch>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeTuningData {
+    pub render_message_capacity: u64,
+    pub asset_stream_queue_capacity: u64,
+    pub asset_worker_queue_capacity: u64,
+    pub max_pending_asset_uploads: u64,
+    pub max_pending_asset_bytes: u64,
+    pub asset_uploads_per_frame: u64,
+    pub wgpu_poll_interval_frames: u32,
+    pub wgpu_poll_mode: u32,
+    pub pixels_per_line: u32,
+    pub title_update_ms: u32,
+    pub resize_debounce_ms: u32,
+    pub max_logic_steps_per_frame: u32,
+    pub target_tickrate: f32,
+    pub target_fps: f32,
+    pub pending_asset_uploads: u64,
+    pub pending_asset_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeTuningPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_message_capacity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_stream_queue_capacity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_worker_queue_capacity: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_asset_uploads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_asset_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_uploads_per_frame: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wgpu_poll_interval_frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wgpu_poll_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels_per_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_update_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_debounce_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_logic_steps_per_frame: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_tickrate: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_fps: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeConfigData {
+    pub egui: bool,
+    pub wgpu_experimental_features: bool,
+    pub wgpu_backend: String,
+    pub binding_backend: String,
+    pub fixed_timestep: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeConfigPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egui: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wgpu_experimental_features: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wgpu_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_timestep: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RenderPassesData {
+    pub gbuffer: bool,
+    pub shadow: bool,
+    pub direct_lighting: bool,
+    pub sky: bool,
+    pub ssgi: bool,
+    pub ssgi_denoise: bool,
+    pub ssr: bool,
+    pub ddgi: bool,
+    pub egui: bool,
+    pub gizmo: bool,
+    pub transparent: bool,
+    pub occlusion: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RenderPassesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gbuffer: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_lighting: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssgi: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssgi_denoise: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssr: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddgi: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egui: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gizmo: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GpuBudgetData {
+    pub used_mib: f64,
+    pub soft_mib: f64,
+    pub hard_mib: f64,
+    pub idle_frames: u32,
+    pub mesh_soft_mib: f64,
+    pub mesh_hard_mib: f64,
+    pub material_soft_mib: f64,
+    pub material_hard_mib: f64,
+    pub texture_soft_mib: f64,
+    pub texture_hard_mib: f64,
+    pub texture_view_soft_mib: f64,
+    pub texture_view_hard_mib: f64,
+    pub sampler_soft_mib: f64,
+    pub sampler_hard_mib: f64,
+    pub buffer_soft_mib: f64,
+    pub buffer_hard_mib: f64,
+    pub external_soft_mib: f64,
+    pub external_hard_mib: f64,
+    pub transient_soft_mib: f64,
+    pub transient_hard_mib: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GpuBudgetPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_frames: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_view_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_view_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_hard_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_soft_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_hard_mib: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AssetBudgetsData {
+    pub mesh_mib: f64,
+    pub texture_mib: f64,
+    pub material_mib: f64,
+    pub audio_mib: f64,
+    pub scene_mib: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AssetBudgetsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_mib: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_mib: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WindowSettingsData {
+    pub title_mode: String,
+    pub custom_title: String,
+    pub fullscreen: bool,
+    pub resizable: bool,
+    pub decorations: bool,
+    pub maximized: bool,
+    pub minimized: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WindowSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullscreen: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resizable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decorations: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScriptBytes {
@@ -2171,6 +2432,150 @@ impl Host {
 
     pub fn set_viewport_preview_camera(&self, entity_id: Option<EntityId>) -> Result<bool, String> {
         self.ecs_call("set_viewport_preview_camera", (entity_id,))
+    }
+
+    pub fn get_runtime_tuning(&self) -> Result<Value, String> {
+        self.ecs_call("get_runtime_tuning", ())
+    }
+
+    pub fn get_runtime_tuning_data(&self) -> Result<RuntimeTuningData, String> {
+        self.ecs_call("get_runtime_tuning", ())
+    }
+
+    pub fn set_runtime_tuning<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_runtime_tuning", (patch,))
+    }
+
+    pub fn set_runtime_tuning_data(&self, patch: &RuntimeTuningPatch) -> Result<bool, String> {
+        self.ecs_call("set_runtime_tuning", (patch,))
+    }
+
+    pub fn get_runtime_config(&self) -> Result<Value, String> {
+        self.ecs_call("get_runtime_config", ())
+    }
+
+    pub fn get_runtime_config_data(&self) -> Result<RuntimeConfigData, String> {
+        self.ecs_call("get_runtime_config", ())
+    }
+
+    pub fn set_runtime_config<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_runtime_config", (patch,))
+    }
+
+    pub fn set_runtime_config_data(&self, patch: &RuntimeConfigPatch) -> Result<bool, String> {
+        self.ecs_call("set_runtime_config", (patch,))
+    }
+
+    pub fn get_render_config(&self) -> Result<Value, String> {
+        self.ecs_call("get_render_config", ())
+    }
+
+    pub fn get_render_config_data<T: DeserializeOwned>(&self) -> Result<T, String> {
+        self.ecs_call("get_render_config", ())
+    }
+
+    pub fn set_render_config<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_render_config", (patch,))
+    }
+
+    pub fn get_shader_constants(&self) -> Result<Value, String> {
+        self.ecs_call("get_shader_constants", ())
+    }
+
+    pub fn get_shader_constants_data<T: DeserializeOwned>(&self) -> Result<T, String> {
+        self.ecs_call("get_shader_constants", ())
+    }
+
+    pub fn set_shader_constants<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_shader_constants", (patch,))
+    }
+
+    pub fn get_streaming_tuning(&self) -> Result<Value, String> {
+        self.ecs_call("get_streaming_tuning", ())
+    }
+
+    pub fn get_streaming_tuning_data<T: DeserializeOwned>(&self) -> Result<T, String> {
+        self.ecs_call("get_streaming_tuning", ())
+    }
+
+    pub fn set_streaming_tuning<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_streaming_tuning", (patch,))
+    }
+
+    pub fn get_render_passes(&self) -> Result<Value, String> {
+        self.ecs_call("get_render_passes", ())
+    }
+
+    pub fn get_render_passes_data(&self) -> Result<RenderPassesData, String> {
+        self.ecs_call("get_render_passes", ())
+    }
+
+    pub fn set_render_passes<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_render_passes", (patch,))
+    }
+
+    pub fn set_render_passes_data(&self, patch: &RenderPassesPatch) -> Result<bool, String> {
+        self.ecs_call("set_render_passes", (patch,))
+    }
+
+    pub fn get_gpu_budget(&self) -> Result<Value, String> {
+        self.ecs_call("get_gpu_budget", ())
+    }
+
+    pub fn get_gpu_budget_data(&self) -> Result<GpuBudgetData, String> {
+        self.ecs_call("get_gpu_budget", ())
+    }
+
+    pub fn set_gpu_budget<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_gpu_budget", (patch,))
+    }
+
+    pub fn set_gpu_budget_data(&self, patch: &GpuBudgetPatch) -> Result<bool, String> {
+        self.ecs_call("set_gpu_budget", (patch,))
+    }
+
+    pub fn get_asset_budgets(&self) -> Result<Value, String> {
+        self.ecs_call("get_asset_budgets", ())
+    }
+
+    pub fn get_asset_budgets_data(&self) -> Result<AssetBudgetsData, String> {
+        self.ecs_call("get_asset_budgets", ())
+    }
+
+    pub fn set_asset_budgets<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_asset_budgets", (patch,))
+    }
+
+    pub fn set_asset_budgets_data(&self, patch: &AssetBudgetsPatch) -> Result<bool, String> {
+        self.ecs_call("set_asset_budgets", (patch,))
+    }
+
+    pub fn get_window_settings(&self) -> Result<Value, String> {
+        self.ecs_call("get_window_settings", ())
+    }
+
+    pub fn get_window_settings_data(&self) -> Result<WindowSettingsData, String> {
+        self.ecs_call("get_window_settings", ())
+    }
+
+    pub fn set_window_settings<S: Serialize>(&self, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_window_settings", (patch,))
+    }
+
+    pub fn set_window_settings_data(&self, patch: &WindowSettingsPatch) -> Result<bool, String> {
+        self.ecs_call("set_window_settings", (patch,))
+    }
+
+    pub fn list_graph_templates(&self) -> Result<Vec<String>, String> {
+        self.ecs_call("list_graph_templates", ())
+    }
+
+    pub fn get_graph_template(&self) -> Result<String, String> {
+        self.ecs_call("get_graph_template", ())
+    }
+
+    pub fn set_graph_template(&self, name: &str) -> Result<bool, String> {
+        self.ecs_call("set_graph_template", (name,))
     }
 
     pub fn get_mesh_renderer(&self, entity_id: EntityId) -> Result<Option<Value>, String> {

@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{
+    RwLock,
+    atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -136,6 +139,164 @@ impl RuntimeCursorState {
 
     pub fn has_pending_update(&self) -> bool {
         self.dirty.load(Ordering::Acquire) || self.warp_pending.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimeWindowTitleMode {
+    #[default]
+    Stats,
+    Custom,
+    CustomWithStats,
+}
+
+impl RuntimeWindowTitleMode {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Stats => 0,
+            Self::Custom => 1,
+            Self::CustomWithStats => 2,
+        }
+    }
+
+    fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::Custom,
+            2 => Self::CustomWithStats,
+            _ => Self::Stats,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stats => "stats",
+            Self::Custom => "custom",
+            Self::CustomWithStats => "custom_with_stats",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeWindowControlSnapshot {
+    pub title_mode: RuntimeWindowTitleMode,
+    pub custom_title: String,
+    pub fullscreen: bool,
+    pub resizable: bool,
+    pub decorations: bool,
+    pub maximized: bool,
+    pub minimized: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug)]
+pub struct RuntimeWindowControl {
+    title_mode: AtomicU8,
+    custom_title: RwLock<String>,
+    fullscreen: AtomicBool,
+    resizable: AtomicBool,
+    decorations: AtomicBool,
+    maximized: AtomicBool,
+    minimized: AtomicBool,
+    visible: AtomicBool,
+}
+
+impl Default for RuntimeWindowControl {
+    fn default() -> Self {
+        Self {
+            title_mode: AtomicU8::new(RuntimeWindowTitleMode::Stats.encode()),
+            custom_title: RwLock::new("helmer engine".to_string()),
+            fullscreen: AtomicBool::new(false),
+            resizable: AtomicBool::new(true),
+            decorations: AtomicBool::new(true),
+            maximized: AtomicBool::new(false),
+            minimized: AtomicBool::new(false),
+            visible: AtomicBool::new(true),
+        }
+    }
+}
+
+impl RuntimeWindowControl {
+    pub fn snapshot(&self) -> RuntimeWindowControlSnapshot {
+        RuntimeWindowControlSnapshot {
+            title_mode: self.title_mode(),
+            custom_title: self.custom_title(),
+            fullscreen: self.fullscreen(),
+            resizable: self.resizable(),
+            decorations: self.decorations(),
+            maximized: self.maximized(),
+            minimized: self.minimized(),
+            visible: self.visible(),
+        }
+    }
+
+    pub fn title_mode(&self) -> RuntimeWindowTitleMode {
+        RuntimeWindowTitleMode::decode(self.title_mode.load(Ordering::Relaxed))
+    }
+
+    pub fn set_title_mode(&self, mode: RuntimeWindowTitleMode) {
+        self.title_mode.store(mode.encode(), Ordering::Relaxed);
+    }
+
+    pub fn custom_title(&self) -> String {
+        self.custom_title
+            .read()
+            .map(|title| title.clone())
+            .unwrap_or_else(|_| "helmer engine".to_string())
+    }
+
+    pub fn set_custom_title(&self, title: impl Into<String>) {
+        let title = title.into();
+        if let Ok(mut current) = self.custom_title.write() {
+            *current = title;
+        }
+    }
+
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fullscreen(&self, value: bool) {
+        self.fullscreen.store(value, Ordering::Relaxed);
+    }
+
+    pub fn resizable(&self) -> bool {
+        self.resizable.load(Ordering::Relaxed)
+    }
+
+    pub fn set_resizable(&self, value: bool) {
+        self.resizable.store(value, Ordering::Relaxed);
+    }
+
+    pub fn decorations(&self) -> bool {
+        self.decorations.load(Ordering::Relaxed)
+    }
+
+    pub fn set_decorations(&self, value: bool) {
+        self.decorations.store(value, Ordering::Relaxed);
+    }
+
+    pub fn maximized(&self) -> bool {
+        self.maximized.load(Ordering::Relaxed)
+    }
+
+    pub fn set_maximized(&self, value: bool) {
+        self.maximized.store(value, Ordering::Relaxed);
+    }
+
+    pub fn minimized(&self) -> bool {
+        self.minimized.load(Ordering::Relaxed)
+    }
+
+    pub fn set_minimized(&self, value: bool) {
+        self.minimized.store(value, Ordering::Relaxed);
+    }
+
+    pub fn visible(&self) -> bool {
+        self.visible.load(Ordering::Relaxed)
+    }
+
+    pub fn set_visible(&self, value: bool) {
+        self.visible.store(value, Ordering::Relaxed);
     }
 }
 

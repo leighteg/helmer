@@ -1086,7 +1086,9 @@ pub struct SkyUniforms {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
+#[derive(
+    Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq, Serialize, Deserialize,
+)]
 pub struct ShaderConstants {
     pub mip_bias: f32,
 
@@ -1809,7 +1811,7 @@ pub const OCCLUSION_STATUS_NO_INSTANCES: u32 = 2;
 pub const OCCLUSION_STATUS_NO_HIZ: u32 = 3;
 pub const OCCLUSION_STATUS_RAN: u32 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StreamingCaps {
     pub global: usize,
     pub mesh: usize,
@@ -1817,7 +1819,7 @@ pub struct StreamingCaps {
     pub texture: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StreamingByteCaps {
     pub global: u64,
     pub mesh: u64,
@@ -1825,7 +1827,7 @@ pub struct StreamingByteCaps {
     pub texture: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StreamingTuning {
     pub caps_none: StreamingCaps,
     pub caps_soft: StreamingCaps,

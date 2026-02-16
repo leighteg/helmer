@@ -73,6 +73,15 @@ pub enum VisualValueType {
     AnimatorState,
     InputModifiers,
     AudioStreamingConfig,
+    RuntimeTuning,
+    RuntimeConfig,
+    RenderConfig,
+    ShaderConstants,
+    StreamingTuning,
+    RenderPasses,
+    GpuBudget,
+    AssetBudgets,
+    WindowSettings,
     Spline,
     Physics,
     PhysicsVelocity,
@@ -112,6 +121,15 @@ impl VisualValueType {
             Self::AnimatorState => "Animator State",
             Self::InputModifiers => "Input Modifiers",
             Self::AudioStreamingConfig => "Audio Streaming Config",
+            Self::RuntimeTuning => "Runtime Tuning",
+            Self::RuntimeConfig => "Runtime Config",
+            Self::RenderConfig => "Render Config",
+            Self::ShaderConstants => "Shader Constants",
+            Self::StreamingTuning => "Streaming Tuning",
+            Self::RenderPasses => "Render Passes",
+            Self::GpuBudget => "GPU Budget",
+            Self::AssetBudgets => "Asset Budgets",
+            Self::WindowSettings => "Window Settings",
             Self::Spline => "Spline",
             Self::Physics => "Physics",
             Self::PhysicsVelocity => "Physics Velocity",
@@ -155,7 +173,7 @@ impl VisualInspectorAssetKind {
     }
 }
 
-const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 31] = [
+const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 40] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -176,6 +194,15 @@ const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 31] = [
     VisualValueType::AnimatorState,
     VisualValueType::InputModifiers,
     VisualValueType::AudioStreamingConfig,
+    VisualValueType::RuntimeTuning,
+    VisualValueType::RuntimeConfig,
+    VisualValueType::RenderConfig,
+    VisualValueType::ShaderConstants,
+    VisualValueType::StreamingTuning,
+    VisualValueType::RenderPasses,
+    VisualValueType::GpuBudget,
+    VisualValueType::AssetBudgets,
+    VisualValueType::WindowSettings,
     VisualValueType::Spline,
     VisualValueType::Physics,
     VisualValueType::PhysicsVelocity,
@@ -521,6 +548,27 @@ pub enum VisualApiOperation {
     EcsSwitchScene,
     EcsSelfScriptIndex,
     EcsTriggerAnimator,
+    EcsListGraphTemplates,
+    EcsGetGraphTemplate,
+    EcsSetGraphTemplate,
+    EcsGetRuntimeTuning,
+    EcsSetRuntimeTuning,
+    EcsGetRuntimeConfig,
+    EcsSetRuntimeConfig,
+    EcsGetRenderConfig,
+    EcsSetRenderConfig,
+    EcsGetShaderConstants,
+    EcsSetShaderConstants,
+    EcsGetStreamingTuning,
+    EcsSetStreamingTuning,
+    EcsGetRenderPasses,
+    EcsSetRenderPasses,
+    EcsGetGpuBudget,
+    EcsSetGpuBudget,
+    EcsGetAssetBudgets,
+    EcsSetAssetBudgets,
+    EcsGetWindowSettings,
+    EcsSetWindowSettings,
     InputActionContext,
     InputActionDown,
     InputActionPressed,
@@ -610,7 +658,7 @@ impl VisualApiOperation {
 }
 
 #[allow(dead_code)]
-const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 213] = [
+const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 234] = [
     VisualApiOperation::EcsAddComponent,
     VisualApiOperation::EcsAddForce,
     VisualApiOperation::EcsAddForceAtPoint,
@@ -788,6 +836,27 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 213] = [
     VisualApiOperation::EcsSwitchScene,
     VisualApiOperation::EcsSelfScriptIndex,
     VisualApiOperation::EcsTriggerAnimator,
+    VisualApiOperation::EcsListGraphTemplates,
+    VisualApiOperation::EcsGetGraphTemplate,
+    VisualApiOperation::EcsSetGraphTemplate,
+    VisualApiOperation::EcsGetRuntimeTuning,
+    VisualApiOperation::EcsSetRuntimeTuning,
+    VisualApiOperation::EcsGetRuntimeConfig,
+    VisualApiOperation::EcsSetRuntimeConfig,
+    VisualApiOperation::EcsGetRenderConfig,
+    VisualApiOperation::EcsSetRenderConfig,
+    VisualApiOperation::EcsGetShaderConstants,
+    VisualApiOperation::EcsSetShaderConstants,
+    VisualApiOperation::EcsGetStreamingTuning,
+    VisualApiOperation::EcsSetStreamingTuning,
+    VisualApiOperation::EcsGetRenderPasses,
+    VisualApiOperation::EcsSetRenderPasses,
+    VisualApiOperation::EcsGetGpuBudget,
+    VisualApiOperation::EcsSetGpuBudget,
+    VisualApiOperation::EcsGetAssetBudgets,
+    VisualApiOperation::EcsSetAssetBudgets,
+    VisualApiOperation::EcsGetWindowSettings,
+    VisualApiOperation::EcsSetWindowSettings,
     VisualApiOperation::InputActionContext,
     VisualApiOperation::InputActionDown,
     VisualApiOperation::InputActionPressed,
@@ -1729,8 +1798,44 @@ const API_INPUTS_77: [VisualApiInputSpec; 2] = [
         value_type: VisualValueType::Any,
     },
 ];
+const API_INPUTS_91: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Tuning",
+    value_type: VisualValueType::RuntimeTuning,
+}];
+const API_INPUTS_92: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Config",
+    value_type: VisualValueType::RuntimeConfig,
+}];
+const API_INPUTS_93: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Patch",
+    value_type: VisualValueType::RenderConfig,
+}];
+const API_INPUTS_94: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Patch",
+    value_type: VisualValueType::ShaderConstants,
+}];
+const API_INPUTS_95: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Patch",
+    value_type: VisualValueType::StreamingTuning,
+}];
+const API_INPUTS_96: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Passes",
+    value_type: VisualValueType::RenderPasses,
+}];
+const API_INPUTS_97: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Budget",
+    value_type: VisualValueType::GpuBudget,
+}];
+const API_INPUTS_98: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Budgets",
+    value_type: VisualValueType::AssetBudgets,
+}];
+const API_INPUTS_99: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Settings",
+    value_type: VisualValueType::WindowSettings,
+}];
 
-const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 213] = [
+const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 234] = [
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsAddComponent,
         table: VisualScriptApiTable::Ecs,
@@ -3861,6 +3966,216 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 213] = [
         inputs: &API_INPUTS_7,
         output_type: Some(VisualValueType::Vec2),
     },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsListGraphTemplates,
+        table: VisualScriptApiTable::Ecs,
+        function: "list_graph_templates",
+        title: "List Graph Templates",
+        category: "Render",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::Array),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetGraphTemplate,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_graph_template",
+        title: "Get Graph Template",
+        category: "Render",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetGraphTemplate,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_graph_template",
+        title: "Set Graph Template",
+        category: "Render",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_9,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetRuntimeTuning,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_runtime_tuning",
+        title: "Get Runtime Tuning",
+        category: "Runtime",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::RuntimeTuning),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetRuntimeTuning,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_runtime_tuning",
+        title: "Set Runtime Tuning",
+        category: "Runtime",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_91,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetRuntimeConfig,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_runtime_config",
+        title: "Get Runtime Config",
+        category: "Runtime",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::RuntimeConfig),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetRuntimeConfig,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_runtime_config",
+        title: "Set Runtime Config",
+        category: "Runtime",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_92,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetRenderConfig,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_render_config",
+        title: "Get Render Config",
+        category: "Rendering",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::RenderConfig),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetRenderConfig,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_render_config",
+        title: "Set Render Config",
+        category: "Rendering",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_93,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetShaderConstants,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_shader_constants",
+        title: "Get Shader Constants",
+        category: "Rendering",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::ShaderConstants),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetShaderConstants,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_shader_constants",
+        title: "Set Shader Constants",
+        category: "Rendering",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_94,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetStreamingTuning,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_streaming_tuning",
+        title: "Get Streaming Tuning",
+        category: "Streaming",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::StreamingTuning),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetStreamingTuning,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_streaming_tuning",
+        title: "Set Streaming Tuning",
+        category: "Streaming",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_95,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetRenderPasses,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_render_passes",
+        title: "Get Render Passes",
+        category: "Rendering",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::RenderPasses),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetRenderPasses,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_render_passes",
+        title: "Set Render Passes",
+        category: "Rendering",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_96,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetGpuBudget,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_gpu_budget",
+        title: "Get GPU Budget",
+        category: "Budgets",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::GpuBudget),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetGpuBudget,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_gpu_budget",
+        title: "Set GPU Budget",
+        category: "Budgets",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_97,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAssetBudgets,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_asset_budgets",
+        title: "Get Asset Budgets",
+        category: "Budgets",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::AssetBudgets),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAssetBudgets,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_asset_budgets",
+        title: "Set Asset Budgets",
+        category: "Budgets",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_98,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetWindowSettings,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_window_settings",
+        title: "Get Window Settings",
+        category: "Window",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::WindowSettings),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetWindowSettings,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_window_settings",
+        title: "Set Window Settings",
+        category: "Window",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_99,
+        output_type: Some(VisualValueType::Bool),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -4507,8 +4822,12 @@ impl VisualScriptNodeKind {
                     args.truncate(expected);
                 }
                 while args.len() < expected {
-                    let default_value =
-                        default_literal_for_type(spec.inputs[args.len()].value_type);
+                    let input_index = args.len();
+                    let default_value = default_literal_for_api_input(
+                        *operation,
+                        input_index,
+                        spec.inputs[input_index].value_type,
+                    );
                     args.push(default_value.to_string());
                 }
             }
@@ -5718,6 +6037,27 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
             "{\"shift\":false,\"ctrl\":false,\"alt\":false,\"super\":false}"
         }
         VisualValueType::AudioStreamingConfig => "{\"buffer_frames\":8192,\"chunk_frames\":2048}",
+        VisualValueType::RuntimeTuning => {
+            "{\"render_message_capacity\":96,\"asset_stream_queue_capacity\":96,\"asset_worker_queue_capacity\":96,\"max_pending_asset_uploads\":48,\"max_pending_asset_bytes\":536870912,\"asset_uploads_per_frame\":8,\"wgpu_poll_interval_frames\":1,\"wgpu_poll_mode\":1,\"pixels_per_line\":38,\"title_update_ms\":200,\"resize_debounce_ms\":500,\"max_logic_steps_per_frame\":4,\"target_tickrate\":120.0,\"target_fps\":0.0}"
+        }
+        VisualValueType::RuntimeConfig => {
+            "{\"egui\":true,\"wgpu_experimental_features\":false,\"wgpu_backend\":\"auto\",\"binding_backend\":\"auto\",\"fixed_timestep\":false}"
+        }
+        VisualValueType::RenderConfig => include_str!("visual_defaults/render_config.json"),
+        VisualValueType::ShaderConstants => include_str!("visual_defaults/shader_constants.json"),
+        VisualValueType::StreamingTuning => include_str!("visual_defaults/streaming_tuning.json"),
+        VisualValueType::RenderPasses => {
+            "{\"gbuffer\":true,\"shadow\":true,\"direct_lighting\":true,\"sky\":true,\"ssgi\":true,\"ssgi_denoise\":true,\"ssr\":true,\"ddgi\":true,\"egui\":true,\"gizmo\":true,\"transparent\":true,\"occlusion\":true}"
+        }
+        VisualValueType::GpuBudget => {
+            "{\"soft_mib\":0.0,\"hard_mib\":0.0,\"idle_frames\":0,\"mesh_soft_mib\":0.0,\"mesh_hard_mib\":0.0,\"material_soft_mib\":0.0,\"material_hard_mib\":0.0,\"texture_soft_mib\":0.0,\"texture_hard_mib\":0.0,\"texture_view_soft_mib\":0.0,\"texture_view_hard_mib\":0.0,\"sampler_soft_mib\":0.0,\"sampler_hard_mib\":0.0,\"buffer_soft_mib\":0.0,\"buffer_hard_mib\":0.0,\"external_soft_mib\":0.0,\"external_hard_mib\":0.0,\"transient_soft_mib\":0.0,\"transient_hard_mib\":0.0}"
+        }
+        VisualValueType::AssetBudgets => {
+            "{\"mesh_mib\":0.0,\"texture_mib\":0.0,\"material_mib\":0.0,\"audio_mib\":0.0,\"scene_mib\":0.0}"
+        }
+        VisualValueType::WindowSettings => {
+            "{\"title_mode\":\"stats\",\"custom_title\":\"helmer engine\",\"fullscreen\":false,\"resizable\":true,\"decorations\":true,\"maximized\":false,\"minimized\":false,\"visible\":true}"
+        }
         VisualValueType::Spline => {
             "{\"points\":[],\"closed\":false,\"tension\":0.5,\"mode\":\"CatmullRom\"}"
         }
@@ -5746,6 +6086,19 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
             "{\"has_hit\":false,\"hit_entity\":null,\"toi\":0.0,\"witness1\":{\"x\":0,\"y\":0,\"z\":0},\"witness2\":{\"x\":0,\"y\":0,\"z\":0},\"normal1\":{\"x\":0,\"y\":1,\"z\":0},\"normal2\":{\"x\":0,\"y\":1,\"z\":0},\"status\":\"Unknown\"}"
         }
         VisualValueType::Any => "null",
+    }
+}
+
+fn default_literal_for_api_input(
+    operation: VisualApiOperation,
+    input_index: usize,
+    value_type: VisualValueType,
+) -> &'static str {
+    match (operation, input_index, value_type) {
+        (VisualApiOperation::EcsSetRenderConfig, 0, VisualValueType::RenderConfig)
+        | (VisualApiOperation::EcsSetShaderConstants, 0, VisualValueType::ShaderConstants)
+        | (VisualApiOperation::EcsSetStreamingTuning, 0, VisualValueType::StreamingTuning) => "{}",
+        _ => default_literal_for_type(value_type),
     }
 }
 
@@ -5780,6 +6133,15 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
         | VisualValueType::AnimatorState
         | VisualValueType::InputModifiers
         | VisualValueType::AudioStreamingConfig
+        | VisualValueType::RuntimeTuning
+        | VisualValueType::RuntimeConfig
+        | VisualValueType::RenderConfig
+        | VisualValueType::ShaderConstants
+        | VisualValueType::StreamingTuning
+        | VisualValueType::RenderPasses
+        | VisualValueType::GpuBudget
+        | VisualValueType::AssetBudgets
+        | VisualValueType::WindowSettings
         | VisualValueType::Spline
         | VisualValueType::Physics
         | VisualValueType::PhysicsVelocity
@@ -6301,6 +6663,15 @@ fn has_structured_api_default_editor(operation: VisualApiOperation, input_index:
             | (VisualApiOperation::EcsSetSpline, 1)
             | (VisualApiOperation::EcsSetDynamicComponent, 2)
             | (VisualApiOperation::EcsSetDynamicField, 3)
+            | (VisualApiOperation::EcsSetRuntimeTuning, 0)
+            | (VisualApiOperation::EcsSetRuntimeConfig, 0)
+            | (VisualApiOperation::EcsSetRenderConfig, 0)
+            | (VisualApiOperation::EcsSetShaderConstants, 0)
+            | (VisualApiOperation::EcsSetStreamingTuning, 0)
+            | (VisualApiOperation::EcsSetRenderPasses, 0)
+            | (VisualApiOperation::EcsSetGpuBudget, 0)
+            | (VisualApiOperation::EcsSetAssetBudgets, 0)
+            | (VisualApiOperation::EcsSetWindowSettings, 0)
     )
 }
 
@@ -6316,6 +6687,15 @@ fn api_input_prefers_vertical_default_layout(
             | (VisualApiOperation::EcsSetAudioEmitter, 1)
             | (VisualApiOperation::EcsSetSpline, 1)
             | (VisualApiOperation::EcsSetDynamicComponent, 2)
+            | (VisualApiOperation::EcsSetRuntimeTuning, 0)
+            | (VisualApiOperation::EcsSetRuntimeConfig, 0)
+            | (VisualApiOperation::EcsSetRenderConfig, 0)
+            | (VisualApiOperation::EcsSetShaderConstants, 0)
+            | (VisualApiOperation::EcsSetStreamingTuning, 0)
+            | (VisualApiOperation::EcsSetRenderPasses, 0)
+            | (VisualApiOperation::EcsSetGpuBudget, 0)
+            | (VisualApiOperation::EcsSetAssetBudgets, 0)
+            | (VisualApiOperation::EcsSetWindowSettings, 0)
     )
 }
 
@@ -6340,6 +6720,15 @@ fn value_type_prefers_vertical_default_layout(value_type: VisualValueType) -> bo
             | VisualValueType::Spline
             | VisualValueType::Camera
             | VisualValueType::Light
+            | VisualValueType::RuntimeTuning
+            | VisualValueType::RuntimeConfig
+            | VisualValueType::RenderConfig
+            | VisualValueType::ShaderConstants
+            | VisualValueType::StreamingTuning
+            | VisualValueType::RenderPasses
+            | VisualValueType::GpuBudget
+            | VisualValueType::AssetBudgets
+            | VisualValueType::WindowSettings
             | VisualValueType::CharacterControllerOutput
     )
 }
@@ -6353,7 +6742,11 @@ enum VisualApiMenuSection {
     Audio,
     Spline,
     Transform,
+    Runtime,
     Render,
+    Streaming,
+    Budgets,
+    WindowControl,
     Dynamic,
     InputKeyboard,
     InputMouse,
@@ -6372,7 +6765,11 @@ impl VisualApiMenuSection {
             Self::Audio => "Audio",
             Self::Spline => "Spline",
             Self::Transform => "Transform",
-            Self::Render => "Render",
+            Self::Runtime => "Runtime",
+            Self::Render => "Rendering",
+            Self::Streaming => "Streaming",
+            Self::Budgets => "Budgets",
+            Self::WindowControl => "Window",
             Self::Dynamic => "Dynamic Components",
             Self::InputKeyboard => "Input / Keyboard",
             Self::InputMouse => "Input / Mouse",
@@ -6383,10 +6780,14 @@ impl VisualApiMenuSection {
     }
 }
 
-const VISUAL_API_MENU_SECTION_ORDER: [VisualApiMenuSection; 14] = [
+const VISUAL_API_MENU_SECTION_ORDER: [VisualApiMenuSection; 18] = [
     VisualApiMenuSection::Entity,
     VisualApiMenuSection::Transform,
+    VisualApiMenuSection::Runtime,
     VisualApiMenuSection::Render,
+    VisualApiMenuSection::Streaming,
+    VisualApiMenuSection::Budgets,
+    VisualApiMenuSection::WindowControl,
     VisualApiMenuSection::Scene,
     VisualApiMenuSection::Physics,
     VisualApiMenuSection::Animation,
@@ -6412,6 +6813,24 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
     }
 
     let function = spec.function;
+    if spec.category == "Runtime"
+        || function.contains("runtime_tuning")
+        || function.contains("runtime_config")
+    {
+        return VisualApiMenuSection::Runtime;
+    }
+    if spec.category == "Window" || function.contains("window_settings") {
+        return VisualApiMenuSection::WindowControl;
+    }
+    if spec.category == "Budgets" {
+        return VisualApiMenuSection::Budgets;
+    }
+    if spec.category == "Streaming" || function.contains("streaming_tuning") {
+        return VisualApiMenuSection::Streaming;
+    }
+    if spec.category == "Rendering" || spec.category == "Graph" {
+        return VisualApiMenuSection::Render;
+    }
     if function.contains("spline") {
         return VisualApiMenuSection::Spline;
     }
@@ -6448,6 +6867,8 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
         || function.contains("light")
         || function.contains("mesh")
         || function.contains("viewport")
+        || function.contains("render")
+        || function.contains("graph_template")
     {
         return VisualApiMenuSection::Render;
     }
@@ -6507,7 +6928,10 @@ fn api_node_kind_from_spec(spec: &VisualApiOperationSpec) -> VisualScriptNodeKin
     let args = spec
         .inputs
         .iter()
-        .map(|input| default_literal_for_type(input.value_type).to_string())
+        .enumerate()
+        .map(|(index, input)| {
+            default_literal_for_api_input(spec.operation, index, input.value_type).to_string()
+        })
         .collect();
     match spec.flow {
         VisualApiFlow::Exec => VisualScriptNodeKind::CallApi {
@@ -9537,18 +9961,27 @@ fn visual_value_type_compare_rank(value_type: VisualValueType) -> u8 {
         VisualValueType::AnimatorState => 17,
         VisualValueType::InputModifiers => 18,
         VisualValueType::AudioStreamingConfig => 19,
-        VisualValueType::Spline => 20,
-        VisualValueType::Physics => 21,
-        VisualValueType::PhysicsVelocity => 22,
-        VisualValueType::PhysicsWorldDefaults => 23,
-        VisualValueType::CharacterControllerOutput => 24,
-        VisualValueType::DynamicComponentFields => 25,
-        VisualValueType::DynamicFieldValue => 26,
-        VisualValueType::PhysicsRayCastHit => 27,
-        VisualValueType::PhysicsPointProjectionHit => 28,
-        VisualValueType::PhysicsShapeCastHit => 29,
-        VisualValueType::PhysicsQueryFilter => 30,
-        VisualValueType::Any => 31,
+        VisualValueType::RuntimeTuning => 20,
+        VisualValueType::RuntimeConfig => 21,
+        VisualValueType::RenderConfig => 22,
+        VisualValueType::ShaderConstants => 23,
+        VisualValueType::StreamingTuning => 24,
+        VisualValueType::RenderPasses => 25,
+        VisualValueType::GpuBudget => 26,
+        VisualValueType::AssetBudgets => 27,
+        VisualValueType::WindowSettings => 28,
+        VisualValueType::Spline => 29,
+        VisualValueType::Physics => 30,
+        VisualValueType::PhysicsVelocity => 31,
+        VisualValueType::PhysicsWorldDefaults => 32,
+        VisualValueType::CharacterControllerOutput => 33,
+        VisualValueType::DynamicComponentFields => 34,
+        VisualValueType::DynamicFieldValue => 35,
+        VisualValueType::PhysicsRayCastHit => 36,
+        VisualValueType::PhysicsPointProjectionHit => 37,
+        VisualValueType::PhysicsShapeCastHit => 38,
+        VisualValueType::PhysicsQueryFilter => 39,
+        VisualValueType::Any => 40,
     }
 }
 
@@ -9718,6 +10151,49 @@ fn coerce_json_to_visual_type(
         VisualValueType::AnimatorState => coerce_json_to_animator_state(value),
         VisualValueType::InputModifiers => coerce_json_to_input_modifiers(value),
         VisualValueType::AudioStreamingConfig => coerce_json_to_audio_streaming_config(value),
+        VisualValueType::RuntimeTuning => coerce_json_to_default_object(
+            value,
+            "Runtime Tuning",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::RuntimeConfig => coerce_json_to_default_object(
+            value,
+            "Runtime Config",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::RenderConfig => coerce_json_to_schema_object(
+            value,
+            "Render Config",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::ShaderConstants => coerce_json_to_schema_object(
+            value,
+            "Shader Constants",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::StreamingTuning => coerce_json_to_schema_object(
+            value,
+            "Streaming Tuning",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::RenderPasses => coerce_json_to_default_object(
+            value,
+            "Render Passes",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::GpuBudget => {
+            coerce_json_to_default_object(value, "GPU Budget", default_literal_for_type(value_type))
+        }
+        VisualValueType::AssetBudgets => coerce_json_to_default_object(
+            value,
+            "Asset Budgets",
+            default_literal_for_type(value_type),
+        ),
+        VisualValueType::WindowSettings => coerce_json_to_default_object(
+            value,
+            "Window Settings",
+            default_literal_for_type(value_type),
+        ),
         VisualValueType::Spline => coerce_json_to_spline(value),
         VisualValueType::Physics => {
             coerce_json_to_default_object(value, "Physics", default_literal_for_type(value_type))
@@ -9793,6 +10269,164 @@ fn coerce_json_to_default_object(
         merged.insert(key, value);
     }
     Ok(JsonValue::Object(merged))
+}
+
+fn strip_internal_schema_fields(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(object) => strip_internal_schema_fields_from_object(object),
+        JsonValue::Array(values) => {
+            for child in values {
+                strip_internal_schema_fields(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_internal_schema_fields_from_object(object: &mut JsonMap<String, JsonValue>) {
+    let keys = object.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        if key.starts_with('_') {
+            object.remove(&key);
+            continue;
+        }
+        if let Some(child) = object.get_mut(&key) {
+            strip_internal_schema_fields(child);
+        }
+    }
+}
+
+fn parse_schema_object_literal(default_literal: &str) -> JsonMap<String, JsonValue> {
+    let mut schema = parse_json_object_literal(default_literal);
+    strip_internal_schema_fields_from_object(&mut schema);
+    schema
+}
+
+fn coerce_json_to_schema_object(
+    value: &JsonValue,
+    type_name: &str,
+    schema_literal: &str,
+) -> Result<JsonValue, String> {
+    let schema = parse_schema_object_literal(schema_literal);
+    let input = coerce_json_to_loose_object(value, type_name)?;
+    Ok(JsonValue::Object(coerce_json_map_to_schema(
+        input, &schema, type_name,
+    )?))
+}
+
+fn coerce_json_map_to_schema(
+    input: JsonMap<String, JsonValue>,
+    schema: &JsonMap<String, JsonValue>,
+    type_name: &str,
+) -> Result<JsonMap<String, JsonValue>, String> {
+    let mut out = JsonMap::new();
+    for (key, value) in input {
+        if key.starts_with('_') {
+            continue;
+        }
+        let Some(schema_value) = schema.get(&key) else {
+            return Err(format!("{} field '{}' is not supported", type_name, key));
+        };
+        let field_path = format!("{}.{}", type_name, key);
+        out.insert(
+            key,
+            coerce_json_to_schema_value(&value, schema_value, &field_path)?,
+        );
+    }
+    Ok(out)
+}
+
+fn coerce_json_to_schema_value(
+    value: &JsonValue,
+    schema: &JsonValue,
+    field_path: &str,
+) -> Result<JsonValue, String> {
+    match schema {
+        JsonValue::Bool(_) => Ok(JsonValue::Bool(is_truthy(value))),
+        JsonValue::Number(_) => match value {
+            JsonValue::Number(number) => Ok(JsonValue::Number(number.clone())),
+            JsonValue::Bool(flag) => Ok(JsonValue::Number(JsonNumber::from(if *flag {
+                1
+            } else {
+                0
+            }))),
+            JsonValue::String(text) => {
+                let trimmed = text.trim();
+                if let Ok(parsed) = trimmed.parse::<i64>() {
+                    return Ok(JsonValue::Number(JsonNumber::from(parsed)));
+                }
+                if let Ok(parsed) = trimmed.parse::<u64>() {
+                    return Ok(JsonValue::Number(JsonNumber::from(parsed)));
+                }
+                let parsed = trimmed
+                    .parse::<f64>()
+                    .map_err(|_| format!("{} must be a number", field_path))?;
+                Ok(json_number(parsed))
+            }
+            JsonValue::Null => Ok(JsonValue::Number(JsonNumber::from(0))),
+            JsonValue::Array(_) | JsonValue::Object(_) => {
+                Err(format!("{} must be a number", field_path))
+            }
+        },
+        JsonValue::String(_) => match value {
+            JsonValue::String(text) => Ok(JsonValue::String(text.clone())),
+            _ => Err(format!("{} must be a string", field_path)),
+        },
+        JsonValue::Array(schema_items) => {
+            let source = match value {
+                JsonValue::Array(values) => values.clone(),
+                JsonValue::String(text) => match parse_loose_literal(text) {
+                    JsonValue::Array(values) => values,
+                    _ => return Err(format!("{} must be an array", field_path)),
+                },
+                _ => return Err(format!("{} must be an array", field_path)),
+            };
+
+            if schema_items.is_empty() {
+                return Ok(JsonValue::Array(source));
+            }
+
+            let mut normalized = Vec::with_capacity(source.len());
+            if schema_items.len() == 1 {
+                for (index, entry) in source.iter().enumerate() {
+                    let entry_path = format!("{}[{}]", field_path, index);
+                    normalized.push(coerce_json_to_schema_value(
+                        entry,
+                        &schema_items[0],
+                        &entry_path,
+                    )?);
+                }
+                return Ok(JsonValue::Array(normalized));
+            }
+
+            if source.len() != schema_items.len() {
+                return Err(format!(
+                    "{} must contain exactly {} item(s)",
+                    field_path,
+                    schema_items.len()
+                ));
+            }
+
+            for (index, entry) in source.iter().enumerate() {
+                let entry_path = format!("{}[{}]", field_path, index);
+                normalized.push(coerce_json_to_schema_value(
+                    entry,
+                    &schema_items[index],
+                    &entry_path,
+                )?);
+            }
+            Ok(JsonValue::Array(normalized))
+        }
+        JsonValue::Object(schema_object) => {
+            let input = coerce_json_to_loose_object(value, field_path)?;
+            Ok(JsonValue::Object(coerce_json_map_to_schema(
+                input,
+                schema_object,
+                field_path,
+            )?))
+        }
+        JsonValue::Null => Ok(JsonValue::Null),
+    }
 }
 
 fn coerce_json_to_camera(value: &JsonValue) -> Result<JsonValue, String> {
@@ -19463,7 +20097,9 @@ fn draw_api_node_body(
         args.resize_with(expected_len, || "null".to_string());
         for (index, arg) in args.iter_mut().enumerate() {
             if arg.trim().is_empty() {
-                *arg = default_literal_for_type(spec.inputs[index].value_type).to_string();
+                *arg =
+                    default_literal_for_api_input(*operation, index, spec.inputs[index].value_type)
+                        .to_string();
             }
         }
         change.changed = true;
@@ -20552,6 +21188,33 @@ fn draw_api_structured_default_editor(
         VisualApiOperation::EcsSetDynamicField if input_index == 3 => {
             draw_dynamic_field_value_editor(ui, default_literal)
         }
+        VisualApiOperation::EcsSetRuntimeTuning if input_index == 0 => {
+            draw_runtime_tuning_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetRuntimeConfig if input_index == 0 => {
+            draw_runtime_config_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetRenderConfig if input_index == 0 => {
+            draw_render_config_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetShaderConstants if input_index == 0 => {
+            draw_shader_constants_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetStreamingTuning if input_index == 0 => {
+            draw_streaming_tuning_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetRenderPasses if input_index == 0 => {
+            draw_render_passes_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetGpuBudget if input_index == 0 => {
+            draw_gpu_budget_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetAssetBudgets if input_index == 0 => {
+            draw_asset_budgets_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetWindowSettings if input_index == 0 => {
+            draw_window_settings_editor(ui, default_literal)
+        }
         VisualApiOperation::InputBindAction if input_index == 1 => {
             draw_input_binding_editor(ui, default_literal)
         }
@@ -21374,6 +22037,975 @@ fn draw_shape_cast_hit_editor(ui: &mut Ui, value: &mut String) -> bool {
     changed
 }
 
+fn draw_json_array_editor(
+    ui: &mut Ui,
+    label: &str,
+    values: &mut Vec<JsonValue>,
+    id_prefix: &str,
+) -> bool {
+    let mut changed = false;
+    if values.iter().all(JsonValue::is_number) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            for entry in values.iter_mut() {
+                let mut number = entry.as_f64().unwrap_or(0.0);
+                if ui.add(DragValue::new(&mut number).speed(0.05)).changed() {
+                    *entry = json_number(number);
+                    changed = true;
+                }
+            }
+        });
+        return changed;
+    }
+    if values.iter().all(JsonValue::is_boolean) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            for entry in values.iter_mut() {
+                let mut flag = entry.as_bool().unwrap_or(false);
+                if ui.checkbox(&mut flag, "").changed() {
+                    *entry = JsonValue::Bool(flag);
+                    changed = true;
+                }
+            }
+        });
+        return changed;
+    }
+    if values.iter().all(JsonValue::is_string) {
+        ui.vertical(|ui| {
+            ui.label(label);
+            for (index, entry) in values.iter_mut().enumerate() {
+                let mut text = entry.as_str().unwrap_or_default().to_string();
+                ui.horizontal(|ui| {
+                    ui.label(format!("#{index}"));
+                    if ui
+                        .add(TextEdit::singleline(&mut text).desired_width(120.0))
+                        .changed()
+                    {
+                        *entry = JsonValue::String(text.clone());
+                        changed = true;
+                    }
+                });
+            }
+        });
+        return changed;
+    }
+
+    ui.collapsing(label, |ui| {
+        for (index, entry) in values.iter_mut().enumerate() {
+            let child_label = format!("[{index}]");
+            changed |= draw_json_value_editor(ui, &child_label, entry, id_prefix);
+        }
+    });
+    changed
+}
+
+fn draw_json_object_tree_editor(
+    ui: &mut Ui,
+    object: &mut JsonMap<String, JsonValue>,
+    id_prefix: &str,
+) -> bool {
+    let mut changed = false;
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.retain(|key| !key.starts_with('_'));
+    keys.sort();
+    for key in keys {
+        if let Some(value) = object.get_mut(&key) {
+            changed |= draw_json_value_editor(ui, &key, value, id_prefix);
+        }
+    }
+    changed
+}
+
+fn draw_json_value_editor(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut JsonValue,
+    id_prefix: &str,
+) -> bool {
+    match value {
+        JsonValue::Bool(flag) => {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(label);
+                changed |= ui.checkbox(flag, "").changed();
+            });
+            changed
+        }
+        JsonValue::Number(number) => {
+            let mut changed = false;
+            let mut current = number.as_f64().unwrap_or(0.0);
+            ui.horizontal(|ui| {
+                ui.label(label);
+                changed |= ui.add(DragValue::new(&mut current).speed(0.05)).changed();
+            });
+            if changed {
+                *value = json_number(current);
+            }
+            changed
+        }
+        JsonValue::String(text) => {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(label);
+                changed |= ui
+                    .add(TextEdit::singleline(text).desired_width(140.0))
+                    .changed();
+            });
+            changed
+        }
+        JsonValue::Array(values) => draw_json_array_editor(ui, label, values, id_prefix),
+        JsonValue::Object(object) => {
+            let mut changed = false;
+            let collapse_id = (id_prefix, label);
+            ui.push_id(collapse_id, |ui| {
+                ui.collapsing(label, |ui| {
+                    changed |= draw_json_object_tree_editor(ui, object, id_prefix);
+                });
+            });
+            changed
+        }
+        JsonValue::Null => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.label("null");
+            });
+            false
+        }
+    }
+}
+
+fn default_patch_value_for_schema(schema_value: &JsonValue) -> JsonValue {
+    match schema_value {
+        JsonValue::Object(_) => JsonValue::Object(JsonMap::new()),
+        _ => schema_value.clone(),
+    }
+}
+
+fn prune_patch_unknown_fields(
+    patch: &mut JsonMap<String, JsonValue>,
+    schema: &JsonMap<String, JsonValue>,
+) -> bool {
+    let mut changed = false;
+    let keys = patch.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        if key.starts_with('_') {
+            patch.remove(&key);
+            changed = true;
+            continue;
+        }
+        let Some(schema_value) = schema.get(&key) else {
+            patch.remove(&key);
+            changed = true;
+            continue;
+        };
+        if let JsonValue::Object(schema_object) = schema_value {
+            match patch.get_mut(&key) {
+                Some(JsonValue::Object(patch_object)) => {
+                    changed |= prune_patch_unknown_fields(patch_object, schema_object);
+                }
+                Some(_) | None => {}
+            }
+        }
+    }
+    changed
+}
+
+fn draw_schema_patch_object_editor(
+    ui: &mut Ui,
+    patch: &mut JsonMap<String, JsonValue>,
+    schema: &JsonMap<String, JsonValue>,
+    id_prefix: &str,
+    path: &str,
+) -> bool {
+    let mut changed = false;
+    let mut keys = schema
+        .keys()
+        .filter(|key| !key.starts_with('_'))
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+
+    for key in keys {
+        let Some(schema_value) = schema.get(&key) else {
+            continue;
+        };
+
+        let mut include = patch.contains_key(&key);
+        let had_include = include;
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut include, "").changed();
+            ui.label(key.as_str());
+        });
+
+        if include {
+            if !had_include {
+                patch.insert(key.clone(), default_patch_value_for_schema(schema_value));
+                changed = true;
+            }
+
+            let field_path = format!("{}.{}", path, key);
+            if let Some(current) = patch.get(&key).cloned() {
+                let normalized = coerce_json_to_schema_value(&current, schema_value, &field_path)
+                    .unwrap_or_else(|_| default_patch_value_for_schema(schema_value));
+                if normalized != current {
+                    patch.insert(key.clone(), normalized);
+                    changed = true;
+                }
+            }
+
+            ui.indent((id_prefix, path, key.as_str()), |ui| {
+                if let JsonValue::Object(schema_object) = schema_value {
+                    if let Some(JsonValue::Object(child_patch)) = patch.get_mut(&key) {
+                        changed |= draw_schema_patch_object_editor(
+                            ui,
+                            child_patch,
+                            schema_object,
+                            id_prefix,
+                            &field_path,
+                        );
+                    }
+                } else if let Some(entry) = patch.get_mut(&key) {
+                    changed |= draw_json_value_editor(ui, "value", entry, id_prefix);
+                }
+            });
+        } else if had_include {
+            patch.remove(&key);
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn draw_schema_patch_editor(
+    ui: &mut Ui,
+    value: &mut String,
+    id_prefix: &str,
+    type_name: &str,
+    schema_literal: &str,
+) -> bool {
+    let schema = parse_schema_object_literal(schema_literal);
+    let mut object = parse_json_object_literal(value);
+    let mut changed = prune_patch_unknown_fields(&mut object, &schema);
+
+    ui.horizontal(|ui| {
+        if ui.small_button("Clear Patch").clicked() {
+            object.clear();
+            changed = true;
+        }
+        ui.small(format!("{} field(s) enabled", object.len()));
+    });
+    ui.small(format!(
+        "{}: enable only the fields you want to update",
+        type_name
+    ));
+
+    changed |= draw_schema_patch_object_editor(ui, &mut object, &schema, id_prefix, type_name);
+    if changed {
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
+fn draw_runtime_tuning_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    object.remove("pending_asset_uploads");
+    object.remove("pending_asset_bytes");
+    let mut changed = false;
+
+    let mut render_message_capacity =
+        json_object_f64(&object, "render_message_capacity", 96.0).max(0.0) as u64;
+    let mut asset_stream_queue_capacity =
+        json_object_f64(&object, "asset_stream_queue_capacity", 96.0).max(0.0) as u64;
+    let mut asset_worker_queue_capacity =
+        json_object_f64(&object, "asset_worker_queue_capacity", 96.0).max(0.0) as u64;
+    let mut max_pending_asset_uploads =
+        json_object_f64(&object, "max_pending_asset_uploads", 48.0).max(0.0) as u64;
+    let mut max_pending_asset_bytes =
+        json_object_f64(&object, "max_pending_asset_bytes", 512.0 * 1024.0 * 1024.0).max(0.0)
+            as u64;
+    let mut asset_uploads_per_frame =
+        json_object_f64(&object, "asset_uploads_per_frame", 8.0).max(0.0) as u64;
+
+    let mut wgpu_poll_interval_frames =
+        json_object_f64(&object, "wgpu_poll_interval_frames", 1.0).max(0.0) as u32;
+    let mut wgpu_poll_mode = json_object_f64(&object, "wgpu_poll_mode", 1.0).max(0.0) as u32;
+    let mut pixels_per_line = json_object_f64(&object, "pixels_per_line", 38.0).max(0.0) as u32;
+    let mut title_update_ms = json_object_f64(&object, "title_update_ms", 200.0).max(0.0) as u32;
+    let mut resize_debounce_ms =
+        json_object_f64(&object, "resize_debounce_ms", 500.0).max(0.0) as u32;
+    let mut max_logic_steps_per_frame =
+        json_object_f64(&object, "max_logic_steps_per_frame", 4.0).max(0.0) as u32;
+
+    let mut target_tickrate = json_object_f64(&object, "target_tickrate", 120.0).max(1.0);
+    let mut target_fps = json_object_f64(&object, "target_fps", 0.0).max(0.0);
+
+    let pending_asset_uploads =
+        json_object_f64(&object, "pending_asset_uploads", 0.0).max(0.0) as u64;
+    let pending_asset_bytes = json_object_f64(&object, "pending_asset_bytes", 0.0).max(0.0) as u64;
+
+    if wgpu_poll_mode > 2 {
+        wgpu_poll_mode = 1;
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Render Message Capacity");
+        changed |= ui
+            .add(
+                DragValue::new(&mut render_message_capacity)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Asset Stream Queue Capacity");
+        changed |= ui
+            .add(
+                DragValue::new(&mut asset_stream_queue_capacity)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Asset Worker Queue Capacity");
+        changed |= ui
+            .add(
+                DragValue::new(&mut asset_worker_queue_capacity)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Max Pending Uploads");
+        changed |= ui
+            .add(
+                DragValue::new(&mut max_pending_asset_uploads)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+        ui.label("Uploads Per Frame");
+        changed |= ui
+            .add(
+                DragValue::new(&mut asset_uploads_per_frame)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Max Pending Bytes");
+        changed |= ui
+            .add(
+                DragValue::new(&mut max_pending_asset_bytes)
+                    .speed(1024.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Poll Interval (frames)");
+        changed |= ui
+            .add(
+                DragValue::new(&mut wgpu_poll_interval_frames)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+        ui.label("Poll Mode");
+        ComboBox::from_id_salt(("runtime_tuning_poll_mode", ui.id()))
+            .selected_text(match wgpu_poll_mode {
+                0 => "Off",
+                2 => "Wait",
+                _ => "Poll",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui.selectable_value(&mut wgpu_poll_mode, 0, "Off").changed();
+                changed |= ui
+                    .selectable_value(&mut wgpu_poll_mode, 1, "Poll")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut wgpu_poll_mode, 2, "Wait")
+                    .changed();
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Pixels Per Line");
+        changed |= ui
+            .add(
+                DragValue::new(&mut pixels_per_line)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+        ui.label("Title Update ms");
+        changed |= ui
+            .add(
+                DragValue::new(&mut title_update_ms)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Resize Debounce ms");
+        changed |= ui
+            .add(
+                DragValue::new(&mut resize_debounce_ms)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+        ui.label("Max Logic Steps/Frame");
+        changed |= ui
+            .add(
+                DragValue::new(&mut max_logic_steps_per_frame)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Target Tickrate");
+        changed |= ui
+            .add(
+                DragValue::new(&mut target_tickrate)
+                    .speed(1.0)
+                    .range(1.0..=10_000.0),
+            )
+            .changed();
+        ui.label("Target FPS (0 = uncapped)");
+        changed |= ui
+            .add(
+                DragValue::new(&mut target_fps)
+                    .speed(1.0)
+                    .range(0.0..=10_000.0),
+            )
+            .changed();
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Pending Uploads");
+        ui.monospace(pending_asset_uploads.to_string());
+        ui.label("Pending Bytes");
+        ui.monospace(pending_asset_bytes.to_string());
+    });
+
+    if changed {
+        object.insert(
+            "render_message_capacity".to_string(),
+            JsonValue::Number(JsonNumber::from(render_message_capacity)),
+        );
+        object.insert(
+            "asset_stream_queue_capacity".to_string(),
+            JsonValue::Number(JsonNumber::from(asset_stream_queue_capacity)),
+        );
+        object.insert(
+            "asset_worker_queue_capacity".to_string(),
+            JsonValue::Number(JsonNumber::from(asset_worker_queue_capacity)),
+        );
+        object.insert(
+            "max_pending_asset_uploads".to_string(),
+            JsonValue::Number(JsonNumber::from(max_pending_asset_uploads)),
+        );
+        object.insert(
+            "max_pending_asset_bytes".to_string(),
+            JsonValue::Number(JsonNumber::from(max_pending_asset_bytes)),
+        );
+        object.insert(
+            "asset_uploads_per_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(asset_uploads_per_frame)),
+        );
+        object.insert(
+            "wgpu_poll_interval_frames".to_string(),
+            JsonValue::Number(JsonNumber::from(wgpu_poll_interval_frames)),
+        );
+        object.insert(
+            "wgpu_poll_mode".to_string(),
+            JsonValue::Number(JsonNumber::from(wgpu_poll_mode)),
+        );
+        object.insert(
+            "pixels_per_line".to_string(),
+            JsonValue::Number(JsonNumber::from(pixels_per_line)),
+        );
+        object.insert(
+            "title_update_ms".to_string(),
+            JsonValue::Number(JsonNumber::from(title_update_ms)),
+        );
+        object.insert(
+            "resize_debounce_ms".to_string(),
+            JsonValue::Number(JsonNumber::from(resize_debounce_ms)),
+        );
+        object.insert(
+            "max_logic_steps_per_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(max_logic_steps_per_frame)),
+        );
+        object.insert("target_tickrate".to_string(), json_number(target_tickrate));
+        object.insert("target_fps".to_string(), json_number(target_fps));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_runtime_config_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut egui_enabled = json_object_bool(&object, "egui", true);
+    let mut wgpu_experimental_features =
+        json_object_bool(&object, "wgpu_experimental_features", false);
+    let mut fixed_timestep = json_object_bool(&object, "fixed_timestep", false);
+    let mut wgpu_backend = json_object_string(&object, "wgpu_backend", "auto");
+    let mut binding_backend = json_object_string(&object, "binding_backend", "auto");
+
+    if !matches!(
+        wgpu_backend.as_str(),
+        "auto" | "vulkan" | "dx12" | "metal" | "gl"
+    ) {
+        wgpu_backend = "auto".to_string();
+    }
+    if !matches!(
+        binding_backend.as_str(),
+        "auto" | "bindless_modern" | "bindless_fallback" | "bind_groups"
+    ) {
+        binding_backend = "auto".to_string();
+    }
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut egui_enabled, "Egui").changed();
+        changed |= ui
+            .checkbox(&mut wgpu_experimental_features, "Experimental Features")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut fixed_timestep, "Fixed Timestep").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("WGPU Backend");
+        ComboBox::from_id_salt(("runtime_config_backend", ui.id()))
+            .selected_text(wgpu_backend.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["auto", "vulkan", "dx12", "metal", "gl"] {
+                    changed |= ui
+                        .selectable_value(&mut wgpu_backend, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Binding Backend");
+        ComboBox::from_id_salt(("runtime_config_binding_backend", ui.id()))
+            .selected_text(binding_backend.clone())
+            .show_ui(ui, |ui| {
+                for candidate in [
+                    "auto",
+                    "bindless_modern",
+                    "bindless_fallback",
+                    "bind_groups",
+                ] {
+                    changed |= ui
+                        .selectable_value(&mut binding_backend, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+
+    if changed {
+        object.insert("egui".to_string(), JsonValue::Bool(egui_enabled));
+        object.insert(
+            "wgpu_experimental_features".to_string(),
+            JsonValue::Bool(wgpu_experimental_features),
+        );
+        object.insert(
+            "fixed_timestep".to_string(),
+            JsonValue::Bool(fixed_timestep),
+        );
+        object.insert("wgpu_backend".to_string(), JsonValue::String(wgpu_backend));
+        object.insert(
+            "binding_backend".to_string(),
+            JsonValue::String(binding_backend),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+    changed
+}
+
+fn draw_render_config_editor(ui: &mut Ui, value: &mut String) -> bool {
+    draw_schema_patch_editor(
+        ui,
+        value,
+        "render_config_patch",
+        "Render Config",
+        default_literal_for_type(VisualValueType::RenderConfig),
+    )
+}
+
+fn draw_shader_constants_editor(ui: &mut Ui, value: &mut String) -> bool {
+    draw_schema_patch_editor(
+        ui,
+        value,
+        "shader_constants_patch",
+        "Shader Constants",
+        default_literal_for_type(VisualValueType::ShaderConstants),
+    )
+}
+
+fn draw_streaming_tuning_editor(ui: &mut Ui, value: &mut String) -> bool {
+    draw_schema_patch_editor(
+        ui,
+        value,
+        "streaming_tuning_patch",
+        "Streaming Tuning",
+        default_literal_for_type(VisualValueType::StreamingTuning),
+    )
+}
+
+fn draw_render_passes_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut gbuffer = json_object_bool(&object, "gbuffer", true);
+    let mut shadow = json_object_bool(&object, "shadow", true);
+    let mut direct_lighting = json_object_bool(&object, "direct_lighting", true);
+    let mut sky = json_object_bool(&object, "sky", true);
+    let mut ssgi = json_object_bool(&object, "ssgi", true);
+    let mut ssgi_denoise = json_object_bool(&object, "ssgi_denoise", true);
+    let mut ssr = json_object_bool(&object, "ssr", true);
+    let mut ddgi = json_object_bool(&object, "ddgi", true);
+    let mut egui_enabled = json_object_bool(&object, "egui", true);
+    let mut gizmo = json_object_bool(&object, "gizmo", true);
+    let mut transparent = json_object_bool(&object, "transparent", true);
+    let mut occlusion = json_object_bool(&object, "occlusion", true);
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut gbuffer, "GBuffer").changed();
+        changed |= ui.checkbox(&mut shadow, "Shadow").changed();
+        changed |= ui.checkbox(&mut direct_lighting, "Direct").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut sky, "Sky").changed();
+        changed |= ui.checkbox(&mut ssgi, "SSGI").changed();
+        changed |= ui.checkbox(&mut ssgi_denoise, "SSGI Denoise").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut ssr, "SSR").changed();
+        changed |= ui.checkbox(&mut ddgi, "DDGI").changed();
+        changed |= ui.checkbox(&mut egui_enabled, "Egui").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut gizmo, "Gizmo").changed();
+        changed |= ui.checkbox(&mut transparent, "Transparent").changed();
+        changed |= ui.checkbox(&mut occlusion, "Occlusion").changed();
+    });
+
+    if changed {
+        object.insert("gbuffer".to_string(), JsonValue::Bool(gbuffer));
+        object.insert("shadow".to_string(), JsonValue::Bool(shadow));
+        object.insert(
+            "direct_lighting".to_string(),
+            JsonValue::Bool(direct_lighting),
+        );
+        object.insert("sky".to_string(), JsonValue::Bool(sky));
+        object.insert("ssgi".to_string(), JsonValue::Bool(ssgi));
+        object.insert("ssgi_denoise".to_string(), JsonValue::Bool(ssgi_denoise));
+        object.insert("ssr".to_string(), JsonValue::Bool(ssr));
+        object.insert("ddgi".to_string(), JsonValue::Bool(ddgi));
+        object.insert("egui".to_string(), JsonValue::Bool(egui_enabled));
+        object.insert("gizmo".to_string(), JsonValue::Bool(gizmo));
+        object.insert("transparent".to_string(), JsonValue::Bool(transparent));
+        object.insert("occlusion".to_string(), JsonValue::Bool(occlusion));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_gpu_budget_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    object.remove("used_mib");
+    let mut changed = false;
+
+    let mut soft_mib = json_object_f64(&object, "soft_mib", 0.0).max(0.0);
+    let mut hard_mib = json_object_f64(&object, "hard_mib", 0.0).max(0.0);
+    let used_mib = json_object_f64(&object, "used_mib", 0.0).max(0.0);
+    let mut idle_frames = json_object_i64(&object, "idle_frames", 0).max(0) as u32;
+
+    let mut kind_limits = [
+        (
+            "mesh_soft_mib",
+            json_object_f64(&object, "mesh_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "mesh_hard_mib",
+            json_object_f64(&object, "mesh_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "material_soft_mib",
+            json_object_f64(&object, "material_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "material_hard_mib",
+            json_object_f64(&object, "material_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "texture_soft_mib",
+            json_object_f64(&object, "texture_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "texture_hard_mib",
+            json_object_f64(&object, "texture_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "texture_view_soft_mib",
+            json_object_f64(&object, "texture_view_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "texture_view_hard_mib",
+            json_object_f64(&object, "texture_view_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "sampler_soft_mib",
+            json_object_f64(&object, "sampler_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "sampler_hard_mib",
+            json_object_f64(&object, "sampler_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "buffer_soft_mib",
+            json_object_f64(&object, "buffer_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "buffer_hard_mib",
+            json_object_f64(&object, "buffer_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "external_soft_mib",
+            json_object_f64(&object, "external_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "external_hard_mib",
+            json_object_f64(&object, "external_hard_mib", 0.0).max(0.0),
+        ),
+        (
+            "transient_soft_mib",
+            json_object_f64(&object, "transient_soft_mib", 0.0).max(0.0),
+        ),
+        (
+            "transient_hard_mib",
+            json_object_f64(&object, "transient_hard_mib", 0.0).max(0.0),
+        ),
+    ];
+
+    ui.horizontal(|ui| {
+        ui.label("Used MiB");
+        ui.monospace(format!("{used_mib:.2}"));
+    });
+    ui.horizontal(|ui| {
+        ui.label("Soft MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut soft_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+        ui.label("Hard MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut hard_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Idle Frames (0 = keep)");
+        changed |= ui
+            .add(
+                DragValue::new(&mut idle_frames)
+                    .speed(1.0)
+                    .range(0..=u32::MAX),
+            )
+            .changed();
+    });
+
+    for chunk in kind_limits.chunks_mut(2) {
+        ui.horizontal(|ui| {
+            for (key, number) in chunk {
+                let label = key
+                    .replace("_soft_mib", " soft")
+                    .replace("_hard_mib", " hard")
+                    .replace('_', " ");
+                ui.label(label);
+                changed |= ui
+                    .add(DragValue::new(number).speed(1.0).range(0.0..=f64::MAX))
+                    .changed();
+            }
+        });
+    }
+
+    if hard_mib < soft_mib {
+        hard_mib = soft_mib;
+    }
+    for chunk in kind_limits.chunks_exact_mut(2) {
+        let soft = chunk[0].1;
+        if chunk[1].1 < soft {
+            chunk[1].1 = soft;
+        }
+    }
+
+    if changed {
+        object.insert("soft_mib".to_string(), json_number(soft_mib));
+        object.insert("hard_mib".to_string(), json_number(hard_mib));
+        object.insert(
+            "idle_frames".to_string(),
+            JsonValue::Number(JsonNumber::from(idle_frames)),
+        );
+        for (key, number) in kind_limits {
+            object.insert(key.to_string(), json_number(number));
+        }
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_asset_budgets_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut mesh_mib = json_object_f64(&object, "mesh_mib", 0.0).max(0.0);
+    let mut texture_mib = json_object_f64(&object, "texture_mib", 0.0).max(0.0);
+    let mut material_mib = json_object_f64(&object, "material_mib", 0.0).max(0.0);
+    let mut audio_mib = json_object_f64(&object, "audio_mib", 0.0).max(0.0);
+    let mut scene_mib = json_object_f64(&object, "scene_mib", 0.0).max(0.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Mesh MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut mesh_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+        ui.label("Texture MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut texture_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Material MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut material_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+        ui.label("Audio MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut audio_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Scene MiB");
+        changed |= ui
+            .add(
+                DragValue::new(&mut scene_mib)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            )
+            .changed();
+    });
+
+    if changed {
+        object.insert("mesh_mib".to_string(), json_number(mesh_mib));
+        object.insert("texture_mib".to_string(), json_number(texture_mib));
+        object.insert("material_mib".to_string(), json_number(material_mib));
+        object.insert("audio_mib".to_string(), json_number(audio_mib));
+        object.insert("scene_mib".to_string(), json_number(scene_mib));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_window_settings_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut title_mode = json_object_string(&object, "title_mode", "stats");
+    let mut custom_title = json_object_string(&object, "custom_title", "helmer engine");
+    let mut fullscreen = json_object_bool(&object, "fullscreen", false);
+    let mut resizable = json_object_bool(&object, "resizable", true);
+    let mut decorations = json_object_bool(&object, "decorations", true);
+    let mut maximized = json_object_bool(&object, "maximized", false);
+    let mut minimized = json_object_bool(&object, "minimized", false);
+    let mut visible = json_object_bool(&object, "visible", true);
+
+    if !matches!(
+        title_mode.as_str(),
+        "stats" | "custom" | "custom_with_stats"
+    ) {
+        title_mode = "stats".to_string();
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Title Mode");
+        ComboBox::from_id_salt(("window_title_mode", ui.id()))
+            .selected_text(title_mode.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["stats", "custom", "custom_with_stats"] {
+                    changed |= ui
+                        .selectable_value(&mut title_mode, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Custom Title");
+        changed |= ui
+            .add(TextEdit::singleline(&mut custom_title).desired_width(180.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut fullscreen, "Fullscreen").changed();
+        changed |= ui.checkbox(&mut resizable, "Resizable").changed();
+        changed |= ui.checkbox(&mut decorations, "Decorations").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut maximized, "Maximized").changed();
+        changed |= ui.checkbox(&mut minimized, "Minimized").changed();
+        changed |= ui.checkbox(&mut visible, "Visible").changed();
+    });
+
+    if changed {
+        object.insert("title_mode".to_string(), JsonValue::String(title_mode));
+        object.insert("custom_title".to_string(), JsonValue::String(custom_title));
+        object.insert("fullscreen".to_string(), JsonValue::Bool(fullscreen));
+        object.insert("resizable".to_string(), JsonValue::Bool(resizable));
+        object.insert("decorations".to_string(), JsonValue::Bool(decorations));
+        object.insert("maximized".to_string(), JsonValue::Bool(maximized));
+        object.insert("minimized".to_string(), JsonValue::Bool(minimized));
+        object.insert("visible".to_string(), JsonValue::Bool(visible));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
 fn draw_typed_default_editor(ui: &mut Ui, value_type: VisualValueType, value: &mut String) -> bool {
     draw_typed_default_editor_with_array_item(ui, value_type, None, value)
 }
@@ -21643,6 +23275,15 @@ fn draw_typed_editor_with_width(
         VisualValueType::AnimatorState => draw_animator_state_editor(ui, value),
         VisualValueType::InputModifiers => draw_input_modifiers_editor(ui, value),
         VisualValueType::AudioStreamingConfig => draw_audio_streaming_config_editor(ui, value),
+        VisualValueType::RuntimeTuning => draw_runtime_tuning_editor(ui, value),
+        VisualValueType::RuntimeConfig => draw_runtime_config_editor(ui, value),
+        VisualValueType::RenderConfig => draw_render_config_editor(ui, value),
+        VisualValueType::ShaderConstants => draw_shader_constants_editor(ui, value),
+        VisualValueType::StreamingTuning => draw_streaming_tuning_editor(ui, value),
+        VisualValueType::RenderPasses => draw_render_passes_editor(ui, value),
+        VisualValueType::GpuBudget => draw_gpu_budget_editor(ui, value),
+        VisualValueType::AssetBudgets => draw_asset_budgets_editor(ui, value),
+        VisualValueType::WindowSettings => draw_window_settings_editor(ui, value),
         VisualValueType::Spline => draw_spline_editor(ui, value),
         VisualValueType::Physics => draw_physics_data_editor(ui, value),
         VisualValueType::PhysicsVelocity => draw_physics_velocity_editor(ui, value),

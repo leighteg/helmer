@@ -26,18 +26,24 @@ use helmer_script_sdk::{
 };
 use libloading::{Library, Symbol};
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, UserData, Value, Variadic};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use helmer::audio::{AudioBus, AudioPlaybackState};
+use helmer::graphics::{
+    backend::binding_backend::BindingBackendChoice,
+    common::renderer::{RenderControl, RenderMessage, WgpuBackend},
+    graph::definition::resource_id::ResourceKind,
+    render_graphs::{graph_templates, template_for_graph},
+};
 use helmer::provided::components::{
     AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer, Spline,
     SplineFollower, SplineMode,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
-use helmer::runtime::runtime::RuntimeCursorGrabMode;
+use helmer::runtime::runtime::{RuntimeCursorGrabMode, RuntimeWindowTitleMode};
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
     ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
@@ -49,14 +55,16 @@ use helmer_becs::physics::components::{
     RigidBodyTransientForces,
 };
 use helmer_becs::physics::physics_resource::PhysicsResource;
+use helmer_becs::systems::render_system::{RenderGraphResource, RenderSyncRequest};
 use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren,
 };
 use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
-    BevyMeshRenderer, BevySpline, BevySplineFollower, BevySystemProfiler, BevyTransform,
-    BevyWrapper, DeltaTime,
+    BevyMeshRenderer, BevyRenderSender, BevyRendererStats, BevyRuntimeConfig, BevyRuntimeTuning,
+    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevyStreamingTuning,
+    BevySystemProfiler, BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
@@ -68,7 +76,9 @@ use crate::editor::{
     commands::{EditorCommand, EditorCommandQueue},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
     project::EditorProject,
-    scene::{EditorEntity, EditorSceneState, WorldState, reset_scene_root_instance},
+    scene::{
+        EditorEntity, EditorRenderRefresh, EditorSceneState, WorldState, reset_scene_root_instance,
+    },
     set_play_camera,
     viewport::{
         EditorCursorControlState, EditorViewportRuntime, EditorViewportState, PlayViewportKind,
@@ -8615,7 +8625,1302 @@ fn build_ecs_table(
         })?,
     )?;
 
+    ecs.set(
+        "list_graph_templates",
+        lua.create_function(move |lua, ()| {
+            let table = lua.create_table()?;
+            for (index, template) in graph_templates().iter().enumerate() {
+                table.set(index + 1, template.name)?;
+            }
+            Ok(table)
+        })?,
+    )?;
+
+    let world_ptr_get_graph_template = world_ptr;
+    ecs.set(
+        "get_graph_template",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_get_graph_template as *mut World) };
+            let current = world
+                .get_resource::<EditorViewportState>()
+                .map(|state| state.graph_template.clone())
+                .filter(|name| !name.trim().is_empty())
+                .or_else(|| {
+                    graph_templates()
+                        .first()
+                        .map(|template| template.name.to_string())
+                })
+                .unwrap_or_default();
+            Ok(current)
+        })?,
+    )?;
+
+    let world_ptr_set_graph_template = world_ptr;
+    ecs.set(
+        "set_graph_template",
+        lua.create_function(move |_, name: String| {
+            let world = unsafe { &mut *(world_ptr_set_graph_template as *mut World) };
+            Ok(set_editor_graph_template(world, &name))
+        })?,
+    )?;
+
+    let world_ptr_get_runtime_tuning = world_ptr;
+    ecs.set(
+        "get_runtime_tuning",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_runtime_tuning as *mut World) };
+            let Some(runtime_tuning) = world.get_resource::<BevyRuntimeTuning>() else {
+                return Err(mlua::Error::external(
+                    "Runtime tuning resource is unavailable",
+                ));
+            };
+            runtime_tuning_to_table(lua, &runtime_tuning.0)
+        })?,
+    )?;
+
+    let world_ptr_set_runtime_tuning = world_ptr;
+    ecs.set(
+        "set_runtime_tuning",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_runtime_tuning as *mut World) };
+            let Some(runtime_tuning) = world.get_resource::<BevyRuntimeTuning>() else {
+                return Ok(false);
+            };
+            Ok(apply_runtime_tuning_patch(&runtime_tuning.0, &data))
+        })?,
+    )?;
+
+    let world_ptr_get_runtime_config = world_ptr;
+    ecs.set(
+        "get_runtime_config",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_runtime_config as *mut World) };
+            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+                return Err(mlua::Error::external(
+                    "Runtime config resource is unavailable",
+                ));
+            };
+            runtime_config_to_table(lua, &runtime_config.0)
+        })?,
+    )?;
+
+    let world_ptr_set_runtime_config = world_ptr;
+    ecs.set(
+        "set_runtime_config",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_runtime_config as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+                return Ok(false);
+            };
+            let previous_backend = runtime_config.0.wgpu_backend;
+            let previous_binding = runtime_config.0.binding_backend;
+            let previous_experimental = runtime_config.0.wgpu_experimental_features;
+            if !apply_runtime_config_patch(&mut runtime_config.0, &patch) {
+                return Ok(false);
+            }
+            let recreate_requested = previous_backend != runtime_config.0.wgpu_backend
+                || previous_binding != runtime_config.0.binding_backend
+                || previous_experimental != runtime_config.0.wgpu_experimental_features;
+            let backend = runtime_config.0.wgpu_backend;
+            let binding_backend = runtime_config.0.binding_backend;
+            let allow_experimental_features = runtime_config.0.wgpu_experimental_features;
+            drop(runtime_config);
+            if recreate_requested {
+                if let Some(render_sender) = world.get_resource::<BevyRenderSender>() {
+                    let _ = render_sender.0.send(RenderMessage::Control(
+                        RenderControl::RecreateDevice {
+                            backend,
+                            binding_backend,
+                            allow_experimental_features,
+                        },
+                    ));
+                }
+            }
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_render_config = world_ptr;
+    ecs.set(
+        "get_render_config",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_render_config as *mut World) };
+            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+                return Err(mlua::Error::external(
+                    "Runtime config resource is unavailable",
+                ));
+            };
+            serde_struct_to_lua_table(lua, &runtime_config.0.render_config)
+        })?,
+    )?;
+
+    let world_ptr_set_render_config = world_ptr;
+    ecs.set(
+        "set_render_config",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_render_config as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+                return Ok(false);
+            };
+            Ok(apply_serde_object_patch(
+                &mut runtime_config.0.render_config,
+                patch,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_get_shader_constants = world_ptr;
+    ecs.set(
+        "get_shader_constants",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_shader_constants as *mut World) };
+            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+                return Err(mlua::Error::external(
+                    "Runtime config resource is unavailable",
+                ));
+            };
+            serde_struct_to_lua_table(lua, &runtime_config.0.render_config.shader_constants)
+        })?,
+    )?;
+
+    let world_ptr_set_shader_constants = world_ptr;
+    ecs.set(
+        "set_shader_constants",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_shader_constants as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+                return Ok(false);
+            };
+            Ok(apply_serde_object_patch(
+                &mut runtime_config.0.render_config.shader_constants,
+                patch,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_get_streaming_tuning = world_ptr;
+    ecs.set(
+        "get_streaming_tuning",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_streaming_tuning as *mut World) };
+            let Some(streaming_tuning) = world.get_resource::<BevyStreamingTuning>() else {
+                return Err(mlua::Error::external(
+                    "Streaming tuning resource is unavailable",
+                ));
+            };
+            serde_struct_to_lua_table(lua, &streaming_tuning.0)
+        })?,
+    )?;
+
+    let world_ptr_set_streaming_tuning = world_ptr;
+    ecs.set(
+        "set_streaming_tuning",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_streaming_tuning as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(mut streaming_tuning) = world.get_resource_mut::<BevyStreamingTuning>() else {
+                return Ok(false);
+            };
+            Ok(apply_serde_object_patch(&mut streaming_tuning.0, patch))
+        })?,
+    )?;
+
+    let world_ptr_get_render_passes = world_ptr;
+    ecs.set(
+        "get_render_passes",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_render_passes as *mut World) };
+            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+                return Err(mlua::Error::external(
+                    "Runtime config resource is unavailable",
+                ));
+            };
+            render_passes_to_table(lua, &runtime_config.0.render_config)
+        })?,
+    )?;
+
+    let world_ptr_set_render_passes = world_ptr;
+    ecs.set(
+        "set_render_passes",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_render_passes as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+                return Ok(false);
+            };
+            Ok(apply_render_passes_patch(
+                &mut runtime_config.0.render_config,
+                &patch,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_get_gpu_budget = world_ptr;
+    ecs.set(
+        "get_gpu_budget",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_gpu_budget as *mut World) };
+            let Some(render_stats) = world.get_resource::<BevyRendererStats>() else {
+                return Err(mlua::Error::external(
+                    "Renderer stats resource is unavailable",
+                ));
+            };
+            gpu_budget_to_table(lua, &render_stats.0)
+        })?,
+    )?;
+
+    let world_ptr_set_gpu_budget = world_ptr;
+    ecs.set(
+        "set_gpu_budget",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_gpu_budget as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            Ok(set_gpu_budget_from_patch(world, &patch))
+        })?,
+    )?;
+
+    let world_ptr_get_asset_budgets = world_ptr;
+    ecs.set(
+        "get_asset_budgets",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_asset_budgets as *mut World) };
+            let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+                return Err(mlua::Error::external(
+                    "Asset server resource is unavailable",
+                ));
+            };
+            asset_budgets_to_table(lua, &asset_server.0.lock())
+        })?,
+    )?;
+
+    let world_ptr_set_asset_budgets = world_ptr;
+    ecs.set(
+        "set_asset_budgets",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_asset_budgets as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+                return Ok(false);
+            };
+            Ok(apply_asset_budget_patch(&mut asset_server.0.lock(), &patch))
+        })?,
+    )?;
+
+    let world_ptr_get_window_settings = world_ptr;
+    ecs.set(
+        "get_window_settings",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_get_window_settings as *mut World) };
+            let Some(window_control) = world.get_resource::<BevyRuntimeWindowControl>() else {
+                return Err(mlua::Error::external(
+                    "Window control resource is unavailable",
+                ));
+            };
+            window_settings_to_table(lua, &window_control.0)
+        })?,
+    )?;
+
+    let world_ptr_set_window_settings = world_ptr;
+    ecs.set(
+        "set_window_settings",
+        lua.create_function(move |_, data: Table| {
+            let world = unsafe { &mut *(world_ptr_set_window_settings as *mut World) };
+            let patch = match table_to_json_object(&data) {
+                Ok(patch) => patch,
+                Err(_) => return Ok(false),
+            };
+            let Some(window_control) = world.get_resource::<BevyRuntimeWindowControl>() else {
+                return Ok(false);
+            };
+            Ok(apply_window_settings_patch(&window_control.0, &patch))
+        })?,
+    )?;
+
     Ok(ecs)
+}
+
+fn f64_to_non_negative_u32(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value >= u32::MAX as f64 {
+        return Some(u32::MAX);
+    }
+    Some(value.round() as u32)
+}
+
+fn f64_to_non_negative_u64(value: f64) -> Option<u64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value >= u64::MAX as f64 {
+        return Some(u64::MAX);
+    }
+    Some(value.round() as u64)
+}
+
+fn f64_to_non_negative_usize(value: f64) -> Option<usize> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value >= usize::MAX as f64 {
+        return Some(usize::MAX);
+    }
+    Some(value.round() as usize)
+}
+
+fn bytes_to_mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+fn mib_to_bytes_u64(mib: f64) -> Option<u64> {
+    f64_to_non_negative_u64(mib * 1024.0 * 1024.0)
+}
+
+fn mib_to_bytes_usize(mib: f64) -> Option<usize> {
+    f64_to_non_negative_usize(mib * 1024.0 * 1024.0)
+}
+
+fn strip_internal_padding_fields(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(object) => {
+            let keys = object
+                .keys()
+                .filter(|key| key.starts_with('_'))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in keys {
+                object.remove(&key);
+            }
+            for child in object.values_mut() {
+                strip_internal_padding_fields(child);
+            }
+        }
+        JsonValue::Array(values) => {
+            for child in values {
+                strip_internal_padding_fields(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn serde_struct_to_lua_table<T: Serialize>(lua: &Lua, value: &T) -> mlua::Result<Table> {
+    let mut value = serde_json::to_value(value).map_err(|err| {
+        mlua::Error::external(format!("Failed to serialize settings data: {err}"))
+    })?;
+    strip_internal_padding_fields(&mut value);
+    match rust_json_to_lua_value(lua, value).map_err(mlua::Error::external)? {
+        Value::Table(table) => Ok(table),
+        _ => Err(mlua::Error::external(
+            "Serialized settings payload was not a table",
+        )),
+    }
+}
+
+fn table_to_json_object(table: &Table) -> Result<JsonMap<String, JsonValue>, String> {
+    match rust_lua_table_to_json(table.clone())? {
+        JsonValue::Object(object) => Ok(object),
+        _ => Err("Settings payload must be a table/object".to_string()),
+    }
+}
+
+fn merge_json_values_strict(base: &mut JsonValue, patch: JsonValue) -> bool {
+    match (base, patch) {
+        (JsonValue::Object(base_object), JsonValue::Object(patch_object)) => {
+            merge_json_maps_strict(base_object, patch_object)
+        }
+        (base, patch) => {
+            *base = patch;
+            true
+        }
+    }
+}
+
+fn merge_json_maps_strict(
+    base: &mut JsonMap<String, JsonValue>,
+    patch: JsonMap<String, JsonValue>,
+) -> bool {
+    for (key, value) in patch {
+        let Some(existing) = base.get_mut(&key) else {
+            return false;
+        };
+        if !merge_json_values_strict(existing, value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn apply_serde_object_patch<T: Serialize + DeserializeOwned>(
+    value: &mut T,
+    patch: JsonMap<String, JsonValue>,
+) -> bool {
+    let Ok(mut root) = serde_json::to_value(&*value) else {
+        return false;
+    };
+    let JsonValue::Object(ref mut root_object) = root else {
+        return false;
+    };
+    if !merge_json_maps_strict(root_object, patch) {
+        return false;
+    }
+    match serde_json::from_value(root) {
+        Ok(next) => {
+            *value = next;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn json_value_to_f64(value: &JsonValue) -> Option<f64> {
+    match value {
+        JsonValue::Number(number) => number.as_f64(),
+        JsonValue::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
+        JsonValue::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_value_to_bool(value: &JsonValue) -> Option<bool> {
+    match value {
+        JsonValue::Bool(flag) => Some(*flag),
+        JsonValue::Number(number) => number.as_f64().map(|value| value != 0.0),
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn json_value_to_string(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn json_value_to_non_negative_u32(value: &JsonValue) -> Option<u32> {
+    f64_to_non_negative_u32(json_value_to_f64(value)?)
+}
+
+fn json_value_to_non_negative_usize(value: &JsonValue) -> Option<usize> {
+    f64_to_non_negative_usize(json_value_to_f64(value)?)
+}
+
+fn runtime_tuning_to_table(
+    lua: &Lua,
+    tuning: &helmer::runtime::runtime::RuntimeTuning,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set(
+        "render_message_capacity",
+        tuning
+            .render_message_capacity
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "asset_stream_queue_capacity",
+        tuning
+            .asset_stream_queue_capacity
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "asset_worker_queue_capacity",
+        tuning
+            .asset_worker_queue_capacity
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "max_pending_asset_uploads",
+        tuning
+            .max_pending_asset_uploads
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "max_pending_asset_bytes",
+        tuning
+            .max_pending_asset_bytes
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "asset_uploads_per_frame",
+        tuning
+            .asset_uploads_per_frame
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "wgpu_poll_interval_frames",
+        tuning
+            .wgpu_poll_interval_frames
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set(
+        "wgpu_poll_mode",
+        tuning
+            .wgpu_poll_mode
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set(
+        "pixels_per_line",
+        tuning
+            .pixels_per_line
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set(
+        "title_update_ms",
+        tuning
+            .title_update_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set(
+        "resize_debounce_ms",
+        tuning
+            .resize_debounce_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set(
+        "max_logic_steps_per_frame",
+        tuning
+            .max_logic_steps_per_frame
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    table.set("target_tickrate", tuning.load_target_tickrate())?;
+    table.set("target_fps", tuning.load_target_fps().unwrap_or(0.0))?;
+    table.set(
+        "pending_asset_uploads",
+        tuning
+            .pending_asset_uploads
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    table.set(
+        "pending_asset_bytes",
+        tuning
+            .pending_asset_bytes
+            .load(std::sync::atomic::Ordering::Relaxed) as u64,
+    )?;
+    Ok(table)
+}
+
+fn apply_runtime_tuning_patch(
+    tuning: &helmer::runtime::runtime::RuntimeTuning,
+    patch_table: &Table,
+) -> bool {
+    let Ok(patch) = table_to_json_object(patch_table) else {
+        return false;
+    };
+    for (key, value) in &patch {
+        match key.as_str() {
+            "render_message_capacity" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .render_message_capacity
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "asset_stream_queue_capacity" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .asset_stream_queue_capacity
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "asset_worker_queue_capacity" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .asset_worker_queue_capacity
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "max_pending_asset_uploads" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .max_pending_asset_uploads
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "max_pending_asset_bytes" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .max_pending_asset_bytes
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "asset_uploads_per_frame" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning
+                    .asset_uploads_per_frame
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "wgpu_poll_interval_frames" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .wgpu_poll_interval_frames
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "wgpu_poll_mode" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .wgpu_poll_mode
+                    .store(parsed.min(2), std::sync::atomic::Ordering::Relaxed);
+            }
+            "pixels_per_line" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .pixels_per_line
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "title_update_ms" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .title_update_ms
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "resize_debounce_ms" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .resize_debounce_ms
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "max_logic_steps_per_frame" => {
+                let Some(parsed) = json_value_to_non_negative_u32(value) else {
+                    return false;
+                };
+                tuning
+                    .max_logic_steps_per_frame
+                    .store(parsed, std::sync::atomic::Ordering::Relaxed);
+            }
+            "target_tickrate" => {
+                let Some(parsed) = json_value_to_f64(value) else {
+                    return false;
+                };
+                if !parsed.is_finite() || parsed <= 0.0 {
+                    return false;
+                }
+                tuning.store_target_tickrate(parsed as f32);
+            }
+            "target_fps" => {
+                let Some(parsed) = json_value_to_f64(value) else {
+                    return false;
+                };
+                if !parsed.is_finite() {
+                    return false;
+                }
+                if parsed <= 0.0 {
+                    tuning.store_target_fps(None);
+                } else {
+                    tuning.store_target_fps(Some(parsed as f32));
+                }
+            }
+            "pending_asset_uploads" | "pending_asset_bytes" => return false,
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn wgpu_backend_name(backend: WgpuBackend) -> &'static str {
+    match backend {
+        WgpuBackend::Auto => "auto",
+        WgpuBackend::Vulkan => "vulkan",
+        WgpuBackend::Dx12 => "dx12",
+        WgpuBackend::Metal => "metal",
+        WgpuBackend::Gl => "gl",
+    }
+}
+
+fn parse_wgpu_backend_name(value: &str) -> Option<WgpuBackend> {
+    match normalize_name(value).as_str() {
+        "auto" => Some(WgpuBackend::Auto),
+        "vulkan" => Some(WgpuBackend::Vulkan),
+        "dx12" => Some(WgpuBackend::Dx12),
+        "metal" => Some(WgpuBackend::Metal),
+        "gl" | "opengl" => Some(WgpuBackend::Gl),
+        _ => None,
+    }
+}
+
+fn binding_backend_name(choice: BindingBackendChoice) -> &'static str {
+    match choice {
+        BindingBackendChoice::Auto => "auto",
+        BindingBackendChoice::BindlessModern => "bindless_modern",
+        BindingBackendChoice::BindlessFallback => "bindless_fallback",
+        BindingBackendChoice::BindGroups => "bind_groups",
+    }
+}
+
+fn parse_binding_backend_name(value: &str) -> Option<BindingBackendChoice> {
+    match normalize_name(value).as_str() {
+        "auto" => Some(BindingBackendChoice::Auto),
+        "bindlessmodern" | "modern" => Some(BindingBackendChoice::BindlessModern),
+        "bindlessfallback" | "fallback" => Some(BindingBackendChoice::BindlessFallback),
+        "bindgroups" | "bindgroup" => Some(BindingBackendChoice::BindGroups),
+        _ => None,
+    }
+}
+
+fn runtime_config_to_table(
+    lua: &Lua,
+    config: &helmer::runtime::config::RuntimeConfig,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("egui", config.egui)?;
+    table.set(
+        "wgpu_experimental_features",
+        config.wgpu_experimental_features,
+    )?;
+    table.set("wgpu_backend", wgpu_backend_name(config.wgpu_backend))?;
+    table.set(
+        "binding_backend",
+        binding_backend_name(config.binding_backend),
+    )?;
+    table.set("fixed_timestep", config.fixed_timestep)?;
+    Ok(table)
+}
+
+fn apply_runtime_config_patch(
+    config: &mut helmer::runtime::config::RuntimeConfig,
+    patch: &JsonMap<String, JsonValue>,
+) -> bool {
+    for (key, value) in patch {
+        match key.as_str() {
+            "egui" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                config.egui = parsed;
+            }
+            "wgpu_experimental_features" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                config.wgpu_experimental_features = parsed;
+            }
+            "wgpu_backend" => {
+                let Some(parsed) = json_value_to_string(value)
+                    .as_deref()
+                    .and_then(parse_wgpu_backend_name)
+                else {
+                    return false;
+                };
+                config.wgpu_backend = parsed;
+            }
+            "binding_backend" => {
+                let Some(parsed) = json_value_to_string(value)
+                    .as_deref()
+                    .and_then(parse_binding_backend_name)
+                else {
+                    return false;
+                };
+                config.binding_backend = parsed;
+            }
+            "fixed_timestep" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                config.fixed_timestep = parsed;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn render_passes_to_table(
+    lua: &Lua,
+    config: &helmer::graphics::common::config::RenderConfig,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("gbuffer", config.gbuffer_pass)?;
+    table.set("shadow", config.shadow_pass)?;
+    table.set("direct_lighting", config.direct_lighting_pass)?;
+    table.set("sky", config.sky_pass)?;
+    table.set("ssgi", config.ssgi_pass)?;
+    table.set("ssgi_denoise", config.ssgi_denoise_pass)?;
+    table.set("ssr", config.ssr_pass)?;
+    table.set("ddgi", config.ddgi_pass)?;
+    table.set("egui", config.egui_pass)?;
+    table.set("gizmo", config.gizmo_pass)?;
+    table.set("transparent", config.transparent_pass)?;
+    table.set("occlusion", config.occlusion_culling)?;
+    Ok(table)
+}
+
+fn apply_render_passes_patch(
+    config: &mut helmer::graphics::common::config::RenderConfig,
+    patch: &JsonMap<String, JsonValue>,
+) -> bool {
+    for (key, value) in patch {
+        let Some(parsed) = json_value_to_bool(value) else {
+            return false;
+        };
+        match key.as_str() {
+            "gbuffer" => config.gbuffer_pass = parsed,
+            "shadow" => config.shadow_pass = parsed,
+            "direct_lighting" => config.direct_lighting_pass = parsed,
+            "sky" => config.sky_pass = parsed,
+            "ssgi" => config.ssgi_pass = parsed,
+            "ssgi_denoise" => config.ssgi_denoise_pass = parsed,
+            "ssr" => config.ssr_pass = parsed,
+            "ddgi" => config.ddgi_pass = parsed,
+            "egui" => config.egui_pass = parsed,
+            "gizmo" => config.gizmo_pass = parsed,
+            "transparent" => config.transparent_pass = parsed,
+            "occlusion" => config.occlusion_culling = parsed,
+            _ => return false,
+        }
+    }
+    true
+}
+
+const GPU_BUDGET_KIND_FIELDS: [(&str, ResourceKind); 8] = [
+    ("mesh", ResourceKind::Mesh),
+    ("material", ResourceKind::Material),
+    ("texture", ResourceKind::Texture),
+    ("texture_view", ResourceKind::TextureView),
+    ("sampler", ResourceKind::Sampler),
+    ("buffer", ResourceKind::Buffer),
+    ("external", ResourceKind::External),
+    ("transient", ResourceKind::Transient),
+];
+
+fn is_valid_gpu_budget_patch_key(key: &str) -> bool {
+    if matches!(key, "soft_mib" | "hard_mib" | "idle_frames") {
+        return true;
+    }
+    if let Some(prefix) = key.strip_suffix("_soft_mib") {
+        return GPU_BUDGET_KIND_FIELDS
+            .iter()
+            .any(|(name, _)| *name == prefix);
+    }
+    if let Some(prefix) = key.strip_suffix("_hard_mib") {
+        return GPU_BUDGET_KIND_FIELDS
+            .iter()
+            .any(|(name, _)| *name == prefix);
+    }
+    false
+}
+
+fn gpu_budget_to_table(
+    lua: &Lua,
+    stats: &helmer::graphics::common::renderer::RendererStats,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    let mut total_kind_soft = 0_u64;
+    let mut total_kind_hard = 0_u64;
+    for (name, kind) in GPU_BUDGET_KIND_FIELDS {
+        let index = kind as usize;
+        let soft_bytes =
+            stats.vram_soft_limit_per_kind[index].load(std::sync::atomic::Ordering::Relaxed);
+        let hard_bytes =
+            stats.vram_hard_limit_per_kind[index].load(std::sync::atomic::Ordering::Relaxed);
+        total_kind_soft = total_kind_soft.saturating_add(soft_bytes);
+        total_kind_hard = total_kind_hard.saturating_add(hard_bytes);
+        table.set(format!("{name}_soft_mib"), bytes_to_mib(soft_bytes))?;
+        table.set(format!("{name}_hard_mib"), bytes_to_mib(hard_bytes))?;
+    }
+    let soft_bytes = {
+        let value = stats
+            .vram_soft_limit_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if value == 0 { total_kind_soft } else { value }
+    };
+    let hard_bytes = {
+        let value = stats
+            .vram_hard_limit_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if value == 0 {
+            total_kind_hard.max(soft_bytes)
+        } else {
+            value.max(soft_bytes)
+        }
+    };
+
+    table.set(
+        "used_mib",
+        bytes_to_mib(
+            stats
+                .vram_used_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+    )?;
+    table.set("soft_mib", bytes_to_mib(soft_bytes))?;
+    table.set("hard_mib", bytes_to_mib(hard_bytes))?;
+    table.set(
+        "idle_frames",
+        stats.idle_frames.load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    Ok(table)
+}
+
+fn set_gpu_budget_from_patch(world: &mut World, patch: &JsonMap<String, JsonValue>) -> bool {
+    for key in patch.keys() {
+        if !is_valid_gpu_budget_patch_key(key.as_str()) {
+            return false;
+        }
+    }
+
+    let Some(render_stats) = world.get_resource::<BevyRendererStats>() else {
+        return false;
+    };
+    let Some(render_sender) = world.get_resource::<BevyRenderSender>() else {
+        return false;
+    };
+    let stats = &render_stats.0;
+
+    let mut per_kind_soft = stats
+        .vram_soft_limit_per_kind
+        .iter()
+        .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let mut per_kind_hard = stats
+        .vram_hard_limit_per_kind
+        .iter()
+        .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
+        .collect::<Vec<_>>();
+    let mut per_kind_changed = false;
+
+    for (name, kind) in GPU_BUDGET_KIND_FIELDS {
+        let index = kind as usize;
+        let soft_key = format!("{name}_soft_mib");
+        if let Some(value) = patch.get(&soft_key) {
+            let Some(mib) = json_value_to_f64(value) else {
+                return false;
+            };
+            let Some(bytes) = mib_to_bytes_u64(mib) else {
+                return false;
+            };
+            if index >= per_kind_soft.len() {
+                return false;
+            }
+            per_kind_soft[index] = bytes;
+            per_kind_changed = true;
+        }
+
+        let hard_key = format!("{name}_hard_mib");
+        if let Some(value) = patch.get(&hard_key) {
+            let Some(mib) = json_value_to_f64(value) else {
+                return false;
+            };
+            let Some(bytes) = mib_to_bytes_u64(mib) else {
+                return false;
+            };
+            if index >= per_kind_hard.len() {
+                return false;
+            }
+            per_kind_hard[index] = bytes;
+            per_kind_changed = true;
+        }
+    }
+
+    for (_, kind) in GPU_BUDGET_KIND_FIELDS {
+        let index = kind as usize;
+        if index < per_kind_soft.len() && index < per_kind_hard.len() {
+            per_kind_hard[index] = per_kind_hard[index].max(per_kind_soft[index]);
+        }
+    }
+
+    let mut soft_limit_bytes = stats
+        .vram_soft_limit_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mut hard_limit_bytes = stats
+        .vram_hard_limit_bytes
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    if let Some(value) = patch.get("soft_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_u64(mib) else {
+            return false;
+        };
+        soft_limit_bytes = bytes;
+    }
+
+    if let Some(value) = patch.get("hard_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_u64(mib) else {
+            return false;
+        };
+        hard_limit_bytes = bytes;
+    }
+
+    if soft_limit_bytes == 0 {
+        soft_limit_bytes = per_kind_soft.iter().copied().sum::<u64>();
+    }
+    if hard_limit_bytes == 0 {
+        hard_limit_bytes = per_kind_hard.iter().copied().sum::<u64>();
+    }
+    hard_limit_bytes = hard_limit_bytes.max(soft_limit_bytes);
+
+    let idle_frames = if let Some(value) = patch.get("idle_frames") {
+        let Some(parsed) = json_value_to_non_negative_u32(value) else {
+            return false;
+        };
+        if parsed == 0 { None } else { Some(parsed) }
+    } else {
+        None
+    };
+
+    render_sender
+        .0
+        .send(RenderMessage::Control(RenderControl::SetGpuBudget {
+            soft_limit_bytes,
+            hard_limit_bytes,
+            idle_frames,
+            per_kind_soft: per_kind_changed.then_some(per_kind_soft),
+            per_kind_hard: per_kind_changed.then_some(per_kind_hard),
+        }))
+        .is_ok()
+}
+
+fn asset_budgets_to_table(
+    lua: &Lua,
+    asset_server: &helmer::runtime::asset_server::AssetServer,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    let (mesh, texture, material) = asset_server.budgets_bytes();
+    table.set("mesh_mib", bytes_to_mib(mesh as u64))?;
+    table.set("texture_mib", bytes_to_mib(texture as u64))?;
+    table.set("material_mib", bytes_to_mib(material as u64))?;
+    table.set(
+        "audio_mib",
+        bytes_to_mib(asset_server.audio_budget_bytes() as u64),
+    )?;
+    table.set(
+        "scene_mib",
+        bytes_to_mib(asset_server.scene_buffer_budget_bytes() as u64),
+    )?;
+    Ok(table)
+}
+
+fn apply_asset_budget_patch(
+    asset_server: &mut helmer::runtime::asset_server::AssetServer,
+    patch: &JsonMap<String, JsonValue>,
+) -> bool {
+    for key in patch.keys() {
+        if !matches!(
+            key.as_str(),
+            "mesh_mib" | "texture_mib" | "material_mib" | "audio_mib" | "scene_mib"
+        ) {
+            return false;
+        }
+    }
+
+    let (mut mesh, mut texture, mut material) = asset_server.budgets_bytes();
+    if let Some(value) = patch.get("mesh_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_usize(mib) else {
+            return false;
+        };
+        mesh = bytes;
+    }
+    if let Some(value) = patch.get("texture_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_usize(mib) else {
+            return false;
+        };
+        texture = bytes;
+    }
+    if let Some(value) = patch.get("material_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_usize(mib) else {
+            return false;
+        };
+        material = bytes;
+    }
+    asset_server.set_budget_bytes(mesh, texture, material);
+
+    if let Some(value) = patch.get("audio_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_usize(mib) else {
+            return false;
+        };
+        asset_server.set_audio_budget_bytes(bytes);
+    }
+    if let Some(value) = patch.get("scene_mib") {
+        let Some(mib) = json_value_to_f64(value) else {
+            return false;
+        };
+        let Some(bytes) = mib_to_bytes_usize(mib) else {
+            return false;
+        };
+        asset_server.set_scene_buffer_budget_bytes(bytes);
+    }
+    true
+}
+
+fn window_settings_to_table(
+    lua: &Lua,
+    window_control: &helmer::runtime::runtime::RuntimeWindowControl,
+) -> mlua::Result<Table> {
+    let snapshot = window_control.snapshot();
+    let table = lua.create_table()?;
+    table.set("title_mode", snapshot.title_mode.as_str())?;
+    table.set("custom_title", snapshot.custom_title)?;
+    table.set("fullscreen", snapshot.fullscreen)?;
+    table.set("resizable", snapshot.resizable)?;
+    table.set("decorations", snapshot.decorations)?;
+    table.set("maximized", snapshot.maximized)?;
+    table.set("minimized", snapshot.minimized)?;
+    table.set("visible", snapshot.visible)?;
+    Ok(table)
+}
+
+fn apply_window_settings_patch(
+    window_control: &helmer::runtime::runtime::RuntimeWindowControl,
+    patch: &JsonMap<String, JsonValue>,
+) -> bool {
+    for (key, value) in patch {
+        match key.as_str() {
+            "title_mode" => {
+                let Some(mode) = json_value_to_string(value)
+                    .as_deref()
+                    .and_then(parse_window_title_mode)
+                else {
+                    return false;
+                };
+                window_control.set_title_mode(mode);
+            }
+            "title" | "custom_title" => {
+                let Some(title) = json_value_to_string(value) else {
+                    return false;
+                };
+                window_control.set_custom_title(title);
+            }
+            "fullscreen" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_fullscreen(parsed);
+            }
+            "resizable" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_resizable(parsed);
+            }
+            "decorations" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_decorations(parsed);
+            }
+            "maximized" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_maximized(parsed);
+            }
+            "minimized" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_minimized(parsed);
+            }
+            "visible" => {
+                let Some(parsed) = json_value_to_bool(value) else {
+                    return false;
+                };
+                window_control.set_visible(parsed);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn parse_window_title_mode(value: &str) -> Option<RuntimeWindowTitleMode> {
+    match normalize_name(value).as_str() {
+        "stats" => Some(RuntimeWindowTitleMode::Stats),
+        "custom" => Some(RuntimeWindowTitleMode::Custom),
+        "customwithstats" | "customstats" => Some(RuntimeWindowTitleMode::CustomWithStats),
+        _ => None,
+    }
+}
+
+fn set_editor_graph_template(world: &mut World, name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let Some(template) = template_for_graph(trimmed) else {
+        return false;
+    };
+
+    let mut updated = false;
+    if let Some(mut viewport_state) = world.get_resource_mut::<EditorViewportState>() {
+        viewport_state.graph_template = template.name.to_string();
+        updated = true;
+    }
+    if let Some(mut render_graph) = world.get_resource_mut::<RenderGraphResource>() {
+        render_graph.0 = (template.build)();
+        updated = true;
+    }
+    if !updated {
+        return false;
+    }
+    if let Some(mut render_sync) = world.get_resource_mut::<RenderSyncRequest>() {
+        render_sync.request_with_epoch(3);
+    }
+    if let Some(mut refresh) = world.get_resource_mut::<EditorRenderRefresh>() {
+        refresh.pending = true;
+    }
+    true
 }
 
 fn has_physics_component(world: &World, entity: Entity) -> bool {

@@ -26,6 +26,7 @@ use helmer::{
         input_manager::InputManager,
         runtime::{
             PerformanceMetrics, Runtime, RuntimeCursorState, RuntimeProfiling, RuntimeTuning,
+            RuntimeWindowControl,
         },
     },
 };
@@ -119,6 +120,8 @@ pub struct BevyRuntimeProfiling(pub Arc<RuntimeProfiling>);
 pub struct BevySystemProfiler(pub Arc<SystemProfiler>);
 #[derive(Resource)]
 pub struct BevyRuntimeCursorState(pub Arc<RuntimeCursorState>);
+#[derive(Resource)]
+pub struct BevyRuntimeWindowControl(pub Arc<RuntimeWindowControl>);
 #[derive(Resource)]
 pub struct BevyRendererStats(pub Arc<RendererStats>);
 #[derive(Resource)]
@@ -273,6 +276,9 @@ fn helmer_becs_init_impl<F>(
             )));
             world.insert_resource::<BevyRuntimeCursorState>(BevyRuntimeCursorState(
                 runtime.cursor_state.clone(),
+            ));
+            world.insert_resource::<BevyRuntimeWindowControl>(BevyRuntimeWindowControl(
+                runtime.window_control.clone(),
             ));
             #[cfg(target_arch = "wasm32")]
             world.insert_non_send_resource::<BevyAssetServer>(BevyAssetServer(

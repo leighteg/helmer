@@ -7,7 +7,7 @@ mod web;
 
 pub use common::{
     PerformanceMetrics, RuntimeCursorGrabMode, RuntimeCursorState, RuntimeCursorStateSnapshot,
-    RuntimeProfiling, RuntimeTuning,
+    RuntimeProfiling, RuntimeTuning, RuntimeWindowControl, RuntimeWindowTitleMode,
 };
 pub(crate) use log_bridge::RuntimeLogLayer;
 pub use log_bridge::{

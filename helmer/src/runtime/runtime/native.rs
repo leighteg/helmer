@@ -32,7 +32,7 @@ use super::{
     RuntimeLogLayer,
     common::{
         LogicClock, PerformanceMetrics, RuntimeCursorGrabMode, RuntimeCursorState,
-        RuntimeProfiling, RuntimeTuning,
+        RuntimeProfiling, RuntimeTuning, RuntimeWindowControl, RuntimeWindowTitleMode,
     },
 };
 use crate::{
@@ -115,6 +115,50 @@ impl WindowSettingsCache {
 
     fn set_fullscreen(&mut self, fullscreen: Option<winit::window::Fullscreen>) {
         self.attributes.fullscreen = fullscreen;
+    }
+
+    fn fullscreen_enabled(&self) -> bool {
+        self.attributes.fullscreen.is_some()
+    }
+
+    fn set_resizable(&mut self, value: bool) {
+        self.attributes.resizable = value;
+    }
+
+    fn resizable(&self) -> bool {
+        self.attributes.resizable
+    }
+
+    fn set_decorations(&mut self, value: bool) {
+        self.attributes.decorations = value;
+    }
+
+    fn decorations(&self) -> bool {
+        self.attributes.decorations
+    }
+
+    fn set_maximized(&mut self, value: bool) {
+        self.attributes.maximized = value;
+    }
+
+    fn maximized(&self) -> bool {
+        self.attributes.maximized
+    }
+
+    fn set_visible(&mut self, value: bool) {
+        self.attributes.visible = value;
+    }
+
+    fn visible(&self) -> bool {
+        self.attributes.visible
+    }
+
+    fn set_minimized(&mut self, value: bool) {
+        self.minimized = Some(value);
+    }
+
+    fn minimized(&self) -> bool {
+        self.minimized.unwrap_or(false)
     }
 
     fn sync_geometry_from_window(&mut self, window: &Window) {
@@ -263,6 +307,7 @@ pub struct Runtime<T: Send + 'static = ()> {
     logic_window: Arc<RwLock<Option<Arc<Window>>>>,
     window_settings: WindowSettingsCache,
     pub cursor_state: Arc<RuntimeCursorState>,
+    pub window_control: Arc<RuntimeWindowControl>,
     cursor_apply_pending: bool,
 
     pub user_state: Option<Arc<Mutex<T>>>,
@@ -344,6 +389,7 @@ impl<T: Send + 'static> Runtime<T> {
             logic_window: Arc::new(RwLock::new(None)),
             window_settings: WindowSettingsCache::new("helmer engine"),
             cursor_state: Arc::new(RuntimeCursorState::default()),
+            window_control: Arc::new(RuntimeWindowControl::default()),
             cursor_apply_pending: true,
 
             user_state: Some(Arc::new(Mutex::new(user_state))),
@@ -1035,9 +1081,10 @@ impl<T: Send + 'static> Runtime<T> {
         let new_size = window.inner_size();
         self.window = Some(Arc::clone(&window));
         *self.logic_window.write() = Some(Arc::clone(&window));
-        self.window_settings.sync_geometry_from_window(&window);
+        self.window_settings.sync_from_window(&window);
         self.draw_splash();
         self.window_settings.apply_post_create(&window);
+        self.sync_window_control_from_settings();
 
         let mut input = self.input_manager.write();
         input.window_size = UVec2::new(new_size.width, new_size.height);
@@ -1157,6 +1204,83 @@ impl<T: Send + 'static> Runtime<T> {
         if let Some((x, y)) = warp_request {
             if let Err(err) = window.set_cursor_position(PhysicalPosition::new(x, y)) {
                 warn!("failed to reposition cursor for freecam capture: {err}");
+            }
+        }
+    }
+
+    fn sync_window_control_from_settings(&self) {
+        self.window_control
+            .set_fullscreen(self.window_settings.fullscreen_enabled());
+        self.window_control
+            .set_resizable(self.window_settings.resizable());
+        self.window_control
+            .set_decorations(self.window_settings.decorations());
+        self.window_control
+            .set_maximized(self.window_settings.maximized());
+        self.window_control
+            .set_minimized(self.window_settings.minimized());
+        self.window_control
+            .set_visible(self.window_settings.visible());
+    }
+
+    fn apply_window_control_to_window(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let snapshot = self.window_control.snapshot();
+
+        if self.window_settings.fullscreen_enabled() != snapshot.fullscreen {
+            let fullscreen = if snapshot.fullscreen {
+                Some(winit::window::Fullscreen::Borderless(None))
+            } else {
+                None
+            };
+            window.set_fullscreen(fullscreen.clone());
+            self.window_settings.set_fullscreen(fullscreen);
+        }
+
+        if self.window_settings.resizable() != snapshot.resizable {
+            window.set_resizable(snapshot.resizable);
+            self.window_settings.set_resizable(snapshot.resizable);
+        }
+
+        if self.window_settings.decorations() != snapshot.decorations {
+            window.set_decorations(snapshot.decorations);
+            self.window_settings.set_decorations(snapshot.decorations);
+        }
+
+        if self.window_settings.maximized() != snapshot.maximized {
+            window.set_maximized(snapshot.maximized);
+            self.window_settings.set_maximized(snapshot.maximized);
+        }
+
+        if self.window_settings.minimized() != snapshot.minimized {
+            window.set_minimized(snapshot.minimized);
+            self.window_settings.set_minimized(snapshot.minimized);
+        }
+
+        if self.window_settings.visible() != snapshot.visible {
+            window.set_visible(snapshot.visible);
+            self.window_settings.set_visible(snapshot.visible);
+        }
+    }
+
+    fn compose_window_title(
+        &self,
+        mode: RuntimeWindowTitleMode,
+        custom_title: &str,
+        fps: u32,
+        tps: u32,
+    ) -> String {
+        match mode {
+            RuntimeWindowTitleMode::Stats => format!("helmer engine | FPS: {} | TPS: {}", fps, tps),
+            RuntimeWindowTitleMode::Custom => custom_title.to_string(),
+            RuntimeWindowTitleMode::CustomWithStats => {
+                if custom_title.trim().is_empty() {
+                    format!("FPS: {} | TPS: {}", fps, tps)
+                } else {
+                    format!("{} | FPS: {} | TPS: {}", custom_title, fps, tps)
+                }
             }
         }
     }
@@ -1320,6 +1444,7 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                             fullscreen
                         };
                         self.window_settings.set_fullscreen(fullscreen);
+                        self.sync_window_control_from_settings();
                     } else {
                         self.input_manager.read().push_event(InputEvent::Keyboard {
                             key: code,
@@ -1495,6 +1620,7 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
                 warn!("failed to send render init: {}", err);
             }
         }
+        self.apply_window_control_to_window();
         self.apply_cursor_state_to_window();
         let profiling_enabled = self.profiling.enabled.load(Ordering::Relaxed);
         let update_start = if profiling_enabled {
@@ -1505,18 +1631,30 @@ impl<T: Send + 'static> ApplicationHandler for Runtime<T> {
         let now = Instant::now();
         let title_ms = self.tuning.title_update_ms.load(Ordering::Relaxed);
         let update_interval = Duration::from_millis(title_ms as u64);
-
-        if now.duration_since(self.last_title_update) >= update_interval {
-            if let Some(window) = &self.window {
-                let fps = self.metrics.fps.load(Ordering::Relaxed);
-                let tps = self.metrics.tps.load(Ordering::Relaxed);
-
-                self.window_settings
-                    .set_title(format!("helmer engine | FPS: {} | TPS: {}", fps, tps));
+        if let Some(window) = &self.window {
+            let window_state = self.window_control.snapshot();
+            let fps = self.metrics.fps.load(Ordering::Relaxed);
+            let tps = self.metrics.tps.load(Ordering::Relaxed);
+            let next_title = self.compose_window_title(
+                window_state.title_mode,
+                &window_state.custom_title,
+                fps,
+                tps,
+            );
+            let title_changed = self.window_settings.title() != next_title;
+            let should_refresh = match window_state.title_mode {
+                RuntimeWindowTitleMode::Stats | RuntimeWindowTitleMode::CustomWithStats => {
+                    now.duration_since(self.last_title_update) >= update_interval
+                }
+                RuntimeWindowTitleMode::Custom => title_changed,
+            };
+            if should_refresh && title_changed {
+                self.window_settings.set_title(next_title);
                 window.set_title(self.window_settings.title());
             }
-
-            self.last_title_update = now;
+            if should_refresh {
+                self.last_title_update = now;
+            }
         }
 
         if let Some(new_size) = self.new_window_size {

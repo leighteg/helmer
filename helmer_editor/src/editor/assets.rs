@@ -11,7 +11,7 @@ use helmer::provided::components::MeshAsset;
 use helmer::runtime::asset_server::{Handle, Material, Mesh, Scene};
 use helmer_becs::BevyAssetServer;
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimitiveKind {
@@ -267,6 +267,7 @@ pub fn scan_asset_entries(root: &Path, filter: &str) -> Vec<AssetEntry> {
         .min_depth(0)
         .sort_by_file_name()
         .into_iter()
+        .filter_entry(should_visit_asset_walk_entry)
         .filter_map(Result::ok)
     {
         let path = entry.path();
@@ -274,10 +275,6 @@ pub fn scan_asset_entries(root: &Path, filter: &str) -> Vec<AssetEntry> {
         let is_dir = entry.file_type().is_dir();
 
         if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-            if name.starts_with('.') {
-                continue;
-            }
-
             if !lower_filter.is_empty() && !is_dir {
                 let name_lower = name.to_ascii_lowercase();
                 if !name_lower.contains(&lower_filter) {
@@ -294,6 +291,33 @@ pub fn scan_asset_entries(root: &Path, filter: &str) -> Vec<AssetEntry> {
     }
 
     entries
+}
+
+fn should_visit_asset_walk_entry(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+
+    let Some(name) = entry.file_name().to_str() else {
+        return true;
+    };
+
+    if name.starts_with('.') {
+        return false;
+    }
+
+    if entry.file_type().is_dir() {
+        return !is_ignored_asset_dir_name(name);
+    }
+
+    true
+}
+
+fn is_ignored_asset_dir_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("target")
+        || name.eq_ignore_ascii_case("node_modules")
+        || name.eq_ignore_ascii_case(".git")
+        || name.eq_ignore_ascii_case(".helmer")
 }
 
 pub fn is_entry_visible(entry: &AssetEntry, root: &Path, expanded: &HashSet<PathBuf>) -> bool {

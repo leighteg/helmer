@@ -7,26 +7,36 @@ pub const VISUAL_SCRIPT_EXTENSION: &str = "hvs";
 pub const RUST_PREBUILT_PLUGIN_ROOT_DIR: &str = ".helmer/rust_scripts";
 pub const RUST_PREBUILT_PLUGIN_FILE_STEM: &str = "script_plugin";
 
+fn has_ascii_case_insensitive_suffix(text: &str, suffix: &str) -> bool {
+    let text_bytes = text.as_bytes();
+    let suffix_bytes = suffix.as_bytes();
+    if text_bytes.len() < suffix_bytes.len() {
+        return false;
+    }
+    text_bytes[text_bytes.len() - suffix_bytes.len()..]
+        .iter()
+        .zip(suffix_bytes.iter())
+        .all(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs))
+}
+
 pub fn is_script_path(path: &Path) -> bool {
     is_lua_script_path(path) || is_visual_script_path(path) || is_rust_script_path(path)
 }
 
 pub fn is_lua_script_path(path: &Path) -> bool {
-    let is_script_ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "lua" | "luau"))
-        .unwrap_or(false);
-    if !is_script_ext {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    if !ext.eq_ignore_ascii_case("lua") && !ext.eq_ignore_ascii_case("luau") {
         return false;
     }
 
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase())
-        .unwrap_or_default();
-    !(file_name.ends_with(".d.lua") || file_name.ends_with(".d.luau"))
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+
+    !has_ascii_case_insensitive_suffix(file_name, ".d.lua")
+        && !has_ascii_case_insensitive_suffix(file_name, ".d.luau")
 }
 
 pub fn is_visual_script_path(path: &Path) -> bool {
@@ -49,12 +59,11 @@ pub fn resolve_rust_script_manifest(path: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let file_name = path
+    if path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| name.to_ascii_lowercase());
-
-    if file_name.as_deref() == Some("cargo.toml") {
+        .is_some_and(|name| name.eq_ignore_ascii_case("cargo.toml"))
+    {
         return Some(path.to_path_buf());
     }
 
@@ -86,13 +95,14 @@ pub fn script_registry_key_for_path(path: &Path) -> Option<PathBuf> {
 
 pub fn script_language_from_path(path: &Path) -> String {
     if is_lua_script_path(path) {
-        return match path
+        return if path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lua"))
         {
-            Some(ext) if ext == "lua" => "lua".to_string(),
-            _ => "luau".to_string(),
+            "lua".to_string()
+        } else {
+            "luau".to_string()
         };
     }
 

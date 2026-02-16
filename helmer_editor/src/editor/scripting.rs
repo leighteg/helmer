@@ -611,7 +611,7 @@ impl Default for ScriptRegistry {
             scripts: HashMap::new(),
             dirty_paths: HashSet::new(),
             last_scan: Instant::now(),
-            scan_interval: Duration::from_millis(500),
+            scan_interval: Duration::from_secs(2),
             status: None,
         }
     }
@@ -619,9 +619,11 @@ impl Default for ScriptRegistry {
 
 impl ScriptRegistry {
     pub fn mark_dirty_paths(&mut self, paths: &HashSet<PathBuf>) {
-        for path in paths {
-            self.dirty_paths.insert(path.clone());
-        }
+        self.dirty_paths.extend(paths.iter().cloned());
+    }
+
+    pub fn mark_dirty_paths_owned(&mut self, paths: HashSet<PathBuf>) {
+        self.dirty_paths.extend(paths);
     }
 
     pub fn take_dirty_paths(&mut self) -> HashSet<PathBuf> {

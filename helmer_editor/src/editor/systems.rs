@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
@@ -79,7 +79,7 @@ use crate::editor::{
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
     scripting::{
-        ScriptComponent, ScriptRegistry, ScriptRuntime, is_script_path, load_script_asset,
+        ScriptComponent, ScriptRegistry, ScriptRuntime, load_script_asset,
         script_registry_key_for_path,
     },
     set_play_camera, set_viewport_audio_listener_enabled,
@@ -94,8 +94,10 @@ use crate::editor::{
     visual_scripting::{
         default_visual_script_template_full, default_visual_script_template_third_person,
     },
-    watch::configure_file_watcher,
+    watch::{FileWatchState, configure_file_watcher},
 };
+
+const WATCHER_BACKSTOP_ASSET_SCAN_INTERVAL: Duration = Duration::from_secs(15);
 
 #[inline]
 fn begin_system_scope(
@@ -1594,6 +1596,7 @@ fn collect_entity_subtree(world: &mut World, root: Entity) -> Vec<Entity> {
 
 pub fn asset_scan_system(
     mut state: ResMut<AssetBrowserState>,
+    watcher: Option<Res<FileWatchState>>,
     system_profiler: Option<Res<BevySystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
@@ -1602,17 +1605,25 @@ pub fn asset_scan_system(
             .begin_scope("helmer_editor::editor::asset_scan_system")
     });
 
-    let root = match state.root.as_ref() {
-        Some(root) => root.clone(),
+    let root = match state.root.as_deref() {
+        Some(root) => root,
         None => return,
     };
 
     let now = Instant::now();
-    if !state.refresh_requested && now.duration_since(state.last_scan) < state.scan_interval {
+    let watcher_active = watcher
+        .as_ref()
+        .is_some_and(|watch_state| watch_state.receiver.is_some());
+    let scan_interval = if watcher_active {
+        WATCHER_BACKSTOP_ASSET_SCAN_INTERVAL
+    } else {
+        state.scan_interval
+    };
+    if !state.refresh_requested && now.duration_since(state.last_scan) < scan_interval {
         return;
     }
 
-    state.entries = scan_asset_entries(&root, &state.filter);
+    state.entries = scan_asset_entries(root, &state.filter);
     state.refresh_requested = false;
     state.last_scan = now;
 }
@@ -2234,20 +2245,30 @@ pub fn script_registry_system(
     };
     let scripts_root = project.config.as_ref().map(|cfg| cfg.scripts_root(root));
 
-    let mut dirty_paths = registry.take_dirty_paths();
+    let dirty_paths = registry.take_dirty_paths();
     if !dirty_paths.is_empty() {
+        let mut dirty_keys = HashSet::<PathBuf>::new();
+        for path in dirty_paths {
+            if let Some(script_key) = script_registry_key_for_path(&path) {
+                dirty_keys.insert(script_key);
+            }
+        }
+
         let mut updated = 0;
         let mut removed = 0;
-        for path in dirty_paths.drain() {
-            if !is_script_path(&path) {
-                continue;
-            }
-
-            let Some(script_key) = script_registry_key_for_path(&path) else {
-                continue;
-            };
-
+        for script_key in dirty_keys {
             if script_key.exists() {
+                let should_reload = match registry.scripts.get(&script_key) {
+                    Some(existing) if existing.language != "rust" => fs::metadata(&script_key)
+                        .and_then(|meta| meta.modified())
+                        .map(|modified| modified > existing.modified)
+                        .unwrap_or(true),
+                    _ => true,
+                };
+                if !should_reload {
+                    continue;
+                }
+
                 registry
                     .scripts
                     .insert(script_key.clone(), load_script_asset(&script_key));
@@ -2299,18 +2320,30 @@ pub fn script_registry_system(
 
     for entry in WalkDir::new(&scripts_root)
         .into_iter()
+        .filter_entry(should_visit_script_walk_entry)
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
     {
-        let path = entry.path().to_path_buf();
-        if !is_script_path(&path) {
+        if !should_consider_script_scan_path(entry.path()) {
             continue;
         }
 
-        let Some(script_key) = script_registry_key_for_path(&path) else {
+        let Some(script_key) = script_registry_key_for_path(entry.path()) else {
             continue;
         };
         if !discovered.insert(script_key.clone()) {
+            continue;
+        }
+
+        let should_attempt_reload = match registry.scripts.get(&script_key) {
+            Some(existing) => fs::metadata(&script_key)
+                .and_then(|meta| meta.modified())
+                .map(|modified| modified > existing.modified)
+                .unwrap_or(true),
+            None => true,
+        };
+
+        if !should_attempt_reload {
             continue;
         }
 
@@ -2348,6 +2381,50 @@ pub fn script_registry_system(
             updated, removed
         ));
     }
+}
+
+fn should_visit_script_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+
+    let Some(name) = entry.file_name().to_str() else {
+        return true;
+    };
+
+    if name.starts_with('.') {
+        return false;
+    }
+
+    if entry.file_type().is_dir() {
+        return !is_ignored_script_dir_name(name);
+    }
+
+    true
+}
+
+fn should_consider_script_scan_path(path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("cargo.toml"))
+    {
+        return true;
+    }
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("lua")
+                || ext.eq_ignore_ascii_case("luau")
+                || ext.eq_ignore_ascii_case("hvs")
+        })
+}
+
+fn is_ignored_script_dir_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("target")
+        || name.eq_ignore_ascii_case("node_modules")
+        || name.eq_ignore_ascii_case(".git")
+        || name.eq_ignore_ascii_case(".helmer")
 }
 
 fn handle_create_project(world: &mut World, name: &str, path: &Path) {
@@ -2421,7 +2498,6 @@ fn handle_close_project(world: &mut World) {
         watcher.root = None;
         watcher.watcher = None;
         watcher.receiver = None;
-        watcher.pending_paths.clear();
         watcher.status = Some("File watcher disabled".to_string());
     }
 
@@ -2476,7 +2552,7 @@ fn initialize_project_state(world: &mut World, project: &EditorProject) {
     if let Some(root) = project.root.as_ref() {
         if let Some(mut watcher) = world.get_resource_mut::<crate::editor::watch::FileWatchState>()
         {
-            configure_file_watcher(&mut watcher, root);
+            configure_file_watcher(&mut watcher, root, project.config.as_ref());
         }
     }
 

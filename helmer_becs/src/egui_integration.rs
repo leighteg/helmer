@@ -130,6 +130,7 @@ pub struct EguiResource {
     pub window_chrome_overrides: HashMap<String, EguiWindowChrome>,
     pub window_dragging: HashSet<String>,
     pub last_screen_rect: Option<Rect>,
+    pub last_pixels_per_point: f32,
     pub snap_enabled: bool,
     pub snap_distance: f32,
     pub suppress_snap: bool,
@@ -363,7 +364,7 @@ pub fn egui_system(world: &mut World) {
         raw_input.events = normalize_clipboard_events(events, &mut clipboard);
     });
 
-    let ctx = {
+    let (ctx, pixels_per_point_changed) = {
         let mut egui_res = world
             .get_resource_mut::<EguiResource>()
             .expect("EguiResource resource not found");
@@ -385,9 +386,15 @@ pub fn egui_system(world: &mut World) {
             InspectorUI::add_window(&mut egui_res);
         }
 
-        egui_res.ctx.clone()
+        let pixels_per_point_changed = pixels_per_point > 0.0
+            && (egui_res.last_pixels_per_point - pixels_per_point).abs() > f32::EPSILON;
+        if pixels_per_point_changed {
+            egui_res.last_pixels_per_point = pixels_per_point;
+        }
+
+        (egui_res.ctx.clone(), pixels_per_point_changed)
     };
-    if pixels_per_point > 0.0 {
+    if pixels_per_point_changed {
         ctx.set_pixels_per_point(pixels_per_point);
     }
 

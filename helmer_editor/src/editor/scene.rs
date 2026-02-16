@@ -44,7 +44,7 @@ use crate::editor::{
     },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
-    scripting::{ScriptComponent, ScriptEntry, normalize_script_language},
+    scripting::{ScriptComponent, ScriptEntry, ScriptInspectorField, normalize_script_language},
     timeline::{
         CameraKey, CameraTrack, ClipSegment, ClipTrack, JointKey, JointTrack, LightKey, LightTrack,
         PoseKey, PoseTrack, SplineKey, SplineTrack, TimelineInterpolation, TimelineTrack,
@@ -1501,6 +1501,8 @@ pub struct SceneAssetData {
 pub struct ScriptComponentData {
     pub path: String,
     pub language: String,
+    #[serde(default)]
+    pub inspector_fields: Vec<ScriptInspectorField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2598,6 +2600,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                         Some(ScriptComponentData {
                             path: normalize_path(path.to_string_lossy().as_ref(), root),
                             language: script.language.clone(),
+                            inspector_fields: script.inspector_fields.clone(),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -3076,13 +3079,16 @@ pub fn spawn_scene_from_document(
                         return None;
                     }
                     let resolved = resolve_path(path, root);
-                    Some(ScriptEntry {
+                    let mut entry = ScriptEntry {
                         path: Some(resolved.clone()),
                         language: normalize_script_language(
                             &script.language,
                             Some(resolved.as_path()),
                         ),
-                    })
+                        inspector_fields: script.inspector_fields.clone(),
+                    };
+                    entry.sanitize_inspector_fields();
+                    Some(entry)
                 })
                 .collect::<Vec<_>>();
             if !scripts.is_empty() {

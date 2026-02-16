@@ -11,6 +11,7 @@ pub enum AssetCreateKind {
     Material,
     Script,
     VisualScript,
+    VisualScriptThirdPerson,
     RustScript,
     Animation,
 }

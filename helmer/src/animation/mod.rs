@@ -194,6 +194,20 @@ pub enum BlendMode {
 pub struct BlendChild {
     pub node: usize,
     pub weight: f32,
+    pub weight_param: Option<String>,
+    pub weight_scale: f32,
+    pub weight_bias: f32,
+}
+
+impl BlendChild {
+    fn resolved_weight(&self, params: Option<&AnimationParameters>) -> f32 {
+        let base = self
+            .weight_param
+            .as_deref()
+            .and_then(|name| params.map(|params| params.get_float(name, self.weight)))
+            .unwrap_or(self.weight);
+        (base * self.weight_scale) + self.weight_bias
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +246,30 @@ impl AnimationGraph {
         out: &mut Pose,
         scratch: &mut Pose,
     ) {
+        self.evaluate_node_with_params(node_index, skeleton, time, out, scratch, None);
+    }
+
+    pub fn evaluate_node_with_params(
+        &self,
+        node_index: usize,
+        skeleton: &Skeleton,
+        time: f32,
+        out: &mut Pose,
+        scratch: &mut Pose,
+        params: Option<&AnimationParameters>,
+    ) {
+        self.evaluate_node_internal(node_index, skeleton, time, out, scratch, params);
+    }
+
+    fn evaluate_node_internal(
+        &self,
+        node_index: usize,
+        skeleton: &Skeleton,
+        time: f32,
+        out: &mut Pose,
+        scratch: &mut Pose,
+        params: Option<&AnimationParameters>,
+    ) {
         let Some(node) = self.nodes.get(node_index) else {
             out.reset_to_bind(skeleton);
             return;
@@ -255,33 +293,70 @@ impl AnimationGraph {
                 if blend_node.children.is_empty() {
                     return;
                 }
-                let mut total_weight = 0.0;
+
+                let mut total_weight = 0.0f32;
                 for child in &blend_node.children {
-                    total_weight += child.weight.max(0.0);
+                    total_weight += child.resolved_weight(params).max(0.0);
                 }
-                if total_weight <= 0.0 {
+                if total_weight <= f32::EPSILON {
                     return;
                 }
+
+                if blend_node.mode == BlendMode::Additive {
+                    for child in &blend_node.children {
+                        let weight = if blend_node.normalize {
+                            (child.resolved_weight(params).max(0.0) / total_weight).clamp(0.0, 1.0)
+                        } else {
+                            child.resolved_weight(params).max(0.0)
+                        };
+                        if weight <= f32::EPSILON {
+                            continue;
+                        }
+                        self.evaluate_node_internal(
+                            child.node, skeleton, time, scratch, out, params,
+                        );
+                        apply_additive_pose(out, scratch, skeleton, weight, None);
+                    }
+                    return;
+                }
+
+                if blend_node.normalize {
+                    let mut accumulated_weight = 0.0f32;
+                    let mut initialized = false;
+                    for child in &blend_node.children {
+                        let weight =
+                            (child.resolved_weight(params).max(0.0) / total_weight).clamp(0.0, 1.0);
+                        if weight <= f32::EPSILON {
+                            continue;
+                        }
+                        self.evaluate_node_internal(
+                            child.node, skeleton, time, scratch, out, params,
+                        );
+                        if !initialized {
+                            out.locals.clear();
+                            out.locals.extend_from_slice(&scratch.locals);
+                            accumulated_weight = weight;
+                            initialized = true;
+                            continue;
+                        }
+                        let blend_factor = weight / (accumulated_weight + weight);
+                        blend_pose(out, scratch, blend_factor, None);
+                        accumulated_weight += weight;
+                    }
+                    return;
+                }
+
                 for (index, child) in blend_node.children.iter().enumerate() {
-                    let weight = if blend_node.normalize {
-                        (child.weight.max(0.0) / total_weight).clamp(0.0, 1.0)
-                    } else {
-                        child.weight.max(0.0)
-                    };
+                    let weight = child.resolved_weight(params).max(0.0);
                     if weight <= 0.0 {
                         continue;
                     }
-                    self.evaluate_node(child.node, skeleton, time, scratch, out);
+                    self.evaluate_node_internal(child.node, skeleton, time, scratch, out, params);
                     if index == 0 {
                         out.locals.clear();
                         out.locals.extend_from_slice(&scratch.locals);
                     } else {
-                        match blend_node.mode {
-                            BlendMode::Linear => blend_pose(out, scratch, weight, None),
-                            BlendMode::Additive => {
-                                apply_additive_pose(out, scratch, skeleton, weight, None)
-                            }
-                        }
+                        blend_pose(out, scratch, weight, None);
                     }
                 }
             }
@@ -337,6 +412,17 @@ struct ActiveTransition {
     to: usize,
     elapsed: f32,
     duration: f32,
+    can_interrupt: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnimationTransitionStatus {
+    pub from: usize,
+    pub to: usize,
+    pub elapsed: f32,
+    pub duration: f32,
+    pub progress: f32,
+    pub can_interrupt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -377,6 +463,48 @@ impl AnimationStateMachine {
         self.state_time = (self.state_time + dt).max(0.0);
         if let Some(active) = self.active_transition.as_mut() {
             active.elapsed += dt;
+            if active.can_interrupt {
+                let active_to = active.to;
+                let active_from = active.from;
+                let active_duration = active.duration.max(0.0);
+                let active_progress = if active_duration > 0.0 {
+                    (active.elapsed / active_duration).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let candidate_state_time =
+                    estimate_state_duration(graph, &self.states, active_to) * active_progress;
+                if let Some(transition_index) =
+                    self.find_transition_index(active_to, candidate_state_time, params, graph)
+                {
+                    let transition = self.transitions[transition_index].clone();
+                    let duration = transition.duration.max(0.0);
+                    if duration <= 0.0 {
+                        self.current_state = transition.to;
+                        self.state_time = 0.0;
+                        self.active_transition = None;
+                        return (self.current_state, None);
+                    }
+                    self.active_transition = Some(ActiveTransition {
+                        from: transition.from,
+                        to: transition.to,
+                        elapsed: 0.0,
+                        duration,
+                        can_interrupt: transition.can_interrupt,
+                    });
+                    self.state_time = 0.0;
+                    return (transition.from, Some((transition.to, 0.0)));
+                }
+
+                if active_progress >= 1.0 {
+                    self.current_state = active_to;
+                    self.state_time = 0.0;
+                    self.active_transition = None;
+                    return (self.current_state, None);
+                }
+                return (active_from, Some((active_to, active_progress)));
+            }
+
             let t = if active.duration > 0.0 {
                 (active.elapsed / active.duration).clamp(0.0, 1.0)
             } else {
@@ -392,23 +520,10 @@ impl AnimationStateMachine {
         }
 
         let current = self.current_state;
-        let state_duration = estimate_state_duration(graph, &self.states, current);
-
-        for transition in self.transitions.iter() {
-            if transition.from != current {
-                continue;
-            }
-            if let Some(exit_time) = transition.exit_time {
-                if state_duration > 0.0 {
-                    let normalized = self.state_time / state_duration;
-                    if normalized < exit_time {
-                        continue;
-                    }
-                }
-            }
-            if !conditions_met(transition.conditions.as_slice(), params) {
-                continue;
-            }
+        if let Some(transition_index) =
+            self.find_transition_index(current, self.state_time, params, graph)
+        {
+            let transition = self.transitions[transition_index].clone();
             let duration = transition.duration.max(0.0);
             if duration <= 0.0 {
                 self.current_state = transition.to;
@@ -420,11 +535,57 @@ impl AnimationStateMachine {
                 to: transition.to,
                 elapsed: 0.0,
                 duration,
+                can_interrupt: transition.can_interrupt,
             });
             return (transition.from, Some((transition.to, 0.0)));
         }
 
         (self.current_state, None)
+    }
+
+    pub fn transition_status(&self) -> Option<AnimationTransitionStatus> {
+        let active = self.active_transition.as_ref()?;
+        let progress = if active.duration > 0.0 {
+            (active.elapsed / active.duration).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Some(AnimationTransitionStatus {
+            from: active.from,
+            to: active.to,
+            elapsed: active.elapsed,
+            duration: active.duration,
+            progress,
+            can_interrupt: active.can_interrupt,
+        })
+    }
+
+    fn find_transition_index(
+        &mut self,
+        from_state: usize,
+        state_time: f32,
+        params: &mut AnimationParameters,
+        graph: &AnimationGraph,
+    ) -> Option<usize> {
+        let state_duration = estimate_state_duration(graph, &self.states, from_state);
+        for (index, transition) in self.transitions.iter().enumerate() {
+            if transition.from != from_state {
+                continue;
+            }
+            if let Some(exit_time) = transition.exit_time {
+                if state_duration > 0.0 {
+                    let normalized = state_time / state_duration;
+                    if normalized < exit_time {
+                        continue;
+                    }
+                }
+            }
+            if !conditions_met(transition.conditions.as_slice(), params) {
+                continue;
+            }
+            return Some(index);
+        }
+        None
     }
 }
 
@@ -500,12 +661,13 @@ impl Animator {
 
             let from_node = layer.state_machine.states.get(from_state).map(|s| s.node);
             if let Some(node) = from_node {
-                layer.graph.evaluate_node(
+                layer.graph.evaluate_node_with_params(
                     node,
                     skeleton,
                     layer.state_machine.state_time,
                     &mut layer_pose,
                     &mut scratch,
+                    Some(&self.parameters),
                 );
             } else {
                 layer_pose.reset_to_bind(skeleton);
@@ -513,12 +675,13 @@ impl Animator {
 
             if let Some((to_state, t)) = transition {
                 if let Some(state) = layer.state_machine.states.get(to_state) {
-                    layer.graph.evaluate_node(
+                    layer.graph.evaluate_node_with_params(
                         state.node,
                         skeleton,
                         layer.state_machine.state_time,
                         &mut scratch,
                         &mut layer_pose,
+                        Some(&self.parameters),
                     );
                     blend_pose(&mut layer_pose, &scratch, t, None);
                 }

@@ -416,6 +416,8 @@ impl ViewportRectPixels {
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct EditorCursorControlState {
     pub freecam_capture_active: bool,
+    pub script_capture_allowed: bool,
+    pub script_capture_suspended: bool,
     pub script_policy: Option<RuntimeCursorStateSnapshot>,
 }
 
@@ -426,8 +428,10 @@ impl EditorCursorControlState {
                 visible: false,
                 grab_mode: RuntimeCursorGrabMode::Locked,
             }
-        } else {
+        } else if self.script_capture_allowed && !self.script_capture_suspended {
             self.script_policy.unwrap_or_default()
+        } else {
+            RuntimeCursorStateSnapshot::default()
         }
     }
 }
@@ -436,6 +440,8 @@ impl Default for EditorCursorControlState {
     fn default() -> Self {
         Self {
             freecam_capture_active: false,
+            script_capture_allowed: false,
+            script_capture_suspended: false,
             script_policy: None,
         }
     }
@@ -477,6 +483,7 @@ impl EditorViewportRuntime {
 pub struct EditorViewportPaneRequest {
     pub pane_id: u64,
     pub camera_entity: Entity,
+    pub is_play_viewport: bool,
     pub texture_id: TextureId,
     pub viewport_rect: ViewportRectPixels,
     pub pointer_over: bool,

@@ -1317,6 +1317,7 @@ pub fn character_controller_system(
         narrow_phase,
         rigid_body_set,
         collider_set,
+        collider_entities,
         ..
     } = &mut *phys;
     let mut query_pipeline = broad_phase.as_query_pipeline_mut(
@@ -1328,6 +1329,7 @@ pub fn character_controller_system(
 
     for (entity, controller, input, handle, mut output) in query.iter_mut() {
         *output = CharacterControllerOutput::default();
+        output.desired_translation = input.desired_translation;
 
         let Some(current_pos) = query_pipeline
             .bodies
@@ -1400,19 +1402,105 @@ pub fn character_controller_system(
         }
 
         if controller.apply_impulses_to_dynamic_bodies && !collisions.is_empty() {
-            rapier_controller.solve_character_collision_impulses(
-                dt,
-                &mut query_pipeline,
-                character_shape.as_ref(),
-                controller.character_mass.max(0.0001),
-                collisions.iter(),
-            );
+            let desired_speed = input.desired_translation.length() / dt.max(1.0e-6);
+            let has_dynamic_collision = collisions.iter().any(|collision| {
+                query_pipeline
+                    .colliders
+                    .get(collision.handle)
+                    .and_then(|collider| collider.parent())
+                    .and_then(|parent| query_pipeline.bodies.get(parent))
+                    .is_some_and(|body| body.is_dynamic())
+            });
+
+            if has_dynamic_collision && desired_speed > 0.05 {
+                let speed_factor = (desired_speed / 5.0).clamp(0.0, 1.0);
+                let effective_character_mass =
+                    controller.character_mass.clamp(0.25, 8.0) * speed_factor;
+                if effective_character_mass > 1.0e-4 {
+                    rapier_controller.solve_character_collision_impulses(
+                        dt,
+                        &mut query_pipeline,
+                        character_shape.as_ref(),
+                        effective_character_mass,
+                        collisions.iter(),
+                    );
+                }
+            }
         }
 
         output.effective_translation = from_vector(effective_movement.translation);
+        output.remaining_translation = input.desired_translation - output.effective_translation;
         output.grounded = effective_movement.grounded;
         output.sliding_down_slope = effective_movement.is_sliding_down_slope;
         output.collision_count = collisions.len() as u32;
+
+        let mut ground_normal_accum = Vec3::ZERO;
+        let mut ground_hit_count = 0u32;
+        let mut first_hit: Option<(Vec3, Vec3, Option<Entity>)> = None;
+        let mut dynamic_hit: Option<(Vec3, Vec3, Option<Entity>)> = None;
+        let mut up_step = 0.0f32;
+        let up_vector = to_vector(up);
+
+        for collision in &collisions {
+            let hit_normal = from_vector(collision.hit.normal2);
+            let hit_normal = normalize_axis(hit_normal, Vec3::ZERO);
+            let hit_point = from_vector(collision.hit.witness2);
+            let hit_entity = collider_entities.get(&collision.handle).copied();
+            let mut hit_platform_velocity = Vec3::ZERO;
+            let mut hit_dynamic_body = false;
+
+            if hit_normal.length_squared() > 1.0e-8 {
+                if hit_normal.dot(up) > 0.05 {
+                    ground_normal_accum += hit_normal;
+                    ground_hit_count = ground_hit_count.saturating_add(1);
+                }
+            }
+
+            up_step = up_step.max(collision.translation_applied.dot(up_vector).max(0.0));
+
+            if let Some(collider) = query_pipeline.colliders.get(collision.handle) {
+                if let Some(parent_body) = collider.parent() {
+                    if let Some(body) = query_pipeline.bodies.get(parent_body) {
+                        hit_platform_velocity = from_vector(body.linvel());
+                        hit_dynamic_body = body.is_dynamic();
+                    }
+                }
+            }
+
+            if first_hit.is_none() {
+                first_hit = Some((hit_normal, hit_point, hit_entity));
+                output.platform_velocity = hit_platform_velocity;
+            }
+
+            if dynamic_hit.is_none() && hit_dynamic_body {
+                dynamic_hit = Some((hit_normal, hit_point, hit_entity));
+            }
+        }
+
+        if let Some((hit_normal, hit_point, hit_entity)) = dynamic_hit.or(first_hit) {
+            output.hit_normal = hit_normal;
+            output.hit_point = hit_point;
+            output.hit_entity = hit_entity;
+        }
+
+        if output.grounded {
+            output.ground_normal = if ground_hit_count > 0 {
+                normalize_axis(
+                    ground_normal_accum / (ground_hit_count as f32).max(1.0),
+                    normalize_axis(up, Vec3::Y),
+                )
+            } else {
+                normalize_axis(up, Vec3::Y)
+            };
+            output.slope_angle = output
+                .ground_normal
+                .dot(normalize_axis(up, Vec3::Y))
+                .clamp(-1.0, 1.0)
+                .acos();
+        }
+
+        output.step_height = up_step;
+        output.stepped_up = up_step > 1.0e-4;
 
         if query_pipeline.bodies.get(handle.rigid_body).is_none() {
             warn!(

@@ -18,7 +18,10 @@ pub fn spline_follow_system(
     let dt = time.0;
     for (entity, mut transform, mut follower) in followers.iter_mut() {
         let target_bits = follower.0.spline_entity.unwrap_or(entity.to_bits());
-        let Ok((spline, spline_transform)) = splines.get(Entity::from_bits(target_bits)) else {
+        let Some(target_entity) = Entity::try_from_bits(target_bits) else {
+            continue;
+        };
+        let Ok((spline, spline_transform)) = splines.get(target_entity) else {
             continue;
         };
         let spline = &spline.0;

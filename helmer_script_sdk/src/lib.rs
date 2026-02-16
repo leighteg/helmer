@@ -33,12 +33,27 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "create_audio_bus",
     "delete_entity",
     "entity_exists",
+    "emit_event",
     "find_entity_by_name",
+    "find_script_index",
     "follow_spline",
     "get_animator_clips",
+    "get_animator_layer_weights",
+    "get_animator_layer_weight",
+    "get_animator_state",
+    "get_animator_state_time",
+    "get_animator_current_state",
+    "get_animator_current_state_name",
+    "get_animator_transition_active",
+    "get_animator_transition_from",
+    "get_animator_transition_to",
+    "get_animator_transition_progress",
+    "get_animator_transition_elapsed",
+    "get_animator_transition_duration",
     "get_audio_bus_name",
     "get_audio_bus_volume",
     "get_audio_emitter",
+    "get_audio_emitter_path",
     "get_audio_enabled",
     "get_audio_head_width",
     "get_audio_listener",
@@ -47,11 +62,34 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_audio_streaming_config",
     "get_camera",
     "get_character_controller_output",
+    "get_character_controller_desired_translation",
+    "get_character_controller_effective_translation",
+    "get_character_controller_remaining_translation",
+    "get_character_controller_grounded",
+    "get_character_controller_sliding_down_slope",
+    "get_character_controller_collision_count",
+    "get_character_controller_ground_normal",
+    "get_character_controller_slope_angle",
+    "get_character_controller_hit_normal",
+    "get_character_controller_hit_point",
+    "get_character_controller_hit_entity",
+    "get_character_controller_stepped_up",
+    "get_character_controller_step_height",
+    "get_character_controller_platform_velocity",
+    "get_collision_events",
+    "get_collision_event_count",
+    "get_collision_event_other",
+    "get_collision_event_normal",
+    "get_collision_event_point",
     "get_dynamic_component",
     "get_dynamic_field",
+    "get_entity_follower",
     "get_entity_name",
     "get_light",
+    "get_look_at",
     "get_mesh_renderer",
+    "get_mesh_renderer_material_path",
+    "get_mesh_renderer_source_path",
     "get_physics",
     "get_physics_gravity",
     "get_physics_point_projection_hit",
@@ -62,16 +100,43 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_physics_world_defaults",
     "get_scene_asset",
     "get_script",
+    "get_script_count",
+    "get_script_field",
+    "get_script_language",
+    "get_script_path",
+    "get_self_script_field",
     "get_spline",
     "get_transform",
+    "get_transform_forward",
+    "get_transform_right",
+    "get_transform_up",
+    "get_trigger_events",
+    "get_trigger_event_count",
+    "get_trigger_event_other",
+    "get_trigger_event_normal",
+    "get_trigger_event_point",
     "get_viewport_mode",
     "get_viewport_preview_camera",
     "has_component",
     "list_audio_buses",
     "list_dynamic_components",
     "list_entities",
+    "list_script_fields",
+    "list_self_script_fields",
     "open_scene",
     "play_anim_clip",
+    "ray_cast",
+    "ray_cast_has_hit",
+    "ray_cast_hit_entity",
+    "ray_cast_point",
+    "ray_cast_normal",
+    "ray_cast_toi",
+    "sphere_cast",
+    "sphere_cast_has_hit",
+    "sphere_cast_hit_entity",
+    "sphere_cast_point",
+    "sphere_cast_normal",
+    "sphere_cast_toi",
     "remove_audio_bus",
     "remove_component",
     "remove_dynamic_component",
@@ -80,12 +145,17 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "sample_spline",
     "set_active_camera",
     "set_animator_enabled",
+    "set_animator_blend_child",
+    "set_animator_blend_node",
     "set_animator_param_bool",
     "set_animator_param_float",
+    "set_animator_layer_weight",
     "set_animator_time_scale",
+    "set_animator_transition",
     "set_audio_bus_name",
     "set_audio_bus_volume",
     "set_audio_emitter",
+    "set_audio_emitter_path",
     "set_audio_enabled",
     "set_audio_head_width",
     "set_audio_listener",
@@ -95,9 +165,13 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "set_camera",
     "set_dynamic_component",
     "set_dynamic_field",
+    "set_entity_follower",
     "set_entity_name",
     "set_light",
+    "set_look_at",
     "set_mesh_renderer",
+    "set_mesh_renderer_material_path",
+    "set_mesh_renderer_source_path",
     "set_persistent_force",
     "set_persistent_torque",
     "set_physics",
@@ -107,6 +181,9 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "set_physics_world_defaults",
     "set_scene_asset",
     "set_script",
+    "set_script_field",
+    "set_self_script_field",
+    "set_character_controller_desired_translation",
     "set_spline",
     "set_spline_point",
     "set_transform",
@@ -115,10 +192,12 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "spawn_entity",
     "spline_length",
     "switch_scene",
+    "self_script_index",
     "trigger_animator",
 ];
 
 pub const INPUT_FUNCTIONS: &[&str] = &[
+    "bind_action",
     "cursor",
     "cursor_delta",
     "gamepad_axes",
@@ -145,10 +224,21 @@ pub const INPUT_FUNCTIONS: &[&str] = &[
     "mouse_pressed",
     "mouse_released",
     "scale_factor",
+    "cursor_grab_mode",
+    "set_cursor_visible",
+    "set_cursor_grab",
+    "reset_cursor_control",
+    "set_action_context",
     "wants_keyboard",
     "wants_pointer",
     "wheel",
     "window_size",
+    "action_context",
+    "action_value",
+    "action_down",
+    "action_pressed",
+    "action_released",
+    "unbind_action",
 ];
 
 #[repr(C)]
@@ -443,6 +533,57 @@ pub struct CameraPatch {
     pub active: Option<bool>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LookAtData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_entity: Option<EntityId>,
+    pub target_offset: Vec3,
+    pub offset_in_target_space: bool,
+    pub up: Vec3,
+    pub rotation_smooth_time: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LookAtPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_entity: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_offset: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_in_target_space: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_smooth_time: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EntityFollowerData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_entity: Option<EntityId>,
+    pub position_offset: Vec3,
+    pub offset_in_target_space: bool,
+    pub follow_rotation: bool,
+    pub position_smooth_time: f32,
+    pub rotation_smooth_time: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EntityFollowerPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_entity: Option<EntityId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_offset: Option<Vec3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_in_target_space: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_rotation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_smooth_time: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_smooth_time: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeshPrimitive {
     #[serde(rename = "Cube")]
@@ -528,6 +669,8 @@ impl MeshRendererPatch {
 pub struct ScriptData {
     pub path: String,
     pub language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1172,10 +1315,21 @@ pub struct CharacterControllerInputPatch {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CharacterControllerOutputData {
+    pub desired_translation: Vec3,
     pub effective_translation: Vec3,
+    pub remaining_translation: Vec3,
     pub grounded: bool,
     pub sliding_down_slope: bool,
     pub collision_count: usize,
+    pub ground_normal: Vec3,
+    pub slope_angle: f32,
+    pub hit_normal: Vec3,
+    pub hit_point: Vec3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hit_entity: Option<EntityId>,
+    pub stepped_up: bool,
+    pub step_height: f32,
+    pub platform_velocity: Vec3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1692,6 +1846,65 @@ impl Host {
         self.ecs_call("follow_spline", (entity_id, spline_id, speed, looped))
     }
 
+    pub fn get_transform_forward(&self, entity_id: EntityId) -> Result<Vec3, String> {
+        self.ecs_call("get_transform_forward", (entity_id,))
+    }
+
+    pub fn get_transform_right(&self, entity_id: EntityId) -> Result<Vec3, String> {
+        self.ecs_call("get_transform_right", (entity_id,))
+    }
+
+    pub fn get_transform_up(&self, entity_id: EntityId) -> Result<Vec3, String> {
+        self.ecs_call("get_transform_up", (entity_id,))
+    }
+
+    pub fn get_look_at(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_look_at", (entity_id,))
+    }
+
+    pub fn get_look_at_data(&self, entity_id: EntityId) -> Result<Option<LookAtData>, String> {
+        self.ecs_call("get_look_at", (entity_id,))
+    }
+
+    pub fn set_look_at<S: Serialize>(&self, entity_id: EntityId, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_look_at", (entity_id, patch))
+    }
+
+    pub fn set_look_at_data(
+        &self,
+        entity_id: EntityId,
+        patch: &LookAtPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_look_at", (entity_id, patch))
+    }
+
+    pub fn get_entity_follower(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_entity_follower", (entity_id,))
+    }
+
+    pub fn get_entity_follower_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<EntityFollowerData>, String> {
+        self.ecs_call("get_entity_follower", (entity_id,))
+    }
+
+    pub fn set_entity_follower<S: Serialize>(
+        &self,
+        entity_id: EntityId,
+        patch: S,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_entity_follower", (entity_id, patch))
+    }
+
+    pub fn set_entity_follower_data(
+        &self,
+        entity_id: EntityId,
+        patch: &EntityFollowerPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_entity_follower", (entity_id, patch))
+    }
+
     pub fn set_animator_enabled(&self, entity_id: EntityId, enabled: bool) -> Result<bool, String> {
         self.ecs_call("set_animator_enabled", (entity_id, enabled))
     }
@@ -1732,6 +1945,167 @@ impl Host {
         layer_index: Option<usize>,
     ) -> Result<Option<Vec<String>>, String> {
         self.ecs_call("get_animator_clips", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_state(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<Option<Value>, String> {
+        self.ecs_call("get_animator_state", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_layer_weights(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_animator_layer_weights", (entity_id,))
+    }
+
+    pub fn get_animator_layer_weight(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<f32, String> {
+        self.ecs_call("get_animator_layer_weight", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_state_time(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<f32, String> {
+        self.ecs_call("get_animator_state_time", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_current_state(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<usize, String> {
+        let state: u64 = self.ecs_call("get_animator_current_state", (entity_id, layer_index))?;
+        Ok(state as usize)
+    }
+
+    pub fn get_animator_current_state_name(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<String, String> {
+        self.ecs_call("get_animator_current_state_name", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_transition_active(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<bool, String> {
+        self.ecs_call("get_animator_transition_active", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_transition_from(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<usize, String> {
+        let state: u64 = self.ecs_call("get_animator_transition_from", (entity_id, layer_index))?;
+        Ok(state as usize)
+    }
+
+    pub fn get_animator_transition_to(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<usize, String> {
+        let state: u64 = self.ecs_call("get_animator_transition_to", (entity_id, layer_index))?;
+        Ok(state as usize)
+    }
+
+    pub fn get_animator_transition_progress(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<f32, String> {
+        self.ecs_call("get_animator_transition_progress", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_transition_elapsed(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<f32, String> {
+        self.ecs_call("get_animator_transition_elapsed", (entity_id, layer_index))
+    }
+
+    pub fn get_animator_transition_duration(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+    ) -> Result<f32, String> {
+        self.ecs_call("get_animator_transition_duration", (entity_id, layer_index))
+    }
+
+    pub fn set_animator_layer_weight(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+        weight: f32,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_animator_layer_weight",
+            (entity_id, layer_index, weight),
+        )
+    }
+
+    pub fn set_animator_transition<S: Serialize>(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+        transition_index: usize,
+        patch: S,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_animator_transition",
+            (entity_id, layer_index, transition_index, patch),
+        )
+    }
+
+    pub fn set_animator_blend_node(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+        node_index: usize,
+        normalize: Option<bool>,
+        mode: Option<&str>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_animator_blend_node",
+            (entity_id, layer_index, node_index, normalize, mode),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_animator_blend_child(
+        &self,
+        entity_id: EntityId,
+        layer_index: Option<usize>,
+        node_index: usize,
+        child_index: usize,
+        weight: Option<f32>,
+        weight_param: Option<&str>,
+        weight_scale: Option<f32>,
+        weight_bias: Option<f32>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_animator_blend_child",
+            (
+                entity_id,
+                layer_index,
+                node_index,
+                child_index,
+                weight,
+                weight_param,
+                weight_scale,
+                weight_bias,
+            ),
+        )
     }
 
     pub fn play_anim_clip(
@@ -1826,6 +2200,36 @@ impl Host {
         self.ecs_call("set_mesh_renderer", (entity_id, patch))
     }
 
+    pub fn get_mesh_renderer_source_path(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<String>, String> {
+        self.ecs_call("get_mesh_renderer_source_path", (entity_id,))
+    }
+
+    pub fn get_mesh_renderer_material_path(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<String>, String> {
+        self.ecs_call("get_mesh_renderer_material_path", (entity_id,))
+    }
+
+    pub fn set_mesh_renderer_source_path(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_mesh_renderer_source_path", (entity_id, path))
+    }
+
+    pub fn set_mesh_renderer_material_path(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_mesh_renderer_material_path", (entity_id, path))
+    }
+
     pub fn get_scene_asset(&self, entity_id: EntityId) -> Result<Option<String>, String> {
         self.ecs_call("get_scene_asset", (entity_id,))
     }
@@ -1842,8 +2246,110 @@ impl Host {
         self.ecs_call("switch_scene", (path,))
     }
 
+    pub fn self_script_index(&self) -> Result<Option<usize>, String> {
+        let index: Option<u64> = self.ecs_call("self_script_index", ())?;
+        Ok(from_lua_script_index(index))
+    }
+
+    pub fn get_script_count(&self, entity_id: EntityId) -> Result<usize, String> {
+        let count: u64 = self.ecs_call("get_script_count", (entity_id,))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    pub fn find_script_index(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+        language: Option<&str>,
+    ) -> Result<Option<usize>, String> {
+        let index: Option<u64> = self.ecs_call("find_script_index", (entity_id, path, language))?;
+        Ok(from_lua_script_index(index))
+    }
+
     pub fn get_script_data(&self, entity_id: EntityId) -> Result<Option<ScriptData>, String> {
-        self.ecs_call("get_script", (entity_id,))
+        self.get_script_data_at(entity_id, None)
+    }
+
+    pub fn get_script_data_at(
+        &self,
+        entity_id: EntityId,
+        script_index: Option<usize>,
+    ) -> Result<Option<ScriptData>, String> {
+        self.ecs_call("get_script", (entity_id, lua_script_index(script_index)))
+    }
+
+    pub fn get_script_path(
+        &self,
+        entity_id: EntityId,
+        script_index: Option<usize>,
+    ) -> Result<Option<String>, String> {
+        self.ecs_call(
+            "get_script_path",
+            (entity_id, lua_script_index(script_index)),
+        )
+    }
+
+    pub fn get_script_language(
+        &self,
+        entity_id: EntityId,
+        script_index: Option<usize>,
+    ) -> Result<Option<String>, String> {
+        self.ecs_call(
+            "get_script_language",
+            (entity_id, lua_script_index(script_index)),
+        )
+    }
+
+    pub fn list_script_fields(
+        &self,
+        entity_id: EntityId,
+        script_index: Option<usize>,
+    ) -> Result<Option<Value>, String> {
+        self.ecs_call(
+            "list_script_fields",
+            (entity_id, lua_script_index(script_index)),
+        )
+    }
+
+    pub fn get_script_field(
+        &self,
+        entity_id: EntityId,
+        field_name: &str,
+        script_index: Option<usize>,
+    ) -> Result<Option<Value>, String> {
+        self.ecs_call(
+            "get_script_field",
+            (entity_id, field_name, lua_script_index(script_index)),
+        )
+    }
+
+    pub fn set_script_field<S: Serialize>(
+        &self,
+        entity_id: EntityId,
+        field_name: &str,
+        value: S,
+        script_index: Option<usize>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_script_field",
+            (entity_id, field_name, value, lua_script_index(script_index)),
+        )
+    }
+
+    pub fn list_self_script_fields(&self) -> Result<Option<Value>, String> {
+        self.ecs_call("list_self_script_fields", ())
+    }
+
+    pub fn get_self_script_field(&self, field_name: &str) -> Result<Option<Value>, String> {
+        self.ecs_call("get_self_script_field", (field_name,))
+    }
+
+    pub fn set_self_script_field<S: Serialize>(
+        &self,
+        field_name: &str,
+        value: S,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_self_script_field", (field_name, value))
     }
 
     pub fn set_script_data(
@@ -1852,7 +2358,20 @@ impl Host {
         path: &str,
         language: Option<&str>,
     ) -> Result<bool, String> {
-        self.ecs_call("set_script", (entity_id, path, language))
+        self.set_script_data_at(entity_id, path, language, None)
+    }
+
+    pub fn set_script_data_at(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+        language: Option<&str>,
+        script_index: Option<usize>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_script",
+            (entity_id, path, language, lua_script_index(script_index)),
+        )
     }
 
     pub fn list_dynamic_components(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
@@ -2022,11 +2541,420 @@ impl Host {
         self.ecs_call("get_character_controller_output", (entity_id,))
     }
 
+    pub fn set_character_controller_desired_translation(
+        &self,
+        entity_id: EntityId,
+        desired_translation: Vec3,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "set_character_controller_desired_translation",
+            (entity_id, desired_translation),
+        )
+    }
+
+    pub fn get_character_controller_desired_translation(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_character_controller_desired_translation", (entity_id,))
+    }
+
+    pub fn get_character_controller_effective_translation(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call(
+            "get_character_controller_effective_translation",
+            (entity_id,),
+        )
+    }
+
+    pub fn get_character_controller_remaining_translation(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call(
+            "get_character_controller_remaining_translation",
+            (entity_id,),
+        )
+    }
+
+    pub fn get_character_controller_grounded(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<bool>, String> {
+        self.ecs_call("get_character_controller_grounded", (entity_id,))
+    }
+
+    pub fn get_character_controller_sliding_down_slope(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<bool>, String> {
+        self.ecs_call("get_character_controller_sliding_down_slope", (entity_id,))
+    }
+
+    pub fn get_character_controller_collision_count(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<u32>, String> {
+        self.ecs_call("get_character_controller_collision_count", (entity_id,))
+    }
+
+    pub fn get_character_controller_ground_normal(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_character_controller_ground_normal", (entity_id,))
+    }
+
+    pub fn get_character_controller_slope_angle(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<f32>, String> {
+        self.ecs_call("get_character_controller_slope_angle", (entity_id,))
+    }
+
+    pub fn get_character_controller_hit_normal(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_character_controller_hit_normal", (entity_id,))
+    }
+
+    pub fn get_character_controller_hit_point(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_character_controller_hit_point", (entity_id,))
+    }
+
+    pub fn get_character_controller_hit_entity(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<EntityId>, String> {
+        self.ecs_call("get_character_controller_hit_entity", (entity_id,))
+    }
+
+    pub fn get_character_controller_stepped_up(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<bool>, String> {
+        self.ecs_call("get_character_controller_stepped_up", (entity_id,))
+    }
+
+    pub fn get_character_controller_step_height(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<f32>, String> {
+        self.ecs_call("get_character_controller_step_height", (entity_id,))
+    }
+
+    pub fn get_character_controller_platform_velocity(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<Vec3>, String> {
+        self.ecs_call("get_character_controller_platform_velocity", (entity_id,))
+    }
+
+    pub fn get_collision_events(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+    ) -> Result<Option<Value>, String> {
+        self.ecs_call("get_collision_events", (entity_id, phase))
+    }
+
+    pub fn get_collision_event_count(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+    ) -> Result<usize, String> {
+        let count: u64 = self.ecs_call("get_collision_event_count", (entity_id, phase))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    pub fn get_collision_event_other(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Option<EntityId>, String> {
+        let other: u64 = self.ecs_call(
+            "get_collision_event_other",
+            (entity_id, phase, lua_script_index(event_index)),
+        )?;
+        Ok((other > 0).then_some(other))
+    }
+
+    pub fn get_collision_event_normal(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "get_collision_event_normal",
+            (entity_id, phase, lua_script_index(event_index)),
+        )
+    }
+
+    pub fn get_collision_event_point(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "get_collision_event_point",
+            (entity_id, phase, lua_script_index(event_index)),
+        )
+    }
+
+    pub fn get_trigger_events(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+    ) -> Result<Option<Value>, String> {
+        self.ecs_call("get_trigger_events", (entity_id, phase))
+    }
+
+    pub fn get_trigger_event_count(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+    ) -> Result<usize, String> {
+        let count: u64 = self.ecs_call("get_trigger_event_count", (entity_id, phase))?;
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    }
+
+    pub fn get_trigger_event_other(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Option<EntityId>, String> {
+        let other: u64 = self.ecs_call(
+            "get_trigger_event_other",
+            (entity_id, phase, lua_script_index(event_index)),
+        )?;
+        Ok((other > 0).then_some(other))
+    }
+
+    pub fn get_trigger_event_normal(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "get_trigger_event_normal",
+            (entity_id, phase, lua_script_index(event_index)),
+        )
+    }
+
+    pub fn get_trigger_event_point(
+        &self,
+        entity_id: EntityId,
+        phase: Option<&str>,
+        event_index: Option<usize>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "get_trigger_event_point",
+            (entity_id, phase, lua_script_index(event_index)),
+        )
+    }
+
+    pub fn emit_event(&self, name: &str, target_entity: Option<EntityId>) -> Result<bool, String> {
+        self.ecs_call("emit_event", (name, target_entity))
+    }
+
     pub fn get_physics_ray_cast_hit(
         &self,
         entity_id: EntityId,
     ) -> Result<Option<PhysicsRayCastHitData>, String> {
         self.ecs_call("get_physics_ray_cast_hit", (entity_id,))
+    }
+
+    pub fn ray_cast(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<PhysicsRayCastHitData, String> {
+        self.ecs_call(
+            "ray_cast",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )
+    }
+
+    pub fn ray_cast_has_hit(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "ray_cast_has_hit",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )
+    }
+
+    pub fn ray_cast_hit_entity(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Option<EntityId>, String> {
+        let entity: u64 = self.ecs_call(
+            "ray_cast_hit_entity",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )?;
+        Ok((entity > 0).then_some(entity))
+    }
+
+    pub fn ray_cast_point(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "ray_cast_point",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )
+    }
+
+    pub fn ray_cast_normal(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "ray_cast_normal",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )
+    }
+
+    pub fn ray_cast_toi(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        solid: Option<bool>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<f32, String> {
+        self.ecs_call(
+            "ray_cast_toi",
+            (origin, direction, max_toi, solid, filter, exclude_entity),
+        )
+    }
+
+    pub fn sphere_cast(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<PhysicsShapeCastHitData, String> {
+        self.ecs_call(
+            "sphere_cast",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )
+    }
+
+    pub fn sphere_cast_has_hit(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<bool, String> {
+        self.ecs_call(
+            "sphere_cast_has_hit",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )
+    }
+
+    pub fn sphere_cast_hit_entity(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Option<EntityId>, String> {
+        let entity: u64 = self.ecs_call(
+            "sphere_cast_hit_entity",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )?;
+        Ok((entity > 0).then_some(entity))
+    }
+
+    pub fn sphere_cast_point(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "sphere_cast_point",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )
+    }
+
+    pub fn sphere_cast_normal(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<Vec3, String> {
+        self.ecs_call(
+            "sphere_cast_normal",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )
+    }
+
+    pub fn sphere_cast_toi(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: Option<f32>,
+        filter: Option<PhysicsQueryFilterData>,
+        exclude_entity: Option<EntityId>,
+    ) -> Result<f32, String> {
+        self.ecs_call(
+            "sphere_cast_toi",
+            (origin, radius, direction, max_toi, filter, exclude_entity),
+        )
     }
 
     pub fn get_physics_point_projection_hit(
@@ -2242,6 +3170,14 @@ impl Host {
         self.ecs_call("set_audio_emitter", (entity_id, patch))
     }
 
+    pub fn get_audio_emitter_path(&self, entity_id: EntityId) -> Result<Option<String>, String> {
+        self.ecs_call("get_audio_emitter_path", (entity_id,))
+    }
+
+    pub fn set_audio_emitter_path(&self, entity_id: EntityId, path: &str) -> Result<bool, String> {
+        self.ecs_call("set_audio_emitter_path", (entity_id, path))
+    }
+
     pub fn get_audio_listener(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
         self.ecs_call("get_audio_listener", (entity_id,))
     }
@@ -2389,6 +3325,53 @@ impl Host {
         self.input_call("gamepad_axis_ref", (name,))
     }
 
+    pub fn input_bind_action<S: Serialize>(
+        &self,
+        action: &str,
+        binding: S,
+        context: Option<&str>,
+        deadzone: Option<f32>,
+    ) -> Result<bool, String> {
+        self.input_call("bind_action", (action, binding, context, deadzone))
+    }
+
+    pub fn input_unbind_action(&self, action: &str, context: Option<&str>) -> Result<bool, String> {
+        self.input_call("unbind_action", (action, Option::<Value>::None, context))
+    }
+
+    pub fn input_unbind_action_binding<S: Serialize>(
+        &self,
+        action: &str,
+        binding: S,
+        context: Option<&str>,
+    ) -> Result<bool, String> {
+        self.input_call("unbind_action", (action, Some(binding), context))
+    }
+
+    pub fn input_set_action_context(&self, context: Option<&str>) -> Result<bool, String> {
+        self.input_call("set_action_context", (context,))
+    }
+
+    pub fn input_action_context(&self) -> Result<String, String> {
+        self.input_call("action_context", ())
+    }
+
+    pub fn input_action_value(&self, action: &str) -> Result<f32, String> {
+        self.input_call("action_value", (action,))
+    }
+
+    pub fn input_action_down(&self, action: &str) -> Result<bool, String> {
+        self.input_call("action_down", (action,))
+    }
+
+    pub fn input_action_pressed(&self, action: &str) -> Result<bool, String> {
+        self.input_call("action_pressed", (action,))
+    }
+
+    pub fn input_action_released(&self, action: &str) -> Result<bool, String> {
+        self.input_call("action_released", (action,))
+    }
+
     pub fn input_key_down<K: Serialize>(&self, key: K) -> Result<bool, String> {
         self.input_call("key_down", (key,))
     }
@@ -2443,6 +3426,22 @@ impl Host {
 
     pub fn input_wants_pointer(&self) -> Result<bool, String> {
         self.input_call("wants_pointer", ())
+    }
+
+    pub fn input_cursor_grab_mode(&self) -> Result<String, String> {
+        self.input_call("cursor_grab_mode", ())
+    }
+
+    pub fn input_set_cursor_visible(&self, visible: bool) -> Result<bool, String> {
+        self.input_call("set_cursor_visible", (visible,))
+    }
+
+    pub fn input_set_cursor_grab<S: Serialize>(&self, mode: S) -> Result<bool, String> {
+        self.input_call("set_cursor_grab", (mode,))
+    }
+
+    pub fn input_reset_cursor_control(&self) -> Result<bool, String> {
+        self.input_call("reset_cursor_control", ())
     }
 
     pub fn input_gamepad_ids(&self) -> Result<Vec<u64>, String> {
@@ -2536,6 +3535,18 @@ impl Host {
 
         String::from_utf8(bytes).map_err(|err| err.to_string())
     }
+}
+
+fn lua_script_index(index: Option<usize>) -> Option<u64> {
+    index
+        .and_then(|index| index.checked_add(1))
+        .and_then(|index| u64::try_from(index).ok())
+}
+
+fn from_lua_script_index(index: Option<u64>) -> Option<usize> {
+    index
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| usize::try_from(index).ok())
 }
 
 fn normalize_call_args(args: Value) -> Value {

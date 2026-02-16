@@ -530,7 +530,7 @@ impl Default for CharacterController {
             min_slope_slide_angle: std::f32::consts::FRAC_PI_4,
             snap_to_ground: 0.2,
             normal_nudge_factor: 1.0e-4,
-            apply_impulses_to_dynamic_bodies: false,
+            apply_impulses_to_dynamic_bodies: true,
             character_mass: 80.0,
         }
     }
@@ -551,19 +551,39 @@ impl Default for CharacterControllerInput {
 
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct CharacterControllerOutput {
+    pub desired_translation: Vec3,
     pub effective_translation: Vec3,
+    pub remaining_translation: Vec3,
     pub grounded: bool,
     pub sliding_down_slope: bool,
     pub collision_count: u32,
+    pub ground_normal: Vec3,
+    pub slope_angle: f32,
+    pub hit_normal: Vec3,
+    pub hit_point: Vec3,
+    pub hit_entity: Option<Entity>,
+    pub stepped_up: bool,
+    pub step_height: f32,
+    pub platform_velocity: Vec3,
 }
 
 impl Default for CharacterControllerOutput {
     fn default() -> Self {
         Self {
+            desired_translation: Vec3::ZERO,
             effective_translation: Vec3::ZERO,
+            remaining_translation: Vec3::ZERO,
             grounded: false,
             sliding_down_slope: false,
             collision_count: 0,
+            ground_normal: Vec3::ZERO,
+            slope_angle: 0.0,
+            hit_normal: Vec3::ZERO,
+            hit_point: Vec3::ZERO,
+            hit_entity: None,
+            stepped_up: false,
+            step_height: 0.0,
+            platform_velocity: Vec3::ZERO,
         }
     }
 }

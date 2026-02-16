@@ -183,6 +183,40 @@ type SplinePatch = {
     mode: string?,
 }
 
+type LookAtData = {
+    target_entity: EntityId?,
+    target_offset: Vec3,
+    offset_in_target_space: boolean,
+    up: Vec3,
+    rotation_smooth_time: number,
+}
+
+type LookAtPatch = {
+    target_entity: EntityId?,
+    target_offset: Vec3?,
+    offset_in_target_space: boolean?,
+    up: Vec3?,
+    rotation_smooth_time: number?,
+}
+
+type EntityFollowerData = {
+    target_entity: EntityId?,
+    position_offset: Vec3,
+    offset_in_target_space: boolean,
+    follow_rotation: boolean,
+    position_smooth_time: number,
+    rotation_smooth_time: number,
+}
+
+type EntityFollowerPatch = {
+    target_entity: EntityId?,
+    position_offset: Vec3?,
+    offset_in_target_space: boolean?,
+    follow_rotation: boolean?,
+    position_smooth_time: number?,
+    rotation_smooth_time: number?,
+}
+
 type LightData = {
     type: string,
     color: Vec3,
@@ -230,6 +264,15 @@ type MeshRendererPatch = {
 type ScriptData = {
     path: string,
     language: string,
+    fields: { [string]: any }?,
+}
+
+type ScriptFieldData = {
+    name: string,
+    label: string,
+    type: string,
+    asset_kind: string?,
+    value: any,
 }
 
 type AudioBus = "Master" | "Music" | "Sfx" | "Ui" | "Ambience" | "World" | number
@@ -562,10 +605,32 @@ type CharacterControllerInputPatch = {
 }
 
 type CharacterControllerOutputData = {
+    desired_translation: Vec3,
     effective_translation: Vec3,
+    remaining_translation: Vec3,
     grounded: boolean,
     sliding_down_slope: boolean,
     collision_count: number,
+    ground_normal: Vec3,
+    slope_angle: number,
+    hit_normal: Vec3,
+    hit_point: Vec3,
+    hit_entity: EntityId?,
+    stepped_up: boolean,
+    step_height: number,
+    platform_velocity: Vec3,
+}
+
+type CollisionEventData = {
+    other_entity: EntityId,
+    normal: Vec3,
+    point: Vec3,
+}
+
+type CollisionEventSet = {
+    enter: { CollisionEventData },
+    stay: { CollisionEventData },
+    exit: { CollisionEventData },
 }
 
 type PhysicsRayCastData = {
@@ -766,6 +831,7 @@ type HelmerEcs = {
     list_entities: () -> { EntityId },
     spawn_entity: (name: string?) -> EntityId,
     entity_exists: (id: EntityId) -> boolean,
+    emit_event: (name: string, target: EntityId?) -> boolean,
     find_entity_by_name: (name: string) -> EntityId?,
     get_entity_name: (id: EntityId) -> string?,
     set_entity_name: (id: EntityId, name: string) -> boolean,
@@ -785,6 +851,13 @@ type HelmerEcs = {
     sample_spline: (id: EntityId, t: number) -> Vec3?,
     spline_length: (id: EntityId, samples: number?) -> number?,
     follow_spline: (id: EntityId, spline_id: EntityId?, speed: number?, looped: boolean?) -> boolean,
+    get_transform_forward: (id: EntityId) -> Vec3,
+    get_transform_right: (id: EntityId) -> Vec3,
+    get_transform_up: (id: EntityId) -> Vec3,
+    get_look_at: (id: EntityId) -> LookAtData?,
+    set_look_at: (id: EntityId, data: LookAtPatch) -> boolean,
+    get_entity_follower: (id: EntityId) -> EntityFollowerData?,
+    set_entity_follower: (id: EntityId, data: EntityFollowerPatch) -> boolean,
 
     set_animator_enabled: (id: EntityId, enabled: boolean) -> boolean,
     set_animator_time_scale: (id: EntityId, time_scale: number) -> boolean,
@@ -792,6 +865,22 @@ type HelmerEcs = {
     set_animator_param_bool: (id: EntityId, name: string, value: boolean) -> boolean,
     trigger_animator: (id: EntityId, name: string) -> boolean,
     get_animator_clips: (id: EntityId, layer_index: number?) -> { string }?,
+    get_animator_state: (id: EntityId, layer_index: number?) -> DynamicFields?,
+    get_animator_layer_weights: (id: EntityId) -> { DynamicFields }?,
+    get_animator_layer_weight: (id: EntityId, layer_index: number?) -> number,
+    get_animator_state_time: (id: EntityId, layer_index: number?) -> number,
+    get_animator_current_state: (id: EntityId, layer_index: number?) -> number,
+    get_animator_current_state_name: (id: EntityId, layer_index: number?) -> string,
+    get_animator_transition_active: (id: EntityId, layer_index: number?) -> boolean,
+    get_animator_transition_from: (id: EntityId, layer_index: number?) -> number,
+    get_animator_transition_to: (id: EntityId, layer_index: number?) -> number,
+    get_animator_transition_progress: (id: EntityId, layer_index: number?) -> number,
+    get_animator_transition_elapsed: (id: EntityId, layer_index: number?) -> number,
+    get_animator_transition_duration: (id: EntityId, layer_index: number?) -> number,
+    set_animator_layer_weight: (id: EntityId, layer_index: number?, weight: number) -> boolean,
+    set_animator_transition: (id: EntityId, layer_index: number?, transition_index: number, patch: DynamicFields) -> boolean,
+    set_animator_blend_node: (id: EntityId, layer_index: number?, node_index: number, normalize: boolean?, mode: string?) -> boolean,
+    set_animator_blend_child: (id: EntityId, layer_index: number?, node_index: number, child_index: number, weight: number?, weight_param: string?, weight_scale: number?, weight_bias: number?) -> boolean,
     play_anim_clip: (id: EntityId, name: string, layer_index: number?) -> boolean,
 
     get_light: (id: EntityId) -> LightData?,
@@ -806,18 +895,35 @@ type HelmerEcs = {
     set_viewport_preview_camera: (id: EntityId?) -> boolean,
 
     get_mesh_renderer: (id: EntityId) -> MeshRendererData?,
+    get_mesh_renderer_source_path: (id: EntityId) -> string?,
+    get_mesh_renderer_material_path: (id: EntityId) -> string?,
     set_mesh_renderer: (id: EntityId, data: MeshRendererPatch) -> boolean,
+    set_mesh_renderer_source_path: (id: EntityId, path: string) -> boolean,
+    set_mesh_renderer_material_path: (id: EntityId, path: string) -> boolean,
 
     get_scene_asset: (id: EntityId) -> string?,
     set_scene_asset: (id: EntityId, path: string) -> boolean,
     open_scene: (path: string) -> boolean,
     switch_scene: (path: string) -> boolean,
 
-    get_script: (id: EntityId) -> ScriptData?,
-    set_script: (id: EntityId, path: string, language: string?) -> boolean,
+    get_script: (id: EntityId, index: number?) -> ScriptData?,
+    get_script_count: (id: EntityId) -> number,
+    get_script_path: (id: EntityId, index: number?) -> string?,
+    get_script_language: (id: EntityId, index: number?) -> string?,
+    list_script_fields: (id: EntityId, index: number?) -> { [string]: any }?,
+    get_script_field: (id: EntityId, field_name: string, index: number?) -> any?,
+    set_script_field: (id: EntityId, field_name: string, value: any, index: number?) -> boolean,
+    find_script_index: (id: EntityId, path: string, language: string?) -> number?,
+    self_script_index: () -> number,
+    list_self_script_fields: () -> { [string]: any }?,
+    get_self_script_field: (field_name: string) -> any?,
+    set_self_script_field: (field_name: string, value: any) -> boolean,
+    set_script: (id: EntityId, path: string, language: string?, index: number?) -> boolean,
 
     get_audio_emitter: (id: EntityId) -> AudioEmitterData?,
+    get_audio_emitter_path: (id: EntityId) -> string?,
     set_audio_emitter: (id: EntityId, data: AudioEmitterPatch) -> boolean,
+    set_audio_emitter_path: (id: EntityId, path: string) -> boolean,
     get_audio_listener: (id: EntityId) -> AudioListenerData?,
     set_audio_listener: (id: EntityId, data: AudioListenerPatch) -> boolean,
 
@@ -846,7 +952,16 @@ type HelmerEcs = {
     get_physics_world_defaults: (id: EntityId) -> PhysicsWorldDefaultsData?,
     set_physics_world_defaults: (id: EntityId, data: PhysicsWorldDefaultsPatch) -> boolean,
     get_character_controller_output: (id: EntityId) -> CharacterControllerOutputData?,
+    get_collision_events: (id: EntityId, phase: string?) -> CollisionEventSet | { CollisionEventData }?,
+    get_trigger_events: (id: EntityId, phase: string?) -> CollisionEventSet | { CollisionEventData }?,
     get_physics_ray_cast_hit: (id: EntityId) -> PhysicsRayCastHitData?,
+    ray_cast: (origin: Vec3, direction: Vec3, max_toi: number?, solid: boolean?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> PhysicsRayCastHitData,
+    sphere_cast: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> PhysicsShapeCastHitData,
+    sphere_cast_has_hit: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> boolean,
+    sphere_cast_hit_entity: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> EntityId?,
+    sphere_cast_point: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> Vec3,
+    sphere_cast_normal: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> Vec3,
+    sphere_cast_toi: (origin: Vec3, radius: number, direction: Vec3, max_toi: number?, filter: PhysicsQueryFilterPatch?, exclude_entity: EntityId?) -> number,
     get_physics_point_projection_hit: (id: EntityId) -> PhysicsPointProjectionHitData?,
     get_physics_shape_cast_hit: (id: EntityId) -> PhysicsShapeCastHitData?,
     get_physics_velocity: (id: EntityId) -> PhysicsVelocityData?,
@@ -921,6 +1036,15 @@ type HelmerInput = {
     gamepad_button_pressed: (button: InputHandle | string, gamepad_id: number?) -> boolean,
     gamepad_button_released: (button: InputHandle | string, gamepad_id: number?) -> boolean,
     gamepad_trigger: (side: InputHandle | string, gamepad_id: number?) -> number,
+
+    bind_action: (action: string, binding: InputHandle | string | number, context: string?, deadzone: number?) -> boolean,
+    unbind_action: (action: string, binding: InputHandle | string | number?, context: string?) -> boolean,
+    set_action_context: (context: string?) -> boolean,
+    action_context: () -> string,
+    action_value: (action: string) -> number,
+    action_down: (action: string) -> boolean,
+    action_pressed: (action: string) -> boolean,
+    action_released: (action: string) -> boolean,
 }
 
 declare entity_id: EntityId
@@ -976,6 +1100,7 @@ pub fn default_script_template_full() -> &'static str {
 -- Entry points: on_start(), on_update(dt), on_stop()
 -- Globals:
 --   entity_id : u64 id of the entity that owns this script
+--   script_index : u64 1-based slot index of this script on the owning entity
 --   print(...) : log values to the editor console
 -- input table:
 --   input.key_down(key) -> bool
@@ -1008,12 +1133,21 @@ pub fn default_script_template_full() -> &'static str {
 --   input.gamepad_button(name) -> button|nil
 --   input.gamepad_axis_handle(name) -> axis|nil
 --   input.gamepad_axis_ref(name) -> axis|nil
+--   input.bind_action(action, binding, context?, deadzone?) -> bool
+--   input.unbind_action(action, binding?, context?) -> bool
+--   input.set_action_context(context?) -> bool
+--   input.action_context() -> string
+--   input.action_value(action) -> number
+--   input.action_down(action) -> bool
+--   input.action_pressed(action) -> bool
+--   input.action_released(action) -> bool
 -- input constants:
 --   input.keys.<Name>, input.mouse_buttons.<Name>, input.gamepad_buttons.<Name>, input.gamepad_axes.<Name>
 -- ecs table:
 --   ecs.list_entities() -> {id, ...}
 --   ecs.spawn_entity(name?) -> id
 --   ecs.entity_exists(id) -> bool
+--   ecs.emit_event(name, target_id?) -> bool
 --   ecs.find_entity_by_name(name) -> id|nil
 --   ecs.get_entity_name(id) -> string|nil
 --   ecs.set_entity_name(id, name) -> bool (empty name removes Name)
@@ -1033,12 +1167,35 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.sample_spline(id, t) -> point|nil
 --   ecs.spline_length(id, samples?) -> number|nil
 --   ecs.follow_spline(id, spline_id?, speed?, looped?) -> bool
+--   ecs.get_transform_forward(id) -> {x,y,z}
+--   ecs.get_transform_right(id) -> {x,y,z}
+--   ecs.get_transform_up(id) -> {x,y,z}
+--   ecs.get_look_at(id) -> {target_entity?, target_offset, offset_in_target_space, up, rotation_smooth_time}|nil
+--   ecs.set_look_at(id, patch) -> bool
+--   ecs.get_entity_follower(id) -> {target_entity?, position_offset, offset_in_target_space, follow_rotation, position_smooth_time, rotation_smooth_time}|nil
+--   ecs.set_entity_follower(id, patch) -> bool
 --   ecs.set_animator_enabled(id, enabled) -> bool
 --   ecs.set_animator_time_scale(id, value) -> bool
 --   ecs.set_animator_param_float(id, name, value) -> bool
 --   ecs.set_animator_param_bool(id, name, value) -> bool
 --   ecs.trigger_animator(id, name) -> bool
 --   ecs.get_animator_clips(id, layer?) -> {name, ...}|nil
+--   ecs.get_animator_state(id, layer?) -> table|nil
+--   ecs.get_animator_layer_weights(id) -> { {index, name, weight, additive}, ... }|nil
+--   ecs.get_animator_layer_weight(id, layer?) -> number
+--   ecs.get_animator_state_time(id, layer?) -> number
+--   ecs.get_animator_current_state(id, layer?) -> number
+--   ecs.get_animator_current_state_name(id, layer?) -> string
+--   ecs.get_animator_transition_active(id, layer?) -> bool
+--   ecs.get_animator_transition_from(id, layer?) -> number
+--   ecs.get_animator_transition_to(id, layer?) -> number
+--   ecs.get_animator_transition_progress(id, layer?) -> number
+--   ecs.get_animator_transition_elapsed(id, layer?) -> number
+--   ecs.get_animator_transition_duration(id, layer?) -> number
+--   ecs.set_animator_layer_weight(id, layer?, weight) -> bool
+--   ecs.set_animator_transition(id, layer?, transition_index, patch) -> bool
+--   ecs.set_animator_blend_node(id, layer?, node_index, normalize?, mode?) -> bool
+--   ecs.set_animator_blend_child(id, layer?, node_index, child_index, weight?, weight_param?, weight_scale?, weight_bias?) -> bool
 --   ecs.play_anim_clip(id, name, layer?) -> bool
 --   ecs.get_light(id) -> {type, color={x,y,z}, intensity, angle?}|nil
 --   ecs.set_light(id, {type?, color?, intensity?, angle?}) -> bool
@@ -1050,13 +1207,28 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.get_viewport_preview_camera() -> id|nil
 --   ecs.set_viewport_preview_camera(id|nil) -> bool
 --   ecs.get_mesh_renderer(id) -> {source, material?, casts_shadow, visible}|nil
+--   ecs.get_mesh_renderer_source_path(id) -> path|nil
+--   ecs.get_mesh_renderer_material_path(id) -> path|nil
 --   ecs.set_mesh_renderer(id, {source?, material?, casts_shadow?, visible?}) -> bool
+--   ecs.set_mesh_renderer_source_path(id, path) -> bool
+--   ecs.set_mesh_renderer_material_path(id, path) -> bool
 --   ecs.get_scene_asset(id) -> path|nil
 --   ecs.set_scene_asset(id, path) -> bool
 --   ecs.open_scene(path) -> bool
 --   ecs.switch_scene(path) -> bool
---   ecs.get_script(id) -> {path, language}|nil
---   ecs.set_script(id, path, language?) -> bool
+--   ecs.get_script(id, index?) -> {path, language, fields?}|nil
+--   ecs.get_script_count(id) -> number
+--   ecs.get_script_path(id, index?) -> path|nil
+--   ecs.get_script_language(id, index?) -> language|nil
+--   ecs.list_script_fields(id, index?) -> { [field_name] = value, __meta = [{name,label,type,asset_kind?,value}, ...] }|nil
+--   ecs.get_script_field(id, field_name, index?) -> value|nil
+--   ecs.set_script_field(id, field_name, value, index?) -> bool
+--   ecs.find_script_index(id, path, language?) -> number|nil
+--   ecs.self_script_index() -> number
+--   ecs.list_self_script_fields() -> { [field_name] = value, __meta = [{name,label,type,asset_kind?,value}, ...] }|nil
+--   ecs.get_self_script_field(field_name) -> value|nil
+--   ecs.set_self_script_field(field_name, value) -> bool
+--   ecs.set_script(id, path, language?, index?) -> bool
 --   ecs.list_dynamic_components(id) -> [{name, fields={...}}, ...]|nil
 --   ecs.get_dynamic_component(id, name) -> fields|nil
 --   ecs.set_dynamic_component(id, name, fields_table) -> bool
@@ -1066,7 +1238,9 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.remove_dynamic_field(id, comp_name, field_name) -> bool
 -- audio:
 --   ecs.get_audio_emitter(id) -> {path?, streaming, bus, volume, pitch, looping, spatial, min_distance, max_distance, rolloff, spatial_blend, playback_state, play_on_spawn, clip_id?}|nil
+--   ecs.get_audio_emitter_path(id) -> path|nil
 --   ecs.set_audio_emitter(id, data) -> bool
+--   ecs.set_audio_emitter_path(id, path) -> bool
 --   ecs.get_audio_listener(id) -> {enabled}|nil
 --   ecs.set_audio_listener(id, {enabled?}) -> bool
 --   ecs.set_audio_enabled(enabled) -> bool
@@ -1093,8 +1267,25 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.clear_physics(id) -> bool
 --   ecs.get_physics_world_defaults(id) -> {gravity, collider_properties, rigid_body_properties}|nil
 --   ecs.set_physics_world_defaults(id, patch) -> bool
---   ecs.get_character_controller_output(id) -> {effective_translation, grounded, sliding_down_slope, collision_count}|nil
+--   ecs.get_character_controller_output(id) -> {desired_translation, effective_translation, remaining_translation, grounded, sliding_down_slope, collision_count, ground_normal, slope_angle, hit_normal, hit_point, hit_entity?, stepped_up, step_height, platform_velocity}|nil
+--   ecs.get_collision_events(id, phase?) -> {enter={...}, stay={...}, exit={...}} | {{other_entity, normal, point}, ...}
+--   ecs.get_collision_event_count(id, phase?) -> number
+--   ecs.get_collision_event_other(id, phase?, event_index?) -> other_entity_id|nil
+--   ecs.get_collision_event_normal(id, phase?, event_index?) -> {x,y,z}
+--   ecs.get_collision_event_point(id, phase?, event_index?) -> {x,y,z}
+--   ecs.get_trigger_events(id, phase?) -> {enter={...}, stay={...}, exit={...}} | {{other_entity, normal, point}, ...}
+--   ecs.get_trigger_event_count(id, phase?) -> number
+--   ecs.get_trigger_event_other(id, phase?, event_index?) -> other_entity_id|nil
+--   ecs.get_trigger_event_normal(id, phase?, event_index?) -> {x,y,z}
+--   ecs.get_trigger_event_point(id, phase?, event_index?) -> {x,y,z}
 --   ecs.get_physics_ray_cast_hit(id) -> {has_hit, hit_entity?, point, normal, toi}|nil
+--   ecs.ray_cast(origin, direction, max_toi?, solid?, filter?, exclude_entity?) -> {has_hit, hit_entity?, point, normal, toi}
+--   ecs.sphere_cast(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> {has_hit, hit_entity?, toi, witness1, witness2, normal1, normal2, status}
+--   ecs.sphere_cast_has_hit(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> bool
+--   ecs.sphere_cast_hit_entity(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> other_entity_id|nil
+--   ecs.sphere_cast_point(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> {x,y,z}
+--   ecs.sphere_cast_normal(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> {x,y,z}
+--   ecs.sphere_cast_toi(origin, radius, direction, max_toi?, filter?, exclude_entity?) -> number
 --   ecs.get_physics_point_projection_hit(id) -> {has_hit, hit_entity?, projected_point, is_inside, distance}|nil
 --   ecs.get_physics_shape_cast_hit(id) -> {has_hit, hit_entity?, toi, witness1, witness2, normal1, normal2, status}|nil
 --   ecs.get_physics_velocity(id) -> {linear?, angular?}|nil

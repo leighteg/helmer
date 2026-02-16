@@ -1,11 +1,15 @@
 use bevy_ecs::{entity::Entity, resource::Resource};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use hashbrown::HashMap;
-use rapier3d::prelude::*;
+use rapier3d::{
+    math::{Pose, Vector},
+    parry::query::{ShapeCastStatus, details::ShapeCastOptions},
+    prelude::*,
+};
 
 use crate::physics::components::{
-    ColliderProperties, PhysicsHandle, PhysicsQueryFilter, PhysicsRayCastHit, PhysicsWorldDefaults,
-    RigidBodyProperties,
+    ColliderProperties, PhysicsHandle, PhysicsQueryFilter, PhysicsRayCastHit, PhysicsShapeCastHit,
+    PhysicsShapeCastStatus, PhysicsWorldDefaults, RigidBodyProperties,
 };
 
 #[derive(Resource)]
@@ -115,6 +119,55 @@ impl PhysicsResource {
 
         hit
     }
+
+    pub fn cast_sphere(
+        &self,
+        origin: Vec3,
+        radius: f32,
+        direction: Vec3,
+        max_toi: f32,
+        filter: PhysicsQueryFilter,
+        exclude_entity: Option<Entity>,
+    ) -> PhysicsShapeCastHit {
+        let mut hit = PhysicsShapeCastHit::default();
+        if !self.running {
+            return hit;
+        }
+
+        let direction = normalize_axis(direction, Vec3::ZERO);
+        if direction.length_squared() <= 1.0e-8 {
+            return hit;
+        }
+
+        let exclude_collider =
+            exclude_entity.and_then(|entity| self.physics_entities.get(&entity).copied());
+        let query_filter = build_query_filter(filter, exclude_collider);
+        let pipeline = self.query_pipeline_with_filter(query_filter);
+
+        let sphere = SharedShape::ball(radius.max(0.0001));
+        let options = ShapeCastOptions {
+            max_time_of_impact: max_toi.max(0.0),
+            target_distance: 0.0,
+            stop_at_penetration: false,
+            compute_impact_geometry_on_penetration: true,
+        };
+        let sphere_pose = Pose::from_parts(origin, Quat::IDENTITY);
+
+        if let Some((collider_handle, cast_hit)) =
+            pipeline.cast_shape(&sphere_pose, to_vector(direction), &*sphere, options)
+        {
+            hit.has_hit = true;
+            hit.hit_entity = self.entity_for_collider(collider_handle);
+            hit.toi = cast_hit.time_of_impact;
+            hit.witness1 = from_vector(cast_hit.witness1);
+            hit.witness2 = from_vector(cast_hit.witness2);
+            hit.normal1 = from_vector(cast_hit.normal1);
+            hit.normal2 = from_vector(cast_hit.normal2);
+            hit.status = map_shape_cast_status(cast_hit.status);
+        }
+
+        hit
+    }
 }
 
 fn build_query_filter(
@@ -155,6 +208,18 @@ fn to_vector(v: Vec3) -> Vector {
 #[inline]
 fn from_vector(v: Vector) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
+}
+
+#[inline]
+fn map_shape_cast_status(status: ShapeCastStatus) -> PhysicsShapeCastStatus {
+    match status {
+        ShapeCastStatus::Converged => PhysicsShapeCastStatus::Converged,
+        ShapeCastStatus::OutOfIterations => PhysicsShapeCastStatus::OutOfIterations,
+        ShapeCastStatus::Failed => PhysicsShapeCastStatus::Failed,
+        ShapeCastStatus::PenetratingOrWithinTargetDist => {
+            PhysicsShapeCastStatus::PenetratingOrWithinTargetDist
+        }
+    }
 }
 
 impl Default for PhysicsResource {

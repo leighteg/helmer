@@ -50,6 +50,7 @@ use helmer_becs::{
     BevySystemProfiler, BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use walkdir::WalkDir;
 
 use crate::editor::{
@@ -94,8 +95,9 @@ use crate::editor::{
         serialize_scene, spawn_scene_from_document, write_animation_asset_document,
     },
     scripting::{
-        ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry, ScriptInstanceKey,
-        ScriptProfilingState, ScriptRegistry, ScriptRuntime, is_script_path,
+        ScriptComponent, ScriptEditCommand, ScriptEditModeState, ScriptEntry,
+        ScriptInspectorAssetKind, ScriptInspectorField, ScriptInspectorFieldType,
+        ScriptInstanceKey, ScriptProfilingState, ScriptRegistry, ScriptRuntime, is_script_path,
         normalize_script_language, script_language_from_path,
     },
     timeline::{
@@ -107,8 +109,9 @@ use crate::editor::{
         build_pose_track_from_clip_segment,
     },
     visual_scripting::{
-        default_visual_script_template_full, draw_visual_script_editor_tab, is_visual_script_path,
-        open_visual_script_editor,
+        VisualInspectorAssetKind, VisualValueType, default_visual_script_template_full,
+        default_visual_script_template_third_person, draw_visual_script_editor_tab,
+        is_visual_script_path, open_visual_script_editor, parse_visual_script_document,
     },
 };
 
@@ -4198,6 +4201,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                         .push(crate::editor::EditorViewportPaneRequest {
                             pane_id,
                             camera_entity,
+                            is_play_viewport: play_viewport,
                             texture_id,
                             viewport_rect: rect_pixels,
                             pointer_over,
@@ -11167,7 +11171,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let target_name = world
                 .get::<BevySplineFollower>(entity)
                 .and_then(|follower| follower.0.spline_entity)
-                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .and_then(Entity::try_from_bits)
+                .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| "<self>".to_string());
 
@@ -11303,7 +11308,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let target_name = world
                 .get::<BevyLookAt>(entity)
                 .and_then(|look_at| look_at.0.target_entity)
-                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .and_then(Entity::try_from_bits)
+                .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| "<none>".to_string());
 
@@ -11435,7 +11441,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let target_name = world
                 .get::<BevyEntityFollower>(entity)
                 .and_then(|follower| follower.0.target_entity)
-                .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
+                .and_then(Entity::try_from_bits)
+                .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| "<none>".to_string());
 
@@ -13342,6 +13349,19 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             set_status(world, "Open a project before creating scripts".to_string());
                         }
                     }
+                    if ui.button("Create 3P Visual Script Template").clicked() {
+                        if let Some(project) = project.as_ref() {
+                            if let Some(path) =
+                                create_visual_script_asset_third_person(world, project)
+                            {
+                                script.path = Some(path.clone());
+                                script.language = script_language_from_path(&path);
+                                scripts_changed = true;
+                            }
+                        } else {
+                            set_status(world, "Open a project before creating scripts".to_string());
+                        }
+                    }
                 });
 
                 ui.label(format!("Language: {}", script.language));
@@ -13353,6 +13373,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             set_status(world, format!("Failed to open visual script: {}", err));
                         }
                     }
+                }
+                if draw_script_inspector_fields_panel(ui, world, entity, index, script) {
+                    scripts_changed = true;
                 }
 
                 let script_key = ScriptInstanceKey {
@@ -13620,6 +13643,849 @@ fn highlight_drop_target(ui: &Ui, response: &Response) {
             StrokeKind::Inside,
         );
     }
+}
+
+#[derive(Debug, Clone)]
+struct VisualInspectorFieldBinding {
+    name: String,
+    label: String,
+    field_type: ScriptInspectorFieldType,
+    asset_kind: Option<ScriptInspectorAssetKind>,
+    default_value: JsonValue,
+}
+
+fn script_json_number(value: f64) -> JsonValue {
+    JsonNumber::from_f64(value)
+        .map(JsonValue::Number)
+        .unwrap_or_else(|| JsonValue::Number(JsonNumber::from(0)))
+}
+
+fn script_json_number_from_u64(value: u64) -> JsonValue {
+    JsonValue::Number(JsonNumber::from(value))
+}
+
+fn parse_visual_default_literal(value: &str) -> JsonValue {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return JsonValue::String(String::new());
+    }
+    if let Ok(parsed) = serde_json::from_str::<JsonValue>(trimmed) {
+        return parsed;
+    }
+    let normalized = trimmed.to_ascii_lowercase();
+    if normalized == "true" {
+        return JsonValue::Bool(true);
+    }
+    if normalized == "false" {
+        return JsonValue::Bool(false);
+    }
+    if let Ok(number) = trimmed.parse::<f64>() {
+        return script_json_number(number);
+    }
+    JsonValue::String(trimmed.to_string())
+}
+
+fn map_visual_inspector_asset_kind(
+    kind: Option<VisualInspectorAssetKind>,
+) -> Option<ScriptInspectorAssetKind> {
+    match kind {
+        Some(VisualInspectorAssetKind::Any) => Some(ScriptInspectorAssetKind::Any),
+        Some(VisualInspectorAssetKind::Scene) => Some(ScriptInspectorAssetKind::Scene),
+        Some(VisualInspectorAssetKind::Model) => Some(ScriptInspectorAssetKind::Model),
+        Some(VisualInspectorAssetKind::Material) => Some(ScriptInspectorAssetKind::Material),
+        Some(VisualInspectorAssetKind::Audio) => Some(ScriptInspectorAssetKind::Audio),
+        Some(VisualInspectorAssetKind::Script) => Some(ScriptInspectorAssetKind::Script),
+        Some(VisualInspectorAssetKind::Animation) => Some(ScriptInspectorAssetKind::Animation),
+        None => None,
+    }
+}
+
+fn map_visual_variable_to_inspector_binding(
+    variable_id: u64,
+    variable_name: &str,
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+    default_value: &str,
+    inspector_label: &str,
+    inspector_asset_kind: Option<VisualInspectorAssetKind>,
+) -> Option<VisualInspectorFieldBinding> {
+    let base_name = if variable_name.trim().is_empty() {
+        format!("var_{}", variable_id)
+    } else {
+        variable_name.trim().to_string()
+    };
+    let label = if inspector_label.trim().is_empty() {
+        base_name.clone()
+    } else {
+        inspector_label.trim().to_string()
+    };
+    let asset_kind = map_visual_inspector_asset_kind(inspector_asset_kind);
+    let field_type = match value_type {
+        VisualValueType::Bool => ScriptInspectorFieldType::Bool,
+        VisualValueType::Number => ScriptInspectorFieldType::Number,
+        VisualValueType::String => {
+            if asset_kind.is_some() {
+                ScriptInspectorFieldType::AssetPath
+            } else {
+                ScriptInspectorFieldType::String
+            }
+        }
+        VisualValueType::Entity => ScriptInspectorFieldType::Entity,
+        VisualValueType::Vec2 => ScriptInspectorFieldType::Vec2,
+        VisualValueType::Vec3 => ScriptInspectorFieldType::Vec3,
+        VisualValueType::Quat => ScriptInspectorFieldType::Quat,
+        VisualValueType::Array => match array_item_type {
+            Some(VisualValueType::String) => {
+                if asset_kind.is_some() {
+                    ScriptInspectorFieldType::AssetPathList
+                } else {
+                    ScriptInspectorFieldType::StringList
+                }
+            }
+            Some(VisualValueType::Number) => ScriptInspectorFieldType::NumberList,
+            Some(VisualValueType::Entity) => ScriptInspectorFieldType::EntityList,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(VisualInspectorFieldBinding {
+        name: base_name,
+        label,
+        field_type,
+        asset_kind,
+        default_value: parse_visual_default_literal(default_value),
+    })
+}
+
+fn script_field_name_key(name: &str) -> String {
+    let mut key = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        let normalized = byte.to_ascii_lowercase();
+        if normalized.is_ascii_alphanumeric() {
+            key.push(normalized as char);
+        }
+    }
+    key
+}
+
+fn resolve_script_path_for_inspector(world: &World, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(project) = world.get_resource::<EditorProject>() {
+        if let Some(root) = project.root.as_ref() {
+            return root.join(path);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn load_visual_inspector_bindings(world: &World, path: &Path) -> Vec<VisualInspectorFieldBinding> {
+    let resolved = resolve_script_path_for_inspector(world, path);
+    let source = world
+        .get_resource::<ScriptRegistry>()
+        .and_then(|registry| {
+            registry
+                .scripts
+                .get(&resolved)
+                .map(|asset| asset.source.clone())
+        })
+        .or_else(|| fs::read_to_string(&resolved).ok());
+    let Some(source) = source else {
+        return Vec::new();
+    };
+    let Ok(document) = parse_visual_script_document(&source) else {
+        return Vec::new();
+    };
+
+    document
+        .variables
+        .into_iter()
+        .filter(|variable| variable.inspector_exposed)
+        .filter_map(|variable| {
+            map_visual_variable_to_inspector_binding(
+                variable.id,
+                &variable.name,
+                variable.value_type,
+                variable.array_item_type,
+                &variable.default_value,
+                &variable.inspector_label,
+                variable.inspector_asset_kind,
+            )
+        })
+        .collect()
+}
+
+fn sync_visual_script_fields(world: &World, script: &mut ScriptEntry) -> bool {
+    let Some(path) = script.path.as_ref() else {
+        return false;
+    };
+    if !is_visual_script_path(path) {
+        return false;
+    }
+    let bindings = load_visual_inspector_bindings(world, path);
+    if bindings.is_empty() {
+        return false;
+    }
+
+    let mut changed = false;
+    for binding in bindings {
+        if let Some(existing) = script.find_inspector_field_mut(&binding.name) {
+            let previous_type = existing.field_type;
+            let previous_asset_kind = existing.asset_kind;
+            let previous_label = existing.label.clone();
+            let previous_value = existing.value.clone();
+            existing.field_type = binding.field_type;
+            existing.asset_kind = binding.asset_kind;
+            if existing.label.trim().is_empty() || existing.label == existing.name {
+                existing.label = binding.label.clone();
+            }
+            existing.value = crate::editor::scripting::coerce_script_field_value(
+                existing.field_type,
+                &existing.value,
+            );
+            existing.sanitize();
+            if previous_type != existing.field_type
+                || previous_asset_kind != existing.asset_kind
+                || previous_label != existing.label
+                || previous_value != existing.value
+            {
+                changed = true;
+            }
+        } else {
+            let mut field = ScriptInspectorField::new(binding.name, binding.field_type);
+            field.label = binding.label;
+            field.asset_kind = binding.asset_kind;
+            field.value = crate::editor::scripting::coerce_script_field_value(
+                field.field_type,
+                &binding.default_value,
+            );
+            field.sanitize();
+            script.inspector_fields.push(field);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn script_field_asset_matches_kind(path: &Path, kind: ScriptInspectorAssetKind) -> bool {
+    match kind {
+        ScriptInspectorAssetKind::Any => true,
+        ScriptInspectorAssetKind::Scene => is_scene_file(path) || is_model_file(path),
+        ScriptInspectorAssetKind::Model => is_model_file(path),
+        ScriptInspectorAssetKind::Material => is_material_file(path),
+        ScriptInspectorAssetKind::Audio => is_audio_file(path),
+        ScriptInspectorAssetKind::Script => is_script_file(path),
+        ScriptInspectorAssetKind::Animation => is_animation_file(path) || is_model_file(path),
+    }
+}
+
+fn json_value_to_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Null => String::new(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string(value).unwrap_or_default()
+        }
+    }
+}
+
+fn json_value_to_f64(value: &JsonValue) -> f64 {
+    match value {
+        JsonValue::Number(value) => value.as_f64().unwrap_or(0.0),
+        JsonValue::String(value) => value.trim().parse::<f64>().unwrap_or(0.0),
+        JsonValue::Bool(value) => {
+            if *value {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => 0.0,
+    }
+}
+
+fn json_value_to_u64(value: &JsonValue) -> u64 {
+    match value {
+        JsonValue::Number(value) => value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|raw| u64::try_from(raw).ok()))
+            .unwrap_or(0),
+        JsonValue::String(value) => value.trim().parse::<u64>().unwrap_or(0),
+        JsonValue::Bool(value) => {
+            if *value {
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn json_object_component(value: &JsonValue, key: &str) -> f64 {
+    value
+        .as_object()
+        .and_then(|map| map.get(key))
+        .map(json_value_to_f64)
+        .unwrap_or(0.0)
+}
+
+fn json_array_strings(value: &JsonValue) -> Vec<String> {
+    match value {
+        JsonValue::Array(values) => values.iter().map(json_value_to_string).collect(),
+        JsonValue::Null => Vec::new(),
+        value => vec![json_value_to_string(value)],
+    }
+}
+
+fn json_array_numbers(value: &JsonValue) -> Vec<f64> {
+    match value {
+        JsonValue::Array(values) => values.iter().map(json_value_to_f64).collect(),
+        JsonValue::Null => Vec::new(),
+        value => vec![json_value_to_f64(value)],
+    }
+}
+
+fn json_array_entities(value: &JsonValue) -> Vec<u64> {
+    match value {
+        JsonValue::Array(values) => values.iter().map(json_value_to_u64).collect(),
+        JsonValue::Null => Vec::new(),
+        value => vec![json_value_to_u64(value)],
+    }
+}
+
+fn draw_script_string_list_editor(
+    ui: &mut Ui,
+    list: &mut Vec<String>,
+    asset_kind: Option<ScriptInspectorAssetKind>,
+) -> bool {
+    let mut changed = false;
+    let mut remove_index: Option<usize> = None;
+    for (index, value) in list.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let response = ui.text_edit_singleline(value);
+            if response.changed() {
+                changed = true;
+            }
+            if let Some(kind) = asset_kind {
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&response) {
+                    if let Some(path) = payload
+                        .paths
+                        .iter()
+                        .find(|path| script_field_asset_matches_kind(path, kind))
+                    {
+                        *value = path.to_string_lossy().to_string();
+                        changed = true;
+                    }
+                }
+                highlight_drop_target(ui, &response);
+            }
+            if ui.small_button("X").clicked() {
+                remove_index = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove_index {
+        if index < list.len() {
+            list.remove(index);
+            changed = true;
+        }
+    }
+    if ui.small_button("Add Item").clicked() {
+        list.push(String::new());
+        changed = true;
+    }
+    changed
+}
+
+fn draw_script_inspector_field_value_editor(
+    ui: &mut Ui,
+    world: &mut World,
+    field: &mut ScriptInspectorField,
+) -> bool {
+    let mut changed = false;
+    match field.field_type {
+        ScriptInspectorFieldType::Bool => {
+            let mut value = matches!(field.value, JsonValue::Bool(true));
+            if ui.checkbox(&mut value, "Value").changed() {
+                field.value = JsonValue::Bool(value);
+                changed = true;
+            }
+        }
+        ScriptInspectorFieldType::Number => {
+            let mut value = json_value_to_f64(&field.value);
+            if ui.add(DragValue::new(&mut value).speed(0.05)).changed() {
+                field.value = script_json_number(value);
+                changed = true;
+            }
+        }
+        ScriptInspectorFieldType::String | ScriptInspectorFieldType::AssetPath => {
+            let mut value = json_value_to_string(&field.value);
+            let response = ui.text_edit_singleline(&mut value);
+            if response.changed() {
+                field.value = JsonValue::String(value.clone());
+                changed = true;
+            }
+            if field.field_type == ScriptInspectorFieldType::AssetPath {
+                let kind = field.asset_kind.unwrap_or(ScriptInspectorAssetKind::Any);
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&response) {
+                    if let Some(path) = payload
+                        .paths
+                        .iter()
+                        .find(|path| script_field_asset_matches_kind(path, kind))
+                    {
+                        field.value = JsonValue::String(path.to_string_lossy().to_string());
+                        changed = true;
+                    }
+                }
+                highlight_drop_target(ui, &response);
+            }
+        }
+        ScriptInspectorFieldType::Entity => {
+            let mut value = json_value_to_u64(&field.value);
+            let mut value_changed = false;
+            ui.horizontal(|ui| {
+                if ui
+                    .add(DragValue::new(&mut value).speed(1.0).range(0..=u64::MAX))
+                    .changed()
+                {
+                    value_changed = true;
+                }
+
+                if ui.small_button("Use Pinned").clicked() {
+                    if let Some(pinned) = world
+                        .get_resource::<InspectorPinnedEntityResource>()
+                        .and_then(|res| res.0)
+                    {
+                        value = pinned.to_bits();
+                        value_changed = true;
+                    }
+                }
+
+                if value != 0 && ui.small_button("Clear").clicked() {
+                    value = 0;
+                    value_changed = true;
+                }
+            });
+
+            let drop_response = ui.add_sized(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Button::new("Drop Entity Here").sense(Sense::hover()),
+            );
+            highlight_drop_target(ui, &drop_response);
+            if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
+                value = payload.entity.to_bits();
+                value_changed = true;
+            }
+
+            let selected_label = if value == 0 {
+                "<none>".to_string()
+            } else if let Some(entity) = Entity::try_from_bits(value) {
+                if world.get_entity(entity).is_ok() {
+                    entity_display_name(world, entity)
+                } else {
+                    format!("Missing Entity {}", value)
+                }
+            } else {
+                format!("Invalid Entity {}", value)
+            };
+            ui.small(format!("Selected: {}", selected_label));
+
+            if value_changed {
+                field.value = script_json_number_from_u64(value);
+                changed = true;
+            }
+        }
+        ScriptInspectorFieldType::Vec2 => {
+            let mut x = json_object_component(&field.value, "x");
+            let mut y = json_object_component(&field.value, "y");
+            ui.horizontal(|ui| {
+                changed |= ui.add(DragValue::new(&mut x).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut y).speed(0.05)).changed();
+            });
+            if changed {
+                field.value = JsonValue::Object(JsonMap::from_iter([
+                    ("x".to_string(), script_json_number(x)),
+                    ("y".to_string(), script_json_number(y)),
+                ]));
+            }
+        }
+        ScriptInspectorFieldType::Vec3 => {
+            let mut x = json_object_component(&field.value, "x");
+            let mut y = json_object_component(&field.value, "y");
+            let mut z = json_object_component(&field.value, "z");
+            ui.horizontal(|ui| {
+                changed |= ui.add(DragValue::new(&mut x).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut y).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut z).speed(0.05)).changed();
+            });
+            if changed {
+                field.value = JsonValue::Object(JsonMap::from_iter([
+                    ("x".to_string(), script_json_number(x)),
+                    ("y".to_string(), script_json_number(y)),
+                    ("z".to_string(), script_json_number(z)),
+                ]));
+            }
+        }
+        ScriptInspectorFieldType::Quat => {
+            let mut x = json_object_component(&field.value, "x");
+            let mut y = json_object_component(&field.value, "y");
+            let mut z = json_object_component(&field.value, "z");
+            let mut w = field
+                .value
+                .as_object()
+                .and_then(|map| map.get("w"))
+                .map(json_value_to_f64)
+                .unwrap_or(1.0);
+            ui.horizontal(|ui| {
+                changed |= ui.add(DragValue::new(&mut x).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut y).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut z).speed(0.05)).changed();
+                changed |= ui.add(DragValue::new(&mut w).speed(0.05)).changed();
+            });
+            if changed {
+                field.value = JsonValue::Object(JsonMap::from_iter([
+                    ("x".to_string(), script_json_number(x)),
+                    ("y".to_string(), script_json_number(y)),
+                    ("z".to_string(), script_json_number(z)),
+                    ("w".to_string(), script_json_number(w)),
+                ]));
+            }
+        }
+        ScriptInspectorFieldType::StringList | ScriptInspectorFieldType::AssetPathList => {
+            let mut list = json_array_strings(&field.value);
+            let asset_kind = if field.field_type == ScriptInspectorFieldType::AssetPathList {
+                Some(field.asset_kind.unwrap_or(ScriptInspectorAssetKind::Any))
+            } else {
+                None
+            };
+            if draw_script_string_list_editor(ui, &mut list, asset_kind) {
+                field.value = JsonValue::Array(list.into_iter().map(JsonValue::String).collect());
+                changed = true;
+            }
+        }
+        ScriptInspectorFieldType::NumberList => {
+            let mut values = json_array_numbers(&field.value);
+            let mut remove_index: Option<usize> = None;
+            for (index, value) in values.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.add(DragValue::new(value).speed(0.05)).changed() {
+                        changed = true;
+                    }
+                    if ui.small_button("X").clicked() {
+                        remove_index = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = remove_index {
+                if index < values.len() {
+                    values.remove(index);
+                    changed = true;
+                }
+            }
+            if ui.small_button("Add Item").clicked() {
+                values.push(0.0);
+                changed = true;
+            }
+            if changed {
+                field.value =
+                    JsonValue::Array(values.into_iter().map(script_json_number).collect());
+            }
+        }
+        ScriptInspectorFieldType::EntityList => {
+            let mut values = json_array_entities(&field.value);
+            let mut remove_index: Option<usize> = None;
+            for (index, value) in values.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(DragValue::new(value).speed(1.0).range(0..=u64::MAX))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if ui.small_button("X").clicked() {
+                        remove_index = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = remove_index {
+                if index < values.len() {
+                    values.remove(index);
+                    changed = true;
+                }
+            }
+            if ui.small_button("Add Item").clicked() {
+                values.push(0);
+                changed = true;
+            }
+            if changed {
+                field.value = JsonValue::Array(
+                    values
+                        .into_iter()
+                        .map(script_json_number_from_u64)
+                        .collect(),
+                );
+            }
+        }
+        ScriptInspectorFieldType::AnimationClipSet => {
+            let mut object = field.value.as_object().cloned().unwrap_or_default();
+
+            let mut packed_source = object
+                .get("packed_source")
+                .map(json_value_to_string)
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("Packed Source");
+                let response = ui.text_edit_singleline(&mut packed_source);
+                if response.changed() {
+                    changed = true;
+                }
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&response) {
+                    if let Some(path) = payload.paths.iter().find(|path| {
+                        script_field_asset_matches_kind(path, ScriptInspectorAssetKind::Animation)
+                    }) {
+                        packed_source = path.to_string_lossy().to_string();
+                        changed = true;
+                    }
+                }
+                highlight_drop_target(ui, &response);
+            });
+            object.insert(
+                "packed_source".to_string(),
+                JsonValue::String(packed_source),
+            );
+
+            ui.label("Packed Clip Names");
+            let mut packed_clips =
+                json_array_strings(object.get("packed_clips").unwrap_or(&JsonValue::Null));
+            if draw_script_string_list_editor(ui, &mut packed_clips, None) {
+                object.insert(
+                    "packed_clips".to_string(),
+                    JsonValue::Array(packed_clips.into_iter().map(JsonValue::String).collect()),
+                );
+                changed = true;
+            } else if !object.contains_key("packed_clips") {
+                object.insert("packed_clips".to_string(), JsonValue::Array(Vec::new()));
+            }
+
+            ui.label("Separate Clip Paths");
+            let mut separate_clips =
+                json_array_strings(object.get("separate_clips").unwrap_or(&JsonValue::Null));
+            if draw_script_string_list_editor(
+                ui,
+                &mut separate_clips,
+                Some(ScriptInspectorAssetKind::Animation),
+            ) {
+                object.insert(
+                    "separate_clips".to_string(),
+                    JsonValue::Array(separate_clips.into_iter().map(JsonValue::String).collect()),
+                );
+                changed = true;
+            } else if !object.contains_key("separate_clips") {
+                object.insert("separate_clips".to_string(), JsonValue::Array(Vec::new()));
+            }
+
+            if changed {
+                field.value = JsonValue::Object(object);
+            }
+        }
+    }
+    if changed {
+        field.value =
+            crate::editor::scripting::coerce_script_field_value(field.field_type, &field.value);
+    }
+    changed
+}
+
+fn draw_script_inspector_fields_panel(
+    ui: &mut Ui,
+    world: &mut World,
+    entity: Entity,
+    script_index: usize,
+    script: &mut ScriptEntry,
+) -> bool {
+    let mut changed = false;
+    let before_sanitize = script.inspector_fields.clone();
+    script.sanitize_inspector_fields();
+    if before_sanitize != script.inspector_fields {
+        changed = true;
+    }
+    if sync_visual_script_fields(world, script) {
+        changed = true;
+    }
+    let auto_field_keys: HashSet<String> = script
+        .path
+        .as_ref()
+        .filter(|path| is_visual_script_path(path))
+        .map(|path| {
+            load_visual_inspector_bindings(world, path)
+                .into_iter()
+                .map(|binding| script_field_name_key(&binding.name))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    ui.collapsing("Inspector Fields", |ui| {
+        if script.inspector_fields.is_empty() {
+            ui.small("No inspector fields. Add fields or expose visual variables");
+        }
+
+        let mut remove_index: Option<usize> = None;
+        for (field_index, field) in script.inspector_fields.iter_mut().enumerate() {
+            let is_auto = auto_field_keys.contains(&script_field_name_key(&field.name));
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Field {}", field_index + 1));
+                    if is_auto {
+                        ui.small("(From Visual Variable)");
+                    }
+                    if ui
+                        .add_enabled(!is_auto, egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        remove_index = Some(field_index);
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.add_enabled_ui(!is_auto, |ui| {
+                        if ui.text_edit_singleline(&mut field.name).changed() {
+                            changed = true;
+                        }
+                    });
+                    ui.label("Label");
+                    if ui.text_edit_singleline(&mut field.label).changed() {
+                        changed = true;
+                    }
+                });
+
+                ui.horizontal_wrapped(|ui| {
+                    let mut selected_type = field.field_type;
+                    ui.add_enabled_ui(!is_auto, |ui| {
+                        ComboBox::from_id_salt((
+                            "script_inspector_field_type",
+                            entity.to_bits(),
+                            script_index,
+                            field_index,
+                        ))
+                        .selected_text(field.field_type.title())
+                        .show_ui(ui, |ui| {
+                            for field_type in [
+                                ScriptInspectorFieldType::String,
+                                ScriptInspectorFieldType::AssetPath,
+                                ScriptInspectorFieldType::Bool,
+                                ScriptInspectorFieldType::Number,
+                                ScriptInspectorFieldType::Entity,
+                                ScriptInspectorFieldType::Vec2,
+                                ScriptInspectorFieldType::Vec3,
+                                ScriptInspectorFieldType::Quat,
+                                ScriptInspectorFieldType::StringList,
+                                ScriptInspectorFieldType::AssetPathList,
+                                ScriptInspectorFieldType::NumberList,
+                                ScriptInspectorFieldType::EntityList,
+                                ScriptInspectorFieldType::AnimationClipSet,
+                            ] {
+                                if ui
+                                    .selectable_value(
+                                        &mut selected_type,
+                                        field_type,
+                                        field_type.title(),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+
+                    if selected_type != field.field_type {
+                        field.field_type = selected_type;
+                        field.value =
+                            crate::editor::scripting::script_field_default_value(selected_type);
+                        if !selected_type.supports_asset_kind() {
+                            field.asset_kind = None;
+                        } else if field.asset_kind.is_none() {
+                            field.asset_kind = Some(ScriptInspectorAssetKind::Any);
+                        }
+                        changed = true;
+                    }
+
+                    if field.field_type.supports_asset_kind() {
+                        let mut kind = field.asset_kind.unwrap_or(ScriptInspectorAssetKind::Any);
+                        ui.add_enabled_ui(!is_auto, |ui| {
+                            ComboBox::from_id_salt((
+                                "script_inspector_field_asset_kind",
+                                entity.to_bits(),
+                                script_index,
+                                field_index,
+                            ))
+                            .selected_text(kind.title())
+                            .show_ui(ui, |ui| {
+                                for candidate in [
+                                    ScriptInspectorAssetKind::Any,
+                                    ScriptInspectorAssetKind::Scene,
+                                    ScriptInspectorAssetKind::Model,
+                                    ScriptInspectorAssetKind::Material,
+                                    ScriptInspectorAssetKind::Audio,
+                                    ScriptInspectorAssetKind::Script,
+                                    ScriptInspectorAssetKind::Animation,
+                                ] {
+                                    if ui
+                                        .selectable_value(&mut kind, candidate, candidate.title())
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
+                        field.asset_kind = Some(kind);
+                    } else {
+                        field.asset_kind = None;
+                    }
+                });
+
+                changed |= draw_script_inspector_field_value_editor(ui, world, field);
+            });
+        }
+
+        if let Some(index) = remove_index {
+            if index < script.inspector_fields.len() {
+                script.inspector_fields.remove(index);
+                changed = true;
+            }
+        }
+
+        ui.horizontal(|ui| {
+            if ui.small_button("Add Field").clicked() {
+                let next = script.inspector_fields.len().saturating_add(1);
+                script.inspector_fields.push(ScriptInspectorField::new(
+                    format!("field_{}", next),
+                    ScriptInspectorFieldType::String,
+                ));
+                changed = true;
+            }
+            if ui.small_button("Add Animation Clip Set").clicked() {
+                let mut field = ScriptInspectorField::new(
+                    "anim_clips".to_string(),
+                    ScriptInspectorFieldType::AnimationClipSet,
+                );
+                field.label = "Animation Clips".to_string();
+                script.inspector_fields.push(field);
+                changed = true;
+            }
+        });
+    });
+
+    if changed {
+        script.sanitize_inspector_fields();
+    }
+    changed
 }
 
 fn draw_entity_drag_indicator(ui: &Ui, world: &World) {
@@ -14577,6 +15443,20 @@ fn asset_create_menu(world: &mut World, ui: &mut Ui, path: &Path) {
                 directory: path.to_path_buf(),
                 name: "new_visual_script".to_string(),
                 kind: AssetCreateKind::VisualScript,
+            },
+        );
+        ui.close_menu();
+    }
+    if ui
+        .button("New Visual Script (3rd Person Template)")
+        .clicked()
+    {
+        push_command(
+            world,
+            EditorCommand::CreateAsset {
+                directory: path.to_path_buf(),
+                name: "new_visual_script_third_person".to_string(),
+                kind: AssetCreateKind::VisualScriptThirdPerson,
             },
         );
         ui.close_menu();
@@ -17244,6 +18124,33 @@ fn create_visual_script_asset(world: &mut World, project: &EditorProject) -> Opt
     let candidate = scripts_root.join("visual_script.hvs");
     let path = unique_path(&candidate);
     if let Err(err) = fs::write(&path, default_visual_script_template_full()) {
+        set_status(world, format!("Failed to write visual script: {}", err));
+        return None;
+    }
+
+    if let Some(mut assets) = world.get_resource_mut::<AssetBrowserState>() {
+        assets.refresh_requested = true;
+    }
+
+    Some(path)
+}
+
+fn create_visual_script_asset_third_person(
+    world: &mut World,
+    project: &EditorProject,
+) -> Option<PathBuf> {
+    let root = project.root.as_ref()?;
+    let config = project.config.as_ref()?;
+    let scripts_root = config.scripts_root(root);
+
+    if let Err(err) = fs::create_dir_all(&scripts_root) {
+        set_status(world, format!("Failed to create scripts dir: {}", err));
+        return None;
+    }
+
+    let candidate = scripts_root.join("visual_script_third_person.hvs");
+    let path = unique_path(&candidate);
+    if let Err(err) = fs::write(&path, default_visual_script_template_third_person()) {
         set_status(world, format!("Failed to write visual script: {}", err));
         return None;
     }

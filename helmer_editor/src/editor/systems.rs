@@ -14,6 +14,7 @@ use helmer::provided::components::{
     Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
+use helmer::runtime::runtime::RuntimeCursorGrabMode;
 use helmer_becs::egui_integration::{
     EguiInputPassthrough, EguiResource, EguiWindowChrome, EguiWindowSpec,
 };
@@ -90,7 +91,9 @@ use crate::editor::{
         ensure_default_pane_workspace, spawn_play_viewport_pane,
     },
     undo_action,
-    visual_scripting::default_visual_script_template_full,
+    visual_scripting::{
+        default_visual_script_template_full, default_visual_script_template_third_person,
+    },
     watch::configure_file_watcher,
 };
 
@@ -2772,6 +2775,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         AssetCreateKind::Material => directory.join(format!("{}.ron", name)),
         AssetCreateKind::Script => directory.join(format!("{}.luau", name)),
         AssetCreateKind::VisualScript => directory.join(format!("{}.hvs", name)),
+        AssetCreateKind::VisualScriptThirdPerson => directory.join(format!("{}.hvs", name)),
         AssetCreateKind::RustScript => directory.join(name),
         AssetCreateKind::Animation => directory.join(format!("{}.hanim.ron", name)),
     };
@@ -2791,6 +2795,10 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
         }
         AssetCreateKind::VisualScript => {
             fs::write(&target_path, default_visual_script_template_full())
+                .map_err(|err| err.to_string())
+        }
+        AssetCreateKind::VisualScriptThirdPerson => {
+            fs::write(&target_path, default_visual_script_template_third_person())
                 .map_err(|err| err.to_string())
         }
         AssetCreateKind::RustScript => (|| -> Result<(), String> {
@@ -3723,6 +3731,7 @@ pub fn freecam_system(
                 bevy_ecs::prelude::Without<EditorViewportCamera>,
             ),
         >,
+        bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
     )>,
     freecam_components: bevy_ecs::prelude::Query<&Freecam>,
     system_profiler: Option<Res<BevySystemProfiler>>,
@@ -3776,6 +3785,7 @@ pub fn freecam_system(
     let dt = time.0;
     let input_manager = &input.0.read();
     let raw_mouse_delta = input_manager.mouse_motion;
+    let capture_cursor_position = input_manager.cursor_position;
     let egui_pixels_per_point = egui_res.ctx.pixels_per_point() as f64;
     let egui_cursor_position = egui_res.ctx.input(|input| {
         input
@@ -3947,6 +3957,80 @@ pub fn freecam_system(
         .map(|pane| pane.pointer_over)
         .unwrap_or(false)
         || viewport_runtime.pointer_over_main;
+    let pointer_over_play_viewport = pointer_over_play_viewport(
+        &scene_state,
+        &viewport_state,
+        &viewport_runtime,
+        &camera_candidates.p2(),
+        capture_cursor_position,
+    );
+    let play_viewport_rect = play_viewport_rect_for_capture(
+        &scene_state,
+        &viewport_state,
+        &viewport_runtime,
+        &camera_candidates.p2(),
+        capture_cursor_position,
+    );
+    let focused_play_viewport = if !viewport_runtime.pane_requests.is_empty() {
+        viewport_runtime.keyboard_focus
+            && active_pane_request.is_some_and(|pane| pane.is_play_viewport)
+    } else {
+        viewport_runtime.keyboard_focus
+            && viewport_state.play_mode_view == PlayViewportKind::Gameplay
+    };
+    if cursor_control_state.script_capture_suspended {
+        let recapture_requested = pointer_over_play_viewport
+            && (input_manager.is_mouse_button_active(MouseButton::Left)
+                || right_mouse_down
+                || middle_mouse_down);
+        if recapture_requested {
+            cursor_control_state.script_capture_suspended = false;
+        }
+    }
+    let script_cursor_capture_allowed = script_cursor_capture_allowed_for_viewports(
+        scene_state.world_state == WorldState::Play,
+        pointer_over_play_viewport,
+        focused_play_viewport,
+        cursor_control_state.script_capture_suspended,
+        cursor_control_state.script_capture_allowed,
+        cursor_control_state.script_policy,
+    );
+    let script_policy_requests_capture = cursor_control_state
+        .script_policy
+        .is_some_and(|policy| policy.grab_mode != RuntimeCursorGrabMode::None || !policy.visible);
+    if scene_state.world_state == WorldState::Play
+        && script_cursor_capture_allowed
+        && !cursor_control_state.script_capture_suspended
+        && script_policy_requests_capture
+    {
+        if let (Some(runtime_cursor_state), Some(rect)) =
+            (runtime_cursor_state.as_deref(), play_viewport_rect)
+        {
+            let min_x = rect.min_x as f64 + 1.0;
+            let min_y = rect.min_y as f64 + 1.0;
+            let max_x = rect.max_x as f64 - 1.0;
+            let max_y = rect.max_y as f64 - 1.0;
+            if max_x > min_x && max_y > min_y {
+                let requested_grab_mode = cursor_control_state
+                    .script_policy
+                    .unwrap_or_default()
+                    .grab_mode;
+                let desired_cursor = if requested_grab_mode == RuntimeCursorGrabMode::Locked {
+                    DVec2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)
+                } else {
+                    DVec2::new(
+                        capture_cursor_position.x.clamp(min_x, max_x),
+                        capture_cursor_position.y.clamp(min_y, max_y),
+                    )
+                };
+                if (desired_cursor - capture_cursor_position).length_squared() > 0.25 {
+                    runtime_cursor_state
+                        .0
+                        .request_warp(desired_cursor.x, desired_cursor.y);
+                }
+            }
+        }
+    }
     let allow_viewport_look_input = can_control_active_camera
         && (state.is_looking
             || state.is_middle_looking
@@ -4299,6 +4383,7 @@ pub fn freecam_system(
             sync_editor_cursor_control(
                 &state,
                 &mut cursor_control_state,
+                script_cursor_capture_allowed,
                 runtime_cursor_state.as_deref(),
                 restore_cursor_position,
             );
@@ -4309,6 +4394,7 @@ pub fn freecam_system(
             sync_editor_cursor_control(
                 &state,
                 &mut cursor_control_state,
+                script_cursor_capture_allowed,
                 runtime_cursor_state.as_deref(),
                 restore_cursor_position,
             );
@@ -4337,6 +4423,7 @@ pub fn freecam_system(
     sync_editor_cursor_control(
         &state,
         &mut cursor_control_state,
+        script_cursor_capture_allowed,
         runtime_cursor_state.as_deref(),
         restore_cursor_position,
     );
@@ -4349,13 +4436,99 @@ fn extract_yaw_pitch(rot: Quat) -> (f32, f32) {
     (yaw, pitch)
 }
 
+fn pointer_over_play_viewport(
+    scene_state: &EditorSceneState,
+    viewport_state: &EditorViewportState,
+    viewport_runtime: &EditorViewportRuntime,
+    _play_cameras: &bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
+    cursor_position: DVec2,
+) -> bool {
+    if scene_state.world_state != WorldState::Play {
+        return false;
+    }
+
+    if !viewport_runtime.pane_requests.is_empty() {
+        return viewport_runtime.pane_requests.iter().any(|pane| {
+            pane.is_play_viewport
+                && (pane.pointer_over || pane.viewport_rect.contains(cursor_position))
+        });
+    }
+
+    viewport_state.play_mode_view == PlayViewportKind::Gameplay
+        && (viewport_runtime.pointer_over_main
+            || viewport_runtime
+                .main_rect_pixels
+                .is_some_and(|rect| rect.contains(cursor_position)))
+}
+
+fn play_viewport_rect_for_capture(
+    scene_state: &EditorSceneState,
+    viewport_state: &EditorViewportState,
+    viewport_runtime: &EditorViewportRuntime,
+    _play_cameras: &bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
+    cursor_position: DVec2,
+) -> Option<ViewportRectPixels> {
+    if scene_state.world_state != WorldState::Play {
+        return None;
+    }
+
+    if !viewport_runtime.pane_requests.is_empty() {
+        let pointed_play_pane = viewport_runtime.pane_requests.iter().find(|pane| {
+            pane.is_play_viewport
+                && (pane.pointer_over || pane.viewport_rect.contains(cursor_position))
+        });
+        let active_play_pane = viewport_runtime.active_pane_id.and_then(|pane_id| {
+            viewport_runtime
+                .pane_requests
+                .iter()
+                .find(|pane| pane.pane_id == pane_id && pane.is_play_viewport)
+        });
+        let first_play_pane = viewport_runtime
+            .pane_requests
+            .iter()
+            .find(|pane| pane.is_play_viewport);
+        return pointed_play_pane
+            .or(active_play_pane)
+            .or(first_play_pane)
+            .map(|pane| pane.viewport_rect);
+    }
+
+    if viewport_state.play_mode_view == PlayViewportKind::Gameplay {
+        return viewport_runtime.main_rect_pixels;
+    }
+
+    None
+}
+
+fn script_cursor_capture_allowed_for_viewports(
+    in_play_mode: bool,
+    pointer_over_play_viewport: bool,
+    focused_play_viewport: bool,
+    script_capture_suspended: bool,
+    script_capture_was_allowed: bool,
+    script_policy: Option<helmer::runtime::runtime::RuntimeCursorStateSnapshot>,
+) -> bool {
+    if !in_play_mode || script_capture_suspended {
+        return false;
+    }
+    if pointer_over_play_viewport || focused_play_viewport {
+        return true;
+    }
+
+    let script_policy_requests_capture = script_policy
+        .is_some_and(|policy| policy.grab_mode != RuntimeCursorGrabMode::None || !policy.visible);
+    script_capture_was_allowed && script_policy_requests_capture
+}
+
 fn sync_editor_cursor_control(
     freecam_state: &FreecamState,
     cursor_control_state: &mut EditorCursorControlState,
+    script_cursor_capture_allowed: bool,
     runtime_cursor_state: Option<&BevyRuntimeCursorState>,
     restore_cursor_position: Option<DVec2>,
 ) {
     cursor_control_state.freecam_capture_active = freecam_state.is_looking;
+    cursor_control_state.script_capture_allowed = script_cursor_capture_allowed;
 
     if let Some(runtime_cursor_state) = runtime_cursor_state {
         runtime_cursor_state

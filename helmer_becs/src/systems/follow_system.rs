@@ -56,7 +56,10 @@ pub fn entity_follow_system(
             let Some(target_bits) = follower.target_entity else {
                 continue;
             };
-            let Ok(target_transform) = targets.get(Entity::from_bits(target_bits)) else {
+            let Some(target_entity) = Entity::try_from_bits(target_bits) else {
+                continue;
+            };
+            let Ok(target_transform) = targets.get(target_entity) else {
                 continue;
             };
 
@@ -133,7 +136,10 @@ pub fn look_at_system(
             if target_bits == entity.to_bits() {
                 continue;
             }
-            let Ok(target_transform) = targets.get(Entity::from_bits(target_bits)) else {
+            let Some(target_entity) = Entity::try_from_bits(target_bits) else {
+                continue;
+            };
+            let Ok(target_transform) = targets.get(target_entity) else {
                 continue;
             };
 

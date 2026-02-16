@@ -67,16 +67,25 @@ pub enum VisualValueType {
     AudioEmitter,
     AudioListener,
     Script,
+    LookAt,
+    EntityFollower,
+    AnimatorState,
+    InputModifiers,
+    AudioStreamingConfig,
+    Spline,
     Physics,
     PhysicsVelocity,
     PhysicsWorldDefaults,
     CharacterControllerOutput,
+    DynamicComponentFields,
+    DynamicFieldValue,
     PhysicsQueryFilter,
     PhysicsRayCastHit,
     PhysicsPointProjectionHit,
     PhysicsShapeCastHit,
+    #[serde(rename = "any", alias = "json")]
     #[default]
-    Json,
+    Any,
 }
 
 impl VisualValueType {
@@ -97,20 +106,55 @@ impl VisualValueType {
             Self::AudioEmitter => "Audio Emitter",
             Self::AudioListener => "Audio Listener",
             Self::Script => "Script",
+            Self::LookAt => "Look At",
+            Self::EntityFollower => "Entity Follower",
+            Self::AnimatorState => "Animator State",
+            Self::InputModifiers => "Input Modifiers",
+            Self::AudioStreamingConfig => "Audio Streaming Config",
+            Self::Spline => "Spline",
             Self::Physics => "Physics",
             Self::PhysicsVelocity => "Physics Velocity",
             Self::PhysicsWorldDefaults => "Physics World Defaults",
             Self::CharacterControllerOutput => "Character Output",
+            Self::DynamicComponentFields => "Dynamic Fields",
+            Self::DynamicFieldValue => "Dynamic Value",
             Self::PhysicsQueryFilter => "Physics Query Filter",
             Self::PhysicsRayCastHit => "Ray Cast Hit",
             Self::PhysicsPointProjectionHit => "Point Projection Hit",
             Self::PhysicsShapeCastHit => "Shape Cast Hit",
-            Self::Json => "Json",
+            Self::Any => "Any",
         }
     }
 }
 
-const VISUAL_VALUE_TYPE_CHOICES_NO_JSON: [VisualValueType; 23] = [
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualInspectorAssetKind {
+    #[default]
+    Any,
+    Scene,
+    Model,
+    Material,
+    Audio,
+    Script,
+    Animation,
+}
+
+impl VisualInspectorAssetKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Any => "Any",
+            Self::Scene => "Scene",
+            Self::Model => "Model",
+            Self::Material => "Material",
+            Self::Audio => "Audio",
+            Self::Script => "Script",
+            Self::Animation => "Animation",
+        }
+    }
+}
+
+const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 31] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -126,17 +170,25 @@ const VISUAL_VALUE_TYPE_CHOICES_NO_JSON: [VisualValueType; 23] = [
     VisualValueType::AudioEmitter,
     VisualValueType::AudioListener,
     VisualValueType::Script,
+    VisualValueType::LookAt,
+    VisualValueType::EntityFollower,
+    VisualValueType::AnimatorState,
+    VisualValueType::InputModifiers,
+    VisualValueType::AudioStreamingConfig,
+    VisualValueType::Spline,
     VisualValueType::Physics,
     VisualValueType::PhysicsVelocity,
     VisualValueType::PhysicsWorldDefaults,
     VisualValueType::CharacterControllerOutput,
+    VisualValueType::DynamicComponentFields,
+    VisualValueType::DynamicFieldValue,
     VisualValueType::PhysicsQueryFilter,
     VisualValueType::PhysicsRayCastHit,
     VisualValueType::PhysicsPointProjectionHit,
     VisualValueType::PhysicsShapeCastHit,
 ];
 
-const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 20] = [
+const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 24] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -151,10 +203,14 @@ const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 20] = [
     VisualValueType::AudioEmitter,
     VisualValueType::AudioListener,
     VisualValueType::Script,
+    VisualValueType::InputModifiers,
+    VisualValueType::AudioStreamingConfig,
+    VisualValueType::Spline,
     VisualValueType::Physics,
     VisualValueType::PhysicsVelocity,
     VisualValueType::PhysicsWorldDefaults,
     VisualValueType::CharacterControllerOutput,
+    VisualValueType::DynamicFieldValue,
     VisualValueType::PhysicsRayCastHit,
     VisualValueType::PhysicsShapeCastHit,
 ];
@@ -171,6 +227,12 @@ pub struct VisualVariableDefinition {
     pub array_item_type: Option<VisualValueType>,
     #[serde(default)]
     pub default_value: String,
+    #[serde(default)]
+    pub inspector_exposed: bool,
+    #[serde(default)]
+    pub inspector_label: String,
+    #[serde(default)]
+    pub inspector_asset_kind: Option<VisualInspectorAssetKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -299,12 +361,27 @@ pub enum VisualApiOperation {
     EcsCreateAudioBus,
     EcsDeleteEntity,
     EcsEntityExists,
+    EcsEmitEvent,
     EcsFindEntityByName,
+    EcsFindScriptIndex,
     EcsFollowSpline,
     EcsGetAnimatorClips,
+    EcsGetAnimatorLayerWeights,
+    EcsGetAnimatorLayerWeight,
+    EcsGetAnimatorState,
+    EcsGetAnimatorStateTime,
+    EcsGetAnimatorCurrentState,
+    EcsGetAnimatorCurrentStateName,
+    EcsGetAnimatorTransitionActive,
+    EcsGetAnimatorTransitionFrom,
+    EcsGetAnimatorTransitionTo,
+    EcsGetAnimatorTransitionProgress,
+    EcsGetAnimatorTransitionElapsed,
+    EcsGetAnimatorTransitionDuration,
     EcsGetAudioBusName,
     EcsGetAudioBusVolume,
     EcsGetAudioEmitter,
+    EcsGetAudioEmitterPath,
     EcsGetAudioEnabled,
     EcsGetAudioHeadWidth,
     EcsGetAudioListener,
@@ -313,29 +390,77 @@ pub enum VisualApiOperation {
     EcsGetAudioStreamingConfig,
     EcsGetCamera,
     EcsGetCharacterControllerOutput,
+    EcsGetCharacterControllerDesiredTranslation,
+    EcsGetCharacterControllerEffectiveTranslation,
+    EcsGetCharacterControllerRemainingTranslation,
+    EcsGetCharacterControllerGrounded,
+    EcsGetCharacterControllerSlidingDownSlope,
+    EcsGetCharacterControllerCollisionCount,
+    EcsGetCharacterControllerGroundNormal,
+    EcsGetCharacterControllerSlopeAngle,
+    EcsGetCharacterControllerHitNormal,
+    EcsGetCharacterControllerHitPoint,
+    EcsGetCharacterControllerHitEntity,
+    EcsGetCharacterControllerSteppedUp,
+    EcsGetCharacterControllerStepHeight,
+    EcsGetCharacterControllerPlatformVelocity,
+    EcsGetCollisionEventCount,
+    EcsGetCollisionEventOther,
+    EcsGetCollisionEventNormal,
+    EcsGetCollisionEventPoint,
     EcsGetDynamicComponent,
     EcsGetDynamicField,
+    EcsGetEntityFollower,
     EcsGetEntityName,
     EcsGetLight,
+    EcsGetLookAt,
     EcsGetMeshRenderer,
+    EcsGetMeshRendererSourcePath,
+    EcsGetMeshRendererMaterialPath,
     EcsGetPhysics,
     EcsGetPhysicsGravity,
     EcsGetPhysicsPointProjectionHit,
     EcsGetPhysicsRayCastHit,
+    EcsRayCast,
+    EcsRayCastHasHit,
+    EcsRayCastHitEntity,
+    EcsRayCastPoint,
+    EcsRayCastNormal,
+    EcsRayCastToi,
+    EcsSphereCast,
+    EcsSphereCastHasHit,
+    EcsSphereCastHitEntity,
+    EcsSphereCastPoint,
+    EcsSphereCastNormal,
+    EcsSphereCastToi,
     EcsGetPhysicsRunning,
     EcsGetPhysicsShapeCastHit,
     EcsGetPhysicsVelocity,
     EcsGetPhysicsWorldDefaults,
     EcsGetSceneAsset,
     EcsGetScript,
+    EcsGetScriptCount,
+    EcsGetScriptField,
+    EcsGetScriptPath,
+    EcsGetScriptLanguage,
+    EcsGetSelfScriptField,
     EcsGetSpline,
     EcsGetTransform,
+    EcsGetTransformForward,
+    EcsGetTransformRight,
+    EcsGetTransformUp,
+    EcsGetTriggerEventCount,
+    EcsGetTriggerEventOther,
+    EcsGetTriggerEventNormal,
+    EcsGetTriggerEventPoint,
     EcsGetViewportMode,
     EcsGetViewportPreviewCamera,
     EcsHasComponent,
     EcsListAudioBuses,
     EcsListDynamicComponents,
     EcsListEntities,
+    EcsListScriptFields,
+    EcsListSelfScriptFields,
     EcsOpenScene,
     EcsPlayAnimClip,
     EcsRemoveAudioBus,
@@ -345,13 +470,18 @@ pub enum VisualApiOperation {
     EcsRemoveSplinePoint,
     EcsSampleSpline,
     EcsSetActiveCamera,
+    EcsSetAnimatorBlendChild,
+    EcsSetAnimatorBlendNode,
     EcsSetAnimatorEnabled,
+    EcsSetAnimatorLayerWeight,
     EcsSetAnimatorParamBool,
     EcsSetAnimatorParamFloat,
     EcsSetAnimatorTimeScale,
+    EcsSetAnimatorTransition,
     EcsSetAudioBusName,
     EcsSetAudioBusVolume,
     EcsSetAudioEmitter,
+    EcsSetAudioEmitterPath,
     EcsSetAudioEnabled,
     EcsSetAudioHeadWidth,
     EcsSetAudioListener,
@@ -361,9 +491,13 @@ pub enum VisualApiOperation {
     EcsSetCamera,
     EcsSetDynamicComponent,
     EcsSetDynamicField,
+    EcsSetEntityFollower,
     EcsSetEntityName,
     EcsSetLight,
+    EcsSetLookAt,
     EcsSetMeshRenderer,
+    EcsSetMeshRendererSourcePath,
+    EcsSetMeshRendererMaterialPath,
     EcsSetPersistentForce,
     EcsSetPersistentTorque,
     EcsSetPhysics,
@@ -373,6 +507,9 @@ pub enum VisualApiOperation {
     EcsSetPhysicsWorldDefaults,
     EcsSetSceneAsset,
     EcsSetScript,
+    EcsSetScriptField,
+    EcsSetSelfScriptField,
+    EcsSetCharacterControllerDesiredTranslation,
     EcsSetSpline,
     EcsSetSplinePoint,
     EcsSetTransform,
@@ -381,7 +518,14 @@ pub enum VisualApiOperation {
     EcsSpawnEntity,
     EcsSplineLength,
     EcsSwitchScene,
+    EcsSelfScriptIndex,
     EcsTriggerAnimator,
+    InputActionContext,
+    InputActionDown,
+    InputActionPressed,
+    InputActionReleased,
+    InputActionValue,
+    InputBindAction,
     InputCursor,
     InputCursorDelta,
     InputCursorGrabMode,
@@ -403,8 +547,10 @@ pub enum VisualApiOperation {
     InputMousePressed,
     InputMouseReleased,
     InputScaleFactor,
+    InputSetActionContext,
     InputSetCursorVisible,
     InputSetCursorGrab,
+    InputUnbindAction,
     InputResetCursorControl,
     InputWantsKeyboard,
     InputWantsPointer,
@@ -463,7 +609,7 @@ impl VisualApiOperation {
 }
 
 #[allow(dead_code)]
-const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
+const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 213] = [
     VisualApiOperation::EcsAddComponent,
     VisualApiOperation::EcsAddForce,
     VisualApiOperation::EcsAddForceAtPoint,
@@ -482,12 +628,27 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsCreateAudioBus,
     VisualApiOperation::EcsDeleteEntity,
     VisualApiOperation::EcsEntityExists,
+    VisualApiOperation::EcsEmitEvent,
     VisualApiOperation::EcsFindEntityByName,
+    VisualApiOperation::EcsFindScriptIndex,
     VisualApiOperation::EcsFollowSpline,
     VisualApiOperation::EcsGetAnimatorClips,
+    VisualApiOperation::EcsGetAnimatorLayerWeights,
+    VisualApiOperation::EcsGetAnimatorLayerWeight,
+    VisualApiOperation::EcsGetAnimatorState,
+    VisualApiOperation::EcsGetAnimatorStateTime,
+    VisualApiOperation::EcsGetAnimatorCurrentState,
+    VisualApiOperation::EcsGetAnimatorCurrentStateName,
+    VisualApiOperation::EcsGetAnimatorTransitionActive,
+    VisualApiOperation::EcsGetAnimatorTransitionFrom,
+    VisualApiOperation::EcsGetAnimatorTransitionTo,
+    VisualApiOperation::EcsGetAnimatorTransitionProgress,
+    VisualApiOperation::EcsGetAnimatorTransitionElapsed,
+    VisualApiOperation::EcsGetAnimatorTransitionDuration,
     VisualApiOperation::EcsGetAudioBusName,
     VisualApiOperation::EcsGetAudioBusVolume,
     VisualApiOperation::EcsGetAudioEmitter,
+    VisualApiOperation::EcsGetAudioEmitterPath,
     VisualApiOperation::EcsGetAudioEnabled,
     VisualApiOperation::EcsGetAudioHeadWidth,
     VisualApiOperation::EcsGetAudioListener,
@@ -496,29 +657,77 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsGetAudioStreamingConfig,
     VisualApiOperation::EcsGetCamera,
     VisualApiOperation::EcsGetCharacterControllerOutput,
+    VisualApiOperation::EcsGetCharacterControllerDesiredTranslation,
+    VisualApiOperation::EcsGetCharacterControllerEffectiveTranslation,
+    VisualApiOperation::EcsGetCharacterControllerRemainingTranslation,
+    VisualApiOperation::EcsGetCharacterControllerGrounded,
+    VisualApiOperation::EcsGetCharacterControllerSlidingDownSlope,
+    VisualApiOperation::EcsGetCharacterControllerCollisionCount,
+    VisualApiOperation::EcsGetCharacterControllerGroundNormal,
+    VisualApiOperation::EcsGetCharacterControllerSlopeAngle,
+    VisualApiOperation::EcsGetCharacterControllerHitNormal,
+    VisualApiOperation::EcsGetCharacterControllerHitPoint,
+    VisualApiOperation::EcsGetCharacterControllerHitEntity,
+    VisualApiOperation::EcsGetCharacterControllerSteppedUp,
+    VisualApiOperation::EcsGetCharacterControllerStepHeight,
+    VisualApiOperation::EcsGetCharacterControllerPlatformVelocity,
+    VisualApiOperation::EcsGetCollisionEventCount,
+    VisualApiOperation::EcsGetCollisionEventOther,
+    VisualApiOperation::EcsGetCollisionEventNormal,
+    VisualApiOperation::EcsGetCollisionEventPoint,
     VisualApiOperation::EcsGetDynamicComponent,
     VisualApiOperation::EcsGetDynamicField,
+    VisualApiOperation::EcsGetEntityFollower,
     VisualApiOperation::EcsGetEntityName,
     VisualApiOperation::EcsGetLight,
+    VisualApiOperation::EcsGetLookAt,
     VisualApiOperation::EcsGetMeshRenderer,
+    VisualApiOperation::EcsGetMeshRendererSourcePath,
+    VisualApiOperation::EcsGetMeshRendererMaterialPath,
     VisualApiOperation::EcsGetPhysics,
     VisualApiOperation::EcsGetPhysicsGravity,
     VisualApiOperation::EcsGetPhysicsPointProjectionHit,
     VisualApiOperation::EcsGetPhysicsRayCastHit,
+    VisualApiOperation::EcsRayCast,
+    VisualApiOperation::EcsRayCastHasHit,
+    VisualApiOperation::EcsRayCastHitEntity,
+    VisualApiOperation::EcsRayCastPoint,
+    VisualApiOperation::EcsRayCastNormal,
+    VisualApiOperation::EcsRayCastToi,
+    VisualApiOperation::EcsSphereCast,
+    VisualApiOperation::EcsSphereCastHasHit,
+    VisualApiOperation::EcsSphereCastHitEntity,
+    VisualApiOperation::EcsSphereCastPoint,
+    VisualApiOperation::EcsSphereCastNormal,
+    VisualApiOperation::EcsSphereCastToi,
     VisualApiOperation::EcsGetPhysicsRunning,
     VisualApiOperation::EcsGetPhysicsShapeCastHit,
     VisualApiOperation::EcsGetPhysicsVelocity,
     VisualApiOperation::EcsGetPhysicsWorldDefaults,
     VisualApiOperation::EcsGetSceneAsset,
     VisualApiOperation::EcsGetScript,
+    VisualApiOperation::EcsGetScriptCount,
+    VisualApiOperation::EcsGetScriptField,
+    VisualApiOperation::EcsGetScriptPath,
+    VisualApiOperation::EcsGetScriptLanguage,
+    VisualApiOperation::EcsGetSelfScriptField,
     VisualApiOperation::EcsGetSpline,
     VisualApiOperation::EcsGetTransform,
+    VisualApiOperation::EcsGetTransformForward,
+    VisualApiOperation::EcsGetTransformRight,
+    VisualApiOperation::EcsGetTransformUp,
+    VisualApiOperation::EcsGetTriggerEventCount,
+    VisualApiOperation::EcsGetTriggerEventOther,
+    VisualApiOperation::EcsGetTriggerEventNormal,
+    VisualApiOperation::EcsGetTriggerEventPoint,
     VisualApiOperation::EcsGetViewportMode,
     VisualApiOperation::EcsGetViewportPreviewCamera,
     VisualApiOperation::EcsHasComponent,
     VisualApiOperation::EcsListAudioBuses,
     VisualApiOperation::EcsListDynamicComponents,
     VisualApiOperation::EcsListEntities,
+    VisualApiOperation::EcsListScriptFields,
+    VisualApiOperation::EcsListSelfScriptFields,
     VisualApiOperation::EcsOpenScene,
     VisualApiOperation::EcsPlayAnimClip,
     VisualApiOperation::EcsRemoveAudioBus,
@@ -528,13 +737,18 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsRemoveSplinePoint,
     VisualApiOperation::EcsSampleSpline,
     VisualApiOperation::EcsSetActiveCamera,
+    VisualApiOperation::EcsSetAnimatorBlendChild,
+    VisualApiOperation::EcsSetAnimatorBlendNode,
     VisualApiOperation::EcsSetAnimatorEnabled,
+    VisualApiOperation::EcsSetAnimatorLayerWeight,
     VisualApiOperation::EcsSetAnimatorParamBool,
     VisualApiOperation::EcsSetAnimatorParamFloat,
     VisualApiOperation::EcsSetAnimatorTimeScale,
+    VisualApiOperation::EcsSetAnimatorTransition,
     VisualApiOperation::EcsSetAudioBusName,
     VisualApiOperation::EcsSetAudioBusVolume,
     VisualApiOperation::EcsSetAudioEmitter,
+    VisualApiOperation::EcsSetAudioEmitterPath,
     VisualApiOperation::EcsSetAudioEnabled,
     VisualApiOperation::EcsSetAudioHeadWidth,
     VisualApiOperation::EcsSetAudioListener,
@@ -544,9 +758,13 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsSetCamera,
     VisualApiOperation::EcsSetDynamicComponent,
     VisualApiOperation::EcsSetDynamicField,
+    VisualApiOperation::EcsSetEntityFollower,
     VisualApiOperation::EcsSetEntityName,
     VisualApiOperation::EcsSetLight,
+    VisualApiOperation::EcsSetLookAt,
     VisualApiOperation::EcsSetMeshRenderer,
+    VisualApiOperation::EcsSetMeshRendererSourcePath,
+    VisualApiOperation::EcsSetMeshRendererMaterialPath,
     VisualApiOperation::EcsSetPersistentForce,
     VisualApiOperation::EcsSetPersistentTorque,
     VisualApiOperation::EcsSetPhysics,
@@ -556,6 +774,9 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsSetPhysicsWorldDefaults,
     VisualApiOperation::EcsSetSceneAsset,
     VisualApiOperation::EcsSetScript,
+    VisualApiOperation::EcsSetScriptField,
+    VisualApiOperation::EcsSetSelfScriptField,
+    VisualApiOperation::EcsSetCharacterControllerDesiredTranslation,
     VisualApiOperation::EcsSetSpline,
     VisualApiOperation::EcsSetSplinePoint,
     VisualApiOperation::EcsSetTransform,
@@ -564,7 +785,14 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::EcsSpawnEntity,
     VisualApiOperation::EcsSplineLength,
     VisualApiOperation::EcsSwitchScene,
+    VisualApiOperation::EcsSelfScriptIndex,
     VisualApiOperation::EcsTriggerAnimator,
+    VisualApiOperation::InputActionContext,
+    VisualApiOperation::InputActionDown,
+    VisualApiOperation::InputActionPressed,
+    VisualApiOperation::InputActionReleased,
+    VisualApiOperation::InputActionValue,
+    VisualApiOperation::InputBindAction,
     VisualApiOperation::InputCursor,
     VisualApiOperation::InputCursorDelta,
     VisualApiOperation::InputCursorGrabMode,
@@ -586,8 +814,10 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 129] = [
     VisualApiOperation::InputMousePressed,
     VisualApiOperation::InputMouseReleased,
     VisualApiOperation::InputScaleFactor,
+    VisualApiOperation::InputSetActionContext,
     VisualApiOperation::InputSetCursorVisible,
     VisualApiOperation::InputSetCursorGrab,
+    VisualApiOperation::InputUnbindAction,
     VisualApiOperation::InputResetCursorControl,
     VisualApiOperation::InputWantsKeyboard,
     VisualApiOperation::InputWantsPointer,
@@ -732,7 +962,7 @@ const API_INPUTS_11: [VisualApiInputSpec; 2] = [
 ];
 const API_INPUTS_12: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
     label: "Bus",
-    value_type: VisualValueType::Json,
+    value_type: VisualValueType::String,
 }];
 const API_INPUTS_13: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
     label: "Scene Id",
@@ -786,7 +1016,7 @@ const API_INPUTS_18: [VisualApiInputSpec; 2] = [
         value_type: VisualValueType::Entity,
     },
     VisualApiInputSpec {
-        label: "Index",
+        label: "Index (1-based, optional)",
         value_type: VisualValueType::Number,
     },
 ];
@@ -851,7 +1081,7 @@ const API_INPUTS_23: [VisualApiInputSpec; 2] = [
 const API_INPUTS_24: [VisualApiInputSpec; 2] = [
     VisualApiInputSpec {
         label: "Bus",
-        value_type: VisualValueType::Json,
+        value_type: VisualValueType::String,
     },
     VisualApiInputSpec {
         label: "Name",
@@ -861,7 +1091,7 @@ const API_INPUTS_24: [VisualApiInputSpec; 2] = [
 const API_INPUTS_25: [VisualApiInputSpec; 2] = [
     VisualApiInputSpec {
         label: "Bus",
-        value_type: VisualValueType::Json,
+        value_type: VisualValueType::String,
     },
     VisualApiInputSpec {
         label: "Volume",
@@ -875,7 +1105,7 @@ const API_INPUTS_26: [VisualApiInputSpec; 2] = [
     },
     VisualApiInputSpec {
         label: "Data",
-        value_type: VisualValueType::Json,
+        value_type: VisualValueType::Spline,
     },
 ];
 const API_INPUTS_27: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
@@ -921,7 +1151,7 @@ const API_INPUTS_32: [VisualApiInputSpec; 3] = [
     },
     VisualApiInputSpec {
         label: "Fields",
-        value_type: VisualValueType::Json,
+        value_type: VisualValueType::DynamicComponentFields,
     },
 ];
 const API_INPUTS_33: [VisualApiInputSpec; 4] = [
@@ -939,7 +1169,7 @@ const API_INPUTS_33: [VisualApiInputSpec; 4] = [
     },
     VisualApiInputSpec {
         label: "Value",
-        value_type: VisualValueType::Json,
+        value_type: VisualValueType::DynamicFieldValue,
     },
 ];
 const API_INPUTS_34: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
@@ -957,20 +1187,6 @@ const API_INPUTS_36: [VisualApiInputSpec; 2] = [
     },
     VisualApiInputSpec {
         label: "Path",
-        value_type: VisualValueType::String,
-    },
-];
-const API_INPUTS_37: [VisualApiInputSpec; 3] = [
-    VisualApiInputSpec {
-        label: "Entity Id",
-        value_type: VisualValueType::Entity,
-    },
-    VisualApiInputSpec {
-        label: "Path",
-        value_type: VisualValueType::String,
-    },
-    VisualApiInputSpec {
-        label: "Language",
         value_type: VisualValueType::String,
     },
 ];
@@ -993,8 +1209,8 @@ const API_INPUTS_39: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
     value_type: VisualValueType::String,
 }];
 const API_INPUTS_40: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
-    label: "Value",
-    value_type: VisualValueType::Json,
+    label: "Mode",
+    value_type: VisualValueType::String,
 }];
 const API_INPUTS_41: [VisualApiInputSpec; 2] = [
     VisualApiInputSpec {
@@ -1134,8 +1350,386 @@ const API_INPUTS_55: [VisualApiInputSpec; 2] = [
         value_type: VisualValueType::PhysicsWorldDefaults,
     },
 ];
+const API_INPUTS_56: [VisualApiInputSpec; 6] = [
+    VisualApiInputSpec {
+        label: "Origin",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Direction",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Max Toi",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Solid",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Filter",
+        value_type: VisualValueType::PhysicsQueryFilter,
+    },
+    VisualApiInputSpec {
+        label: "Exclude Entity",
+        value_type: VisualValueType::Entity,
+    },
+];
+const API_INPUTS_57: [VisualApiInputSpec; 4] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Path",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Language",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Index (1-based, optional)",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_58: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Name",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Target Entity",
+        value_type: VisualValueType::Entity,
+    },
+];
+const API_INPUTS_59: [VisualApiInputSpec; 3] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Layer Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Weight",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_60: [VisualApiInputSpec; 9] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Layer Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Transition Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "From State",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "To State",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Duration",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Can Interrupt",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Use Exit Time",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Exit Time",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_61: [VisualApiInputSpec; 5] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Layer Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Node Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Normalize",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Mode",
+        value_type: VisualValueType::String,
+    },
+];
+const API_INPUTS_62: [VisualApiInputSpec; 8] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Layer Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Node Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Child Index",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Weight",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Weight Param",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Weight Scale",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Weight Bias",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_63: [VisualApiInputSpec; 4] = [
+    VisualApiInputSpec {
+        label: "Action",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Binding (KeyW, MouseLeft, GamepadSouth...)",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Context",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Deadzone",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_64: [VisualApiInputSpec; 3] = [
+    VisualApiInputSpec {
+        label: "Action",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Binding (optional)",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Context",
+        value_type: VisualValueType::String,
+    },
+];
+const API_INPUTS_65: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Action",
+    value_type: VisualValueType::String,
+}];
+const API_INPUTS_66: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Context",
+    value_type: VisualValueType::String,
+}];
+const API_INPUTS_67: [VisualApiInputSpec; 3] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Path",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Language",
+        value_type: VisualValueType::String,
+    },
+];
+const API_INPUTS_68: [VisualApiInputSpec; 6] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Target Entity",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Target Offset",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Offset In Target Space",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Up",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Rotation Smooth Time",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_69: [VisualApiInputSpec; 7] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Target Entity",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Position Offset",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Offset In Target Space",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Follow Rotation",
+        value_type: VisualValueType::Bool,
+    },
+    VisualApiInputSpec {
+        label: "Position Smooth Time",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Rotation Smooth Time",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_70: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Desired Translation",
+        value_type: VisualValueType::Vec3,
+    },
+];
+const API_INPUTS_71: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Phase (enter/stay/exit/all)",
+        value_type: VisualValueType::String,
+    },
+];
+const API_INPUTS_72: [VisualApiInputSpec; 3] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Phase (enter/stay/exit/all)",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Event Index",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_73: [VisualApiInputSpec; 6] = [
+    VisualApiInputSpec {
+        label: "Origin",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Radius",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Direction",
+        value_type: VisualValueType::Vec3,
+    },
+    VisualApiInputSpec {
+        label: "Max TOI",
+        value_type: VisualValueType::Number,
+    },
+    VisualApiInputSpec {
+        label: "Filter",
+        value_type: VisualValueType::PhysicsQueryFilter,
+    },
+    VisualApiInputSpec {
+        label: "Exclude Entity",
+        value_type: VisualValueType::Entity,
+    },
+];
+const API_INPUTS_74: [VisualApiInputSpec; 3] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Field Name",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Index",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_75: [VisualApiInputSpec; 4] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Field Name",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Value",
+        value_type: VisualValueType::Any,
+    },
+    VisualApiInputSpec {
+        label: "Index",
+        value_type: VisualValueType::Number,
+    },
+];
+const API_INPUTS_76: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
+    label: "Field Name",
+    value_type: VisualValueType::String,
+}];
+const API_INPUTS_77: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Field Name",
+        value_type: VisualValueType::String,
+    },
+    VisualApiInputSpec {
+        label: "Value",
+        value_type: VisualValueType::Any,
+    },
+];
 
-const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
+const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 213] = [
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsAddComponent,
         table: VisualScriptApiTable::Ecs,
@@ -1294,7 +1888,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Create",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_9,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsDeleteEntity,
@@ -1317,6 +1911,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsEmitEvent,
+        table: VisualScriptApiTable::Ecs,
+        function: "emit_event",
+        title: "Emit Event",
+        category: "Events",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_58,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsFindEntityByName,
         table: VisualScriptApiTable::Ecs,
         function: "find_entity_by_name",
@@ -1325,6 +1929,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_9,
         output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsFindScriptIndex,
+        table: VisualScriptApiTable::Ecs,
+        function: "find_script_index",
+        title: "Find Script Index",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_67,
+        output_type: Some(VisualValueType::Number),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsFollowSpline,
@@ -1344,7 +1958,127 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_11,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Array),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorLayerWeights,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_layer_weights",
+        title: "Get Animator Layer Weights",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Array),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorLayerWeight,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_layer_weight",
+        title: "Get Animator Layer Weight",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorState,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_state",
+        title: "Get Animator State",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::AnimatorState),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorStateTime,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_state_time",
+        title: "Get Animator State Time",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorCurrentState,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_current_state",
+        title: "Get Animator Current State",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorCurrentStateName,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_current_state_name",
+        title: "Get Animator Current State Name",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionActive,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_active",
+        title: "Get Animator Transition Active",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionFrom,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_from",
+        title: "Get Animator Transition From",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionTo,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_to",
+        title: "Get Animator Transition To",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionProgress,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_progress",
+        title: "Get Animator Transition Progress",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionElapsed,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_elapsed",
+        title: "Get Animator Transition Elapsed",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAnimatorTransitionDuration,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_animator_transition_duration",
+        title: "Get Animator Transition Duration",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_11,
+        output_type: Some(VisualValueType::Number),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetAudioBusName,
@@ -1375,6 +2109,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
         output_type: Some(VisualValueType::AudioEmitter),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetAudioEmitterPath,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_audio_emitter_path",
+        title: "Get Audio Emitter Path",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetAudioEnabled,
@@ -1434,7 +2178,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::AudioStreamingConfig),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetCamera,
@@ -1457,6 +2201,186 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::CharacterControllerOutput),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerDesiredTranslation,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_desired_translation",
+        title: "Get Character Desired Translation",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerEffectiveTranslation,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_effective_translation",
+        title: "Get Character Effective Translation",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerRemainingTranslation,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_remaining_translation",
+        title: "Get Character Remaining Translation",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerGrounded,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_grounded",
+        title: "Get Character Grounded",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerSlidingDownSlope,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_sliding_down_slope",
+        title: "Get Character Sliding Down Slope",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerCollisionCount,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_collision_count",
+        title: "Get Character Collision Count",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerGroundNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_ground_normal",
+        title: "Get Character Ground Normal",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerSlopeAngle,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_slope_angle",
+        title: "Get Character Slope Angle",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerHitNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_hit_normal",
+        title: "Get Character Hit Normal",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerHitPoint,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_hit_point",
+        title: "Get Character Hit Point",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerHitEntity,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_hit_entity",
+        title: "Get Character Hit Entity",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerSteppedUp,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_stepped_up",
+        title: "Get Character Stepped Up",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerStepHeight,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_step_height",
+        title: "Get Character Step Height",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCharacterControllerPlatformVelocity,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_character_controller_platform_velocity",
+        title: "Get Character Platform Velocity",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCollisionEventCount,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_collision_event_count",
+        title: "Get Collision Event Count",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_71,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCollisionEventOther,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_collision_event_other",
+        title: "Get Collision Event Other",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCollisionEventNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_collision_event_normal",
+        title: "Get Collision Event Normal",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetCollisionEventPoint,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_collision_event_point",
+        title: "Get Collision Event Point",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetDynamicComponent,
         table: VisualScriptApiTable::Ecs,
         function: "get_dynamic_component",
@@ -1464,7 +2388,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_14,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::DynamicComponentFields),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetDynamicField,
@@ -1474,7 +2398,17 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_15,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::DynamicFieldValue),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetEntityFollower,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_entity_follower",
+        title: "Get Entity Follower",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::EntityFollower),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetEntityName,
@@ -1497,6 +2431,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Light),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetLookAt,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_look_at",
+        title: "Get Look At",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::LookAt),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetMeshRenderer,
         table: VisualScriptApiTable::Ecs,
         function: "get_mesh_renderer",
@@ -1505,6 +2449,26 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
         output_type: Some(VisualValueType::MeshRenderer),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetMeshRendererSourcePath,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_mesh_renderer_source_path",
+        title: "Get Mesh Renderer Source Path",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetMeshRendererMaterialPath,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_mesh_renderer_material_path",
+        title: "Get Mesh Renderer Material Path",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::String),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysics,
@@ -1545,6 +2509,126 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
         output_type: Some(VisualValueType::PhysicsRayCastHit),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCast,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast",
+        title: "Ray Cast",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::PhysicsRayCastHit),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCastHasHit,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast_has_hit",
+        title: "Ray Cast Has Hit",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCastHitEntity,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast_hit_entity",
+        title: "Ray Cast Hit Entity",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCastPoint,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast_point",
+        title: "Ray Cast Point",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCastNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast_normal",
+        title: "Ray Cast Normal",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsRayCastToi,
+        table: VisualScriptApiTable::Ecs,
+        function: "ray_cast_toi",
+        title: "Ray Cast TOI",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_56,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCast,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast",
+        title: "Sphere Cast",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::PhysicsShapeCastHit),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCastHasHit,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast_has_hit",
+        title: "Sphere Cast Has Hit",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCastHitEntity,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast_hit_entity",
+        title: "Sphere Cast Hit Entity",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCastPoint,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast_point",
+        title: "Sphere Cast Point",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCastNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast_normal",
+        title: "Sphere Cast Normal",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSphereCastToi,
+        table: VisualScriptApiTable::Ecs,
+        function: "sphere_cast_toi",
+        title: "Sphere Cast TOI",
+        category: "Query",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_73,
+        output_type: Some(VisualValueType::Number),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetPhysicsRunning,
@@ -1607,6 +2691,76 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Script),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetScriptCount,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_script_count",
+        title: "Get Script Count",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsListScriptFields,
+        table: VisualScriptApiTable::Ecs,
+        function: "list_script_fields",
+        title: "List Script Fields",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_18,
+        output_type: Some(VisualValueType::Any),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetScriptField,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_script_field",
+        title: "Get Script Field",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_74,
+        output_type: Some(VisualValueType::Any),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetScriptPath,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_script_path",
+        title: "Get Script Path",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_18,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetScriptLanguage,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_script_language",
+        title: "Get Script Language",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_18,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsListSelfScriptFields,
+        table: VisualScriptApiTable::Ecs,
+        function: "list_self_script_fields",
+        title: "List Self Script Fields",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::Any),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetSelfScriptField,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_self_script_field",
+        title: "Get Self Script Field",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_76,
+        output_type: Some(VisualValueType::Any),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetSpline,
         table: VisualScriptApiTable::Ecs,
         function: "get_spline",
@@ -1614,7 +2768,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Get",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Spline),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetTransform,
@@ -1625,6 +2779,76 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
         output_type: Some(VisualValueType::Transform),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTransformForward,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_transform_forward",
+        title: "Get Transform Forward",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTransformRight,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_transform_right",
+        title: "Get Transform Right",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTransformUp,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_transform_up",
+        title: "Get Transform Up",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTriggerEventCount,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_trigger_event_count",
+        title: "Get Trigger Event Count",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_71,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTriggerEventOther,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_trigger_event_other",
+        title: "Get Trigger Event Other",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Entity),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTriggerEventNormal,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_trigger_event_normal",
+        title: "Get Trigger Event Normal",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Vec3),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetTriggerEventPoint,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_trigger_event_point",
+        title: "Get Trigger Event Point",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_72,
+        output_type: Some(VisualValueType::Vec3),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsGetViewportMode,
@@ -1664,7 +2888,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "List",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Array),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsListDynamicComponents,
@@ -1674,7 +2898,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "List",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_8,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Array),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsListEntities,
@@ -1684,7 +2908,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "List",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Array),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsOpenScene,
@@ -1777,6 +3001,26 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAnimatorBlendChild,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_animator_blend_child",
+        title: "Set Animator Blend Child",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_62,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAnimatorBlendNode,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_animator_blend_node",
+        title: "Set Animator Blend Node",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_61,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsSetAnimatorEnabled,
         table: VisualScriptApiTable::Ecs,
         function: "set_animator_enabled",
@@ -1784,6 +3028,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Set",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_20,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAnimatorLayerWeight,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_animator_layer_weight",
+        title: "Set Animator Layer Weight",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_59,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1817,6 +3071,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAnimatorTransition,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_animator_transition",
+        title: "Set Animator Transition",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_60,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsSetAudioBusName,
         table: VisualScriptApiTable::Ecs,
         function: "set_audio_bus_name",
@@ -1844,6 +3108,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Set",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_48,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetAudioEmitterPath,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_audio_emitter_path",
+        title: "Set Audio Emitter Path",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_36,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -1937,6 +3211,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetEntityFollower,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_entity_follower",
+        title: "Set Entity Follower",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_69,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsSetEntityName,
         table: VisualScriptApiTable::Ecs,
         function: "set_entity_name",
@@ -1957,6 +3241,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetLookAt,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_look_at",
+        title: "Set Look At",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_68,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsSetMeshRenderer,
         table: VisualScriptApiTable::Ecs,
         function: "set_mesh_renderer",
@@ -1964,6 +3258,26 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Set",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_52,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetMeshRendererSourcePath,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_mesh_renderer_source_path",
+        title: "Set Mesh Renderer Source Path",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_36,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetMeshRendererMaterialPath,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_mesh_renderer_material_path",
+        title: "Set Mesh Renderer Material Path",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_36,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -2053,7 +3367,37 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         title: "Set Script",
         category: "Set",
         flow: VisualApiFlow::Exec,
-        inputs: &API_INPUTS_37,
+        inputs: &API_INPUTS_57,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetScriptField,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_script_field",
+        title: "Set Script Field",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_75,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetSelfScriptField,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_self_script_field",
+        title: "Set Self Script Field",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_77,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetCharacterControllerDesiredTranslation,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_character_controller_desired_translation",
+        title: "Set Character Desired Translation",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_70,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -2137,6 +3481,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSelfScriptIndex,
+        table: VisualScriptApiTable::Ecs,
+        function: "self_script_index",
+        title: "Self Script Index",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::EcsTriggerAnimator,
         table: VisualScriptApiTable::Ecs,
         function: "trigger_animator",
@@ -2144,6 +3498,66 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Animation",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_14,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputActionContext,
+        table: VisualScriptApiTable::Input,
+        function: "action_context",
+        title: "Action Context",
+        category: "Window",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_7,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputActionDown,
+        table: VisualScriptApiTable::Input,
+        function: "action_down",
+        title: "Action Down",
+        category: "Keyboard",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_65,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputActionPressed,
+        table: VisualScriptApiTable::Input,
+        function: "action_pressed",
+        title: "Action Pressed",
+        category: "Keyboard",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_65,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputActionReleased,
+        table: VisualScriptApiTable::Input,
+        function: "action_released",
+        title: "Action Released",
+        category: "Keyboard",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_65,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputActionValue,
+        table: VisualScriptApiTable::Input,
+        function: "action_value",
+        title: "Action Value",
+        category: "Keyboard",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_65,
+        output_type: Some(VisualValueType::Number),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputBindAction,
+        table: VisualScriptApiTable::Input,
+        function: "bind_action",
+        title: "Register Action Binding",
+        category: "Keyboard",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_63,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -2244,7 +3658,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Gamepad",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::Array),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputGamepadTrigger,
@@ -2304,7 +3718,7 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Window",
         flow: VisualApiFlow::Pure,
         inputs: &API_INPUTS_7,
-        output_type: Some(VisualValueType::Json),
+        output_type: Some(VisualValueType::InputModifiers),
     },
     VisualApiOperationSpec {
         operation: VisualApiOperation::InputMouseButton,
@@ -2357,6 +3771,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         output_type: Some(VisualValueType::Number),
     },
     VisualApiOperationSpec {
+        operation: VisualApiOperation::InputSetActionContext,
+        table: VisualScriptApiTable::Input,
+        function: "set_action_context",
+        title: "Set Action Context",
+        category: "Window",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_66,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
         operation: VisualApiOperation::InputSetCursorVisible,
         table: VisualScriptApiTable::Input,
         function: "set_cursor_visible",
@@ -2374,6 +3798,16 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 129] = [
         category: "Window",
         flow: VisualApiFlow::Exec,
         inputs: &API_INPUTS_39,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::InputUnbindAction,
+        table: VisualScriptApiTable::Input,
+        function: "unbind_action",
+        title: "Unregister Action Binding",
+        category: "Keyboard",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_64,
         output_type: Some(VisualValueType::Bool),
     },
     VisualApiOperationSpec {
@@ -2721,12 +4155,46 @@ impl VisualPhysicsVelocityComponent {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualInputActionPhase {
+    #[default]
+    Pressed,
+    Released,
+    Down,
+}
+
+impl VisualInputActionPhase {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Pressed => "Pressed",
+            Self::Released => "Released",
+            Self::Down => "Down",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VisualScriptNodeKind {
     OnStart,
     OnUpdate,
     OnStop,
+    OnCollisionEnter,
+    OnCollisionStay,
+    OnCollisionExit,
+    OnTriggerEnter,
+    OnTriggerExit,
+    OnInputAction {
+        #[serde(default = "default_input_action_name")]
+        action: String,
+        #[serde(default)]
+        phase: VisualInputActionPhase,
+    },
+    OnCustomEvent {
+        #[serde(default = "default_custom_event_name")]
+        name: String,
+    },
     Sequence {
         #[serde(default = "default_sequence_outputs")]
         outputs: u8,
@@ -2799,7 +4267,8 @@ pub enum VisualScriptNodeKind {
         #[serde(default)]
         value: String,
     },
-    JsonLiteral {
+    #[serde(alias = "json_literal")]
+    AnyLiteral {
         #[serde(default)]
         value: String,
     },
@@ -2983,6 +4452,22 @@ struct PinSlot {
 impl VisualScriptNodeKind {
     fn normalize(&mut self) {
         match self {
+            Self::OnInputAction { action, .. } => {
+                let normalized = normalize_event_name(action);
+                if normalized.is_empty() {
+                    *action = default_input_action_name();
+                } else {
+                    *action = normalized;
+                }
+            }
+            Self::OnCustomEvent { name } => {
+                let normalized = normalize_event_name(name);
+                if normalized.is_empty() {
+                    *name = default_custom_event_name();
+                } else {
+                    *name = normalized;
+                }
+            }
             Self::Sequence { outputs } => {
                 *outputs = (*outputs).clamp(1, 8);
             }
@@ -3039,7 +4524,7 @@ impl VisualScriptNodeKind {
                     let value_type = outputs
                         .get(index)
                         .map(|port| port.value_type)
-                        .unwrap_or(VisualValueType::Json);
+                        .unwrap_or(VisualValueType::Any);
                     values.push(default_literal_for_type(value_type).to_string());
                 }
             }
@@ -3060,7 +4545,7 @@ impl VisualScriptNodeKind {
                     let value_type = inputs
                         .get(args.len())
                         .map(|port| port.value_type)
-                        .unwrap_or(VisualValueType::Json);
+                        .unwrap_or(VisualValueType::Any);
                     args.push(default_literal_for_type(value_type).to_string());
                 }
             }
@@ -3083,7 +4568,7 @@ impl VisualScriptNodeKind {
             | Self::ArrayPush { item_type }
             | Self::ArrayRemoveAt { item_type }
             | Self::ArrayClear { item_type } => {
-                if matches!(*item_type, VisualValueType::Array | VisualValueType::Json) {
+                if matches!(*item_type, VisualValueType::Array | VisualValueType::Any) {
                     *item_type = default_array_item_type();
                 }
             }
@@ -3096,6 +4581,15 @@ impl VisualScriptNodeKind {
             Self::OnStart => "On Start".to_string(),
             Self::OnUpdate => "On Update".to_string(),
             Self::OnStop => "On Stop".to_string(),
+            Self::OnCollisionEnter => "On Collision Enter".to_string(),
+            Self::OnCollisionStay => "On Collision Stay".to_string(),
+            Self::OnCollisionExit => "On Collision Exit".to_string(),
+            Self::OnTriggerEnter => "On Trigger Enter".to_string(),
+            Self::OnTriggerExit => "On Trigger Exit".to_string(),
+            Self::OnInputAction { action, phase } => {
+                format!("On Input {} ({})", phase.title(), action)
+            }
+            Self::OnCustomEvent { name } => format!("On Event ({})", name),
             Self::Sequence { .. } => "Sequence".to_string(),
             Self::Branch { .. } => "Branch".to_string(),
             Self::LoopWhile { .. } => "Loop While".to_string(),
@@ -3108,7 +4602,7 @@ impl VisualScriptNodeKind {
             Self::BoolLiteral { .. } => "Bool".to_string(),
             Self::NumberLiteral { .. } => "Number".to_string(),
             Self::StringLiteral { .. } => "String".to_string(),
-            Self::JsonLiteral { .. } => "JSON".to_string(),
+            Self::AnyLiteral { .. } => "Any Value".to_string(),
             Self::PhysicsQueryFilterLiteral { .. } => "Physics Query Filter".to_string(),
             Self::SelfEntity => "Self Entity".to_string(),
             Self::DeltaTime => "Delta Time".to_string(),
@@ -3176,12 +4670,19 @@ impl VisualScriptNodeKind {
             Self::OnStart
             | Self::OnUpdate
             | Self::OnStop
+            | Self::OnCollisionEnter
+            | Self::OnCollisionStay
+            | Self::OnCollisionExit
+            | Self::OnTriggerEnter
+            | Self::OnTriggerExit
+            | Self::OnInputAction { .. }
+            | Self::OnCustomEvent { .. }
             | Self::GetVariable { .. }
             | Self::QueryApi { .. }
             | Self::BoolLiteral { .. }
             | Self::NumberLiteral { .. }
             | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
+            | Self::AnyLiteral { .. }
             | Self::PhysicsQueryFilterLiteral { .. }
             | Self::SelfEntity
             | Self::DeltaTime
@@ -3239,7 +4740,16 @@ impl VisualScriptNodeKind {
 
     fn exec_output_count(&self) -> usize {
         match self {
-            Self::OnStart | Self::OnUpdate | Self::OnStop => 1,
+            Self::OnStart
+            | Self::OnUpdate
+            | Self::OnStop
+            | Self::OnCollisionEnter
+            | Self::OnCollisionStay
+            | Self::OnCollisionExit
+            | Self::OnTriggerEnter
+            | Self::OnTriggerExit
+            | Self::OnInputAction { .. }
+            | Self::OnCustomEvent { .. } => 1,
             Self::Sequence { outputs } => usize::from((*outputs).clamp(1, 8)),
             Self::Branch { .. } => 2,
             Self::LoopWhile { .. } => 2,
@@ -3257,7 +4767,7 @@ impl VisualScriptNodeKind {
             | Self::BoolLiteral { .. }
             | Self::NumberLiteral { .. }
             | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
+            | Self::AnyLiteral { .. }
             | Self::PhysicsQueryFilterLiteral { .. }
             | Self::SelfEntity
             | Self::DeltaTime
@@ -3360,13 +4870,20 @@ impl VisualScriptNodeKind {
             Self::OnStart
             | Self::OnUpdate
             | Self::OnStop
+            | Self::OnCollisionEnter
+            | Self::OnCollisionStay
+            | Self::OnCollisionExit
+            | Self::OnTriggerEnter
+            | Self::OnTriggerExit
+            | Self::OnInputAction { .. }
+            | Self::OnCustomEvent { .. }
             | Self::Sequence { .. }
             | Self::ClearVariable { .. }
             | Self::GetVariable { .. }
             | Self::BoolLiteral { .. }
             | Self::NumberLiteral { .. }
             | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
+            | Self::AnyLiteral { .. }
             | Self::PhysicsQueryFilterLiteral { .. }
             | Self::SelfEntity
             | Self::DeltaTime
@@ -3386,7 +4903,7 @@ impl VisualScriptNodeKind {
             | Self::BoolLiteral { .. }
             | Self::NumberLiteral { .. }
             | Self::StringLiteral { .. }
-            | Self::JsonLiteral { .. }
+            | Self::AnyLiteral { .. }
             | Self::PhysicsQueryFilterLiteral { .. }
             | Self::SelfEntity
             | Self::DeltaTime
@@ -3432,6 +4949,13 @@ impl VisualScriptNodeKind {
             Self::OnStart
             | Self::OnUpdate
             | Self::OnStop
+            | Self::OnCollisionEnter
+            | Self::OnCollisionStay
+            | Self::OnCollisionExit
+            | Self::OnTriggerEnter
+            | Self::OnTriggerExit
+            | Self::OnInputAction { .. }
+            | Self::OnCustomEvent { .. }
             | Self::Sequence { .. }
             | Self::Branch { .. }
             | Self::LoopWhile { .. }
@@ -3725,6 +5249,13 @@ impl VisualScriptNodeKind {
                 Self::OnStart => "Start".to_string(),
                 Self::OnUpdate => "Tick".to_string(),
                 Self::OnStop => "Stop".to_string(),
+                Self::OnCollisionEnter => "Enter".to_string(),
+                Self::OnCollisionStay => "Stay".to_string(),
+                Self::OnCollisionExit => "Exit".to_string(),
+                Self::OnTriggerEnter => "Enter".to_string(),
+                Self::OnTriggerExit => "Exit".to_string(),
+                Self::OnInputAction { phase, .. } => phase.title().to_string(),
+                Self::OnCustomEvent { .. } => "Event".to_string(),
                 Self::FunctionStart { .. } => "Start".to_string(),
                 Self::Branch { .. } => {
                     if slot.index == 0 {
@@ -3818,7 +5349,20 @@ impl VisualScriptNodeKind {
         match slot.kind {
             PinKind::Data => PIN_COLOR_DATA,
             PinKind::Exec => match self {
-                Self::OnStart | Self::OnUpdate | Self::OnStop if is_output => PIN_COLOR_EVENT,
+                Self::OnStart
+                | Self::OnUpdate
+                | Self::OnStop
+                | Self::OnCollisionEnter
+                | Self::OnCollisionStay
+                | Self::OnCollisionExit
+                | Self::OnTriggerEnter
+                | Self::OnTriggerExit
+                | Self::OnInputAction { .. }
+                | Self::OnCustomEvent { .. }
+                    if is_output =>
+                {
+                    PIN_COLOR_EVENT
+                }
                 Self::Branch { .. } | Self::Sequence { .. } | Self::LoopWhile { .. } => {
                     PIN_COLOR_CONTROL
                 }
@@ -3833,6 +5377,11 @@ impl VisualScriptNodeKind {
             Self::OnStart
                 | Self::OnUpdate
                 | Self::OnStop
+                | Self::OnCollisionEnter
+                | Self::OnCollisionStay
+                | Self::OnCollisionExit
+                | Self::OnTriggerEnter
+                | Self::OnTriggerExit
                 | Self::SelfEntity
                 | Self::DeltaTime
                 | Self::TimeSinceStart
@@ -3869,6 +5418,25 @@ fn default_max_loop_iterations() -> u32 {
 
 fn default_log_message() -> String {
     "hello from visual script".to_string()
+}
+
+fn default_input_action_name() -> String {
+    "jump".to_string()
+}
+
+fn default_custom_event_name() -> String {
+    "event".to_string()
+}
+
+fn normalize_event_name(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let normalized = byte.to_ascii_lowercase();
+        if normalized.is_ascii_alphanumeric() {
+            out.push(normalized as char);
+        }
+    }
+    out
 }
 
 fn default_var_name() -> String {
@@ -3912,7 +5480,7 @@ fn normalize_array_item_type(
         return;
     }
     let mut selected = array_item.unwrap_or(default_array_item_type());
-    if matches!(selected, VisualValueType::Array | VisualValueType::Json) {
+    if matches!(selected, VisualValueType::Array | VisualValueType::Any) {
         selected = default_array_item_type();
     }
     *array_item = Some(selected);
@@ -4060,7 +5628,7 @@ fn sync_function_signature_nodes(function: &mut VisualScriptFunctionDefinition) 
                     let value_type = outputs
                         .get(values.len())
                         .map(|port| port.value_type)
-                        .unwrap_or(VisualValueType::Json);
+                        .unwrap_or(VisualValueType::Any);
                     values.push(default_literal_for_type(value_type).to_string());
                 }
                 return_count += 1;
@@ -4136,6 +5704,22 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         }
         VisualValueType::AudioListener => "{\"enabled\":true}",
         VisualValueType::Script => "{\"path\":\"\",\"language\":\"lua\"}",
+        VisualValueType::LookAt => {
+            "{\"target_entity\":null,\"target_offset\":{\"x\":0,\"y\":0,\"z\":0},\"offset_in_target_space\":false,\"up\":{\"x\":0,\"y\":1,\"z\":0},\"rotation_smooth_time\":0.0}"
+        }
+        VisualValueType::EntityFollower => {
+            "{\"target_entity\":null,\"position_offset\":{\"x\":0,\"y\":0,\"z\":0},\"offset_in_target_space\":false,\"follow_rotation\":true,\"position_smooth_time\":0.0,\"rotation_smooth_time\":0.0}"
+        }
+        VisualValueType::AnimatorState => {
+            "{\"layer_index\":0,\"layer_name\":\"\",\"layer_weight\":1.0,\"layer_additive\":false,\"state_time\":0.0,\"current_state\":0,\"current_state_name\":\"\",\"states\":[],\"transitions\":[],\"transition\":null}"
+        }
+        VisualValueType::InputModifiers => {
+            "{\"shift\":false,\"ctrl\":false,\"alt\":false,\"super\":false}"
+        }
+        VisualValueType::AudioStreamingConfig => "{\"buffer_frames\":8192,\"chunk_frames\":2048}",
+        VisualValueType::Spline => {
+            "{\"points\":[],\"closed\":false,\"tension\":0.5,\"mode\":\"CatmullRom\"}"
+        }
         VisualValueType::Physics => {
             "{\"body_kind\":{\"type\":\"Fixed\"},\"collider_shape\":{\"type\":\"Cuboid\"},\"rigid_body_properties\":{\"linear_damping\":0.0,\"angular_damping\":0.0,\"gravity_scale\":1.0,\"ccd_enabled\":false,\"can_sleep\":true,\"sleeping\":false,\"dominance_group\":0,\"lock_translation_x\":false,\"lock_translation_y\":false,\"lock_translation_z\":false,\"lock_rotation_x\":false,\"lock_rotation_y\":false,\"lock_rotation_z\":false,\"linear_velocity\":{\"x\":0,\"y\":0,\"z\":0},\"angular_velocity\":{\"x\":0,\"y\":0,\"z\":0}},\"collider_properties\":{\"friction\":0.5,\"restitution\":0.0,\"density\":1.0,\"enabled\":true,\"is_sensor\":false}}"
         }
@@ -4144,8 +5728,10 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         }
         VisualValueType::PhysicsWorldDefaults => "{\"gravity\":{\"x\":0,\"y\":-9.81,\"z\":0}}",
         VisualValueType::CharacterControllerOutput => {
-            "{\"effective_translation\":{\"x\":0,\"y\":0,\"z\":0},\"grounded\":false,\"sliding_down_slope\":false,\"collision_count\":0}"
+            "{\"desired_translation\":{\"x\":0,\"y\":0,\"z\":0},\"effective_translation\":{\"x\":0,\"y\":0,\"z\":0},\"remaining_translation\":{\"x\":0,\"y\":0,\"z\":0},\"grounded\":false,\"sliding_down_slope\":false,\"collision_count\":0,\"ground_normal\":{\"x\":0,\"y\":1,\"z\":0},\"slope_angle\":0.0,\"hit_normal\":{\"x\":0,\"y\":0,\"z\":0},\"hit_point\":{\"x\":0,\"y\":0,\"z\":0},\"hit_entity\":null,\"stepped_up\":false,\"step_height\":0.0,\"platform_velocity\":{\"x\":0,\"y\":0,\"z\":0}}"
         }
+        VisualValueType::DynamicComponentFields => "{}",
+        VisualValueType::DynamicFieldValue => "",
         VisualValueType::PhysicsQueryFilter => {
             "{\"flags\":0,\"groups_memberships\":4294967295,\"groups_filter\":4294967295,\"use_groups\":false}"
         }
@@ -4158,7 +5744,7 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         VisualValueType::PhysicsShapeCastHit => {
             "{\"has_hit\":false,\"hit_entity\":null,\"toi\":0.0,\"witness1\":{\"x\":0,\"y\":0,\"z\":0},\"witness2\":{\"x\":0,\"y\":0,\"z\":0},\"normal1\":{\"x\":0,\"y\":1,\"z\":0},\"normal2\":{\"x\":0,\"y\":1,\"z\":0},\"status\":\"Unknown\"}"
         }
-        VisualValueType::Json => "null",
+        VisualValueType::Any => "null",
     }
 }
 
@@ -4188,15 +5774,23 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
         | VisualValueType::AudioEmitter
         | VisualValueType::AudioListener
         | VisualValueType::Script
+        | VisualValueType::LookAt
+        | VisualValueType::EntityFollower
+        | VisualValueType::AnimatorState
+        | VisualValueType::InputModifiers
+        | VisualValueType::AudioStreamingConfig
+        | VisualValueType::Spline
         | VisualValueType::Physics
         | VisualValueType::PhysicsVelocity
         | VisualValueType::PhysicsWorldDefaults
         | VisualValueType::CharacterControllerOutput
+        | VisualValueType::DynamicComponentFields
+        | VisualValueType::DynamicFieldValue
         | VisualValueType::PhysicsQueryFilter
         | VisualValueType::PhysicsRayCastHit
         | VisualValueType::PhysicsPointProjectionHit
         | VisualValueType::PhysicsShapeCastHit
-        | VisualValueType::Json => compact_json_string(value),
+        | VisualValueType::Any => compact_json_string(value),
     }
 }
 
@@ -4291,6 +5885,16 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 || object.contains_key("playback_state")
                 || object.contains_key("clip_id");
             let has_audio_listener = object.contains_key("enabled") && object.len() == 1;
+            let has_input_modifiers = object.contains_key("shift")
+                || object.contains_key("ctrl")
+                || object.contains_key("alt")
+                || object.contains_key("super");
+            let has_audio_streaming =
+                object.contains_key("buffer_frames") || object.contains_key("chunk_frames");
+            let has_spline = object.contains_key("points")
+                || object.contains_key("closed")
+                || object.contains_key("tension")
+                || object.contains_key("mode");
             let has_script = object.contains_key("path") && object.contains_key("language");
             let has_physics_velocity = (object.contains_key("linear")
                 || object.contains_key("angular")
@@ -4330,6 +5934,10 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
             let has_query_filter = object.contains_key("flags")
                 && object.contains_key("groups_memberships")
                 && object.contains_key("groups_filter");
+            let has_dynamic_component_fields = object.is_empty()
+                || object
+                    .values()
+                    .all(|entry| coerce_json_to_dynamic_field_value(entry).is_ok());
             let has_physics = object.contains_key("body_kind")
                 || object.contains_key("collider_shape")
                 || object.contains_key("collider_properties")
@@ -4397,10 +6005,16 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 VisualValueType::PhysicsQueryFilter
             } else if has_physics {
                 VisualValueType::Physics
+            } else if has_spline {
+                VisualValueType::Spline
             } else if has_script {
                 VisualValueType::Script
             } else if has_audio_emitter {
                 VisualValueType::AudioEmitter
+            } else if has_audio_streaming {
+                VisualValueType::AudioStreamingConfig
+            } else if has_input_modifiers {
+                VisualValueType::InputModifiers
             } else if has_audio_listener {
                 VisualValueType::AudioListener
             } else if has_mesh_renderer {
@@ -4417,11 +6031,13 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 VisualValueType::Vec3
             } else if has_vec2 {
                 VisualValueType::Vec2
+            } else if has_dynamic_component_fields {
+                VisualValueType::DynamicComponentFields
             } else {
-                VisualValueType::Json
+                VisualValueType::Any
             }
         }
-        JsonValue::Null => VisualValueType::Json,
+        JsonValue::Null => VisualValueType::Any,
     }
 }
 
@@ -4434,10 +6050,21 @@ fn infer_array_item_type_from_literal(value: &str) -> Option<VisualValueType> {
         return Some(default_array_item_type());
     };
     let mut inferred = infer_visual_value_type_from_json(first);
-    if matches!(inferred, VisualValueType::Array | VisualValueType::Json) {
+    if matches!(inferred, VisualValueType::Array | VisualValueType::Any) {
         inferred = default_array_item_type();
     }
     Some(inferred)
+}
+
+fn is_dynamic_field_value_type(value_type: VisualValueType) -> bool {
+    matches!(
+        value_type,
+        VisualValueType::Bool
+            | VisualValueType::Number
+            | VisualValueType::String
+            | VisualValueType::Vec3
+            | VisualValueType::DynamicFieldValue
+    )
 }
 
 fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueType) -> bool {
@@ -4445,7 +6072,11 @@ fn are_data_types_compatible(from_type: VisualValueType, to_type: VisualValueTyp
         return true;
     }
 
-    if matches!(from_type, VisualValueType::Json) || matches!(to_type, VisualValueType::Json) {
+    if matches!(from_type, VisualValueType::Any) || matches!(to_type, VisualValueType::Any) {
+        return true;
+    }
+
+    if is_dynamic_field_value_type(from_type) && is_dynamic_field_value_type(to_type) {
         return true;
     }
 
@@ -4464,8 +6095,12 @@ fn are_data_types_compatible_strict_typed(
         return true;
     }
 
-    if matches!(from_type, VisualValueType::Json) || matches!(to_type, VisualValueType::Json) {
-        return false;
+    if matches!(from_type, VisualValueType::Any) || matches!(to_type, VisualValueType::Any) {
+        return true;
+    }
+
+    if is_dynamic_field_value_type(from_type) && is_dynamic_field_value_type(to_type) {
+        return true;
     }
 
     matches!(
@@ -4559,7 +6194,19 @@ fn api_input_asset_path_kind(
         VisualApiOperation::EcsSetSceneAsset if input_index == 1 => {
             Some(VisualAssetPathKind::Scene)
         }
+        VisualApiOperation::EcsFindScriptIndex if input_index == 1 => {
+            Some(VisualAssetPathKind::Script)
+        }
         VisualApiOperation::EcsSetScript if input_index == 1 => Some(VisualAssetPathKind::Script),
+        VisualApiOperation::EcsSetMeshRendererSourcePath if input_index == 1 => {
+            Some(VisualAssetPathKind::Model)
+        }
+        VisualApiOperation::EcsSetMeshRendererMaterialPath if input_index == 1 => {
+            Some(VisualAssetPathKind::Material)
+        }
+        VisualApiOperation::EcsSetAudioEmitterPath if input_index == 1 => {
+            Some(VisualAssetPathKind::Audio)
+        }
         _ => None,
     }
 }
@@ -4603,7 +6250,20 @@ fn api_input_label(operation: VisualApiOperation, input_index: usize) -> String 
         "Value" if operation == VisualApiOperation::EcsSetViewportPreviewCamera => {
             "Camera Entity Id".to_string()
         }
-        "Index" if operation == VisualApiOperation::EcsGetScript => "Script Index".to_string(),
+        "Index"
+            if matches!(
+                operation,
+                VisualApiOperation::EcsGetScript
+                    | VisualApiOperation::EcsListScriptFields
+                    | VisualApiOperation::EcsGetScriptPath
+                    | VisualApiOperation::EcsGetScriptLanguage
+                    | VisualApiOperation::EcsGetScriptField
+                    | VisualApiOperation::EcsSetScript
+                    | VisualApiOperation::EcsSetScriptField
+            ) =>
+        {
+            "Script Index".to_string()
+        }
         label => label.to_string(),
     }
 }
@@ -4612,7 +6272,7 @@ fn with_data_type_suffix(label: String, value_type: Option<VisualValueType>) -> 
     let Some(value_type) = value_type else {
         return label;
     };
-    if value_type == VisualValueType::Json {
+    if value_type == VisualValueType::Any {
         return label;
     }
     let type_title = value_type.title();
@@ -4637,6 +6297,7 @@ fn has_structured_api_default_editor(operation: VisualApiOperation, input_index:
             | (VisualApiOperation::EcsSetPhysics, 1)
             | (VisualApiOperation::EcsSetPhysicsVelocity, 1)
             | (VisualApiOperation::EcsSetPhysicsWorldDefaults, 1)
+            | (VisualApiOperation::EcsSetSpline, 1)
             | (VisualApiOperation::EcsSetDynamicComponent, 2)
             | (VisualApiOperation::EcsSetDynamicField, 3)
     )
@@ -4652,6 +6313,7 @@ fn api_input_prefers_vertical_default_layout(
             | (VisualApiOperation::EcsSetMeshRenderer, 1)
             | (VisualApiOperation::EcsSetLight, 1)
             | (VisualApiOperation::EcsSetAudioEmitter, 1)
+            | (VisualApiOperation::EcsSetSpline, 1)
             | (VisualApiOperation::EcsSetDynamicComponent, 2)
     )
 }
@@ -4670,6 +6332,11 @@ fn value_type_prefers_vertical_default_layout(value_type: VisualValueType) -> bo
             | VisualValueType::MeshRenderer
             | VisualValueType::AudioEmitter
             | VisualValueType::AudioListener
+            | VisualValueType::LookAt
+            | VisualValueType::EntityFollower
+            | VisualValueType::AnimatorState
+            | VisualValueType::AudioStreamingConfig
+            | VisualValueType::Spline
             | VisualValueType::Camera
             | VisualValueType::Light
             | VisualValueType::CharacterControllerOutput
@@ -4751,9 +6418,16 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
         return VisualApiMenuSection::Render;
     }
     if function.contains("physics")
+        || function.contains("ray_cast")
+        || function.contains("sphere_cast")
+        || function.contains("shape_cast")
+        || function.contains("point_projection")
         || function.contains("force")
         || function.contains("torque")
         || function.contains("impulse")
+        || function.contains("character_controller")
+        || function.contains("collision_event")
+        || function.contains("trigger_event")
     {
         return VisualApiMenuSection::Physics;
     }
@@ -4766,12 +6440,18 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
     if function.contains("transform") {
         return VisualApiMenuSection::Transform;
     }
+    if function.contains("look_at") || function.contains("follower") {
+        return VisualApiMenuSection::Transform;
+    }
     if function.contains("camera")
         || function.contains("light")
         || function.contains("mesh")
         || function.contains("viewport")
     {
         return VisualApiMenuSection::Render;
+    }
+    if function.contains("script") {
+        return VisualApiMenuSection::Entity;
     }
     if function.contains("scene") {
         return VisualApiMenuSection::Scene;
@@ -5019,12 +6699,12 @@ fn node_data_input_type(
         VisualScriptNodeKind::Branch { .. }
         | VisualScriptNodeKind::LoopWhile { .. }
         | VisualScriptNodeKind::Not => Some(VisualValueType::Bool),
-        VisualScriptNodeKind::Log { .. } => Some(VisualValueType::Json),
+        VisualScriptNodeKind::Log { .. } => Some(VisualValueType::Any),
         VisualScriptNodeKind::SetVariable {
             variable_id, name, ..
         } => find_variable_definition(variables, *variable_id, name)
             .map(|var| var.value_type)
-            .or(Some(VisualValueType::Json)),
+            .or(Some(VisualValueType::Any)),
         VisualScriptNodeKind::CallApi { operation, .. }
         | VisualScriptNodeKind::QueryApi { operation, .. } => operation
             .spec()
@@ -5062,7 +6742,7 @@ fn node_data_input_type(
         VisualScriptNodeKind::MathVector { .. } => Some(VisualValueType::Vec3),
         VisualScriptNodeKind::MathProcedural { .. } => Some(VisualValueType::Number),
         VisualScriptNodeKind::MathUtility { .. } => Some(VisualValueType::Number),
-        VisualScriptNodeKind::Compare { .. } => Some(VisualValueType::Json),
+        VisualScriptNodeKind::Compare { .. } => Some(VisualValueType::Any),
         VisualScriptNodeKind::LogicalBinary { .. } => Some(VisualValueType::Bool),
         VisualScriptNodeKind::TimeSince { .. } => Some(VisualValueType::Number),
         VisualScriptNodeKind::Select { value_type } => {
@@ -5167,7 +6847,7 @@ fn node_data_input_type(
                     VisualValueType::Number
                 }
             }
-            _ => VisualValueType::Json,
+            _ => VisualValueType::Any,
         }),
         VisualScriptNodeKind::RayCast => Some(match input_index {
             0 | 1 => VisualValueType::Vec3,
@@ -5202,11 +6882,11 @@ fn node_data_output_type(
             variable_id, name, ..
         } => find_variable_definition(variables, *variable_id, name)
             .map(|var| var.value_type)
-            .or(Some(VisualValueType::Json)),
+            .or(Some(VisualValueType::Any)),
         VisualScriptNodeKind::CallApi { operation, .. }
         | VisualScriptNodeKind::QueryApi { operation, .. } => {
             if output_index == 0 {
-                operation.spec().output_type.or(Some(VisualValueType::Json))
+                operation.spec().output_type.or(Some(VisualValueType::Any))
             } else {
                 None
             }
@@ -5245,7 +6925,7 @@ fn node_data_output_type(
             Some(VisualValueType::Number)
         }
         VisualScriptNodeKind::StringLiteral { .. } => Some(VisualValueType::String),
-        VisualScriptNodeKind::JsonLiteral { .. } => Some(VisualValueType::Json),
+        VisualScriptNodeKind::AnyLiteral { .. } => Some(VisualValueType::Any),
         VisualScriptNodeKind::PhysicsQueryFilterLiteral { .. } => {
             Some(VisualValueType::PhysicsQueryFilter)
         }
@@ -5290,11 +6970,20 @@ fn node_data_output_type(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisualScriptEvent {
     Start,
     Update,
     Stop,
+    CollisionEnter,
+    CollisionStay,
+    CollisionExit,
+    TriggerEnter,
+    TriggerExit,
+    InputActionPressed(String),
+    InputActionReleased(String),
+    InputActionDown(String),
+    CustomEvent(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -5359,11 +7048,59 @@ pub struct VisualScriptProgram {
     on_start_nodes: Vec<u64>,
     on_update_nodes: Vec<u64>,
     on_stop_nodes: Vec<u64>,
+    on_collision_enter_nodes: Vec<u64>,
+    on_collision_stay_nodes: Vec<u64>,
+    on_collision_exit_nodes: Vec<u64>,
+    on_trigger_enter_nodes: Vec<u64>,
+    on_trigger_exit_nodes: Vec<u64>,
+    on_input_action_pressed_nodes: Vec<u64>,
+    on_input_action_released_nodes: Vec<u64>,
+    on_input_action_down_nodes: Vec<u64>,
+    on_custom_event_nodes: Vec<u64>,
     functions: HashMap<u64, VisualCompiledFunctionProgram>,
     function_context: Option<(u64, String)>,
 }
 
 impl VisualScriptProgram {
+    fn filter_input_action_roots(&self, candidates: &[u64], action: &str) -> Vec<u64> {
+        let action = normalize_event_name(action);
+        if action.is_empty() {
+            return Vec::new();
+        }
+
+        candidates
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                matches!(
+                    self.nodes.get(node_id),
+                    Some(VisualScriptNodeKind::OnInputAction {
+                        action: node_action,
+                        ..
+                    }) if node_action == &action
+                )
+            })
+            .collect()
+    }
+
+    fn filter_custom_event_roots(&self, candidates: &[u64], name: &str) -> Vec<u64> {
+        let name = normalize_event_name(name);
+        if name.is_empty() {
+            return Vec::new();
+        }
+
+        candidates
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                matches!(
+                    self.nodes.get(node_id),
+                    Some(VisualScriptNodeKind::OnCustomEvent { name: event_name }) if event_name == &name
+                )
+            })
+            .collect()
+    }
+
     pub fn describe(&self) -> String {
         let mut api_calls = 0usize;
         let mut query_calls = 0usize;
@@ -5389,7 +7126,7 @@ impl VisualScriptProgram {
             .unwrap_or_default();
 
         format!(
-            "Runtime Plan\nsource: {}{}\nnodes: {}\nexec edges: {}\ndata edges: {}\nvariable defs: {}\non_start: {}\non_update: {}\non_stop: {}\napi call nodes: {}\napi query nodes: {}\nfunction call nodes: {}\nvariable nodes: {}\nfunctions: {}\nstep budget/event: {}",
+            "Runtime Plan\nsource: {}{}\nnodes: {}\nexec edges: {}\ndata edges: {}\nvariable defs: {}\non_start: {}\non_update: {}\non_stop: {}\non_collision_enter: {}\non_collision_stay: {}\non_collision_exit: {}\non_trigger_enter: {}\non_trigger_exit: {}\non_input_action_pressed: {}\non_input_action_released: {}\non_input_action_down: {}\non_custom_event: {}\napi call nodes: {}\napi query nodes: {}\nfunction call nodes: {}\nvariable nodes: {}\nfunctions: {}\nstep budget/event: {}",
             self.source_label,
             function_label,
             self.nodes.len(),
@@ -5402,6 +7139,15 @@ impl VisualScriptProgram {
             self.on_start_nodes.len(),
             self.on_update_nodes.len(),
             self.on_stop_nodes.len(),
+            self.on_collision_enter_nodes.len(),
+            self.on_collision_stay_nodes.len(),
+            self.on_collision_exit_nodes.len(),
+            self.on_trigger_enter_nodes.len(),
+            self.on_trigger_exit_nodes.len(),
+            self.on_input_action_pressed_nodes.len(),
+            self.on_input_action_released_nodes.len(),
+            self.on_input_action_down_nodes.len(),
+            self.on_custom_event_nodes.len(),
             api_calls,
             query_calls,
             call_functions,
@@ -5439,14 +7185,31 @@ impl VisualScriptProgram {
                 .or_insert_with(|| default_value.clone());
         }
 
-        if matches!(event, VisualScriptEvent::Update) {
+        if matches!(&event, VisualScriptEvent::Update) {
             state.elapsed_seconds += f64::from(dt.max(0.0));
         }
 
-        let roots = match event {
-            VisualScriptEvent::Start => &self.on_start_nodes,
-            VisualScriptEvent::Update => &self.on_update_nodes,
-            VisualScriptEvent::Stop => &self.on_stop_nodes,
+        let roots: Vec<u64> = match &event {
+            VisualScriptEvent::Start => self.on_start_nodes.clone(),
+            VisualScriptEvent::Update => self.on_update_nodes.clone(),
+            VisualScriptEvent::Stop => self.on_stop_nodes.clone(),
+            VisualScriptEvent::CollisionEnter => self.on_collision_enter_nodes.clone(),
+            VisualScriptEvent::CollisionStay => self.on_collision_stay_nodes.clone(),
+            VisualScriptEvent::CollisionExit => self.on_collision_exit_nodes.clone(),
+            VisualScriptEvent::TriggerEnter => self.on_trigger_enter_nodes.clone(),
+            VisualScriptEvent::TriggerExit => self.on_trigger_exit_nodes.clone(),
+            VisualScriptEvent::InputActionPressed(action) => {
+                self.filter_input_action_roots(&self.on_input_action_pressed_nodes, action)
+            }
+            VisualScriptEvent::InputActionReleased(action) => {
+                self.filter_input_action_roots(&self.on_input_action_released_nodes, action)
+            }
+            VisualScriptEvent::InputActionDown(action) => {
+                self.filter_input_action_roots(&self.on_input_action_down_nodes, action)
+            }
+            VisualScriptEvent::CustomEvent(name) => {
+                self.filter_custom_event_roots(&self.on_custom_event_nodes, name)
+            }
         };
 
         let mut context = VisualRuntimeContext {
@@ -5463,12 +7226,12 @@ impl VisualScriptProgram {
             call_depth,
         };
 
-        if matches!(event, VisualScriptEvent::Update) {
+        if matches!(&event, VisualScriptEvent::Update) {
             context.resume_wait_timers()?;
             context.resume_pending_function_calls()?;
         }
 
-        for root in roots.iter().copied() {
+        for root in roots {
             context.execute_exec_targets(root, 0)?;
         }
 
@@ -5636,7 +7399,14 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
         match node {
             VisualScriptNodeKind::OnStart
             | VisualScriptNodeKind::OnUpdate
-            | VisualScriptNodeKind::OnStop => {
+            | VisualScriptNodeKind::OnStop
+            | VisualScriptNodeKind::OnCollisionEnter
+            | VisualScriptNodeKind::OnCollisionStay
+            | VisualScriptNodeKind::OnCollisionExit
+            | VisualScriptNodeKind::OnTriggerEnter
+            | VisualScriptNodeKind::OnTriggerExit
+            | VisualScriptNodeKind::OnInputAction { .. }
+            | VisualScriptNodeKind::OnCustomEvent { .. } => {
                 self.execute_exec_targets(node_id, 0)?;
             }
             VisualScriptNodeKind::Sequence { outputs } => {
@@ -5871,7 +7641,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             | VisualScriptNodeKind::BoolLiteral { .. }
             | VisualScriptNodeKind::NumberLiteral { .. }
             | VisualScriptNodeKind::StringLiteral { .. }
-            | VisualScriptNodeKind::JsonLiteral { .. }
+            | VisualScriptNodeKind::AnyLiteral { .. }
             | VisualScriptNodeKind::PhysicsQueryFilterLiteral { .. }
             | VisualScriptNodeKind::SelfEntity
             | VisualScriptNodeKind::DeltaTime
@@ -5935,7 +7705,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             let value_type = inputs
                 .get(index)
                 .map(|input| input.value_type)
-                .unwrap_or(VisualValueType::Json);
+                .unwrap_or(VisualValueType::Any);
             let coerced = coerce_json_to_visual_type(&value, value_type).map_err(|err| {
                 let argument = api_input_label(operation, index);
                 format!(
@@ -5948,7 +7718,254 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             })?;
             args.push(coerced);
         }
-        Ok(args)
+        self.normalize_api_call_args(operation, args)
+    }
+
+    fn normalize_api_call_args(
+        &self,
+        operation: VisualApiOperation,
+        mut args: Vec<JsonValue>,
+    ) -> Result<Vec<JsonValue>, String> {
+        match operation {
+            VisualApiOperation::EcsSetLookAt => {
+                if args.len() < 6 {
+                    return Ok(args);
+                }
+                let mut patch = JsonMap::new();
+                patch.insert(
+                    "target_entity".to_string(),
+                    match json_to_u64(&args[1]) {
+                        Some(id) if id > 0 => JsonValue::Number(JsonNumber::from(id)),
+                        _ => JsonValue::Null,
+                    },
+                );
+                patch.insert("target_offset".to_string(), args[2].clone());
+                patch.insert("offset_in_target_space".to_string(), args[3].clone());
+                patch.insert("up".to_string(), args[4].clone());
+                patch.insert("rotation_smooth_time".to_string(), args[5].clone());
+                Ok(vec![args.remove(0), JsonValue::Object(patch)])
+            }
+            VisualApiOperation::EcsSetEntityFollower => {
+                if args.len() < 7 {
+                    return Ok(args);
+                }
+                let mut patch = JsonMap::new();
+                patch.insert(
+                    "target_entity".to_string(),
+                    match json_to_u64(&args[1]) {
+                        Some(id) if id > 0 => JsonValue::Number(JsonNumber::from(id)),
+                        _ => JsonValue::Null,
+                    },
+                );
+                patch.insert("position_offset".to_string(), args[2].clone());
+                patch.insert("offset_in_target_space".to_string(), args[3].clone());
+                patch.insert("follow_rotation".to_string(), args[4].clone());
+                patch.insert("position_smooth_time".to_string(), args[5].clone());
+                patch.insert("rotation_smooth_time".to_string(), args[6].clone());
+                Ok(vec![args.remove(0), JsonValue::Object(patch)])
+            }
+            VisualApiOperation::EcsSetAnimatorTransition => {
+                if args.len() < 9 {
+                    return Ok(args);
+                }
+                let mut patch = JsonMap::new();
+                patch.insert("from".to_string(), args[3].clone());
+                patch.insert("to".to_string(), args[4].clone());
+                patch.insert("duration".to_string(), args[5].clone());
+                patch.insert("can_interrupt".to_string(), args[6].clone());
+                let use_exit_time = args[7].as_bool().unwrap_or(false);
+                patch.insert(
+                    "exit_time".to_string(),
+                    if use_exit_time {
+                        args[8].clone()
+                    } else {
+                        JsonValue::Null
+                    },
+                );
+                Ok(vec![
+                    args[0].clone(),
+                    args[1].clone(),
+                    args[2].clone(),
+                    JsonValue::Object(patch),
+                ])
+            }
+            VisualApiOperation::EcsSetAnimatorBlendNode => {
+                if args.len() >= 5 {
+                    let mode = args[4].as_str().unwrap_or("").trim();
+                    if mode.is_empty() {
+                        args[4] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsSetAnimatorBlendChild => {
+                if args.len() >= 6 {
+                    let param = args[5].as_str().unwrap_or("").trim();
+                    if param.is_empty() {
+                        args[5] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::InputBindAction => {
+                if args.len() >= 4 {
+                    let context = args[2].as_str().unwrap_or("").trim();
+                    if context.is_empty() {
+                        args[2] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::InputUnbindAction => {
+                if args.len() >= 2 {
+                    let binding = args[1].as_str().unwrap_or("").trim();
+                    if binding.is_empty() {
+                        args[1] = JsonValue::Null;
+                    }
+                }
+                if args.len() >= 3 {
+                    let context = args[2].as_str().unwrap_or("").trim();
+                    if context.is_empty() {
+                        args[2] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::InputSetActionContext => {
+                if let Some(context) = args.get(0) {
+                    let context = context.as_str().unwrap_or("").trim();
+                    if context.is_empty() {
+                        args[0] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsFindScriptIndex => {
+                if args.len() >= 3 {
+                    let language = args[2].as_str().unwrap_or("").trim();
+                    if language.is_empty() {
+                        args[2] = JsonValue::Null;
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsGetScript
+            | VisualApiOperation::EcsListScriptFields
+            | VisualApiOperation::EcsGetScriptPath
+            | VisualApiOperation::EcsGetScriptLanguage => {
+                if args.len() >= 2 {
+                    let index = args[1].as_f64().unwrap_or(0.0).round();
+                    if index <= 0.0 {
+                        args[1] = JsonValue::Null;
+                    } else {
+                        args[1] = JsonValue::Number(JsonNumber::from(index as u64));
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsGetScriptField => {
+                if args.len() >= 3 {
+                    let index = args[2].as_f64().unwrap_or(0.0).round();
+                    if index <= 0.0 {
+                        args[2] = JsonValue::Null;
+                    } else {
+                        args[2] = JsonValue::Number(JsonNumber::from(index as u64));
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsSetScript => {
+                if args.len() >= 3 {
+                    let language = args[2].as_str().unwrap_or("").trim();
+                    if language.is_empty() {
+                        args[2] = JsonValue::Null;
+                    }
+                }
+                if args.len() >= 4 {
+                    let index = args[3].as_f64().unwrap_or(0.0).round();
+                    if index <= 0.0 {
+                        args[3] = JsonValue::Null;
+                    } else {
+                        args[3] = JsonValue::Number(JsonNumber::from(index as u64));
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsSetScriptField => {
+                if args.len() >= 4 {
+                    let index = args[3].as_f64().unwrap_or(0.0).round();
+                    if index <= 0.0 {
+                        args[3] = JsonValue::Null;
+                    } else {
+                        args[3] = JsonValue::Number(JsonNumber::from(index as u64));
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsGetCollisionEventCount
+            | VisualApiOperation::EcsGetCollisionEventOther
+            | VisualApiOperation::EcsGetCollisionEventNormal
+            | VisualApiOperation::EcsGetCollisionEventPoint
+            | VisualApiOperation::EcsGetTriggerEventCount
+            | VisualApiOperation::EcsGetTriggerEventOther
+            | VisualApiOperation::EcsGetTriggerEventNormal
+            | VisualApiOperation::EcsGetTriggerEventPoint => {
+                if args.len() >= 2 {
+                    let phase = args[1].as_str().unwrap_or("").trim();
+                    if phase.is_empty() {
+                        args[1] = JsonValue::String("all".to_string());
+                    }
+                }
+                if args.len() >= 3 {
+                    let index = args[2].as_f64().unwrap_or(1.0).round().max(1.0);
+                    args[2] = JsonValue::Number(JsonNumber::from(index as u64));
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsSphereCast
+            | VisualApiOperation::EcsSphereCastHasHit
+            | VisualApiOperation::EcsSphereCastHitEntity
+            | VisualApiOperation::EcsSphereCastPoint
+            | VisualApiOperation::EcsSphereCastNormal
+            | VisualApiOperation::EcsSphereCastToi => {
+                if args.len() >= 2 {
+                    let radius = args[1].as_f64().unwrap_or(0.1).max(0.0001);
+                    args[1] = JsonValue::Number(
+                        JsonNumber::from_f64(radius).unwrap_or(JsonNumber::from(0)),
+                    );
+                }
+                if args.len() >= 4 {
+                    let max_toi = args[3].as_f64().unwrap_or(10_000.0).max(0.0);
+                    args[3] = JsonValue::Number(
+                        JsonNumber::from_f64(max_toi).unwrap_or(JsonNumber::from(10_000)),
+                    );
+                }
+                Ok(args)
+            }
+            VisualApiOperation::EcsGetAudioBusName
+            | VisualApiOperation::EcsGetAudioBusVolume
+            | VisualApiOperation::EcsSetAudioBusName
+            | VisualApiOperation::EcsSetAudioBusVolume
+            | VisualApiOperation::EcsRemoveAudioBus => {
+                if let Some(bus) = args.get(0) {
+                    let bus = bus.as_str().unwrap_or("").trim();
+                    if bus.is_empty() {
+                        args[0] = JsonValue::String("Master".to_string());
+                    }
+                }
+                Ok(args)
+            }
+            VisualApiOperation::InputSetCursorGrab => {
+                if let Some(mode) = args.get(0) {
+                    let mode = mode.as_str().unwrap_or("").trim();
+                    if mode.is_empty() {
+                        args[0] = JsonValue::String("none".to_string());
+                    }
+                }
+                Ok(args)
+            }
+            _ => Ok(args),
+        }
     }
 
     fn collect_function_call_args(
@@ -6342,7 +8359,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             VisualScriptNodeKind::BoolLiteral { value } => JsonValue::Bool(*value),
             VisualScriptNodeKind::NumberLiteral { value } => json_number(*value),
             VisualScriptNodeKind::StringLiteral { value } => JsonValue::String(value.clone()),
-            VisualScriptNodeKind::JsonLiteral { value } => parse_loose_literal(value),
+            VisualScriptNodeKind::AnyLiteral { value } => parse_loose_literal(value),
             VisualScriptNodeKind::PhysicsQueryFilterLiteral { value } => {
                 let parsed = parse_loose_literal(value);
                 coerce_json_to_visual_type(&parsed, VisualValueType::PhysicsQueryFilter)?
@@ -6400,7 +8417,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 let (value_type, array_item_type) = inputs
                     .get(data_output)
                     .map(|input| (input.value_type, input.array_item_type))
-                    .unwrap_or((VisualValueType::Json, None));
+                    .unwrap_or((VisualValueType::Any, None));
                 coerce_json_to_visual_type_with_array_item(&value, value_type, array_item_type)?
             }
             VisualScriptNodeKind::CallFunction {
@@ -6917,7 +8934,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 let normalized = coerce_json_to_visual_type(&value, VisualValueType::Transform)?;
                 let object = normalized
                     .as_object()
-                    .ok_or_else(|| "Transform values must be JSON objects".to_string())?;
+                    .ok_or_else(|| "Transform values must be structured objects".to_string())?;
                 match component {
                     VisualTransformComponent::Position => object
                         .get("position")
@@ -6944,7 +8961,7 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 let mut object = normalized
                     .as_object()
                     .cloned()
-                    .ok_or_else(|| "Transform values must be JSON objects".to_string())?;
+                    .ok_or_else(|| "Transform values must be structured objects".to_string())?;
                 let replacement = match component {
                     VisualTransformComponent::Position => {
                         let value = self.resolve_data_input_with_stack(
@@ -6994,9 +9011,9 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 )?;
                 let normalized =
                     coerce_json_to_visual_type(&value, VisualValueType::PhysicsVelocity)?;
-                let object = normalized
-                    .as_object()
-                    .ok_or_else(|| "Physics velocity values must be JSON objects".to_string())?;
+                let object = normalized.as_object().ok_or_else(|| {
+                    "Physics velocity values must be structured objects".to_string()
+                })?;
                 match component {
                     VisualPhysicsVelocityComponent::Linear => object
                         .get("linear")
@@ -7021,10 +9038,9 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                 )?;
                 let normalized =
                     coerce_json_to_visual_type(&value, VisualValueType::PhysicsVelocity)?;
-                let mut object = normalized
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(|| "Physics velocity values must be JSON objects".to_string())?;
+                let mut object = normalized.as_object().cloned().ok_or_else(|| {
+                    "Physics velocity values must be structured objects".to_string()
+                })?;
                 let replacement = match component {
                     VisualPhysicsVelocityComponent::Linear
                     | VisualPhysicsVelocityComponent::Angular => {
@@ -7262,6 +9278,13 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
             VisualScriptNodeKind::OnStart
             | VisualScriptNodeKind::OnUpdate
             | VisualScriptNodeKind::OnStop
+            | VisualScriptNodeKind::OnCollisionEnter
+            | VisualScriptNodeKind::OnCollisionStay
+            | VisualScriptNodeKind::OnCollisionExit
+            | VisualScriptNodeKind::OnTriggerEnter
+            | VisualScriptNodeKind::OnTriggerExit
+            | VisualScriptNodeKind::OnInputAction { .. }
+            | VisualScriptNodeKind::OnCustomEvent { .. }
             | VisualScriptNodeKind::Sequence { .. }
             | VisualScriptNodeKind::Branch { .. }
             | VisualScriptNodeKind::LoopWhile { .. }
@@ -7347,11 +9370,11 @@ fn shared_compare_type(
         return Some(VisualValueType::Number);
     }
 
-    if left_type == VisualValueType::Json {
+    if left_type == VisualValueType::Any {
         return Some(right_type);
     }
 
-    if right_type == VisualValueType::Json {
+    if right_type == VisualValueType::Any {
         return Some(left_type);
     }
 
@@ -7415,7 +9438,7 @@ fn compare_visual_values_as_type(
             compare_quat(left_quat, right_quat)
         }
         VisualValueType::Transform => compare_transforms(left, right),
-        VisualValueType::Json => canonical_json_string(left).cmp(&canonical_json_string(right)),
+        VisualValueType::Any => canonical_json_string(left).cmp(&canonical_json_string(right)),
         _ => {
             let left_normalized =
                 coerce_json_to_visual_type(left, value_type).unwrap_or_else(|_| left.clone());
@@ -7507,15 +9530,23 @@ fn visual_value_type_compare_rank(value_type: VisualValueType) -> u8 {
         VisualValueType::AudioEmitter => 12,
         VisualValueType::AudioListener => 13,
         VisualValueType::Script => 14,
-        VisualValueType::Physics => 15,
-        VisualValueType::PhysicsVelocity => 16,
-        VisualValueType::PhysicsWorldDefaults => 17,
-        VisualValueType::CharacterControllerOutput => 18,
-        VisualValueType::PhysicsRayCastHit => 19,
-        VisualValueType::PhysicsPointProjectionHit => 20,
-        VisualValueType::PhysicsShapeCastHit => 21,
-        VisualValueType::PhysicsQueryFilter => 22,
-        VisualValueType::Json => 23,
+        VisualValueType::LookAt => 15,
+        VisualValueType::EntityFollower => 16,
+        VisualValueType::AnimatorState => 17,
+        VisualValueType::InputModifiers => 18,
+        VisualValueType::AudioStreamingConfig => 19,
+        VisualValueType::Spline => 20,
+        VisualValueType::Physics => 21,
+        VisualValueType::PhysicsVelocity => 22,
+        VisualValueType::PhysicsWorldDefaults => 23,
+        VisualValueType::CharacterControllerOutput => 24,
+        VisualValueType::DynamicComponentFields => 25,
+        VisualValueType::DynamicFieldValue => 26,
+        VisualValueType::PhysicsRayCastHit => 27,
+        VisualValueType::PhysicsPointProjectionHit => 28,
+        VisualValueType::PhysicsShapeCastHit => 29,
+        VisualValueType::PhysicsQueryFilter => 30,
+        VisualValueType::Any => 31,
     }
 }
 
@@ -7597,7 +9628,7 @@ fn coerce_json_to_f64(value: &JsonValue) -> Result<f64, String> {
             .map_err(|_| format!("Cannot convert string '{}' to number", value)),
         JsonValue::Null => Ok(0.0),
         JsonValue::Array(_) | JsonValue::Object(_) => {
-            Err("Cannot convert complex JSON value to number".to_string())
+            Err("Cannot convert complex value to number".to_string())
         }
     }
 }
@@ -7607,7 +9638,7 @@ fn coerce_json_to_visual_type(
     value_type: VisualValueType,
 ) -> Result<JsonValue, String> {
     match value_type {
-        VisualValueType::Json => Ok(value.clone()),
+        VisualValueType::Any => Ok(value.clone()),
         VisualValueType::Bool => Ok(JsonValue::Bool(is_truthy(value))),
         VisualValueType::Number => Ok(json_number(coerce_json_to_f64(value)?)),
         VisualValueType::String => Ok(JsonValue::String(match value {
@@ -7628,7 +9659,7 @@ fn coerce_json_to_visual_type(
             JsonValue::String(text) => {
                 coerce_json_to_visual_type(&parse_loose_literal(text), VisualValueType::Array)
             }
-            _ => Err("Array values must be arrays or JSON array strings".to_string()),
+            _ => Err("Array values must be arrays or array literal strings".to_string()),
         },
         VisualValueType::Vec2 => {
             let (x, y) = coerce_json_to_vec2_components(value)?;
@@ -7680,12 +9711,20 @@ fn coerce_json_to_visual_type(
         VisualValueType::AudioEmitter => coerce_json_to_audio_emitter(value),
         VisualValueType::AudioListener => coerce_json_to_audio_listener(value),
         VisualValueType::Script => coerce_json_to_script_ref(value),
+        VisualValueType::LookAt => coerce_json_to_look_at(value),
+        VisualValueType::EntityFollower => coerce_json_to_entity_follower(value),
+        VisualValueType::AnimatorState => coerce_json_to_animator_state(value),
+        VisualValueType::InputModifiers => coerce_json_to_input_modifiers(value),
+        VisualValueType::AudioStreamingConfig => coerce_json_to_audio_streaming_config(value),
+        VisualValueType::Spline => coerce_json_to_spline(value),
         VisualValueType::Physics => {
             coerce_json_to_default_object(value, "Physics", default_literal_for_type(value_type))
         }
         VisualValueType::PhysicsVelocity => coerce_json_to_physics_velocity(value),
         VisualValueType::PhysicsWorldDefaults => coerce_json_to_physics_world_defaults(value),
         VisualValueType::CharacterControllerOutput => coerce_json_to_character_output(value),
+        VisualValueType::DynamicComponentFields => coerce_json_to_dynamic_component_fields(value),
+        VisualValueType::DynamicFieldValue => coerce_json_to_dynamic_field_value(value),
         VisualValueType::PhysicsQueryFilter => coerce_json_to_physics_query_filter(value),
         VisualValueType::PhysicsRayCastHit => coerce_json_to_ray_cast_hit(value),
         VisualValueType::PhysicsPointProjectionHit => coerce_json_to_point_projection_hit(value),
@@ -7737,7 +9776,7 @@ fn coerce_json_to_loose_object(
     };
     match parsed {
         JsonValue::Object(object) => Ok(object),
-        _ => Err(format!("{} values must be JSON objects", type_name)),
+        _ => Err(format!("{} values must be structured objects", type_name)),
     }
 }
 
@@ -7964,6 +10003,206 @@ fn coerce_json_to_script_ref(value: &JsonValue) -> Result<JsonValue, String> {
     Ok(JsonValue::Object(out))
 }
 
+fn coerce_json_to_look_at(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Look At")?;
+    let mut out = JsonMap::new();
+
+    let target_entity = object
+        .get("target_entity")
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    let target_entity = if target_entity.is_null() {
+        JsonValue::Null
+    } else {
+        coerce_json_to_visual_type(&target_entity, VisualValueType::Entity)?
+    };
+    let target_offset = object
+        .get("target_offset")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let up = object
+        .get("up")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 1.0, 0.0));
+    let offset_in_target_space = object
+        .get("offset_in_target_space")
+        .map(is_truthy)
+        .unwrap_or(false);
+    let rotation_smooth_time = object
+        .get("rotation_smooth_time")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+
+    out.insert("target_entity".to_string(), target_entity);
+    out.insert("target_offset".to_string(), target_offset);
+    out.insert(
+        "offset_in_target_space".to_string(),
+        JsonValue::Bool(offset_in_target_space),
+    );
+    out.insert("up".to_string(), up);
+    out.insert(
+        "rotation_smooth_time".to_string(),
+        json_number(rotation_smooth_time),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_entity_follower(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Entity Follower")?;
+    let mut out = JsonMap::new();
+
+    let target_entity = object
+        .get("target_entity")
+        .cloned()
+        .unwrap_or(JsonValue::Null);
+    let target_entity = if target_entity.is_null() {
+        JsonValue::Null
+    } else {
+        coerce_json_to_visual_type(&target_entity, VisualValueType::Entity)?
+    };
+    let position_offset = object
+        .get("position_offset")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let offset_in_target_space = object
+        .get("offset_in_target_space")
+        .map(is_truthy)
+        .unwrap_or(false);
+    let follow_rotation = object.get("follow_rotation").map(is_truthy).unwrap_or(true);
+    let position_smooth_time = object
+        .get("position_smooth_time")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+    let rotation_smooth_time = object
+        .get("rotation_smooth_time")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+
+    out.insert("target_entity".to_string(), target_entity);
+    out.insert("position_offset".to_string(), position_offset);
+    out.insert(
+        "offset_in_target_space".to_string(),
+        JsonValue::Bool(offset_in_target_space),
+    );
+    out.insert(
+        "follow_rotation".to_string(),
+        JsonValue::Bool(follow_rotation),
+    );
+    out.insert(
+        "position_smooth_time".to_string(),
+        json_number(position_smooth_time),
+    );
+    out.insert(
+        "rotation_smooth_time".to_string(),
+        json_number(rotation_smooth_time),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_animator_state(value: &JsonValue) -> Result<JsonValue, String> {
+    coerce_json_to_default_object(
+        value,
+        "Animator State",
+        default_literal_for_type(VisualValueType::AnimatorState),
+    )
+}
+
+fn coerce_json_to_input_modifiers(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Input Modifiers")?;
+    let mut out = JsonMap::new();
+    out.insert(
+        "shift".to_string(),
+        JsonValue::Bool(object.get("shift").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "ctrl".to_string(),
+        JsonValue::Bool(object.get("ctrl").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "alt".to_string(),
+        JsonValue::Bool(object.get("alt").map(is_truthy).unwrap_or(false)),
+    );
+    out.insert(
+        "super".to_string(),
+        JsonValue::Bool(object.get("super").map(is_truthy).unwrap_or(false)),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_audio_streaming_config(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Audio Streaming Config")?;
+    let buffer_frames = object
+        .get("buffer_frames")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(8192.0)
+        .max(1.0)
+        .round() as u64;
+    let chunk_frames = object
+        .get("chunk_frames")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(2048.0)
+        .max(1.0)
+        .round() as u64;
+    let mut out = JsonMap::new();
+    out.insert(
+        "buffer_frames".to_string(),
+        JsonValue::Number(JsonNumber::from(buffer_frames)),
+    );
+    out.insert(
+        "chunk_frames".to_string(),
+        JsonValue::Number(JsonNumber::from(chunk_frames)),
+    );
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_spline(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Spline")?;
+    let points = object
+        .get("points")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Array))
+        .transpose()?
+        .unwrap_or_else(|| JsonValue::Array(Vec::new()));
+    let points = points.as_array().cloned().unwrap_or_default();
+    let mut normalized_points = Vec::with_capacity(points.len());
+    for point in points {
+        normalized_points.push(coerce_json_to_visual_type(&point, VisualValueType::Vec3)?);
+    }
+    let closed = object.get("closed").map(is_truthy).unwrap_or(false);
+    let tension = object
+        .get("tension")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    let mut mode = object
+        .get("mode")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("CatmullRom")
+        .trim()
+        .to_string();
+    if !matches!(mode.as_str(), "Linear" | "CatmullRom" | "Bezier") {
+        mode = "CatmullRom".to_string();
+    }
+
+    let mut out = JsonMap::new();
+    out.insert("points".to_string(), JsonValue::Array(normalized_points));
+    out.insert("closed".to_string(), JsonValue::Bool(closed));
+    out.insert("tension".to_string(), json_number(tension));
+    out.insert("mode".to_string(), JsonValue::String(mode));
+    Ok(JsonValue::Object(out))
+}
+
 fn coerce_json_to_physics_velocity(value: &JsonValue) -> Result<JsonValue, String> {
     let object = coerce_json_to_loose_object(value, "Physics Velocity")?;
     let mut out = JsonMap::new();
@@ -8072,8 +10311,18 @@ fn coerce_entity_or_null(value: Option<&JsonValue>) -> JsonValue {
 fn coerce_json_to_character_output(value: &JsonValue) -> Result<JsonValue, String> {
     let object = coerce_json_to_loose_object(value, "Character Output")?;
     let mut out = JsonMap::new();
+    let desired_translation = object
+        .get("desired_translation")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
     let effective_translation = object
         .get("effective_translation")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let remaining_translation = object
+        .get("remaining_translation")
         .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
         .transpose()?
         .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
@@ -8088,7 +10337,42 @@ fn coerce_json_to_character_output(value: &JsonValue) -> Result<JsonValue, Strin
         .transpose()?
         .unwrap_or(0.0)
         .max(0.0);
+    let ground_normal = object
+        .get("ground_normal")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 1.0, 0.0));
+    let slope_angle = object
+        .get("slope_angle")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+    let hit_normal = object
+        .get("hit_normal")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let hit_point = object
+        .get("hit_point")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    let stepped_up = object.get("stepped_up").map(is_truthy).unwrap_or(false);
+    let step_height = object
+        .get("step_height")
+        .map(coerce_json_to_f64)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+    let platform_velocity = object
+        .get("platform_velocity")
+        .map(|entry| coerce_json_to_visual_type(entry, VisualValueType::Vec3))
+        .transpose()?
+        .unwrap_or_else(|| vec3_json(0.0, 0.0, 0.0));
+    out.insert("desired_translation".to_string(), desired_translation);
     out.insert("effective_translation".to_string(), effective_translation);
+    out.insert("remaining_translation".to_string(), remaining_translation);
     out.insert("grounded".to_string(), JsonValue::Bool(grounded));
     out.insert(
         "sliding_down_slope".to_string(),
@@ -8098,6 +10382,42 @@ fn coerce_json_to_character_output(value: &JsonValue) -> Result<JsonValue, Strin
         "collision_count".to_string(),
         JsonValue::Number(JsonNumber::from(collision_count.round() as u64)),
     );
+    out.insert("ground_normal".to_string(), ground_normal);
+    out.insert("slope_angle".to_string(), json_number(slope_angle));
+    out.insert("hit_normal".to_string(), hit_normal);
+    out.insert("hit_point".to_string(), hit_point);
+    out.insert(
+        "hit_entity".to_string(),
+        coerce_entity_or_null(object.get("hit_entity")),
+    );
+    out.insert("stepped_up".to_string(), JsonValue::Bool(stepped_up));
+    out.insert("step_height".to_string(), json_number(step_height));
+    out.insert("platform_velocity".to_string(), platform_velocity);
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_dynamic_field_value(value: &JsonValue) -> Result<JsonValue, String> {
+    match value {
+        JsonValue::Bool(value) => Ok(JsonValue::Bool(*value)),
+        JsonValue::Number(value) => Ok(JsonValue::Number(value.clone())),
+        JsonValue::String(value) => Ok(JsonValue::String(value.clone())),
+        JsonValue::Null => Ok(JsonValue::String(String::new())),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            let (x, y, z) = coerce_json_to_vec3_components(value)?;
+            Ok(vec3_json(x, y, z))
+        }
+    }
+}
+
+fn coerce_json_to_dynamic_component_fields(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Dynamic Fields")?;
+    let mut out = JsonMap::new();
+    for (field, value) in object {
+        if field.trim().is_empty() {
+            continue;
+        }
+        out.insert(field, coerce_json_to_dynamic_field_value(&value)?);
+    }
     Ok(JsonValue::Object(out))
 }
 
@@ -8248,16 +10568,24 @@ fn coerce_json_to_shape_cast_hit(value: &JsonValue) -> Result<JsonValue, String>
 
 fn coerce_json_to_vec2_components(value: &JsonValue) -> Result<(f64, f64), String> {
     match value {
+        JsonValue::Null => Ok((0.0, 0.0)),
+        JsonValue::Bool(value) => Ok((if *value { 1.0 } else { 0.0 }, 0.0)),
+        JsonValue::Number(_) => Ok((coerce_json_to_f64(value)?, 0.0)),
         JsonValue::Object(object) => Ok((
             coerce_json_to_f64(object.get("x").unwrap_or(&JsonValue::Null))?,
             coerce_json_to_f64(object.get("y").unwrap_or(&JsonValue::Null))?,
         )),
-        JsonValue::Array(array) if array.len() >= 2 => Ok((
-            coerce_json_to_f64(&array[0])?,
-            coerce_json_to_f64(&array[1])?,
-        )),
+        JsonValue::Array(array) if !array.is_empty() => {
+            let x = coerce_json_to_f64(&array[0])?;
+            let y = array
+                .get(1)
+                .map(coerce_json_to_f64)
+                .transpose()?
+                .unwrap_or(0.0);
+            Ok((x, y))
+        }
         JsonValue::String(text) => coerce_json_to_vec2_components(&parse_loose_literal(text)),
-        _ => Err("Vec2 values must be objects, arrays, or JSON strings".to_string()),
+        _ => Err("Vec2 values must be objects, arrays, or literal strings".to_string()),
     }
 }
 
@@ -8274,7 +10602,7 @@ fn coerce_json_to_vec3_components(value: &JsonValue) -> Result<(f64, f64, f64), 
             coerce_json_to_f64(&array[2])?,
         )),
         JsonValue::String(text) => coerce_json_to_vec3_components(&parse_loose_literal(text)),
-        _ => Err("Vec3 values must be objects, arrays, or JSON strings".to_string()),
+        _ => Err("Vec3 values must be objects, arrays, or literal strings".to_string()),
     }
 }
 
@@ -8297,7 +10625,7 @@ fn coerce_json_to_quat_components(value: &JsonValue) -> Result<(f64, f64, f64, f
             coerce_json_to_f64(&array[3])?,
         )),
         JsonValue::String(text) => coerce_json_to_quat_components(&parse_loose_literal(text)),
-        _ => Err("Quat values must be objects, arrays, or JSON strings".to_string()),
+        _ => Err("Quat values must be objects, arrays, or literal strings".to_string()),
     }
 }
 
@@ -9107,8 +11435,17 @@ pub fn is_visual_script_path(path: &Path) -> bool {
 
 pub fn default_visual_script_template_full() -> String {
     let document = default_visual_script_document();
+    visual_script_template_to_string(&document)
+}
+
+pub fn default_visual_script_template_third_person() -> String {
+    let document = default_visual_script_document_third_person();
+    visual_script_template_to_string(&document)
+}
+
+fn visual_script_template_to_string(document: &VisualScriptDocument) -> String {
     let pretty = PrettyConfig::new().compact_arrays(false);
-    ron::ser::to_string_pretty(&document, pretty)
+    ron::ser::to_string_pretty(document, pretty)
         .unwrap_or_else(|_| "(\n    version: 3,\n)\n".to_string())
 }
 
@@ -9944,12 +12281,142 @@ fn compile_visual_script_program_internal(
             }
         })
         .collect::<Vec<_>>();
+    let mut on_collision_enter_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnCollisionEnter) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_collision_stay_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnCollisionStay) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_collision_exit_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnCollisionExit) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_trigger_enter_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnTriggerEnter) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_trigger_exit_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnTriggerExit) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_input_action_pressed_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(
+                node,
+                VisualScriptNodeKind::OnInputAction {
+                    phase: VisualInputActionPhase::Pressed,
+                    ..
+                }
+            ) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_input_action_released_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(
+                node,
+                VisualScriptNodeKind::OnInputAction {
+                    phase: VisualInputActionPhase::Released,
+                    ..
+                }
+            ) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_input_action_down_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(
+                node,
+                VisualScriptNodeKind::OnInputAction {
+                    phase: VisualInputActionPhase::Down,
+                    ..
+                }
+            ) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut on_custom_event_nodes = nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            if matches!(node, VisualScriptNodeKind::OnCustomEvent { .. }) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
 
     on_start_nodes.sort_unstable();
     on_update_nodes.sort_unstable();
     on_stop_nodes.sort_unstable();
+    on_collision_enter_nodes.sort_unstable();
+    on_collision_stay_nodes.sort_unstable();
+    on_collision_exit_nodes.sort_unstable();
+    on_trigger_enter_nodes.sort_unstable();
+    on_trigger_exit_nodes.sort_unstable();
+    on_input_action_pressed_nodes.sort_unstable();
+    on_input_action_released_nodes.sort_unstable();
+    on_input_action_down_nodes.sort_unstable();
+    on_custom_event_nodes.sort_unstable();
 
-    if on_start_nodes.is_empty() && on_update_nodes.is_empty() && on_stop_nodes.is_empty() {
+    let has_root_events = !on_start_nodes.is_empty()
+        || !on_update_nodes.is_empty()
+        || !on_stop_nodes.is_empty()
+        || !on_collision_enter_nodes.is_empty()
+        || !on_collision_stay_nodes.is_empty()
+        || !on_collision_exit_nodes.is_empty()
+        || !on_trigger_enter_nodes.is_empty()
+        || !on_trigger_exit_nodes.is_empty()
+        || !on_input_action_pressed_nodes.is_empty()
+        || !on_input_action_released_nodes.is_empty()
+        || !on_input_action_down_nodes.is_empty()
+        || !on_custom_event_nodes.is_empty();
+
+    if !has_root_events {
         if is_function_program {
             on_start_nodes = nodes
                 .iter()
@@ -9975,7 +12442,7 @@ fn compile_visual_script_program_internal(
     let mut functions = HashMap::new();
     if !is_function_program {
         for function in &document.functions {
-            let mut graph = function.graph.clone();
+            let graph = function.graph.clone();
 
             let mut start_nodes = Vec::new();
             let mut return_nodes = Vec::new();
@@ -9985,7 +12452,14 @@ fn compile_visual_script_program_internal(
                     VisualScriptNodeKind::FunctionReturn { .. } => return_nodes.push(node.id),
                     VisualScriptNodeKind::OnStart
                     | VisualScriptNodeKind::OnUpdate
-                    | VisualScriptNodeKind::OnStop => {
+                    | VisualScriptNodeKind::OnStop
+                    | VisualScriptNodeKind::OnCollisionEnter
+                    | VisualScriptNodeKind::OnCollisionStay
+                    | VisualScriptNodeKind::OnCollisionExit
+                    | VisualScriptNodeKind::OnTriggerEnter
+                    | VisualScriptNodeKind::OnTriggerExit
+                    | VisualScriptNodeKind::OnInputAction { .. }
+                    | VisualScriptNodeKind::OnCustomEvent { .. } => {
                         return Err(format!(
                             "Function '{}' cannot contain event nodes",
                             function.name
@@ -10049,6 +12523,15 @@ fn compile_visual_script_program_internal(
         on_start_nodes,
         on_update_nodes,
         on_stop_nodes,
+        on_collision_enter_nodes,
+        on_collision_stay_nodes,
+        on_collision_exit_nodes,
+        on_trigger_enter_nodes,
+        on_trigger_exit_nodes,
+        on_input_action_pressed_nodes,
+        on_input_action_released_nodes,
+        on_input_action_down_nodes,
+        on_custom_event_nodes,
         functions,
         function_context: None,
     })
@@ -10134,6 +12617,31 @@ fn normalize_document(document: &mut VisualScriptDocument) {
         }
     }
 
+    if document.name.trim() == "third_person_controller" {
+        for variable in &mut document.variables {
+            let variable_name = variable.name.trim();
+            if matches!(
+                variable_name,
+                "camera_orbit_yaw" | "camera_orbit_pitch" | "camera_entity"
+            ) {
+                variable.inspector_exposed = false;
+                variable.inspector_asset_kind = None;
+            }
+            if variable_name == "camera_name" {
+                let default_value = variable.default_value.trim();
+                if default_value.is_empty() || default_value == "Main Camera" {
+                    variable.default_value = "Scene Camera".to_string();
+                }
+            }
+            if variable_name == "camera_pitch_min" {
+                let parsed = variable.default_value.trim().parse::<f64>().ok();
+                if parsed.is_none_or(|value| value < -20.0) {
+                    variable.default_value = "-20".to_string();
+                }
+            }
+        }
+    }
+
     let mut name_to_id = HashMap::new();
     for variable in &document.variables {
         name_to_id.insert(variable.name.clone(), variable.id);
@@ -10173,6 +12681,9 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                                 value_type,
                                 array_item_type,
                             ),
+                            inspector_exposed: false,
+                            inspector_label: String::new(),
+                            inspector_asset_kind: None,
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -10219,6 +12730,9 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                                 value_type,
                                 array_item_type,
                             ),
+                            inspector_exposed: false,
+                            inspector_label: String::new(),
+                            inspector_asset_kind: None,
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -10252,6 +12766,9 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                             value_type: VisualValueType::String,
                             array_item_type: None,
                             default_value: String::new(),
+                            inspector_exposed: false,
+                            inspector_label: String::new(),
+                            inspector_asset_kind: None,
                         });
                         name_to_id.insert(trimmed, new_id);
                         seen_ids.insert(new_id);
@@ -10285,7 +12802,7 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         let value_type = inputs
                             .get(args.len())
                             .map(|port| port.value_type)
-                            .unwrap_or(VisualValueType::Json);
+                            .unwrap_or(VisualValueType::Any);
                         args.push(default_literal_for_type(value_type).to_string());
                     }
                 }
@@ -10307,6 +12824,12 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                 variable.value_type,
                 variable.array_item_type,
             );
+        }
+        variable.inspector_label = variable.inspector_label.trim().to_string();
+        if !variable.inspector_exposed
+            || !visual_variable_supports_asset_kind(variable.value_type, variable.array_item_type)
+        {
+            variable.inspector_asset_kind = None;
         }
     }
 
@@ -10332,7 +12855,7 @@ fn normalize_document(document: &mut VisualScriptDocument) {
                         let value_type = inputs
                             .get(args.len())
                             .map(|port| port.value_type)
-                            .unwrap_or(VisualValueType::Json);
+                            .unwrap_or(VisualValueType::Any);
                         args.push(default_literal_for_type(value_type).to_string());
                     }
                 }
@@ -10487,10 +13010,2723 @@ fn graph_data_from_snarl(snarl: &Snarl<VisualScriptNodeKind>) -> VisualScriptGra
     VisualScriptGraphData { nodes, wires }
 }
 
+fn template_insert_api_node(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    pos: egui::Pos2,
+    operation: VisualApiOperation,
+) -> NodeId {
+    snarl.insert_node(pos, api_node_kind_from_spec(operation.spec()))
+}
+
+fn template_set_api_arg(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    node: NodeId,
+    arg_index: usize,
+    value: &str,
+) {
+    let Some(node) = snarl.get_node_mut(node) else {
+        return;
+    };
+    match node {
+        VisualScriptNodeKind::CallApi { args, .. }
+        | VisualScriptNodeKind::QueryApi { args, .. } => {
+            if let Some(arg) = args.get_mut(arg_index) {
+                *arg = value.to_string();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn template_connect_exec(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    from_node: NodeId,
+    from_exec_pin: usize,
+    to_node: NodeId,
+    to_exec_pin: usize,
+) {
+    snarl.connect(
+        OutPinId {
+            node: from_node,
+            output: from_exec_pin,
+        },
+        InPinId {
+            node: to_node,
+            input: to_exec_pin,
+        },
+    );
+}
+
+fn template_connect_data(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    from_node: NodeId,
+    from_data_pin: usize,
+    to_node: NodeId,
+    to_data_pin: usize,
+) {
+    let from_pin = snarl
+        .get_node(from_node)
+        .map(|node| node.exec_output_count() + from_data_pin)
+        .unwrap_or(from_data_pin);
+    let to_pin = snarl
+        .get_node(to_node)
+        .map(|node| node.exec_input_count() + to_data_pin)
+        .unwrap_or(to_data_pin);
+    snarl.connect(
+        OutPinId {
+            node: from_node,
+            output: from_pin,
+        },
+        InPinId {
+            node: to_node,
+            input: to_pin,
+        },
+    );
+}
+
+fn template_get_variable_node(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    pos: egui::Pos2,
+    variable_id: u64,
+    name: &str,
+) -> NodeId {
+    snarl.insert_node(
+        pos,
+        VisualScriptNodeKind::GetVariable {
+            variable_id,
+            name: name.to_string(),
+            default_value: String::new(),
+        },
+    )
+}
+
+fn template_set_variable_node(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    pos: egui::Pos2,
+    variable_id: u64,
+    name: &str,
+    value: &str,
+) -> NodeId {
+    snarl.insert_node(
+        pos,
+        VisualScriptNodeKind::SetVariable {
+            variable_id,
+            name: name.to_string(),
+            value: value.to_string(),
+        },
+    )
+}
+
+fn template_number_node(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    pos: egui::Pos2,
+    value: f64,
+) -> NodeId {
+    snarl.insert_node(pos, VisualScriptNodeKind::NumberLiteral { value })
+}
+
+fn template_bool_node(
+    snarl: &mut Snarl<VisualScriptNodeKind>,
+    pos: egui::Pos2,
+    value: bool,
+) -> NodeId {
+    snarl.insert_node(pos, VisualScriptNodeKind::BoolLiteral { value })
+}
+
+fn default_visual_script_document_third_person() -> VisualScriptDocument {
+    const VAR_CAMERA_ENTITY: u64 = 1;
+    const VAR_CAMERA_NAME: u64 = 2;
+    const VAR_CAMERA_PIVOT_HEIGHT: u64 = 3;
+    const VAR_CAMERA_MIN_DISTANCE: u64 = 4;
+    const VAR_CAMERA_MAX_DISTANCE: u64 = 5;
+    const VAR_CAMERA_ORBIT_YAW: u64 = 6;
+    const VAR_CAMERA_ORBIT_PITCH: u64 = 7;
+    const VAR_CAMERA_PITCH_MIN: u64 = 8;
+    const VAR_CAMERA_PITCH_MAX: u64 = 9;
+    const VAR_SPEED_WALK: u64 = 10;
+    const VAR_SPEED_RUN: u64 = 11;
+    const VAR_SPEED_SPRINT: u64 = 12;
+    const VAR_SPEED_CROUCH: u64 = 13;
+    const VAR_IS_SPRINTING: u64 = 14;
+    const VAR_IS_CROUCHING: u64 = 15;
+    const VAR_JUMP_QUEUED: u64 = 16;
+    const VAR_LEFT_FOOT_GROUNDED: u64 = 17;
+    const VAR_RIGHT_FOOT_GROUNDED: u64 = 18;
+    const VAR_LEFT_FOOT_OFFSET: u64 = 19;
+    const VAR_RIGHT_FOOT_OFFSET: u64 = 20;
+    const VAR_PUSH_IMPULSE: u64 = 21;
+    const VAR_MOVE_MAGNITUDE: u64 = 22;
+    const VAR_MOVE_WORLD_DIRECTION: u64 = 23;
+    const VAR_CAMERA_RUNTIME_ENTITY: u64 = 24;
+    const VAR_CAMERA_STICK_SENSITIVITY: u64 = 25;
+    const VAR_CAMERA_MOUSE_SENSITIVITY: u64 = 26;
+    const VAR_JUMP_SPEED: u64 = 27;
+    const VAR_GRAVITY_ACCELERATION: u64 = 28;
+    const VAR_VERTICAL_VELOCITY: u64 = 29;
+    const VAR_TURN_SMOOTH_SPEED: u64 = 30;
+    const VAR_BASE_YAW_OFFSET: u64 = 31;
+    const VAR_CLIP_IDLE: u64 = 32;
+    const VAR_CLIP_WALK: u64 = 33;
+    const VAR_CLIP_RUN: u64 = 34;
+    const VAR_CLIP_SPRINT: u64 = 35;
+    const VAR_CLIP_JUMP: u64 = 36;
+    const VAR_CLIP_CROUCH: u64 = 37;
+
+    let make_var = |id: u64,
+                    name: &str,
+                    value_type: VisualValueType,
+                    default_value: &str,
+                    inspector_exposed: bool| {
+        VisualVariableDefinition {
+            id,
+            name: name.to_string(),
+            value_type,
+            array_item_type: None,
+            default_value: default_value.to_string(),
+            inspector_exposed,
+            inspector_label: String::new(),
+            inspector_asset_kind: None,
+        }
+    };
+
+    let variables = vec![
+        make_var(
+            VAR_CAMERA_ENTITY,
+            "camera_entity",
+            VisualValueType::Entity,
+            "0",
+            false,
+        ),
+        make_var(
+            VAR_CAMERA_NAME,
+            "camera_name",
+            VisualValueType::String,
+            "Scene Camera",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_PIVOT_HEIGHT,
+            "camera_pivot_height",
+            VisualValueType::Number,
+            "1.65",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_MIN_DISTANCE,
+            "camera_min_distance",
+            VisualValueType::Number,
+            "0.9",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_MAX_DISTANCE,
+            "camera_max_distance",
+            VisualValueType::Number,
+            "4.6",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_ORBIT_YAW,
+            "camera_orbit_yaw",
+            VisualValueType::Number,
+            "0",
+            false,
+        ),
+        make_var(
+            VAR_CAMERA_ORBIT_PITCH,
+            "camera_orbit_pitch",
+            VisualValueType::Number,
+            "18",
+            false,
+        ),
+        make_var(
+            VAR_CAMERA_PITCH_MIN,
+            "camera_pitch_min",
+            VisualValueType::Number,
+            "-20",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_PITCH_MAX,
+            "camera_pitch_max",
+            VisualValueType::Number,
+            "70",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_STICK_SENSITIVITY,
+            "camera_stick_sensitivity",
+            VisualValueType::Number,
+            "140",
+            true,
+        ),
+        make_var(
+            VAR_CAMERA_MOUSE_SENSITIVITY,
+            "camera_mouse_sensitivity",
+            VisualValueType::Number,
+            "0.12",
+            true,
+        ),
+        make_var(
+            VAR_SPEED_WALK,
+            "move_speed_walk",
+            VisualValueType::Number,
+            "2.4",
+            true,
+        ),
+        make_var(
+            VAR_SPEED_RUN,
+            "move_speed_run",
+            VisualValueType::Number,
+            "4.2",
+            true,
+        ),
+        make_var(
+            VAR_SPEED_SPRINT,
+            "move_speed_sprint",
+            VisualValueType::Number,
+            "6.8",
+            true,
+        ),
+        make_var(
+            VAR_SPEED_CROUCH,
+            "move_speed_crouch",
+            VisualValueType::Number,
+            "1.55",
+            true,
+        ),
+        make_var(
+            VAR_IS_SPRINTING,
+            "is_sprinting",
+            VisualValueType::Bool,
+            "false",
+            false,
+        ),
+        make_var(
+            VAR_IS_CROUCHING,
+            "is_crouching",
+            VisualValueType::Bool,
+            "false",
+            false,
+        ),
+        make_var(
+            VAR_JUMP_QUEUED,
+            "jump_queued",
+            VisualValueType::Bool,
+            "false",
+            false,
+        ),
+        make_var(
+            VAR_LEFT_FOOT_GROUNDED,
+            "left_foot_grounded",
+            VisualValueType::Bool,
+            "false",
+            false,
+        ),
+        make_var(
+            VAR_RIGHT_FOOT_GROUNDED,
+            "right_foot_grounded",
+            VisualValueType::Bool,
+            "false",
+            false,
+        ),
+        make_var(
+            VAR_LEFT_FOOT_OFFSET,
+            "left_foot_offset",
+            VisualValueType::Vec3,
+            "{\"x\":-0.17,\"y\":0.18,\"z\":0.09}",
+            true,
+        ),
+        make_var(
+            VAR_RIGHT_FOOT_OFFSET,
+            "right_foot_offset",
+            VisualValueType::Vec3,
+            "{\"x\":0.17,\"y\":0.18,\"z\":0.09}",
+            true,
+        ),
+        make_var(
+            VAR_PUSH_IMPULSE,
+            "push_impulse",
+            VisualValueType::Number,
+            "3.5",
+            true,
+        ),
+        make_var(
+            VAR_JUMP_SPEED,
+            "jump_speed",
+            VisualValueType::Number,
+            "5.4",
+            true,
+        ),
+        make_var(
+            VAR_GRAVITY_ACCELERATION,
+            "gravity_acceleration",
+            VisualValueType::Number,
+            "-18.0",
+            true,
+        ),
+        make_var(
+            VAR_TURN_SMOOTH_SPEED,
+            "turn_smooth_speed",
+            VisualValueType::Number,
+            "12.0",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_IDLE,
+            "clip_idle",
+            VisualValueType::String,
+            "idle",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_WALK,
+            "clip_walk",
+            VisualValueType::String,
+            "walk",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_RUN,
+            "clip_run",
+            VisualValueType::String,
+            "run",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_SPRINT,
+            "clip_sprint",
+            VisualValueType::String,
+            "sprint",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_JUMP,
+            "clip_jump",
+            VisualValueType::String,
+            "jump",
+            true,
+        ),
+        make_var(
+            VAR_CLIP_CROUCH,
+            "clip_crouch",
+            VisualValueType::String,
+            "crouch",
+            true,
+        ),
+        make_var(
+            VAR_MOVE_MAGNITUDE,
+            "move_magnitude",
+            VisualValueType::Number,
+            "0",
+            false,
+        ),
+        make_var(
+            VAR_MOVE_WORLD_DIRECTION,
+            "move_world_direction",
+            VisualValueType::Vec3,
+            "{\"x\":0,\"y\":0,\"z\":0}",
+            false,
+        ),
+        make_var(
+            VAR_CAMERA_RUNTIME_ENTITY,
+            "camera_runtime_entity",
+            VisualValueType::Entity,
+            "0",
+            false,
+        ),
+        make_var(
+            VAR_VERTICAL_VELOCITY,
+            "vertical_velocity",
+            VisualValueType::Number,
+            "0",
+            false,
+        ),
+        make_var(
+            VAR_BASE_YAW_OFFSET,
+            "base_yaw_offset",
+            VisualValueType::Number,
+            "0",
+            false,
+        ),
+    ];
+
+    let mut snarl = Snarl::new();
+    let self_entity = snarl.insert_node(egui::pos2(20.0, 20.0), VisualScriptNodeKind::SelfEntity);
+
+    let on_start = snarl.insert_node(egui::pos2(40.0, 90.0), VisualScriptNodeKind::OnStart);
+    let on_stop = snarl.insert_node(egui::pos2(40.0, 190.0), VisualScriptNodeKind::OnStop);
+    let on_update = snarl.insert_node(egui::pos2(40.0, 820.0), VisualScriptNodeKind::OnUpdate);
+    let on_sprint_down = snarl.insert_node(
+        egui::pos2(40.0, 340.0),
+        VisualScriptNodeKind::OnInputAction {
+            action: "sprint".to_string(),
+            phase: VisualInputActionPhase::Down,
+        },
+    );
+    let on_sprint_released = snarl.insert_node(
+        egui::pos2(40.0, 430.0),
+        VisualScriptNodeKind::OnInputAction {
+            action: "sprint".to_string(),
+            phase: VisualInputActionPhase::Released,
+        },
+    );
+    let on_crouch_pressed = snarl.insert_node(
+        egui::pos2(40.0, 520.0),
+        VisualScriptNodeKind::OnInputAction {
+            action: "crouch".to_string(),
+            phase: VisualInputActionPhase::Pressed,
+        },
+    );
+    let on_jump_pressed = snarl.insert_node(
+        egui::pos2(40.0, 610.0),
+        VisualScriptNodeKind::OnInputAction {
+            action: "jump".to_string(),
+            phase: VisualInputActionPhase::Pressed,
+        },
+    );
+
+    let on_update_seq = snarl.insert_node(
+        egui::pos2(300.0, 820.0),
+        VisualScriptNodeKind::Sequence { outputs: 4 },
+    );
+    template_connect_exec(&mut snarl, on_update, 0, on_update_seq, 0);
+
+    let start_set_context = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(320.0, 90.0),
+        VisualApiOperation::InputSetActionContext,
+    );
+    template_set_api_arg(&mut snarl, start_set_context, 0, "gameplay");
+    template_connect_exec(&mut snarl, on_start, 0, start_set_context, 0);
+
+    let stop_reset_cursor = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(320.0, 190.0),
+        VisualApiOperation::InputResetCursorControl,
+    );
+    let stop_set_context = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 190.0),
+        VisualApiOperation::InputSetActionContext,
+    );
+    template_set_api_arg(&mut snarl, stop_set_context, 0, "default");
+    template_connect_exec(&mut snarl, on_stop, 0, stop_reset_cursor, 0);
+    template_connect_exec(&mut snarl, stop_reset_cursor, 0, stop_set_context, 0);
+
+    let mut start_cursor = start_set_context;
+    let start_bindings = [
+        ("move_forward", "w", "gameplay", "0.0"),
+        ("move_backward", "s", "gameplay", "0.0"),
+        ("move_left", "a", "gameplay", "0.0"),
+        ("move_right", "d", "gameplay", "0.0"),
+        ("jump", "space", "gameplay", "0.0"),
+        ("jump", "south", "gameplay", "0.0"),
+        ("sprint", "shiftleft", "gameplay", "0.0"),
+        ("sprint", "lefttrigger", "gameplay", "0.25"),
+        ("crouch", "ctrlleft", "gameplay", "0.0"),
+        ("crouch", "righttrigger", "gameplay", "0.25"),
+        ("look_x", "rightx", "gameplay", "0.1"),
+        ("look_y", "righty", "gameplay", "0.1"),
+    ];
+    let mut bind_x = 620.0;
+    for (action, binding, context, deadzone) in start_bindings {
+        let bind_node = template_insert_api_node(
+            &mut snarl,
+            egui::pos2(bind_x, 90.0),
+            VisualApiOperation::InputBindAction,
+        );
+        template_set_api_arg(&mut snarl, bind_node, 0, action);
+        template_set_api_arg(&mut snarl, bind_node, 1, binding);
+        template_set_api_arg(&mut snarl, bind_node, 2, context);
+        template_set_api_arg(&mut snarl, bind_node, 3, deadzone);
+        template_connect_exec(&mut snarl, start_cursor, 0, bind_node, 0);
+        start_cursor = bind_node;
+        bind_x += 300.0;
+    }
+
+    let start_cursor_visible = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::InputSetCursorVisible,
+    );
+    template_set_api_arg(&mut snarl, start_cursor_visible, 0, "false");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_cursor_visible, 0);
+    start_cursor = start_cursor_visible;
+    bind_x += 280.0;
+
+    let start_cursor_grab = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::InputSetCursorGrab,
+    );
+    template_set_api_arg(&mut snarl, start_cursor_grab, 0, "locked");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_cursor_grab, 0);
+    start_cursor = start_cursor_grab;
+    bind_x += 300.0;
+
+    let find_camera = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(620.0, 260.0),
+        VisualApiOperation::EcsFindEntityByName,
+    );
+    let camera_name_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(620.0, 340.0),
+        VAR_CAMERA_NAME,
+        "camera_name",
+    );
+    let camera_entity_override = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(860.0, 340.0),
+        VAR_CAMERA_ENTITY,
+        "camera_entity",
+    );
+    let has_camera_override = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1200.0, 340.0),
+        VisualApiOperation::EcsEntityExists,
+    );
+    let resolved_camera_entity = snarl.insert_node(
+        egui::pos2(1380.0, 340.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Entity,
+        },
+    );
+    template_connect_data(&mut snarl, camera_name_var, 0, find_camera, 0);
+    template_connect_data(
+        &mut snarl,
+        camera_entity_override,
+        0,
+        has_camera_override,
+        0,
+    );
+    template_connect_data(
+        &mut snarl,
+        has_camera_override,
+        0,
+        resolved_camera_entity,
+        0,
+    );
+    template_connect_data(
+        &mut snarl,
+        camera_entity_override,
+        0,
+        resolved_camera_entity,
+        1,
+    );
+    template_connect_data(&mut snarl, find_camera, 0, resolved_camera_entity, 2);
+    let set_camera_runtime_entity = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VAR_CAMERA_RUNTIME_ENTITY,
+        "camera_runtime_entity",
+        "0",
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, set_camera_runtime_entity, 0);
+    template_connect_data(
+        &mut snarl,
+        resolved_camera_entity,
+        0,
+        set_camera_runtime_entity,
+        0,
+    );
+    start_cursor = set_camera_runtime_entity;
+    bind_x += 320.0;
+
+    let start_reset_vertical_velocity = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VAR_VERTICAL_VELOCITY,
+        "vertical_velocity",
+        "0",
+    );
+    template_connect_exec(
+        &mut snarl,
+        start_cursor,
+        0,
+        start_reset_vertical_velocity,
+        0,
+    );
+    start_cursor = start_reset_vertical_velocity;
+    bind_x += 320.0;
+
+    let start_add_transform = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsAddComponent,
+    );
+    template_set_api_arg(&mut snarl, start_add_transform, 1, "transform");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_add_transform, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_add_transform, 0);
+    start_cursor = start_add_transform;
+    bind_x += 320.0;
+
+    let start_add_collider_shape = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsAddComponent,
+    );
+    template_set_api_arg(&mut snarl, start_add_collider_shape, 1, "collider_shape");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_add_collider_shape, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_add_collider_shape, 0);
+    start_cursor = start_add_collider_shape;
+    bind_x += 320.0;
+
+    let start_add_kinematic = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsAddComponent,
+    );
+    template_set_api_arg(&mut snarl, start_add_kinematic, 1, "kinematic_rigid_body");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_add_kinematic, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_add_kinematic, 0);
+    start_cursor = start_add_kinematic;
+    bind_x += 320.0;
+
+    let start_add_character_controller = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsAddComponent,
+    );
+    template_set_api_arg(
+        &mut snarl,
+        start_add_character_controller,
+        1,
+        "character_controller",
+    );
+    template_connect_exec(
+        &mut snarl,
+        start_cursor,
+        0,
+        start_add_character_controller,
+        0,
+    );
+    template_connect_data(
+        &mut snarl,
+        self_entity,
+        0,
+        start_add_character_controller,
+        0,
+    );
+    start_cursor = start_add_character_controller;
+    bind_x += 320.0;
+
+    let start_get_self_forward = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsGetTransformForward,
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, start_get_self_forward, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_get_self_forward, 0);
+    start_cursor = start_get_self_forward;
+    bind_x += 320.0;
+
+    let start_forward_x = snarl.insert_node(
+        egui::pos2(bind_x - 80.0, 220.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let start_forward_z = snarl.insert_node(
+        egui::pos2(bind_x - 80.0, 300.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, start_get_self_forward, 0, start_forward_x, 0);
+    template_connect_data(&mut snarl, start_get_self_forward, 0, start_forward_z, 0);
+    let start_base_yaw = snarl.insert_node(
+        egui::pos2(bind_x + 120.0, 260.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Atan2,
+        },
+    );
+    template_connect_data(&mut snarl, start_forward_x, 0, start_base_yaw, 0);
+    template_connect_data(&mut snarl, start_forward_z, 0, start_base_yaw, 1);
+
+    let start_set_base_yaw_offset = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VAR_BASE_YAW_OFFSET,
+        "base_yaw_offset",
+        "0",
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, start_set_base_yaw_offset, 0);
+    template_connect_data(&mut snarl, start_base_yaw, 0, start_set_base_yaw_offset, 0);
+    start_cursor = start_set_base_yaw_offset;
+    bind_x += 320.0;
+
+    let camera_start_offset =
+        snarl.insert_node(egui::pos2(1120.0, 260.0), VisualScriptNodeKind::Vec3);
+    let camera_start_y = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(980.0, 350.0),
+        VAR_CAMERA_PIVOT_HEIGHT,
+        "camera_pivot_height",
+    );
+    let camera_start_z = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1260.0, 350.0),
+        VAR_CAMERA_MAX_DISTANCE,
+        "camera_max_distance",
+    );
+    let neg_one_start = template_number_node(&mut snarl, egui::pos2(1440.0, 350.0), -1.0);
+    let neg_camera_z = snarl.insert_node(
+        egui::pos2(1600.0, 350.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, camera_start_y, 0, camera_start_offset, 1);
+    template_connect_data(&mut snarl, camera_start_z, 0, neg_camera_z, 0);
+    template_connect_data(&mut snarl, neg_one_start, 0, neg_camera_z, 1);
+    template_connect_data(&mut snarl, neg_camera_z, 0, camera_start_offset, 2);
+
+    let start_set_follower = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsSetEntityFollower,
+    );
+    template_set_api_arg(&mut snarl, start_set_follower, 3, "false");
+    template_set_api_arg(&mut snarl, start_set_follower, 4, "false");
+    template_set_api_arg(&mut snarl, start_set_follower, 5, "0.0");
+    template_set_api_arg(&mut snarl, start_set_follower, 6, "0.0");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_set_follower, 0);
+    template_connect_data(&mut snarl, resolved_camera_entity, 0, start_set_follower, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_set_follower, 1);
+    template_connect_data(&mut snarl, camera_start_offset, 0, start_set_follower, 2);
+    start_cursor = start_set_follower;
+    bind_x += 320.0;
+
+    let camera_target_offset =
+        snarl.insert_node(egui::pos2(1880.0, 260.0), VisualScriptNodeKind::Vec3);
+    let camera_up_vec = snarl.insert_node(egui::pos2(2080.0, 260.0), VisualScriptNodeKind::Vec3);
+    let one_lit = template_number_node(&mut snarl, egui::pos2(2120.0, 350.0), 1.0);
+    template_connect_data(&mut snarl, camera_start_y, 0, camera_target_offset, 1);
+    template_connect_data(&mut snarl, one_lit, 0, camera_up_vec, 1);
+
+    let start_set_look_at = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsSetLookAt,
+    );
+    template_set_api_arg(&mut snarl, start_set_look_at, 3, "true");
+    template_set_api_arg(&mut snarl, start_set_look_at, 5, "0.0");
+    template_connect_exec(&mut snarl, start_cursor, 0, start_set_look_at, 0);
+    template_connect_data(&mut snarl, resolved_camera_entity, 0, start_set_look_at, 0);
+    template_connect_data(&mut snarl, self_entity, 0, start_set_look_at, 1);
+    template_connect_data(&mut snarl, camera_target_offset, 0, start_set_look_at, 2);
+    template_connect_data(&mut snarl, camera_up_vec, 0, start_set_look_at, 4);
+    start_cursor = start_set_look_at;
+    bind_x += 320.0;
+
+    let start_set_active_camera = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VisualApiOperation::EcsSetActiveCamera,
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, start_set_active_camera, 0);
+    template_connect_data(
+        &mut snarl,
+        resolved_camera_entity,
+        0,
+        start_set_active_camera,
+        0,
+    );
+    start_cursor = start_set_active_camera;
+    bind_x += 320.0;
+
+    let start_log = snarl.insert_node(
+        egui::pos2(bind_x, 90.0),
+        VisualScriptNodeKind::Log {
+            message: "third-person controller graph initialized".to_string(),
+        },
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, start_log, 0);
+
+    let set_sprint_true = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(320.0, 340.0),
+        VAR_IS_SPRINTING,
+        "is_sprinting",
+        "true",
+    );
+    let set_sprint_false = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(320.0, 430.0),
+        VAR_IS_SPRINTING,
+        "is_sprinting",
+        "false",
+    );
+    template_connect_exec(&mut snarl, on_sprint_down, 0, set_sprint_true, 0);
+    template_connect_exec(&mut snarl, on_sprint_released, 0, set_sprint_false, 0);
+    let true_lit = template_bool_node(&mut snarl, egui::pos2(250.0, 300.0), true);
+    let false_lit = template_bool_node(&mut snarl, egui::pos2(250.0, 470.0), false);
+    template_connect_data(&mut snarl, true_lit, 0, set_sprint_true, 0);
+    template_connect_data(&mut snarl, false_lit, 0, set_sprint_false, 0);
+
+    let crouch_get = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(300.0, 560.0),
+        VAR_IS_CROUCHING,
+        "is_crouching",
+    );
+    let crouch_not = snarl.insert_node(egui::pos2(500.0, 560.0), VisualScriptNodeKind::Not);
+    let crouch_set = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(700.0, 520.0),
+        VAR_IS_CROUCHING,
+        "is_crouching",
+        "false",
+    );
+    template_connect_exec(&mut snarl, on_crouch_pressed, 0, crouch_set, 0);
+    template_connect_data(&mut snarl, crouch_get, 0, crouch_not, 0);
+    template_connect_data(&mut snarl, crouch_not, 0, crouch_set, 0);
+
+    let jump_set = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(320.0, 610.0),
+        VAR_JUMP_QUEUED,
+        "jump_queued",
+        "true",
+    );
+    template_connect_exec(&mut snarl, on_jump_pressed, 0, jump_set, 0);
+    template_connect_data(&mut snarl, true_lit, 0, jump_set, 0);
+
+    let stage1_self_transform = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 910.0),
+        VisualApiOperation::EcsGetTransform,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, stage1_self_transform, 0);
+    let stage1_position = snarl.insert_node(
+        egui::pos2(760.0, 910.0),
+        VisualScriptNodeKind::TransformGetComponent {
+            component: VisualTransformComponent::Position,
+        },
+    );
+    template_connect_data(&mut snarl, stage1_self_transform, 0, stage1_position, 0);
+    let stage1_pos_x = snarl.insert_node(
+        egui::pos2(960.0, 820.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let stage1_pos_y = snarl.insert_node(
+        egui::pos2(960.0, 910.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let stage1_pos_z = snarl.insert_node(
+        egui::pos2(960.0, 1000.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, stage1_position, 0, stage1_pos_x, 0);
+    template_connect_data(&mut snarl, stage1_position, 0, stage1_pos_y, 0);
+    template_connect_data(&mut snarl, stage1_position, 0, stage1_pos_z, 0);
+
+    let left_offset_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1160.0, 820.0),
+        VAR_LEFT_FOOT_OFFSET,
+        "left_foot_offset",
+    );
+    let right_offset_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1160.0, 1080.0),
+        VAR_RIGHT_FOOT_OFFSET,
+        "right_foot_offset",
+    );
+    let left_offset_x = snarl.insert_node(
+        egui::pos2(1360.0, 760.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let left_offset_y = snarl.insert_node(
+        egui::pos2(1360.0, 850.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let left_offset_z = snarl.insert_node(
+        egui::pos2(1360.0, 940.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, left_offset_var, 0, left_offset_x, 0);
+    template_connect_data(&mut snarl, left_offset_var, 0, left_offset_y, 0);
+    template_connect_data(&mut snarl, left_offset_var, 0, left_offset_z, 0);
+    let right_offset_x = snarl.insert_node(
+        egui::pos2(1360.0, 1040.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let right_offset_y = snarl.insert_node(
+        egui::pos2(1360.0, 1130.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let right_offset_z = snarl.insert_node(
+        egui::pos2(1360.0, 1220.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, right_offset_var, 0, right_offset_x, 0);
+    template_connect_data(&mut snarl, right_offset_var, 0, right_offset_y, 0);
+    template_connect_data(&mut snarl, right_offset_var, 0, right_offset_z, 0);
+
+    let left_origin_x = snarl.insert_node(
+        egui::pos2(1560.0, 760.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let left_origin_y = snarl.insert_node(
+        egui::pos2(1560.0, 850.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let left_origin_z = snarl.insert_node(
+        egui::pos2(1560.0, 940.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, stage1_pos_x, 0, left_origin_x, 0);
+    template_connect_data(&mut snarl, left_offset_x, 0, left_origin_x, 1);
+    template_connect_data(&mut snarl, stage1_pos_y, 0, left_origin_y, 0);
+    template_connect_data(&mut snarl, left_offset_y, 0, left_origin_y, 1);
+    template_connect_data(&mut snarl, stage1_pos_z, 0, left_origin_z, 0);
+    template_connect_data(&mut snarl, left_offset_z, 0, left_origin_z, 1);
+    let left_origin = snarl.insert_node(egui::pos2(1760.0, 850.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, left_origin_x, 0, left_origin, 0);
+    template_connect_data(&mut snarl, left_origin_y, 0, left_origin, 1);
+    template_connect_data(&mut snarl, left_origin_z, 0, left_origin, 2);
+
+    let right_origin_x = snarl.insert_node(
+        egui::pos2(1560.0, 1040.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let right_origin_y = snarl.insert_node(
+        egui::pos2(1560.0, 1130.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let right_origin_z = snarl.insert_node(
+        egui::pos2(1560.0, 1220.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, stage1_pos_x, 0, right_origin_x, 0);
+    template_connect_data(&mut snarl, right_offset_x, 0, right_origin_x, 1);
+    template_connect_data(&mut snarl, stage1_pos_y, 0, right_origin_y, 0);
+    template_connect_data(&mut snarl, right_offset_y, 0, right_origin_y, 1);
+    template_connect_data(&mut snarl, stage1_pos_z, 0, right_origin_z, 0);
+    template_connect_data(&mut snarl, right_offset_z, 0, right_origin_z, 1);
+    let right_origin = snarl.insert_node(egui::pos2(1760.0, 1130.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, right_origin_x, 0, right_origin, 0);
+    template_connect_data(&mut snarl, right_origin_y, 0, right_origin, 1);
+    template_connect_data(&mut snarl, right_origin_z, 0, right_origin, 2);
+
+    let down_vec = snarl.insert_node(egui::pos2(1760.0, 1380.0), VisualScriptNodeKind::Vec3);
+    let neg_one = template_number_node(&mut snarl, egui::pos2(1960.0, 1430.0), -1.0);
+    template_connect_data(&mut snarl, neg_one, 0, down_vec, 1);
+
+    let left_probe = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1960.0, 850.0),
+        VisualApiOperation::EcsSphereCastHasHit,
+    );
+    template_set_api_arg(&mut snarl, left_probe, 1, "0.085");
+    template_set_api_arg(&mut snarl, left_probe, 3, "0.95");
+    template_connect_data(&mut snarl, left_origin, 0, left_probe, 0);
+    template_connect_data(&mut snarl, down_vec, 0, left_probe, 2);
+    template_connect_data(&mut snarl, self_entity, 0, left_probe, 5);
+
+    let right_probe = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1960.0, 1130.0),
+        VisualApiOperation::EcsSphereCastHasHit,
+    );
+    template_set_api_arg(&mut snarl, right_probe, 1, "0.085");
+    template_set_api_arg(&mut snarl, right_probe, 3, "0.95");
+    template_connect_data(&mut snarl, right_origin, 0, right_probe, 0);
+    template_connect_data(&mut snarl, down_vec, 0, right_probe, 2);
+    template_connect_data(&mut snarl, self_entity, 0, right_probe, 5);
+
+    let set_left_grounded = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(2200.0, 850.0),
+        VAR_LEFT_FOOT_GROUNDED,
+        "left_foot_grounded",
+        "false",
+    );
+    let set_right_grounded = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(2400.0, 850.0),
+        VAR_RIGHT_FOOT_GROUNDED,
+        "right_foot_grounded",
+        "false",
+    );
+    template_connect_exec(&mut snarl, on_update_seq, 0, set_left_grounded, 0);
+    template_connect_exec(&mut snarl, set_left_grounded, 0, set_right_grounded, 0);
+    template_connect_data(&mut snarl, left_probe, 0, set_left_grounded, 0);
+    template_connect_data(&mut snarl, right_probe, 0, set_right_grounded, 0);
+
+    let move_right = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 1560.0),
+        VisualApiOperation::InputActionValue,
+    );
+    template_set_api_arg(&mut snarl, move_right, 0, "move_right");
+    let move_left = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 1650.0),
+        VisualApiOperation::InputActionValue,
+    );
+    template_set_api_arg(&mut snarl, move_left, 0, "move_left");
+    let move_forward = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 1740.0),
+        VisualApiOperation::InputActionValue,
+    );
+    template_set_api_arg(&mut snarl, move_forward, 0, "move_forward");
+    let move_backward = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 1830.0),
+        VisualApiOperation::InputActionValue,
+    );
+    template_set_api_arg(&mut snarl, move_backward, 0, "move_backward");
+
+    let move_axis_x = snarl.insert_node(
+        egui::pos2(820.0, 1605.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Subtract,
+        },
+    );
+    let move_axis_z = snarl.insert_node(
+        egui::pos2(820.0, 1785.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Subtract,
+        },
+    );
+    template_connect_data(&mut snarl, move_right, 0, move_axis_x, 0);
+    template_connect_data(&mut snarl, move_left, 0, move_axis_x, 1);
+    template_connect_data(&mut snarl, move_forward, 0, move_axis_z, 0);
+    template_connect_data(&mut snarl, move_backward, 0, move_axis_z, 1);
+
+    let move_local = snarl.insert_node(egui::pos2(1060.0, 1695.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, move_axis_x, 0, move_local, 0);
+    template_connect_data(&mut snarl, move_axis_z, 0, move_local, 2);
+
+    let move_magnitude_raw = snarl.insert_node(
+        egui::pos2(1260.0, 1695.0),
+        VisualScriptNodeKind::MathVector {
+            op: VisualVectorMathOp::Length,
+        },
+    );
+    template_connect_data(&mut snarl, move_local, 0, move_magnitude_raw, 0);
+    let move_magnitude = snarl.insert_node(
+        egui::pos2(1460.0, 1695.0),
+        VisualScriptNodeKind::MathProcedural {
+            op: VisualProceduralMathOp::Saturate,
+        },
+    );
+    template_connect_data(&mut snarl, move_magnitude_raw, 0, move_magnitude, 0);
+
+    let move_yaw_rad = snarl.insert_node(
+        egui::pos2(1060.0, 1885.0),
+        VisualScriptNodeKind::MathUtility {
+            op: VisualUtilityMathOp::Radians,
+        },
+    );
+    let move_yaw_sin = snarl.insert_node(
+        egui::pos2(1260.0, 1840.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Sin,
+        },
+    );
+    let move_yaw_cos = snarl.insert_node(
+        egui::pos2(1260.0, 1930.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Cos,
+        },
+    );
+    template_connect_data(&mut snarl, move_yaw_rad, 0, move_yaw_sin, 0);
+    template_connect_data(&mut snarl, move_yaw_rad, 0, move_yaw_cos, 0);
+    let move_right_x = snarl.insert_node(
+        egui::pos2(1460.0, 1840.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let move_right_z = snarl.insert_node(
+        egui::pos2(1460.0, 1930.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, move_yaw_cos, 0, move_right_x, 0);
+    template_connect_data(&mut snarl, neg_one, 0, move_right_x, 1);
+    template_connect_data(&mut snarl, move_yaw_sin, 0, move_right_z, 0);
+    template_connect_data(&mut snarl, one_lit, 0, move_right_z, 1);
+    let move_right_vec = snarl.insert_node(egui::pos2(1660.0, 1930.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, move_right_x, 0, move_right_vec, 0);
+    template_connect_data(&mut snarl, move_right_z, 0, move_right_vec, 2);
+    let move_forward_vec =
+        snarl.insert_node(egui::pos2(1660.0, 2060.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, move_yaw_sin, 0, move_forward_vec, 0);
+    template_connect_data(&mut snarl, move_yaw_cos, 0, move_forward_vec, 2);
+    let right_x = snarl.insert_node(
+        egui::pos2(1260.0, 1880.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let right_y = snarl.insert_node(
+        egui::pos2(1260.0, 1970.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let right_z = snarl.insert_node(
+        egui::pos2(1260.0, 2060.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    let forward_x = snarl.insert_node(
+        egui::pos2(1260.0, 2150.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let forward_y = snarl.insert_node(
+        egui::pos2(1260.0, 2240.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let forward_z = snarl.insert_node(
+        egui::pos2(1260.0, 2330.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, move_right_vec, 0, right_x, 0);
+    template_connect_data(&mut snarl, move_right_vec, 0, right_y, 0);
+    template_connect_data(&mut snarl, move_right_vec, 0, right_z, 0);
+    template_connect_data(&mut snarl, move_forward_vec, 0, forward_x, 0);
+    template_connect_data(&mut snarl, move_forward_vec, 0, forward_y, 0);
+    template_connect_data(&mut snarl, move_forward_vec, 0, forward_z, 0);
+
+    let right_x_mul = snarl.insert_node(
+        egui::pos2(1460.0, 1880.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let right_y_mul = snarl.insert_node(
+        egui::pos2(1460.0, 1970.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let right_z_mul = snarl.insert_node(
+        egui::pos2(1460.0, 2060.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let forward_x_mul = snarl.insert_node(
+        egui::pos2(1460.0, 2150.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let forward_y_mul = snarl.insert_node(
+        egui::pos2(1460.0, 2240.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let forward_z_mul = snarl.insert_node(
+        egui::pos2(1460.0, 2330.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, right_x, 0, right_x_mul, 0);
+    template_connect_data(&mut snarl, right_y, 0, right_y_mul, 0);
+    template_connect_data(&mut snarl, right_z, 0, right_z_mul, 0);
+    template_connect_data(&mut snarl, move_axis_x, 0, right_x_mul, 1);
+    template_connect_data(&mut snarl, move_axis_x, 0, right_y_mul, 1);
+    template_connect_data(&mut snarl, move_axis_x, 0, right_z_mul, 1);
+    template_connect_data(&mut snarl, forward_x, 0, forward_x_mul, 0);
+    template_connect_data(&mut snarl, forward_y, 0, forward_y_mul, 0);
+    template_connect_data(&mut snarl, forward_z, 0, forward_z_mul, 0);
+    template_connect_data(&mut snarl, move_axis_z, 0, forward_x_mul, 1);
+    template_connect_data(&mut snarl, move_axis_z, 0, forward_y_mul, 1);
+    template_connect_data(&mut snarl, move_axis_z, 0, forward_z_mul, 1);
+    let zero_planar_y = template_number_node(&mut snarl, egui::pos2(1380.0, 2015.0), 0.0);
+    template_connect_data(&mut snarl, zero_planar_y, 0, right_y_mul, 0);
+    template_connect_data(&mut snarl, zero_planar_y, 0, forward_y_mul, 0);
+
+    let world_x_add = snarl.insert_node(
+        egui::pos2(1660.0, 2015.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let world_y_add = snarl.insert_node(
+        egui::pos2(1660.0, 2105.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let world_z_add = snarl.insert_node(
+        egui::pos2(1660.0, 2195.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, right_x_mul, 0, world_x_add, 0);
+    template_connect_data(&mut snarl, forward_x_mul, 0, world_x_add, 1);
+    template_connect_data(&mut snarl, right_y_mul, 0, world_y_add, 0);
+    template_connect_data(&mut snarl, forward_y_mul, 0, world_y_add, 1);
+    template_connect_data(&mut snarl, right_z_mul, 0, world_z_add, 0);
+    template_connect_data(&mut snarl, forward_z_mul, 0, world_z_add, 1);
+    let world_raw = snarl.insert_node(egui::pos2(1860.0, 2105.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, world_x_add, 0, world_raw, 0);
+    template_connect_data(&mut snarl, world_y_add, 0, world_raw, 1);
+    template_connect_data(&mut snarl, world_z_add, 0, world_raw, 2);
+    let world_dir_normalized = snarl.insert_node(
+        egui::pos2(2060.0, 2105.0),
+        VisualScriptNodeKind::MathVector {
+            op: VisualVectorMathOp::Normalize,
+        },
+    );
+    template_connect_data(&mut snarl, world_raw, 0, world_dir_normalized, 0);
+    let move_input_epsilon = template_number_node(&mut snarl, egui::pos2(2260.0, 2105.0), 0.0001);
+    let has_move_input = snarl.insert_node(
+        egui::pos2(2460.0, 2105.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::Greater,
+        },
+    );
+    template_connect_data(&mut snarl, move_magnitude_raw, 0, has_move_input, 0);
+    template_connect_data(&mut snarl, move_input_epsilon, 0, has_move_input, 1);
+    let zero_world_dir = snarl.insert_node(egui::pos2(2660.0, 2035.0), VisualScriptNodeKind::Vec3);
+    let world_dir = snarl.insert_node(
+        egui::pos2(2660.0, 2140.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Vec3,
+        },
+    );
+    template_connect_data(&mut snarl, has_move_input, 0, world_dir, 0);
+    template_connect_data(&mut snarl, world_dir_normalized, 0, world_dir, 1);
+    template_connect_data(&mut snarl, zero_world_dir, 0, world_dir, 2);
+
+    let speed_walk = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 1870.0),
+        VAR_SPEED_WALK,
+        "move_speed_walk",
+    );
+    let speed_run = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 1960.0),
+        VAR_SPEED_RUN,
+        "move_speed_run",
+    );
+    let speed_sprint = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 2050.0),
+        VAR_SPEED_SPRINT,
+        "move_speed_sprint",
+    );
+    let speed_crouch = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 2140.0),
+        VAR_SPEED_CROUCH,
+        "move_speed_crouch",
+    );
+    let is_sprinting = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 2230.0),
+        VAR_IS_SPRINTING,
+        "is_sprinting",
+    );
+    let is_crouching = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2260.0, 2320.0),
+        VAR_IS_CROUCHING,
+        "is_crouching",
+    );
+    let not_crouching = snarl.insert_node(egui::pos2(2460.0, 2320.0), VisualScriptNodeKind::Not);
+    template_connect_data(&mut snarl, is_crouching, 0, not_crouching, 0);
+    let can_sprint = snarl.insert_node(
+        egui::pos2(2660.0, 2230.0),
+        VisualScriptNodeKind::LogicalBinary {
+            op: VisualLogicalOp::And,
+        },
+    );
+    template_connect_data(&mut snarl, is_sprinting, 0, can_sprint, 0);
+    template_connect_data(&mut snarl, not_crouching, 0, can_sprint, 1);
+    let speed_base = snarl.insert_node(
+        egui::pos2(2460.0, 1960.0),
+        VisualScriptNodeKind::MathInterpolation {
+            op: VisualInterpolationOp::Lerp,
+        },
+    );
+    template_connect_data(&mut snarl, speed_walk, 0, speed_base, 0);
+    template_connect_data(&mut snarl, speed_run, 0, speed_base, 1);
+    template_connect_data(&mut snarl, move_magnitude, 0, speed_base, 2);
+    let speed_sprint_or_base = snarl.insert_node(
+        egui::pos2(2860.0, 2050.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Number,
+        },
+    );
+    template_connect_data(&mut snarl, can_sprint, 0, speed_sprint_or_base, 0);
+    template_connect_data(&mut snarl, speed_sprint, 0, speed_sprint_or_base, 1);
+    template_connect_data(&mut snarl, speed_base, 0, speed_sprint_or_base, 2);
+    let speed_final = snarl.insert_node(
+        egui::pos2(3060.0, 2140.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Number,
+        },
+    );
+    template_connect_data(&mut snarl, is_crouching, 0, speed_final, 0);
+    template_connect_data(&mut snarl, speed_crouch, 0, speed_final, 1);
+    template_connect_data(&mut snarl, speed_sprint_or_base, 0, speed_final, 2);
+
+    let dt = snarl.insert_node(egui::pos2(3260.0, 2140.0), VisualScriptNodeKind::DeltaTime);
+    let step_distance = snarl.insert_node(
+        egui::pos2(3460.0, 2140.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, speed_final, 0, step_distance, 0);
+    template_connect_data(&mut snarl, dt, 0, step_distance, 1);
+
+    let world_dir_x = snarl.insert_node(
+        egui::pos2(2260.0, 2440.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let world_dir_y = snarl.insert_node(
+        egui::pos2(2260.0, 2530.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let world_dir_z = snarl.insert_node(
+        egui::pos2(2260.0, 2620.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, world_dir, 0, world_dir_x, 0);
+    template_connect_data(&mut snarl, world_dir, 0, world_dir_y, 0);
+    template_connect_data(&mut snarl, world_dir, 0, world_dir_z, 0);
+
+    let move_x_scaled = snarl.insert_node(
+        egui::pos2(2460.0, 2440.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let move_y_scaled = snarl.insert_node(
+        egui::pos2(2460.0, 2530.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let move_z_scaled = snarl.insert_node(
+        egui::pos2(2460.0, 2620.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, world_dir_x, 0, move_x_scaled, 0);
+    template_connect_data(&mut snarl, world_dir_y, 0, move_y_scaled, 0);
+    template_connect_data(&mut snarl, world_dir_z, 0, move_z_scaled, 0);
+    template_connect_data(&mut snarl, step_distance, 0, move_x_scaled, 1);
+    template_connect_data(&mut snarl, step_distance, 0, move_y_scaled, 1);
+    template_connect_data(&mut snarl, step_distance, 0, move_z_scaled, 1);
+
+    let desired_move = snarl.insert_node(egui::pos2(2660.0, 2530.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, move_x_scaled, 0, desired_move, 0);
+    template_connect_data(&mut snarl, move_y_scaled, 0, desired_move, 1);
+    template_connect_data(&mut snarl, move_z_scaled, 0, desired_move, 2);
+
+    let is_grounded = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2860.0, 2440.0),
+        VisualApiOperation::EcsGetCharacterControllerGrounded,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, is_grounded, 0);
+    let jump_queued = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2860.0, 2530.0),
+        VAR_JUMP_QUEUED,
+        "jump_queued",
+    );
+    let do_jump = snarl.insert_node(
+        egui::pos2(3060.0, 2485.0),
+        VisualScriptNodeKind::LogicalBinary {
+            op: VisualLogicalOp::And,
+        },
+    );
+    template_connect_data(&mut snarl, is_grounded, 0, do_jump, 0);
+    template_connect_data(&mut snarl, jump_queued, 0, do_jump, 1);
+    let jump_speed = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3260.0, 2350.0),
+        VAR_JUMP_SPEED,
+        "jump_speed",
+    );
+    let gravity_acceleration = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3260.0, 2440.0),
+        VAR_GRAVITY_ACCELERATION,
+        "gravity_acceleration",
+    );
+    let vertical_velocity = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3260.0, 2530.0),
+        VAR_VERTICAL_VELOCITY,
+        "vertical_velocity",
+    );
+    let zero_number = template_number_node(&mut snarl, egui::pos2(3260.0, 2620.0), 0.0);
+    let gravity_step = snarl.insert_node(
+        egui::pos2(3460.0, 2440.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, gravity_acceleration, 0, gravity_step, 0);
+    template_connect_data(&mut snarl, dt, 0, gravity_step, 1);
+    let vertical_after_gravity = snarl.insert_node(
+        egui::pos2(3660.0, 2485.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, vertical_velocity, 0, vertical_after_gravity, 0);
+    template_connect_data(&mut snarl, gravity_step, 0, vertical_after_gravity, 1);
+    let vertical_when_grounded = snarl.insert_node(
+        egui::pos2(3860.0, 2485.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Number,
+        },
+    );
+    template_connect_data(&mut snarl, is_grounded, 0, vertical_when_grounded, 0);
+    template_connect_data(&mut snarl, zero_number, 0, vertical_when_grounded, 1);
+    template_connect_data(
+        &mut snarl,
+        vertical_after_gravity,
+        0,
+        vertical_when_grounded,
+        2,
+    );
+    let vertical_target = snarl.insert_node(
+        egui::pos2(4060.0, 2485.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Number,
+        },
+    );
+    template_connect_data(&mut snarl, do_jump, 0, vertical_target, 0);
+    template_connect_data(&mut snarl, jump_speed, 0, vertical_target, 1);
+    template_connect_data(&mut snarl, vertical_when_grounded, 0, vertical_target, 2);
+    let vertical_step = snarl.insert_node(
+        egui::pos2(4260.0, 2485.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, vertical_target, 0, vertical_step, 0);
+    template_connect_data(&mut snarl, dt, 0, vertical_step, 1);
+    let desired_with_vertical = snarl.insert_node(
+        egui::pos2(4460.0, 2530.0),
+        VisualScriptNodeKind::Vec3SetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    template_connect_data(&mut snarl, desired_move, 0, desired_with_vertical, 0);
+    template_connect_data(&mut snarl, vertical_step, 0, desired_with_vertical, 1);
+
+    let set_move_magnitude = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(560.0, 1400.0),
+        VAR_MOVE_MAGNITUDE,
+        "move_magnitude",
+        "0",
+    );
+    let set_move_dir = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(780.0, 1400.0),
+        VAR_MOVE_WORLD_DIRECTION,
+        "move_world_direction",
+        "{\"x\":0,\"y\":0,\"z\":0}",
+    );
+    let set_vertical_velocity = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(1000.0, 1400.0),
+        VAR_VERTICAL_VELOCITY,
+        "vertical_velocity",
+        "0",
+    );
+    let set_character_move = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1220.0, 1400.0),
+        VisualApiOperation::EcsSetCharacterControllerDesiredTranslation,
+    );
+    let clear_jump_queued = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(1440.0, 1400.0),
+        VAR_JUMP_QUEUED,
+        "jump_queued",
+        "false",
+    );
+    let set_anim_move_input = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1660.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamFloat,
+    );
+    let set_anim_move_speed = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1880.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamFloat,
+    );
+    let set_anim_moving = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2100.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_grounded = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2320.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_jump = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2430.0, 1320.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_sprint = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2540.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_crouch = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2760.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_left_foot = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2980.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_right_foot = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(3200.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamBool,
+    );
+    let set_anim_slope = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1400.0),
+        VisualApiOperation::EcsSetAnimatorParamFloat,
+    );
+    let turn_smooth_speed = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(620.0, 1220.0),
+        VAR_TURN_SMOOTH_SPEED,
+        "turn_smooth_speed",
+    );
+    let facing_yaw = snarl.insert_node(
+        egui::pos2(860.0, 1220.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Atan2,
+        },
+    );
+    template_connect_data(&mut snarl, world_dir_x, 0, facing_yaw, 0);
+    template_connect_data(&mut snarl, world_dir_z, 0, facing_yaw, 1);
+    let base_yaw_offset = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1060.0, 1140.0),
+        VAR_BASE_YAW_OFFSET,
+        "base_yaw_offset",
+    );
+    let facing_yaw_with_offset = snarl.insert_node(
+        egui::pos2(1060.0, 1220.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, facing_yaw, 0, facing_yaw_with_offset, 0);
+    template_connect_data(&mut snarl, base_yaw_offset, 0, facing_yaw_with_offset, 1);
+    let half_number = template_number_node(&mut snarl, egui::pos2(1260.0, 1220.0), 0.5);
+    let facing_half_yaw = snarl.insert_node(
+        egui::pos2(1460.0, 1220.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, facing_yaw_with_offset, 0, facing_half_yaw, 0);
+    template_connect_data(&mut snarl, half_number, 0, facing_half_yaw, 1);
+    let facing_sin = snarl.insert_node(
+        egui::pos2(1660.0, 1180.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Sin,
+        },
+    );
+    let facing_cos = snarl.insert_node(
+        egui::pos2(1660.0, 1260.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Cos,
+        },
+    );
+    template_connect_data(&mut snarl, facing_half_yaw, 0, facing_sin, 0);
+    template_connect_data(&mut snarl, facing_half_yaw, 0, facing_cos, 0);
+    let target_rotation = snarl.insert_node(egui::pos2(1860.0, 1220.0), VisualScriptNodeKind::Quat);
+    template_connect_data(&mut snarl, facing_sin, 0, target_rotation, 1);
+    template_connect_data(&mut snarl, facing_cos, 0, target_rotation, 3);
+    let current_forward = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1660.0, 1310.0),
+        VisualApiOperation::EcsGetTransformForward,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, current_forward, 0);
+    let current_forward_x = snarl.insert_node(
+        egui::pos2(1860.0, 1220.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let current_forward_z = snarl.insert_node(
+        egui::pos2(1860.0, 1300.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, current_forward, 0, current_forward_x, 0);
+    template_connect_data(&mut snarl, current_forward, 0, current_forward_z, 0);
+    let current_yaw = snarl.insert_node(
+        egui::pos2(2060.0, 1260.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Atan2,
+        },
+    );
+    template_connect_data(&mut snarl, current_forward_x, 0, current_yaw, 0);
+    template_connect_data(&mut snarl, current_forward_z, 0, current_yaw, 1);
+    let current_half_yaw = snarl.insert_node(
+        egui::pos2(2260.0, 1260.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, current_yaw, 0, current_half_yaw, 0);
+    template_connect_data(&mut snarl, half_number, 0, current_half_yaw, 1);
+    let current_sin = snarl.insert_node(
+        egui::pos2(2460.0, 1220.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Sin,
+        },
+    );
+    let current_cos = snarl.insert_node(
+        egui::pos2(2460.0, 1300.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Cos,
+        },
+    );
+    template_connect_data(&mut snarl, current_half_yaw, 0, current_sin, 0);
+    template_connect_data(&mut snarl, current_half_yaw, 0, current_cos, 0);
+    let current_rotation =
+        snarl.insert_node(egui::pos2(2660.0, 1260.0), VisualScriptNodeKind::Quat);
+    template_connect_data(&mut snarl, current_sin, 0, current_rotation, 1);
+    template_connect_data(&mut snarl, current_cos, 0, current_rotation, 3);
+    let turn_lerp_raw = snarl.insert_node(
+        egui::pos2(1860.0, 1310.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, dt, 0, turn_lerp_raw, 0);
+    template_connect_data(&mut snarl, turn_smooth_speed, 0, turn_lerp_raw, 1);
+    let turn_lerp = snarl.insert_node(
+        egui::pos2(2060.0, 1310.0),
+        VisualScriptNodeKind::MathProcedural {
+            op: VisualProceduralMathOp::Saturate,
+        },
+    );
+    template_connect_data(&mut snarl, turn_lerp_raw, 0, turn_lerp, 0);
+    let smoothed_rotation = snarl.insert_node(
+        egui::pos2(2260.0, 1310.0),
+        VisualScriptNodeKind::MathInterpolation {
+            op: VisualInterpolationOp::QuatSlerp,
+        },
+    );
+    template_connect_data(&mut snarl, current_rotation, 0, smoothed_rotation, 0);
+    template_connect_data(&mut snarl, target_rotation, 0, smoothed_rotation, 1);
+    template_connect_data(&mut snarl, turn_lerp, 0, smoothed_rotation, 2);
+    let rotated_transform = snarl.insert_node(
+        egui::pos2(2460.0, 1310.0),
+        VisualScriptNodeKind::TransformSetComponent {
+            component: VisualTransformComponent::Rotation,
+        },
+    );
+    template_connect_data(&mut snarl, stage1_self_transform, 0, rotated_transform, 0);
+    template_connect_data(&mut snarl, smoothed_rotation, 0, rotated_transform, 1);
+    let rotate_branch = snarl.insert_node(
+        egui::pos2(1000.0, 1320.0),
+        VisualScriptNodeKind::Branch {
+            condition: "true".to_string(),
+        },
+    );
+    let set_character_rotation = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(1180.0, 1220.0),
+        VisualApiOperation::EcsSetTransform,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, set_character_rotation, 0);
+    template_connect_data(&mut snarl, rotated_transform, 0, set_character_rotation, 1);
+
+    template_set_api_arg(&mut snarl, set_anim_move_input, 1, "move_input");
+    template_set_api_arg(&mut snarl, set_anim_move_speed, 1, "move_speed");
+    template_set_api_arg(&mut snarl, set_anim_moving, 1, "moving");
+    template_set_api_arg(&mut snarl, set_anim_grounded, 1, "grounded");
+    template_set_api_arg(&mut snarl, set_anim_jump, 1, "jump");
+    template_set_api_arg(&mut snarl, set_anim_sprint, 1, "sprint");
+    template_set_api_arg(&mut snarl, set_anim_crouch, 1, "crouch");
+    template_set_api_arg(&mut snarl, set_anim_left_foot, 1, "left_foot_grounded");
+    template_set_api_arg(&mut snarl, set_anim_right_foot, 1, "right_foot_grounded");
+    template_set_api_arg(&mut snarl, set_anim_slope, 1, "slope_angle");
+
+    template_connect_exec(&mut snarl, on_update_seq, 2, set_move_magnitude, 0);
+    template_connect_exec(&mut snarl, set_move_magnitude, 0, set_move_dir, 0);
+    template_connect_exec(&mut snarl, set_move_dir, 0, rotate_branch, 0);
+    template_connect_exec(&mut snarl, rotate_branch, 0, set_character_rotation, 0);
+    template_connect_exec(
+        &mut snarl,
+        set_character_rotation,
+        0,
+        set_vertical_velocity,
+        0,
+    );
+    template_connect_exec(&mut snarl, rotate_branch, 1, set_vertical_velocity, 0);
+    template_connect_exec(&mut snarl, set_vertical_velocity, 0, set_character_move, 0);
+    template_connect_exec(&mut snarl, set_character_move, 0, clear_jump_queued, 0);
+    template_connect_exec(&mut snarl, clear_jump_queued, 0, set_anim_move_input, 0);
+    template_connect_exec(&mut snarl, set_anim_move_input, 0, set_anim_move_speed, 0);
+    template_connect_exec(&mut snarl, set_anim_move_speed, 0, set_anim_moving, 0);
+    template_connect_exec(&mut snarl, set_anim_moving, 0, set_anim_grounded, 0);
+    template_connect_exec(&mut snarl, set_anim_grounded, 0, set_anim_jump, 0);
+    template_connect_exec(&mut snarl, set_anim_jump, 0, set_anim_sprint, 0);
+    template_connect_exec(&mut snarl, set_anim_sprint, 0, set_anim_crouch, 0);
+    template_connect_exec(&mut snarl, set_anim_crouch, 0, set_anim_left_foot, 0);
+    template_connect_exec(&mut snarl, set_anim_left_foot, 0, set_anim_right_foot, 0);
+    template_connect_exec(&mut snarl, set_anim_right_foot, 0, set_anim_slope, 0);
+
+    template_connect_data(&mut snarl, move_magnitude, 0, set_move_magnitude, 0);
+    template_connect_data(&mut snarl, world_dir, 0, set_move_dir, 0);
+    template_connect_data(&mut snarl, vertical_target, 0, set_vertical_velocity, 0);
+    template_connect_data(&mut snarl, self_entity, 0, set_character_move, 0);
+    template_connect_data(&mut snarl, desired_with_vertical, 0, set_character_move, 1);
+    template_connect_data(&mut snarl, false_lit, 0, clear_jump_queued, 0);
+
+    let moving_threshold = template_number_node(&mut snarl, egui::pos2(1680.0, 1310.0), 0.1);
+    let is_moving = snarl.insert_node(
+        egui::pos2(1820.0, 1310.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::Greater,
+        },
+    );
+    template_connect_data(&mut snarl, move_magnitude, 0, is_moving, 0);
+    template_connect_data(&mut snarl, moving_threshold, 0, is_moving, 1);
+    template_connect_data(&mut snarl, is_moving, 0, rotate_branch, 0);
+
+    let left_foot_grounded = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2620.0, 1310.0),
+        VAR_LEFT_FOOT_GROUNDED,
+        "left_foot_grounded",
+    );
+    let right_foot_grounded = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2840.0, 1310.0),
+        VAR_RIGHT_FOOT_GROUNDED,
+        "right_foot_grounded",
+    );
+    let slope_angle = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(3060.0, 1310.0),
+        VisualApiOperation::EcsGetCharacterControllerSlopeAngle,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, slope_angle, 0);
+
+    for node in [
+        set_anim_move_input,
+        set_anim_move_speed,
+        set_anim_moving,
+        set_anim_grounded,
+        set_anim_jump,
+        set_anim_sprint,
+        set_anim_crouch,
+        set_anim_left_foot,
+        set_anim_right_foot,
+        set_anim_slope,
+    ] {
+        template_connect_data(&mut snarl, self_entity, 0, node, 0);
+    }
+    template_connect_data(&mut snarl, move_magnitude, 0, set_anim_move_input, 2);
+    template_connect_data(&mut snarl, speed_final, 0, set_anim_move_speed, 2);
+    template_connect_data(&mut snarl, is_moving, 0, set_anim_moving, 2);
+    template_connect_data(&mut snarl, is_grounded, 0, set_anim_grounded, 2);
+    template_connect_data(&mut snarl, do_jump, 0, set_anim_jump, 2);
+    template_connect_data(&mut snarl, is_sprinting, 0, set_anim_sprint, 2);
+    template_connect_data(&mut snarl, is_crouching, 0, set_anim_crouch, 2);
+    template_connect_data(&mut snarl, left_foot_grounded, 0, set_anim_left_foot, 2);
+    template_connect_data(&mut snarl, right_foot_grounded, 0, set_anim_right_foot, 2);
+    template_connect_data(&mut snarl, slope_angle, 0, set_anim_slope, 2);
+
+    let clip_idle = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1220.0),
+        VAR_CLIP_IDLE,
+        "clip_idle",
+    );
+    let clip_walk = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1300.0),
+        VAR_CLIP_WALK,
+        "clip_walk",
+    );
+    let clip_run = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1380.0),
+        VAR_CLIP_RUN,
+        "clip_run",
+    );
+    let clip_sprint = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1460.0),
+        VAR_CLIP_SPRINT,
+        "clip_sprint",
+    );
+    let clip_jump = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1540.0),
+        VAR_CLIP_JUMP,
+        "clip_jump",
+    );
+    let clip_crouch = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3420.0, 1620.0),
+        VAR_CLIP_CROUCH,
+        "clip_crouch",
+    );
+    let run_threshold = template_number_node(&mut snarl, egui::pos2(3620.0, 1300.0), 0.55);
+    let should_run = snarl.insert_node(
+        egui::pos2(3800.0, 1300.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::Greater,
+        },
+    );
+    template_connect_data(&mut snarl, move_magnitude, 0, should_run, 0);
+    template_connect_data(&mut snarl, run_threshold, 0, should_run, 1);
+    let locomotion_clip = snarl.insert_node(
+        egui::pos2(4000.0, 1300.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::String,
+        },
+    );
+    template_connect_data(&mut snarl, should_run, 0, locomotion_clip, 0);
+    template_connect_data(&mut snarl, clip_run, 0, locomotion_clip, 1);
+    template_connect_data(&mut snarl, clip_walk, 0, locomotion_clip, 2);
+    let sprint_or_locomotion = snarl.insert_node(
+        egui::pos2(4200.0, 1380.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::String,
+        },
+    );
+    template_connect_data(&mut snarl, can_sprint, 0, sprint_or_locomotion, 0);
+    template_connect_data(&mut snarl, clip_sprint, 0, sprint_or_locomotion, 1);
+    template_connect_data(&mut snarl, locomotion_clip, 0, sprint_or_locomotion, 2);
+    let moving_or_idle = snarl.insert_node(
+        egui::pos2(4400.0, 1380.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::String,
+        },
+    );
+    template_connect_data(&mut snarl, is_moving, 0, moving_or_idle, 0);
+    template_connect_data(&mut snarl, sprint_or_locomotion, 0, moving_or_idle, 1);
+    template_connect_data(&mut snarl, clip_idle, 0, moving_or_idle, 2);
+    let crouch_or_base = snarl.insert_node(
+        egui::pos2(4600.0, 1460.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::String,
+        },
+    );
+    template_connect_data(&mut snarl, is_crouching, 0, crouch_or_base, 0);
+    template_connect_data(&mut snarl, clip_crouch, 0, crouch_or_base, 1);
+    template_connect_data(&mut snarl, moving_or_idle, 0, crouch_or_base, 2);
+    let desired_anim_clip = snarl.insert_node(
+        egui::pos2(4800.0, 1540.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::String,
+        },
+    );
+    template_connect_data(&mut snarl, do_jump, 0, desired_anim_clip, 0);
+    template_connect_data(&mut snarl, clip_jump, 0, desired_anim_clip, 1);
+    template_connect_data(&mut snarl, crouch_or_base, 0, desired_anim_clip, 2);
+    let play_anim_clip = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(5000.0, 1460.0),
+        VisualApiOperation::EcsPlayAnimClip,
+    );
+    template_set_api_arg(&mut snarl, play_anim_clip, 2, "0");
+    template_connect_exec(&mut snarl, set_anim_slope, 0, play_anim_clip, 0);
+    template_connect_data(&mut snarl, self_entity, 0, play_anim_clip, 0);
+    template_connect_data(&mut snarl, desired_anim_clip, 0, play_anim_clip, 1);
+
+    let camera_entity_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(520.0, 2840.0),
+        VAR_CAMERA_RUNTIME_ENTITY,
+        "camera_runtime_entity",
+    );
+    let look_x_action = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(520.0, 2930.0),
+        VisualApiOperation::InputActionValue,
+    );
+    let look_y_action = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(520.0, 3020.0),
+        VisualApiOperation::InputActionValue,
+    );
+    template_set_api_arg(&mut snarl, look_x_action, 0, "look_x");
+    template_set_api_arg(&mut snarl, look_y_action, 0, "look_y");
+    let cursor_delta = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(520.0, 3200.0),
+        VisualApiOperation::InputCursorDelta,
+    );
+    let cursor_x = snarl.insert_node(
+        egui::pos2(720.0, 3160.0),
+        VisualScriptNodeKind::Vec2GetComponent {
+            component: VisualVec2Component::X,
+        },
+    );
+    let cursor_y = snarl.insert_node(
+        egui::pos2(720.0, 3250.0),
+        VisualScriptNodeKind::Vec2GetComponent {
+            component: VisualVec2Component::Y,
+        },
+    );
+    template_connect_data(&mut snarl, cursor_delta, 0, cursor_x, 0);
+    template_connect_data(&mut snarl, cursor_delta, 0, cursor_y, 0);
+    let cursor_weight = template_number_node(&mut snarl, egui::pos2(920.0, 3205.0), 1.0);
+    let cursor_x_weighted = snarl.insert_node(
+        egui::pos2(1120.0, 3160.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let cursor_y_weighted = snarl.insert_node(
+        egui::pos2(1120.0, 3250.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, cursor_x, 0, cursor_x_weighted, 0);
+    template_connect_data(&mut snarl, cursor_weight, 0, cursor_x_weighted, 1);
+    template_connect_data(&mut snarl, cursor_y, 0, cursor_y_weighted, 0);
+    template_connect_data(&mut snarl, cursor_weight, 0, cursor_y_weighted, 1);
+    let yaw_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(520.0, 3330.0),
+        VAR_CAMERA_ORBIT_YAW,
+        "camera_orbit_yaw",
+    );
+    let pitch_var = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(520.0, 3420.0),
+        VAR_CAMERA_ORBIT_PITCH,
+        "camera_orbit_pitch",
+    );
+    let camera_stick_sensitivity = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(920.0, 3330.0),
+        VAR_CAMERA_STICK_SENSITIVITY,
+        "camera_stick_sensitivity",
+    );
+    let camera_mouse_sensitivity = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(920.0, 3420.0),
+        VAR_CAMERA_MOUSE_SENSITIVITY,
+        "camera_mouse_sensitivity",
+    );
+    let look_x_dt = snarl.insert_node(
+        egui::pos2(1120.0, 3330.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let look_y_dt = snarl.insert_node(
+        egui::pos2(1120.0, 3420.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, look_x_action, 0, look_x_dt, 0);
+    template_connect_data(&mut snarl, dt, 0, look_x_dt, 1);
+    template_connect_data(&mut snarl, look_y_action, 0, look_y_dt, 0);
+    template_connect_data(&mut snarl, dt, 0, look_y_dt, 1);
+    let stick_yaw_delta = snarl.insert_node(
+        egui::pos2(1320.0, 3330.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let stick_pitch_delta = snarl.insert_node(
+        egui::pos2(1320.0, 3420.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, look_x_dt, 0, stick_yaw_delta, 0);
+    template_connect_data(&mut snarl, camera_stick_sensitivity, 0, stick_yaw_delta, 1);
+    template_connect_data(&mut snarl, look_y_dt, 0, stick_pitch_delta, 0);
+    template_connect_data(
+        &mut snarl,
+        camera_stick_sensitivity,
+        0,
+        stick_pitch_delta,
+        1,
+    );
+    let neg_one_mouse = template_number_node(&mut snarl, egui::pos2(1120.0, 3510.0), 1.0);
+    let cursor_x_inverted = snarl.insert_node(
+        egui::pos2(1220.0, 3510.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, cursor_x_weighted, 0, cursor_x_inverted, 0);
+    template_connect_data(&mut snarl, neg_one_mouse, 0, cursor_x_inverted, 1);
+    let mouse_yaw_delta = snarl.insert_node(
+        egui::pos2(1420.0, 3510.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let mouse_pitch_delta = snarl.insert_node(
+        egui::pos2(1320.0, 3600.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, cursor_x_inverted, 0, mouse_yaw_delta, 0);
+    template_connect_data(&mut snarl, camera_mouse_sensitivity, 0, mouse_yaw_delta, 1);
+    template_connect_data(&mut snarl, cursor_y_weighted, 0, mouse_pitch_delta, 0);
+    template_connect_data(
+        &mut snarl,
+        camera_mouse_sensitivity,
+        0,
+        mouse_pitch_delta,
+        1,
+    );
+    let yaw_delta = snarl.insert_node(
+        egui::pos2(1520.0, 3330.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let pitch_delta = snarl.insert_node(
+        egui::pos2(1520.0, 3420.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, stick_yaw_delta, 0, yaw_delta, 0);
+    template_connect_data(&mut snarl, mouse_yaw_delta, 0, yaw_delta, 1);
+    template_connect_data(&mut snarl, stick_pitch_delta, 0, pitch_delta, 0);
+    template_connect_data(&mut snarl, mouse_pitch_delta, 0, pitch_delta, 1);
+    let yaw_updated = snarl.insert_node(
+        egui::pos2(1720.0, 3330.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    let pitch_updated = snarl.insert_node(
+        egui::pos2(1720.0, 3420.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Subtract,
+        },
+    );
+    template_connect_data(&mut snarl, yaw_var, 0, yaw_updated, 0);
+    template_connect_data(&mut snarl, yaw_delta, 0, yaw_updated, 1);
+    template_connect_data(&mut snarl, yaw_updated, 0, move_yaw_rad, 0);
+    template_connect_data(&mut snarl, pitch_var, 0, pitch_updated, 0);
+    template_connect_data(&mut snarl, pitch_delta, 0, pitch_updated, 1);
+    let pitch_min = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1720.0, 3500.0),
+        VAR_CAMERA_PITCH_MIN,
+        "camera_pitch_min",
+    );
+    let pitch_max = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1720.0, 3590.0),
+        VAR_CAMERA_PITCH_MAX,
+        "camera_pitch_max",
+    );
+    let pitch_clamped = snarl.insert_node(
+        egui::pos2(1920.0, 3460.0),
+        VisualScriptNodeKind::MathProcedural {
+            op: VisualProceduralMathOp::Clamp,
+        },
+    );
+    template_connect_data(&mut snarl, pitch_updated, 0, pitch_clamped, 0);
+    template_connect_data(&mut snarl, pitch_min, 0, pitch_clamped, 1);
+    template_connect_data(&mut snarl, pitch_max, 0, pitch_clamped, 2);
+
+    let set_yaw = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(2160.0, 3330.0),
+        VAR_CAMERA_ORBIT_YAW,
+        "camera_orbit_yaw",
+        "0",
+    );
+    let set_pitch = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(2380.0, 3330.0),
+        VAR_CAMERA_ORBIT_PITCH,
+        "camera_orbit_pitch",
+        "18",
+    );
+    template_connect_exec(&mut snarl, on_update_seq, 1, set_yaw, 0);
+    template_connect_exec(&mut snarl, set_yaw, 0, set_pitch, 0);
+    template_connect_data(&mut snarl, yaw_updated, 0, set_yaw, 0);
+    template_connect_data(&mut snarl, pitch_clamped, 0, set_pitch, 0);
+
+    let yaw_rad = snarl.insert_node(
+        egui::pos2(2160.0, 3520.0),
+        VisualScriptNodeKind::MathUtility {
+            op: VisualUtilityMathOp::Radians,
+        },
+    );
+    let pitch_rad = snarl.insert_node(
+        egui::pos2(2160.0, 3610.0),
+        VisualScriptNodeKind::MathUtility {
+            op: VisualUtilityMathOp::Radians,
+        },
+    );
+    template_connect_data(&mut snarl, yaw_updated, 0, yaw_rad, 0);
+    template_connect_data(&mut snarl, pitch_clamped, 0, pitch_rad, 0);
+    let sin_yaw = snarl.insert_node(
+        egui::pos2(2360.0, 3520.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Sin,
+        },
+    );
+    let cos_yaw = snarl.insert_node(
+        egui::pos2(2360.0, 3610.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Cos,
+        },
+    );
+    let sin_pitch = snarl.insert_node(
+        egui::pos2(2360.0, 3700.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Sin,
+        },
+    );
+    let cos_pitch = snarl.insert_node(
+        egui::pos2(2360.0, 3790.0),
+        VisualScriptNodeKind::MathTrig {
+            op: VisualTrigOp::Cos,
+        },
+    );
+    template_connect_data(&mut snarl, yaw_rad, 0, sin_yaw, 0);
+    template_connect_data(&mut snarl, yaw_rad, 0, cos_yaw, 0);
+    template_connect_data(&mut snarl, pitch_rad, 0, sin_pitch, 0);
+    template_connect_data(&mut snarl, pitch_rad, 0, cos_pitch, 0);
+    let dir_x_mul = snarl.insert_node(
+        egui::pos2(2560.0, 3520.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let dir_z_mul = snarl.insert_node(
+        egui::pos2(2560.0, 3610.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, cos_pitch, 0, dir_x_mul, 0);
+    template_connect_data(&mut snarl, sin_yaw, 0, dir_x_mul, 1);
+    template_connect_data(&mut snarl, cos_pitch, 0, dir_z_mul, 0);
+    template_connect_data(&mut snarl, cos_yaw, 0, dir_z_mul, 1);
+    let dir_x = snarl.insert_node(
+        egui::pos2(2760.0, 3520.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let dir_z = snarl.insert_node(
+        egui::pos2(2760.0, 3610.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, dir_x_mul, 0, dir_x, 0);
+    template_connect_data(&mut snarl, neg_one, 0, dir_x, 1);
+    template_connect_data(&mut snarl, dir_z_mul, 0, dir_z, 0);
+    template_connect_data(&mut snarl, neg_one, 0, dir_z, 1);
+    let orbit_dir = snarl.insert_node(egui::pos2(2960.0, 3610.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, dir_x, 0, orbit_dir, 0);
+    template_connect_data(&mut snarl, sin_pitch, 0, orbit_dir, 1);
+    template_connect_data(&mut snarl, dir_z, 0, orbit_dir, 2);
+
+    let cam_self_transform = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2160.0, 3880.0),
+        VisualApiOperation::EcsGetTransform,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, cam_self_transform, 0);
+    let cam_position = snarl.insert_node(
+        egui::pos2(2360.0, 3880.0),
+        VisualScriptNodeKind::TransformGetComponent {
+            component: VisualTransformComponent::Position,
+        },
+    );
+    template_connect_data(&mut snarl, cam_self_transform, 0, cam_position, 0);
+    let cam_pos_x = snarl.insert_node(
+        egui::pos2(2560.0, 3830.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let cam_pos_y = snarl.insert_node(
+        egui::pos2(2560.0, 3920.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let cam_pos_z = snarl.insert_node(
+        egui::pos2(2560.0, 4010.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, cam_position, 0, cam_pos_x, 0);
+    template_connect_data(&mut snarl, cam_position, 0, cam_pos_y, 0);
+    template_connect_data(&mut snarl, cam_position, 0, cam_pos_z, 0);
+    let cam_pivot_height = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(2760.0, 3920.0),
+        VAR_CAMERA_PIVOT_HEIGHT,
+        "camera_pivot_height",
+    );
+    let cam_origin_y = snarl.insert_node(
+        egui::pos2(2960.0, 3920.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, cam_pos_y, 0, cam_origin_y, 0);
+    template_connect_data(&mut snarl, cam_pivot_height, 0, cam_origin_y, 1);
+    let camera_origin = snarl.insert_node(egui::pos2(3160.0, 3920.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, cam_pos_x, 0, camera_origin, 0);
+    template_connect_data(&mut snarl, cam_origin_y, 0, camera_origin, 1);
+    template_connect_data(&mut snarl, cam_pos_z, 0, camera_origin, 2);
+
+    let camera_max_distance = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3160.0, 4040.0),
+        VAR_CAMERA_MAX_DISTANCE,
+        "camera_max_distance",
+    );
+    let camera_min_distance = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(3160.0, 4130.0),
+        VAR_CAMERA_MIN_DISTANCE,
+        "camera_min_distance",
+    );
+    let camera_cast_hit = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(3360.0, 3920.0),
+        VisualApiOperation::EcsSphereCastHasHit,
+    );
+    template_set_api_arg(&mut snarl, camera_cast_hit, 1, "0.2");
+    template_connect_data(&mut snarl, camera_origin, 0, camera_cast_hit, 0);
+    template_connect_data(&mut snarl, orbit_dir, 0, camera_cast_hit, 2);
+    template_connect_data(&mut snarl, camera_max_distance, 0, camera_cast_hit, 3);
+    template_connect_data(&mut snarl, self_entity, 0, camera_cast_hit, 5);
+    let camera_cast_toi = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(3360.0, 4050.0),
+        VisualApiOperation::EcsSphereCastToi,
+    );
+    template_set_api_arg(&mut snarl, camera_cast_toi, 1, "0.2");
+    template_connect_data(&mut snarl, camera_origin, 0, camera_cast_toi, 0);
+    template_connect_data(&mut snarl, orbit_dir, 0, camera_cast_toi, 2);
+    template_connect_data(&mut snarl, camera_max_distance, 0, camera_cast_toi, 3);
+    template_connect_data(&mut snarl, self_entity, 0, camera_cast_toi, 5);
+    let toi_padding = template_number_node(&mut snarl, egui::pos2(3560.0, 4130.0), 0.24);
+    let toi_adjusted = snarl.insert_node(
+        egui::pos2(3760.0, 4050.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Subtract,
+        },
+    );
+    template_connect_data(&mut snarl, camera_cast_toi, 0, toi_adjusted, 0);
+    template_connect_data(&mut snarl, toi_padding, 0, toi_adjusted, 1);
+    let blocked_min_distance = template_number_node(&mut snarl, egui::pos2(3960.0, 3990.0), 0.05);
+    let blocked_distance = snarl.insert_node(
+        egui::pos2(3960.0, 4050.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Max,
+        },
+    );
+    template_connect_data(&mut snarl, toi_adjusted, 0, blocked_distance, 0);
+    template_connect_data(&mut snarl, blocked_min_distance, 0, blocked_distance, 1);
+    let default_camera_distance = snarl.insert_node(
+        egui::pos2(3960.0, 4140.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Max,
+        },
+    );
+    template_connect_data(
+        &mut snarl,
+        camera_max_distance,
+        0,
+        default_camera_distance,
+        0,
+    );
+    template_connect_data(
+        &mut snarl,
+        camera_min_distance,
+        0,
+        default_camera_distance,
+        1,
+    );
+    let camera_distance = snarl.insert_node(
+        egui::pos2(4160.0, 4095.0),
+        VisualScriptNodeKind::Select {
+            value_type: VisualValueType::Number,
+        },
+    );
+    template_connect_data(&mut snarl, camera_cast_hit, 0, camera_distance, 0);
+    template_connect_data(&mut snarl, blocked_distance, 0, camera_distance, 1);
+    template_connect_data(&mut snarl, default_camera_distance, 0, camera_distance, 2);
+
+    let orbit_dir_x = snarl.insert_node(
+        egui::pos2(3360.0, 4270.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let orbit_dir_y = snarl.insert_node(
+        egui::pos2(3360.0, 4360.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let orbit_dir_z = snarl.insert_node(
+        egui::pos2(3360.0, 4450.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, orbit_dir, 0, orbit_dir_x, 0);
+    template_connect_data(&mut snarl, orbit_dir, 0, orbit_dir_y, 0);
+    template_connect_data(&mut snarl, orbit_dir, 0, orbit_dir_z, 0);
+    let orbit_offset_x = snarl.insert_node(
+        egui::pos2(3560.0, 4270.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let orbit_offset_y = snarl.insert_node(
+        egui::pos2(3560.0, 4360.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let orbit_offset_z = snarl.insert_node(
+        egui::pos2(3560.0, 4450.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, orbit_dir_x, 0, orbit_offset_x, 0);
+    template_connect_data(&mut snarl, orbit_dir_y, 0, orbit_offset_y, 0);
+    template_connect_data(&mut snarl, orbit_dir_z, 0, orbit_offset_z, 0);
+    template_connect_data(&mut snarl, camera_distance, 0, orbit_offset_x, 1);
+    template_connect_data(&mut snarl, camera_distance, 0, orbit_offset_y, 1);
+    template_connect_data(&mut snarl, camera_distance, 0, orbit_offset_z, 1);
+    let orbit_offset_y_with_pivot = snarl.insert_node(
+        egui::pos2(3760.0, 4360.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Add,
+        },
+    );
+    template_connect_data(&mut snarl, orbit_offset_y, 0, orbit_offset_y_with_pivot, 0);
+    template_connect_data(
+        &mut snarl,
+        cam_pivot_height,
+        0,
+        orbit_offset_y_with_pivot,
+        1,
+    );
+    let orbit_offset = snarl.insert_node(egui::pos2(3760.0, 4360.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, orbit_offset_x, 0, orbit_offset, 0);
+    template_connect_data(&mut snarl, orbit_offset_y_with_pivot, 0, orbit_offset, 1);
+    template_connect_data(&mut snarl, orbit_offset_z, 0, orbit_offset, 2);
+
+    let camera_target_offset_runtime =
+        snarl.insert_node(egui::pos2(3960.0, 4360.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(
+        &mut snarl,
+        cam_pivot_height,
+        0,
+        camera_target_offset_runtime,
+        1,
+    );
+
+    let camera_set_follower = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2600.0, 3330.0),
+        VisualApiOperation::EcsSetEntityFollower,
+    );
+    let camera_set_look_at = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(2820.0, 3330.0),
+        VisualApiOperation::EcsSetLookAt,
+    );
+    template_set_api_arg(&mut snarl, camera_set_follower, 3, "false");
+    template_set_api_arg(&mut snarl, camera_set_follower, 4, "false");
+    template_set_api_arg(&mut snarl, camera_set_follower, 5, "0.0");
+    template_set_api_arg(&mut snarl, camera_set_follower, 6, "0.0");
+    template_set_api_arg(&mut snarl, camera_set_look_at, 3, "true");
+    template_set_api_arg(&mut snarl, camera_set_look_at, 5, "0.0");
+    template_connect_exec(&mut snarl, play_anim_clip, 0, camera_set_follower, 0);
+    template_connect_exec(&mut snarl, camera_set_follower, 0, camera_set_look_at, 0);
+    template_connect_data(&mut snarl, camera_entity_var, 0, camera_set_follower, 0);
+    template_connect_data(&mut snarl, self_entity, 0, camera_set_follower, 1);
+    template_connect_data(&mut snarl, orbit_offset, 0, camera_set_follower, 2);
+    template_connect_data(&mut snarl, camera_entity_var, 0, camera_set_look_at, 0);
+    template_connect_data(&mut snarl, self_entity, 0, camera_set_look_at, 1);
+    template_connect_data(
+        &mut snarl,
+        camera_target_offset_runtime,
+        0,
+        camera_set_look_at,
+        2,
+    );
+    template_connect_data(&mut snarl, camera_up_vec, 0, camera_set_look_at, 4);
+
+    let hit_collision_count = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 4660.0),
+        VisualApiOperation::EcsGetCharacterControllerCollisionCount,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, hit_collision_count, 0);
+    let has_collisions = snarl.insert_node(
+        egui::pos2(760.0, 4660.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::Greater,
+        },
+    );
+    let zero_for_collision = template_number_node(&mut snarl, egui::pos2(760.0, 4750.0), 0.0);
+    template_connect_data(&mut snarl, hit_collision_count, 0, has_collisions, 0);
+    template_connect_data(&mut snarl, zero_for_collision, 0, has_collisions, 1);
+    let hit_entity = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(560.0, 4840.0),
+        VisualApiOperation::EcsGetCharacterControllerHitEntity,
+    );
+    template_connect_data(&mut snarl, self_entity, 0, hit_entity, 0);
+    let hit_entity_exists = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(760.0, 4840.0),
+        VisualApiOperation::EcsEntityExists,
+    );
+    template_connect_data(&mut snarl, hit_entity, 0, hit_entity_exists, 0);
+    let hit_entity_dynamic = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(760.0, 4930.0),
+        VisualApiOperation::EcsHasComponent,
+    );
+    template_set_api_arg(&mut snarl, hit_entity_dynamic, 1, "dynamic_rigid_body");
+    template_connect_data(&mut snarl, hit_entity, 0, hit_entity_dynamic, 0);
+    let moving_mag_for_push = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(560.0, 5020.0),
+        VAR_MOVE_MAGNITUDE,
+        "move_magnitude",
+    );
+    let moving_for_push = snarl.insert_node(
+        egui::pos2(760.0, 5020.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::Greater,
+        },
+    );
+    let push_threshold = template_number_node(&mut snarl, egui::pos2(760.0, 5110.0), 0.1);
+    template_connect_data(&mut snarl, moving_mag_for_push, 0, moving_for_push, 0);
+    template_connect_data(&mut snarl, push_threshold, 0, moving_for_push, 1);
+
+    let can_push_a = snarl.insert_node(
+        egui::pos2(960.0, 4750.0),
+        VisualScriptNodeKind::LogicalBinary {
+            op: VisualLogicalOp::And,
+        },
+    );
+    let can_push = snarl.insert_node(
+        egui::pos2(1160.0, 4840.0),
+        VisualScriptNodeKind::LogicalBinary {
+            op: VisualLogicalOp::And,
+        },
+    );
+    let can_push_b = snarl.insert_node(
+        egui::pos2(1160.0, 4930.0),
+        VisualScriptNodeKind::LogicalBinary {
+            op: VisualLogicalOp::And,
+        },
+    );
+    template_connect_data(&mut snarl, has_collisions, 0, can_push_a, 0);
+    template_connect_data(&mut snarl, hit_entity_exists, 0, can_push_a, 1);
+    template_connect_data(&mut snarl, can_push_a, 0, can_push_b, 0);
+    template_connect_data(&mut snarl, hit_entity_dynamic, 0, can_push_b, 1);
+    template_connect_data(&mut snarl, can_push_b, 0, can_push, 0);
+    template_connect_data(&mut snarl, moving_for_push, 0, can_push, 1);
+
+    let push_branch = snarl.insert_node(
+        egui::pos2(560.0, 5200.0),
+        VisualScriptNodeKind::Branch {
+            condition: "true".to_string(),
+        },
+    );
+    template_connect_exec(&mut snarl, on_update_seq, 3, push_branch, 0);
+    template_connect_data(&mut snarl, can_push, 0, push_branch, 0);
+
+    let push_dir = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1360.0, 4840.0),
+        VAR_MOVE_WORLD_DIRECTION,
+        "move_world_direction",
+    );
+    let push_strength = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(1360.0, 4930.0),
+        VAR_PUSH_IMPULSE,
+        "push_impulse",
+    );
+    let push_min_strength = template_number_node(&mut snarl, egui::pos2(1360.0, 5020.0), 0.1);
+    let push_strength_effective = snarl.insert_node(
+        egui::pos2(1560.0, 5020.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Max,
+        },
+    );
+    template_connect_data(&mut snarl, push_strength, 0, push_strength_effective, 0);
+    template_connect_data(&mut snarl, push_min_strength, 0, push_strength_effective, 1);
+    let push_dir_x = snarl.insert_node(
+        egui::pos2(1560.0, 4750.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::X,
+        },
+    );
+    let push_dir_y = snarl.insert_node(
+        egui::pos2(1560.0, 4840.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Y,
+        },
+    );
+    let push_dir_z = snarl.insert_node(
+        egui::pos2(1560.0, 4930.0),
+        VisualScriptNodeKind::Vec3GetComponent {
+            component: VisualVec3Component::Z,
+        },
+    );
+    template_connect_data(&mut snarl, push_dir, 0, push_dir_x, 0);
+    template_connect_data(&mut snarl, push_dir, 0, push_dir_y, 0);
+    template_connect_data(&mut snarl, push_dir, 0, push_dir_z, 0);
+
+    let push_x = snarl.insert_node(
+        egui::pos2(1760.0, 4750.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let push_y = snarl.insert_node(
+        egui::pos2(1760.0, 4840.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    let push_z = snarl.insert_node(
+        egui::pos2(1760.0, 4930.0),
+        VisualScriptNodeKind::MathBinary {
+            op: VisualMathOp::Multiply,
+        },
+    );
+    template_connect_data(&mut snarl, push_dir_x, 0, push_x, 0);
+    template_connect_data(&mut snarl, push_dir_y, 0, push_y, 0);
+    template_connect_data(&mut snarl, push_dir_z, 0, push_z, 0);
+    template_connect_data(&mut snarl, push_strength_effective, 0, push_x, 1);
+    template_connect_data(&mut snarl, push_strength_effective, 0, push_y, 1);
+    template_connect_data(&mut snarl, push_strength_effective, 0, push_z, 1);
+    let push_vector = snarl.insert_node(egui::pos2(1960.0, 4840.0), VisualScriptNodeKind::Vec3);
+    template_connect_data(&mut snarl, push_x, 0, push_vector, 0);
+    template_connect_data(&mut snarl, push_y, 0, push_vector, 1);
+    template_connect_data(&mut snarl, push_z, 0, push_vector, 2);
+
+    let apply_push = template_insert_api_node(
+        &mut snarl,
+        egui::pos2(760.0, 5200.0),
+        VisualApiOperation::EcsAddForce,
+    );
+    template_set_api_arg(&mut snarl, apply_push, 2, "true");
+    template_connect_exec(&mut snarl, push_branch, 0, apply_push, 0);
+    template_connect_data(&mut snarl, hit_entity, 0, apply_push, 0);
+    template_connect_data(&mut snarl, push_vector, 0, apply_push, 1);
+
+    VisualScriptDocument {
+        version: VISUAL_SCRIPT_VERSION,
+        name: "third_person_controller".to_string(),
+        prelude: "".to_string(),
+        variables,
+        functions: Vec::new(),
+        graph: graph_data_from_snarl(&snarl),
+    }
+}
+
 fn default_visual_script_document() -> VisualScriptDocument {
     let mut snarl = Snarl::new();
     let on_start = snarl.insert_node(egui::pos2(48.0, 80.0), VisualScriptNodeKind::OnStart);
-    let on_update = snarl.insert_node(egui::pos2(48.0, 280.0), VisualScriptNodeKind::OnUpdate);
+    let _on_update = snarl.insert_node(egui::pos2(48.0, 280.0), VisualScriptNodeKind::OnUpdate);
     let start_log = snarl.insert_node(
         egui::pos2(340.0, 80.0),
         VisualScriptNodeKind::Log {
@@ -10560,6 +15796,19 @@ fn set_status_message(world: &mut World, message: String) {
     crate::editor::push_console_status(world, message);
 }
 
+fn visual_variable_supports_asset_kind(
+    value_type: VisualValueType,
+    array_item_type: Option<VisualValueType>,
+) -> bool {
+    if value_type == VisualValueType::String {
+        return true;
+    }
+    if value_type == VisualValueType::Array {
+        return array_item_type == Some(VisualValueType::String);
+    }
+    false
+}
+
 fn draw_variable_definitions_panel(
     ui: &mut Ui,
     document: &mut VisualScriptOpenDocument,
@@ -10588,7 +15837,7 @@ fn draw_variable_definitions_panel(
                 ComboBox::from_id_salt(("visual_variable_type", index))
                     .selected_text(variable.value_type.title())
                     .show_ui(ui, |ui| {
-                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
+                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_ANY {
                             if ui
                                 .selectable_value(
                                     &mut variable.value_type,
@@ -10601,6 +15850,12 @@ fn draw_variable_definitions_panel(
                                     variable.value_type,
                                     &mut variable.array_item_type,
                                 );
+                                if !visual_variable_supports_asset_kind(
+                                    variable.value_type,
+                                    variable.array_item_type,
+                                ) {
+                                    variable.inspector_asset_kind = None;
+                                }
                                 variable.default_value = normalize_literal_for_data_type(
                                     &variable.default_value,
                                     value_type,
@@ -10632,6 +15887,12 @@ fn draw_variable_definitions_panel(
                                         variable.value_type,
                                         &mut variable.array_item_type,
                                     );
+                                    if !visual_variable_supports_asset_kind(
+                                        variable.value_type,
+                                        variable.array_item_type,
+                                    ) {
+                                        variable.inspector_asset_kind = None;
+                                    }
                                     variable.default_value = normalize_literal_for_data_type(
                                         &variable.default_value,
                                         variable.value_type,
@@ -10658,6 +15919,59 @@ fn draw_variable_definitions_panel(
                     &mut variable.default_value,
                 ) {
                     *changed = true;
+                }
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .checkbox(&mut variable.inspector_exposed, "Expose in Inspector")
+                    .changed()
+                {
+                    *changed = true;
+                }
+
+                if variable.inspector_exposed {
+                    ui.label("Label");
+                    if ui
+                        .text_edit_singleline(&mut variable.inspector_label)
+                        .changed()
+                    {
+                        *changed = true;
+                    }
+
+                    if visual_variable_supports_asset_kind(
+                        variable.value_type,
+                        variable.array_item_type,
+                    ) {
+                        let mut asset_kind = variable
+                            .inspector_asset_kind
+                            .unwrap_or(VisualInspectorAssetKind::Any);
+                        ComboBox::from_id_salt(("visual_variable_asset_kind", index))
+                            .selected_text(asset_kind.title())
+                            .show_ui(ui, |ui| {
+                                for kind in [
+                                    VisualInspectorAssetKind::Any,
+                                    VisualInspectorAssetKind::Scene,
+                                    VisualInspectorAssetKind::Model,
+                                    VisualInspectorAssetKind::Material,
+                                    VisualInspectorAssetKind::Audio,
+                                    VisualInspectorAssetKind::Script,
+                                    VisualInspectorAssetKind::Animation,
+                                ] {
+                                    if ui
+                                        .selectable_value(&mut asset_kind, kind, kind.title())
+                                        .changed()
+                                    {
+                                        *changed = true;
+                                    }
+                                }
+                            });
+                        variable.inspector_asset_kind = Some(asset_kind);
+                    } else {
+                        variable.inspector_asset_kind = None;
+                    }
+                } else {
+                    variable.inspector_asset_kind = None;
                 }
             });
 
@@ -10691,6 +16005,9 @@ fn draw_variable_definitions_panel(
             value_type: VisualValueType::String,
             array_item_type: None,
             default_value: String::new(),
+            inspector_exposed: false,
+            inspector_label: String::new(),
+            inspector_asset_kind: None,
         });
         *changed = true;
     }
@@ -10802,7 +16119,7 @@ fn sync_call_function_nodes_in_snarl(
                     let value_type = inputs
                         .get(args.len())
                         .map(|port| port.value_type)
-                        .unwrap_or(VisualValueType::Json);
+                        .unwrap_or(VisualValueType::Any);
                     args.push(default_literal_for_type(value_type).to_string());
                 }
 
@@ -10843,7 +16160,7 @@ fn draw_function_port_list(
                 ComboBox::from_id_salt((label, "function_port_type", index))
                     .selected_text(port.value_type.title())
                     .show_ui(ui, |ui| {
-                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
+                        for value_type in VISUAL_VALUE_TYPE_CHOICES_NO_ANY {
                             if ui
                                 .selectable_value(
                                     &mut port.value_type,
@@ -11273,6 +16590,62 @@ impl VisualScriptViewer {
                     "On Stop".to_string(),
                     &["on stop", "event"],
                     AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnStop),
+                );
+                push_search_result(
+                    "On Collision Enter".to_string(),
+                    &["collision enter", "on collision", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnCollisionEnter),
+                );
+                push_search_result(
+                    "On Collision Stay".to_string(),
+                    &["collision stay", "on collision", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnCollisionStay),
+                );
+                push_search_result(
+                    "On Collision Exit".to_string(),
+                    &["collision exit", "on collision", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnCollisionExit),
+                );
+                push_search_result(
+                    "On Trigger Enter".to_string(),
+                    &["trigger enter", "on trigger", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnTriggerEnter),
+                );
+                push_search_result(
+                    "On Trigger Exit".to_string(),
+                    &["trigger exit", "on trigger", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnTriggerExit),
+                );
+                push_search_result(
+                    "On Input Pressed".to_string(),
+                    &["on input", "input action", "pressed", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnInputAction {
+                        action: default_input_action_name(),
+                        phase: VisualInputActionPhase::Pressed,
+                    }),
+                );
+                push_search_result(
+                    "On Input Released".to_string(),
+                    &["on input", "input action", "released", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnInputAction {
+                        action: default_input_action_name(),
+                        phase: VisualInputActionPhase::Released,
+                    }),
+                );
+                push_search_result(
+                    "On Input Down".to_string(),
+                    &["on input", "input action", "down", "held", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnInputAction {
+                        action: default_input_action_name(),
+                        phase: VisualInputActionPhase::Down,
+                    }),
+                );
+                push_search_result(
+                    "On Custom Event".to_string(),
+                    &["custom event", "emit event", "on event", "event"],
+                    AddNodeSearchAction::InsertNode(VisualScriptNodeKind::OnCustomEvent {
+                        name: default_custom_event_name(),
+                    }),
                 );
             } else if let Some(function_id) = self.active_function_graph {
                 let inputs = self
@@ -11905,6 +17278,71 @@ impl VisualScriptViewer {
                         "On Stop",
                         &["on stop", "event"],
                         VisualScriptNodeKind::OnStop
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Collision Enter",
+                        &["collision enter", "on collision", "event"],
+                        VisualScriptNodeKind::OnCollisionEnter
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Collision Stay",
+                        &["collision stay", "on collision", "event"],
+                        VisualScriptNodeKind::OnCollisionStay
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Collision Exit",
+                        &["collision exit", "on collision", "event"],
+                        VisualScriptNodeKind::OnCollisionExit
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Trigger Enter",
+                        &["trigger enter", "on trigger", "event"],
+                        VisualScriptNodeKind::OnTriggerEnter
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Trigger Exit",
+                        &["trigger exit", "on trigger", "event"],
+                        VisualScriptNodeKind::OnTriggerExit
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Input Pressed",
+                        &["on input", "input action", "pressed", "event"],
+                        VisualScriptNodeKind::OnInputAction {
+                            action: default_input_action_name(),
+                            phase: VisualInputActionPhase::Pressed,
+                        }
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Input Released",
+                        &["on input", "input action", "released", "event"],
+                        VisualScriptNodeKind::OnInputAction {
+                            action: default_input_action_name(),
+                            phase: VisualInputActionPhase::Released,
+                        }
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Input Down",
+                        &["on input", "input action", "down", "held", "event"],
+                        VisualScriptNodeKind::OnInputAction {
+                            action: default_input_action_name(),
+                            phase: VisualInputActionPhase::Down,
+                        }
+                    );
+                    add_node_button!(
+                        ui,
+                        "On Custom Event",
+                        &["custom event", "emit event", "on event", "event"],
+                        VisualScriptNodeKind::OnCustomEvent {
+                            name: default_custom_event_name(),
+                        }
                     );
                 } else if let Some(function_id) = self.active_function_graph {
                     let inputs = self
@@ -12711,7 +18149,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 };
 
                 ui.add_space(4.0);
-                let input_type = value_type.unwrap_or(VisualValueType::Json);
+                let input_type = value_type.unwrap_or(VisualValueType::Any);
                 let mut changed = false;
                 let mut handled_by_structured = false;
 
@@ -12825,6 +18263,11 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 VisualScriptNodeKind::OnStart
                 | VisualScriptNodeKind::OnUpdate
                 | VisualScriptNodeKind::OnStop
+                | VisualScriptNodeKind::OnCollisionEnter
+                | VisualScriptNodeKind::OnCollisionStay
+                | VisualScriptNodeKind::OnCollisionExit
+                | VisualScriptNodeKind::OnTriggerEnter
+                | VisualScriptNodeKind::OnTriggerExit
                 | VisualScriptNodeKind::SelfEntity
                 | VisualScriptNodeKind::DeltaTime
                 | VisualScriptNodeKind::TimeSinceStart
@@ -12836,6 +18279,55 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 | VisualScriptNodeKind::Transform
                 | VisualScriptNodeKind::PhysicsVelocity
                 | VisualScriptNodeKind::RayCast => {}
+                VisualScriptNodeKind::OnInputAction { action, phase } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Action");
+                        let mut value = action.clone();
+                        if ui.text_edit_singleline(&mut value).changed() {
+                            let normalized = normalize_event_name(&value);
+                            *action = if normalized.is_empty() {
+                                default_input_action_name()
+                            } else {
+                                normalized
+                            };
+                            self.mark_changed();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Phase");
+                        ComboBox::from_id_salt(("visual_input_action_phase", node_id.0))
+                            .selected_text(phase.title())
+                            .show_ui(ui, |ui| {
+                                for candidate in [
+                                    VisualInputActionPhase::Pressed,
+                                    VisualInputActionPhase::Released,
+                                    VisualInputActionPhase::Down,
+                                ] {
+                                    if ui
+                                        .selectable_value(phase, candidate, candidate.title())
+                                        .changed()
+                                    {
+                                        self.mark_changed();
+                                    }
+                                }
+                            });
+                    });
+                }
+                VisualScriptNodeKind::OnCustomEvent { name } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Event");
+                        let mut value = name.clone();
+                        if ui.text_edit_singleline(&mut value).changed() {
+                            let normalized = normalize_event_name(&value);
+                            *name = if normalized.is_empty() {
+                                default_custom_event_name()
+                            } else {
+                                normalized
+                            };
+                            self.mark_changed();
+                        }
+                    });
+                }
                 VisualScriptNodeKind::Sequence { outputs } => {
                     let mut value = i32::from(*outputs);
                     ui.horizontal(|ui| {
@@ -12916,7 +18408,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                             let (value_type, array_item_type) =
                                 find_variable_definition(&self.variables, *variable_id, name)
                                     .map(|var| (var.value_type, var.array_item_type))
-                                    .unwrap_or((VisualValueType::Json, None));
+                                    .unwrap_or((VisualValueType::Any, None));
                             if draw_typed_default_editor_with_array_item(
                                 ui,
                                 value_type,
@@ -12957,7 +18449,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         let (value_type, array_item_type) =
                             find_variable_definition(&self.variables, *variable_id, name)
                                 .map(|var| (var.value_type, var.array_item_type))
-                                .unwrap_or((VisualValueType::Json, None));
+                                .unwrap_or((VisualValueType::Any, None));
                         if draw_typed_default_editor_with_array_item(
                             ui,
                             value_type,
@@ -13014,8 +18506,8 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                         self.mark_changed();
                     }
                 }
-                VisualScriptNodeKind::JsonLiteral { value } => {
-                    ui.label("JSON or loose literal");
+                VisualScriptNodeKind::AnyLiteral { value } => {
+                    ui.label("Any value or loose literal");
                     if ui
                         .add(
                             TextEdit::multiline(value)
@@ -13122,7 +18614,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                             let value_type = input_ports
                                 .get(args.len())
                                 .map(|port| port.value_type)
-                                .unwrap_or(VisualValueType::Json);
+                                .unwrap_or(VisualValueType::Any);
                             args.push(default_literal_for_type(value_type).to_string());
                         }
                         self.mark_changed();
@@ -13166,7 +18658,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                                     {
                                         if matches!(
                                             *item_type,
-                                            VisualValueType::Array | VisualValueType::Json
+                                            VisualValueType::Array | VisualValueType::Any
                                         ) {
                                             *item_type = default_array_item_type();
                                         }
@@ -13350,7 +18842,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                     ComboBox::from_id_salt(("visual_select_type", node_id.0))
                         .selected_text(value_type.title())
                         .show_ui(ui, |ui| {
-                            for candidate in VISUAL_VALUE_TYPE_CHOICES_NO_JSON {
+                            for candidate in VISUAL_VALUE_TYPE_CHOICES_NO_ANY {
                                 if ui
                                     .selectable_value(value_type, candidate, candidate.title())
                                     .changed()
@@ -14884,7 +20376,7 @@ fn draw_dynamic_field_value_editor(ui: &mut Ui, value: &mut String) -> bool {
     let mut value_type = infer_visual_value_type_from_literal(value);
     if value_type == VisualValueType::Entity {
         value_type = VisualValueType::Number;
-    } else if value_type == VisualValueType::Json {
+    } else if value_type == VisualValueType::Any {
         value_type = VisualValueType::String;
     } else if !matches!(
         value_type,
@@ -14905,7 +20397,6 @@ fn draw_dynamic_field_value_editor(ui: &mut Ui, value: &mut String) -> bool {
                     VisualValueType::Number,
                     VisualValueType::String,
                     VisualValueType::Vec3,
-                    VisualValueType::Json,
                 ] {
                     if ui
                         .selectable_value(&mut value_type, candidate, candidate.title())
@@ -14918,6 +20409,61 @@ fn draw_dynamic_field_value_editor(ui: &mut Ui, value: &mut String) -> bool {
             });
     });
     changed |= draw_typed_pin_input_editor(ui, value_type, value);
+    changed
+}
+
+fn draw_input_binding_editor(ui: &mut Ui, value: &mut String) -> bool {
+    const PRESETS: [&str; 23] = [
+        "KeyW",
+        "KeyA",
+        "KeyS",
+        "KeyD",
+        "KeySpace",
+        "KeyLeftShift",
+        "KeyLeftCtrl",
+        "KeyQ",
+        "KeyE",
+        "KeyR",
+        "MouseLeft",
+        "MouseRight",
+        "MouseMiddle",
+        "GamepadSouth",
+        "GamepadEast",
+        "GamepadWest",
+        "GamepadNorth",
+        "GamepadLeftShoulder",
+        "GamepadRightShoulder",
+        "GamepadLeftStickX",
+        "GamepadLeftStickY",
+        "GamepadRightStickX",
+        "GamepadRightStickY",
+    ];
+
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Preset");
+        ComboBox::from_id_salt(("visual_input_binding_preset", ui.id()))
+            .selected_text(if value.trim().is_empty() {
+                "Custom".to_string()
+            } else {
+                value.clone()
+            })
+            .show_ui(ui, |ui| {
+                for preset in PRESETS {
+                    if ui.selectable_label(false, preset).clicked() {
+                        *value = preset.to_string();
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Binding");
+        changed |= ui
+            .add(TextEdit::singleline(value).desired_width(140.0))
+            .changed();
+    });
     changed
 }
 
@@ -14970,6 +20516,12 @@ fn draw_api_structured_default_editor(
         VisualApiOperation::EcsSetDynamicField if input_index == 3 => {
             draw_dynamic_field_value_editor(ui, default_literal)
         }
+        VisualApiOperation::InputBindAction if input_index == 1 => {
+            draw_input_binding_editor(ui, default_literal)
+        }
+        VisualApiOperation::InputUnbindAction if input_index == 1 => {
+            draw_input_binding_editor(ui, default_literal)
+        }
         _ => false,
     }
 }
@@ -15014,19 +20566,412 @@ fn draw_script_data_editor(ui: &mut Ui, value: &mut String) -> bool {
     changed
 }
 
+fn draw_look_at_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut target_entity = json_to_u64(object.get("target_entity").unwrap_or(&JsonValue::Null));
+    let mut target_offset = json_object_vec3(&object, "target_offset", (0.0, 0.0, 0.0));
+    let mut offset_in_target_space = json_object_bool(&object, "offset_in_target_space", false);
+    let mut up = json_object_vec3(&object, "up", (0.0, 1.0, 0.0));
+    let mut rotation_smooth_time = json_object_f64(&object, "rotation_smooth_time", 0.0).max(0.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Target Entity");
+        let mut raw = target_entity.unwrap_or(0);
+        if ui
+            .add(DragValue::new(&mut raw).speed(1.0).range(0..=u64::MAX))
+            .changed()
+        {
+            target_entity = (raw > 0).then_some(raw);
+            changed = true;
+        }
+        if ui.button("Clear").clicked() {
+            target_entity = None;
+            changed = true;
+        }
+    });
+    changed |= draw_vec3_row(ui, "Target Offset", &mut target_offset, 0.05);
+    changed |= draw_vec3_row(ui, "Up", &mut up, 0.05);
+    ui.horizontal(|ui| {
+        changed |= ui
+            .checkbox(&mut offset_in_target_space, "Offset In Target Space")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Rotation Smooth Time");
+        changed |= ui
+            .add(DragValue::new(&mut rotation_smooth_time).speed(0.01))
+            .changed();
+    });
+
+    if changed {
+        object.insert(
+            "target_entity".to_string(),
+            target_entity
+                .map(|id| JsonValue::Number(JsonNumber::from(id)))
+                .unwrap_or(JsonValue::Null),
+        );
+        object.insert(
+            "target_offset".to_string(),
+            vec3_json(target_offset.0, target_offset.1, target_offset.2),
+        );
+        object.insert(
+            "offset_in_target_space".to_string(),
+            JsonValue::Bool(offset_in_target_space),
+        );
+        object.insert("up".to_string(), vec3_json(up.0, up.1, up.2));
+        object.insert(
+            "rotation_smooth_time".to_string(),
+            json_number(rotation_smooth_time.max(0.0)),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_entity_follower_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut target_entity = json_to_u64(object.get("target_entity").unwrap_or(&JsonValue::Null));
+    let mut position_offset = json_object_vec3(&object, "position_offset", (0.0, 0.0, 0.0));
+    let mut offset_in_target_space = json_object_bool(&object, "offset_in_target_space", false);
+    let mut follow_rotation = json_object_bool(&object, "follow_rotation", true);
+    let mut position_smooth_time = json_object_f64(&object, "position_smooth_time", 0.0).max(0.0);
+    let mut rotation_smooth_time = json_object_f64(&object, "rotation_smooth_time", 0.0).max(0.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Target Entity");
+        let mut raw = target_entity.unwrap_or(0);
+        if ui
+            .add(DragValue::new(&mut raw).speed(1.0).range(0..=u64::MAX))
+            .changed()
+        {
+            target_entity = (raw > 0).then_some(raw);
+            changed = true;
+        }
+        if ui.button("Clear").clicked() {
+            target_entity = None;
+            changed = true;
+        }
+    });
+    changed |= draw_vec3_row(ui, "Position Offset", &mut position_offset, 0.05);
+    ui.horizontal(|ui| {
+        changed |= ui
+            .checkbox(&mut offset_in_target_space, "Offset In Target Space")
+            .changed();
+        changed |= ui
+            .checkbox(&mut follow_rotation, "Follow Rotation")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Position Smooth Time");
+        changed |= ui
+            .add(DragValue::new(&mut position_smooth_time).speed(0.01))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Rotation Smooth Time");
+        changed |= ui
+            .add(DragValue::new(&mut rotation_smooth_time).speed(0.01))
+            .changed();
+    });
+
+    if changed {
+        object.insert(
+            "target_entity".to_string(),
+            target_entity
+                .map(|id| JsonValue::Number(JsonNumber::from(id)))
+                .unwrap_or(JsonValue::Null),
+        );
+        object.insert(
+            "position_offset".to_string(),
+            vec3_json(position_offset.0, position_offset.1, position_offset.2),
+        );
+        object.insert(
+            "offset_in_target_space".to_string(),
+            JsonValue::Bool(offset_in_target_space),
+        );
+        object.insert(
+            "follow_rotation".to_string(),
+            JsonValue::Bool(follow_rotation),
+        );
+        object.insert(
+            "position_smooth_time".to_string(),
+            json_number(position_smooth_time.max(0.0)),
+        );
+        object.insert(
+            "rotation_smooth_time".to_string(),
+            json_number(rotation_smooth_time.max(0.0)),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_animator_state_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut layer_index = json_object_i64(&object, "layer_index", 0).max(0);
+    let mut layer_name = json_object_string(&object, "layer_name", "");
+    let mut layer_weight = json_object_f64(&object, "layer_weight", 1.0);
+    let mut layer_additive = json_object_bool(&object, "layer_additive", false);
+    let mut state_time = json_object_f64(&object, "state_time", 0.0).max(0.0);
+    let mut current_state = json_object_i64(&object, "current_state", 0).max(0);
+    let mut current_state_name = json_object_string(&object, "current_state_name", "");
+
+    ui.horizontal(|ui| {
+        ui.label("Layer Index");
+        changed |= ui
+            .add(DragValue::new(&mut layer_index).speed(1.0))
+            .changed();
+        ui.label("Layer Name");
+        changed |= ui
+            .add(TextEdit::singleline(&mut layer_name).desired_width(120.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Layer Weight");
+        changed |= ui
+            .add(DragValue::new(&mut layer_weight).speed(0.05))
+            .changed();
+        changed |= ui.checkbox(&mut layer_additive, "Additive").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("State Time");
+        changed |= ui
+            .add(DragValue::new(&mut state_time).speed(0.01))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Current State");
+        changed |= ui
+            .add(DragValue::new(&mut current_state).speed(1.0))
+            .changed();
+        ui.label("State Name");
+        changed |= ui
+            .add(TextEdit::singleline(&mut current_state_name).desired_width(120.0))
+            .changed();
+    });
+
+    if changed {
+        object.insert(
+            "layer_index".to_string(),
+            JsonValue::Number(JsonNumber::from(layer_index)),
+        );
+        object.insert("layer_name".to_string(), JsonValue::String(layer_name));
+        object.insert("layer_weight".to_string(), json_number(layer_weight));
+        object.insert(
+            "layer_additive".to_string(),
+            JsonValue::Bool(layer_additive),
+        );
+        object.insert("state_time".to_string(), json_number(state_time));
+        object.insert(
+            "current_state".to_string(),
+            JsonValue::Number(JsonNumber::from(current_state)),
+        );
+        object.insert(
+            "current_state_name".to_string(),
+            JsonValue::String(current_state_name),
+        );
+        if !object.contains_key("states") {
+            object.insert("states".to_string(), JsonValue::Array(Vec::new()));
+        }
+        if !object.contains_key("transitions") {
+            object.insert("transitions".to_string(), JsonValue::Array(Vec::new()));
+        }
+        if !object.contains_key("transition") {
+            object.insert("transition".to_string(), JsonValue::Null);
+        }
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_input_modifiers_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut shift = json_object_bool(&object, "shift", false);
+    let mut ctrl = json_object_bool(&object, "ctrl", false);
+    let mut alt = json_object_bool(&object, "alt", false);
+    let mut super_key = json_object_bool(&object, "super", false);
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut shift, "Shift").changed();
+        changed |= ui.checkbox(&mut ctrl, "Ctrl").changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut alt, "Alt").changed();
+        changed |= ui.checkbox(&mut super_key, "Super").changed();
+    });
+
+    if changed {
+        object.insert("shift".to_string(), JsonValue::Bool(shift));
+        object.insert("ctrl".to_string(), JsonValue::Bool(ctrl));
+        object.insert("alt".to_string(), JsonValue::Bool(alt));
+        object.insert("super".to_string(), JsonValue::Bool(super_key));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_audio_streaming_config_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut buffer_frames = json_object_i64(&object, "buffer_frames", 8192).max(1);
+    let mut chunk_frames = json_object_i64(&object, "chunk_frames", 2048).max(1);
+
+    ui.horizontal(|ui| {
+        ui.label("Buffer Frames");
+        changed |= ui
+            .add(
+                DragValue::new(&mut buffer_frames)
+                    .speed(1.0)
+                    .range(1..=i64::MAX),
+            )
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Chunk Frames");
+        changed |= ui
+            .add(
+                DragValue::new(&mut chunk_frames)
+                    .speed(1.0)
+                    .range(1..=i64::MAX),
+            )
+            .changed();
+    });
+
+    if changed {
+        object.insert(
+            "buffer_frames".to_string(),
+            JsonValue::Number(JsonNumber::from(buffer_frames)),
+        );
+        object.insert(
+            "chunk_frames".to_string(),
+            JsonValue::Number(JsonNumber::from(chunk_frames)),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_spline_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut closed = json_object_bool(&object, "closed", false);
+    let mut tension = json_object_f64(&object, "tension", 0.5).clamp(0.0, 1.0);
+    let mut mode = json_object_string(&object, "mode", "CatmullRom");
+    if !matches!(mode.as_str(), "Linear" | "CatmullRom" | "Bezier") {
+        mode = "CatmullRom".to_string();
+    }
+
+    let mut points = object
+        .get("points")
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut remove_index: Option<usize> = None;
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut closed, "Closed").changed();
+        ui.label("Mode");
+        ComboBox::from_id_salt(("visual_spline_mode_inline", ui.id()))
+            .selected_text(mode.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["Linear", "CatmullRom", "Bezier"] {
+                    changed |= ui
+                        .selectable_value(&mut mode, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Tension");
+        changed |= ui.add(DragValue::new(&mut tension).speed(0.01)).changed();
+    });
+    ui.separator();
+    ui.label("Points");
+    for (index, point) in points.iter_mut().enumerate() {
+        let mut components = coerce_json_to_vec3_components(point).unwrap_or((0.0, 0.0, 0.0));
+        ui.horizontal(|ui| {
+            ui.label(format!("#{}", index));
+            let mut row_changed = false;
+            row_changed |= ui
+                .add(DragValue::new(&mut components.0).speed(0.05))
+                .changed();
+            row_changed |= ui
+                .add(DragValue::new(&mut components.1).speed(0.05))
+                .changed();
+            row_changed |= ui
+                .add(DragValue::new(&mut components.2).speed(0.05))
+                .changed();
+            if row_changed {
+                *point = vec3_json(components.0, components.1, components.2);
+                changed = true;
+            }
+            if ui.small_button("-").clicked() {
+                remove_index = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove_index {
+        if index < points.len() {
+            points.remove(index);
+            changed = true;
+        }
+    }
+    if ui.small_button("+ Point").clicked() {
+        points.push(vec3_json(0.0, 0.0, 0.0));
+        changed = true;
+    }
+
+    if changed {
+        object.insert("closed".to_string(), JsonValue::Bool(closed));
+        object.insert("tension".to_string(), json_number(tension.clamp(0.0, 1.0)));
+        object.insert("mode".to_string(), JsonValue::String(mode));
+        object.insert("points".to_string(), JsonValue::Array(points));
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
 fn draw_character_output_editor(ui: &mut Ui, value: &mut String) -> bool {
     let mut object = parse_json_object_literal(value);
     let mut changed = false;
+    let mut desired_translation = json_object_vec3(&object, "desired_translation", (0.0, 0.0, 0.0));
     let mut effective_translation =
         json_object_vec3(&object, "effective_translation", (0.0, 0.0, 0.0));
+    let mut remaining_translation =
+        json_object_vec3(&object, "remaining_translation", (0.0, 0.0, 0.0));
     let mut grounded = json_object_bool(&object, "grounded", false);
     let mut sliding_down_slope = json_object_bool(&object, "sliding_down_slope", false);
     let mut collision_count = json_object_i64(&object, "collision_count", 0).max(0);
+    let mut ground_normal = json_object_vec3(&object, "ground_normal", (0.0, 1.0, 0.0));
+    let mut slope_angle = json_object_f64(&object, "slope_angle", 0.0).max(0.0);
+    let mut hit_normal = json_object_vec3(&object, "hit_normal", (0.0, 0.0, 0.0));
+    let mut hit_point = json_object_vec3(&object, "hit_point", (0.0, 0.0, 0.0));
+    let mut stepped_up = json_object_bool(&object, "stepped_up", false);
+    let mut step_height = json_object_f64(&object, "step_height", 0.0).max(0.0);
+    let mut platform_velocity = json_object_vec3(&object, "platform_velocity", (0.0, 0.0, 0.0));
+    let mut hit_entity = json_to_u64(object.get("hit_entity").unwrap_or(&JsonValue::Null));
 
+    changed |= draw_vec3_row(ui, "Desired Translation", &mut desired_translation, 0.05);
     changed |= draw_vec3_row(
         ui,
         "Effective Translation",
         &mut effective_translation,
+        0.05,
+    );
+    changed |= draw_vec3_row(
+        ui,
+        "Remaining Translation",
+        &mut remaining_translation,
         0.05,
     );
     ui.horizontal(|ui| {
@@ -15041,14 +20986,62 @@ fn draw_character_output_editor(ui: &mut Ui, value: &mut String) -> bool {
             .add(DragValue::new(&mut collision_count).speed(1.0))
             .changed();
     });
+    changed |= draw_vec3_row(ui, "Ground Normal", &mut ground_normal, 0.05);
+    ui.horizontal(|ui| {
+        ui.label("Slope Angle");
+        changed |= ui
+            .add(DragValue::new(&mut slope_angle).speed(0.01))
+            .changed();
+    });
+    changed |= draw_vec3_row(ui, "Hit Normal", &mut hit_normal, 0.05);
+    changed |= draw_vec3_row(ui, "Hit Point", &mut hit_point, 0.05);
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut stepped_up, "Stepped Up").changed();
+        ui.label("Step Height");
+        changed |= ui
+            .add(DragValue::new(&mut step_height).speed(0.01))
+            .changed();
+    });
+    changed |= draw_vec3_row(ui, "Platform Velocity", &mut platform_velocity, 0.05);
+    ui.horizontal(|ui| {
+        ui.label("Hit Entity");
+        let mut raw = hit_entity.unwrap_or(0);
+        if ui
+            .add(DragValue::new(&mut raw).speed(1.0).range(0..=u64::MAX))
+            .changed()
+        {
+            hit_entity = (raw > 0).then_some(raw);
+            changed = true;
+        }
+        if ui.button("Clear").clicked() {
+            hit_entity = None;
+            changed = true;
+        }
+    });
 
     if changed {
+        object.insert(
+            "desired_translation".to_string(),
+            vec3_json(
+                desired_translation.0,
+                desired_translation.1,
+                desired_translation.2,
+            ),
+        );
         object.insert(
             "effective_translation".to_string(),
             vec3_json(
                 effective_translation.0,
                 effective_translation.1,
                 effective_translation.2,
+            ),
+        );
+        object.insert(
+            "remaining_translation".to_string(),
+            vec3_json(
+                remaining_translation.0,
+                remaining_translation.1,
+                remaining_translation.2,
             ),
         );
         object.insert("grounded".to_string(), JsonValue::Bool(grounded));
@@ -15059,6 +21052,35 @@ fn draw_character_output_editor(ui: &mut Ui, value: &mut String) -> bool {
         object.insert(
             "collision_count".to_string(),
             JsonValue::Number(JsonNumber::from(collision_count)),
+        );
+        object.insert(
+            "ground_normal".to_string(),
+            vec3_json(ground_normal.0, ground_normal.1, ground_normal.2),
+        );
+        object.insert("slope_angle".to_string(), json_number(slope_angle));
+        object.insert(
+            "hit_normal".to_string(),
+            vec3_json(hit_normal.0, hit_normal.1, hit_normal.2),
+        );
+        object.insert(
+            "hit_point".to_string(),
+            vec3_json(hit_point.0, hit_point.1, hit_point.2),
+        );
+        object.insert("stepped_up".to_string(), JsonValue::Bool(stepped_up));
+        object.insert("step_height".to_string(), json_number(step_height));
+        object.insert(
+            "platform_velocity".to_string(),
+            vec3_json(
+                platform_velocity.0,
+                platform_velocity.1,
+                platform_velocity.2,
+            ),
+        );
+        object.insert(
+            "hit_entity".to_string(),
+            hit_entity
+                .map(|value| JsonValue::Number(JsonNumber::from(value)))
+                .unwrap_or(JsonValue::Null),
         );
         *value = compact_json_string(&JsonValue::Object(object));
     }
@@ -15580,15 +21602,23 @@ fn draw_typed_editor_with_width(
         VisualValueType::AudioEmitter => draw_audio_emitter_data_editor_plain(ui, value),
         VisualValueType::AudioListener => draw_audio_listener_data_editor(ui, value),
         VisualValueType::Script => draw_script_data_editor(ui, value),
+        VisualValueType::LookAt => draw_look_at_data_editor(ui, value),
+        VisualValueType::EntityFollower => draw_entity_follower_data_editor(ui, value),
+        VisualValueType::AnimatorState => draw_animator_state_editor(ui, value),
+        VisualValueType::InputModifiers => draw_input_modifiers_editor(ui, value),
+        VisualValueType::AudioStreamingConfig => draw_audio_streaming_config_editor(ui, value),
+        VisualValueType::Spline => draw_spline_editor(ui, value),
         VisualValueType::Physics => draw_physics_data_editor(ui, value),
         VisualValueType::PhysicsVelocity => draw_physics_velocity_editor(ui, value),
         VisualValueType::PhysicsWorldDefaults => draw_physics_world_defaults_editor(ui, value),
         VisualValueType::CharacterControllerOutput => draw_character_output_editor(ui, value),
+        VisualValueType::DynamicComponentFields => draw_dynamic_component_fields_editor(ui, value),
+        VisualValueType::DynamicFieldValue => draw_dynamic_field_value_editor(ui, value),
         VisualValueType::PhysicsQueryFilter => draw_physics_query_filter_editor(ui, value),
         VisualValueType::PhysicsRayCastHit => draw_ray_cast_hit_editor(ui, value),
         VisualValueType::PhysicsPointProjectionHit => draw_point_projection_hit_editor(ui, value),
         VisualValueType::PhysicsShapeCastHit => draw_shape_cast_hit_editor(ui, value),
-        VisualValueType::Json => ui
+        VisualValueType::Any => ui
             .add(TextEdit::singleline(value).desired_width(text_width))
             .changed(),
     }

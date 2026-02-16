@@ -26,6 +26,7 @@ use helmer_script_sdk::{
 };
 use libloading::{Library, Symbol};
 use mlua::{Function, Lua, MultiValue, RegistryKey, Table, UserData, Value, Variadic};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -48,7 +49,9 @@ use helmer_becs::physics::components::{
     RigidBodyTransientForces,
 };
 use helmer_becs::physics::physics_resource::PhysicsResource;
-use helmer_becs::systems::scene_system::SceneRoot;
+use helmer_becs::systems::scene_system::{
+    EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren,
+};
 use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
@@ -73,15 +76,138 @@ use crate::editor::{
     visual_scripting::{
         VisualScriptApiTable, VisualScriptEvent, VisualScriptHost, VisualScriptProgram,
         VisualScriptRuntimeState, compile_visual_script_runtime_source,
+        parse_visual_script_document,
     },
 };
 
 const RUST_SCRIPT_PLUGIN_SYMBOL: &[u8] = b"helmer_get_script_plugin\0";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptInspectorFieldType {
+    Bool,
+    Number,
+    #[default]
+    String,
+    Entity,
+    Vec2,
+    Vec3,
+    Quat,
+    AssetPath,
+    StringList,
+    NumberList,
+    EntityList,
+    AssetPathList,
+    AnimationClipSet,
+}
+
+impl ScriptInspectorFieldType {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Bool => "Bool",
+            Self::Number => "Number",
+            Self::String => "String",
+            Self::Entity => "Entity",
+            Self::Vec2 => "Vec2",
+            Self::Vec3 => "Vec3",
+            Self::Quat => "Quat",
+            Self::AssetPath => "Asset Path",
+            Self::StringList => "String List",
+            Self::NumberList => "Number List",
+            Self::EntityList => "Entity List",
+            Self::AssetPathList => "Asset Path List",
+            Self::AnimationClipSet => "Animation Clip Set",
+        }
+    }
+
+    pub fn supports_asset_kind(self) -> bool {
+        matches!(self, Self::AssetPath | Self::AssetPathList)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptInspectorAssetKind {
+    #[default]
+    Any,
+    Scene,
+    Model,
+    Material,
+    Audio,
+    Script,
+    Animation,
+}
+
+impl ScriptInspectorAssetKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Any => "Any",
+            Self::Scene => "Scene",
+            Self::Model => "Model",
+            Self::Material => "Material",
+            Self::Audio => "Audio",
+            Self::Script => "Script",
+            Self::Animation => "Animation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptInspectorField {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub field_type: ScriptInspectorFieldType,
+    #[serde(default)]
+    pub asset_kind: Option<ScriptInspectorAssetKind>,
+    #[serde(default)]
+    pub value: JsonValue,
+}
+
+impl ScriptInspectorField {
+    pub fn new(name: impl Into<String>, field_type: ScriptInspectorFieldType) -> Self {
+        let mut field = Self {
+            name: name.into(),
+            label: String::new(),
+            field_type,
+            asset_kind: None,
+            value: script_field_default_value(field_type),
+        };
+        field.sanitize();
+        field
+    }
+
+    pub fn sanitize(&mut self) {
+        self.name = self.name.trim().to_string();
+        if self.name.is_empty() {
+            self.name = "field".to_string();
+        }
+        if self.label.trim().is_empty() {
+            self.label = self.name.clone();
+        } else {
+            self.label = self.label.trim().to_string();
+        }
+        if !self.field_type.supports_asset_kind() {
+            self.asset_kind = None;
+        } else if self.asset_kind.is_none() {
+            self.asset_kind = Some(ScriptInspectorAssetKind::Any);
+        }
+        self.value = coerce_script_field_value(self.field_type, &self.value);
+    }
+
+    pub fn normalized_name_key(&self) -> String {
+        normalize_name(&self.name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScriptEntry {
     pub path: Option<PathBuf>,
     pub language: String,
+    #[serde(default)]
+    pub inspector_fields: Vec<ScriptInspectorField>,
 }
 
 impl ScriptEntry {
@@ -89,7 +215,328 @@ impl ScriptEntry {
         Self {
             path: None,
             language: "luau".to_string(),
+            inspector_fields: Vec::new(),
         }
+    }
+
+    pub fn find_inspector_field(&self, name: &str) -> Option<&ScriptInspectorField> {
+        let key = normalize_name(name);
+        if key.is_empty() {
+            return None;
+        }
+        self.inspector_fields
+            .iter()
+            .find(|field| field.normalized_name_key() == key)
+    }
+
+    pub fn find_inspector_field_mut(&mut self, name: &str) -> Option<&mut ScriptInspectorField> {
+        let key = normalize_name(name);
+        if key.is_empty() {
+            return None;
+        }
+        self.inspector_fields
+            .iter_mut()
+            .find(|field| field.normalized_name_key() == key)
+    }
+
+    pub fn upsert_inspector_field(&mut self, mut field: ScriptInspectorField) {
+        field.sanitize();
+        let key = field.normalized_name_key();
+        if key.is_empty() {
+            return;
+        }
+        if let Some(existing) = self
+            .inspector_fields
+            .iter_mut()
+            .find(|entry| entry.normalized_name_key() == key)
+        {
+            *existing = field;
+        } else {
+            self.inspector_fields.push(field);
+        }
+    }
+
+    pub fn sanitize_inspector_fields(&mut self) {
+        for field in &mut self.inspector_fields {
+            field.sanitize();
+        }
+        self.inspector_fields
+            .retain(|field| !field.name.trim().is_empty());
+    }
+}
+
+fn json_number(value: f64) -> JsonValue {
+    JsonNumber::from_f64(value)
+        .map(JsonValue::Number)
+        .unwrap_or_else(|| JsonValue::Number(JsonNumber::from(0)))
+}
+
+fn json_string(value: &str) -> JsonValue {
+    JsonValue::String(value.to_string())
+}
+
+pub fn script_field_default_value(field_type: ScriptInspectorFieldType) -> JsonValue {
+    match field_type {
+        ScriptInspectorFieldType::Bool => JsonValue::Bool(false),
+        ScriptInspectorFieldType::Number => json_number(0.0),
+        ScriptInspectorFieldType::String => json_string(""),
+        ScriptInspectorFieldType::Entity => JsonValue::Number(JsonNumber::from(0u64)),
+        ScriptInspectorFieldType::Vec2 => JsonValue::Object(JsonMap::from_iter([
+            ("x".to_string(), json_number(0.0)),
+            ("y".to_string(), json_number(0.0)),
+        ])),
+        ScriptInspectorFieldType::Vec3 => JsonValue::Object(JsonMap::from_iter([
+            ("x".to_string(), json_number(0.0)),
+            ("y".to_string(), json_number(0.0)),
+            ("z".to_string(), json_number(0.0)),
+        ])),
+        ScriptInspectorFieldType::Quat => JsonValue::Object(JsonMap::from_iter([
+            ("x".to_string(), json_number(0.0)),
+            ("y".to_string(), json_number(0.0)),
+            ("z".to_string(), json_number(0.0)),
+            ("w".to_string(), json_number(1.0)),
+        ])),
+        ScriptInspectorFieldType::AssetPath => json_string(""),
+        ScriptInspectorFieldType::StringList => JsonValue::Array(Vec::new()),
+        ScriptInspectorFieldType::NumberList => JsonValue::Array(Vec::new()),
+        ScriptInspectorFieldType::EntityList => JsonValue::Array(Vec::new()),
+        ScriptInspectorFieldType::AssetPathList => JsonValue::Array(Vec::new()),
+        ScriptInspectorFieldType::AnimationClipSet => JsonValue::Object(JsonMap::from_iter([
+            ("packed_source".to_string(), json_string("")),
+            ("packed_clips".to_string(), JsonValue::Array(Vec::new())),
+            ("separate_clips".to_string(), JsonValue::Array(Vec::new())),
+        ])),
+    }
+}
+
+fn coerce_json_string(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Null => String::new(),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            serde_json::to_string(value).unwrap_or_default()
+        }
+    }
+}
+
+fn coerce_json_number(value: &JsonValue) -> f64 {
+    match value {
+        JsonValue::Number(value) => value.as_f64().unwrap_or(0.0),
+        JsonValue::String(value) => value.trim().parse::<f64>().unwrap_or(0.0),
+        JsonValue::Bool(value) => {
+            if *value {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_) => 0.0,
+    }
+}
+
+fn coerce_json_entity(value: &JsonValue) -> u64 {
+    match value {
+        JsonValue::Number(value) => value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|raw| u64::try_from(raw).ok()))
+            .unwrap_or(0),
+        JsonValue::String(value) => value.trim().parse::<u64>().unwrap_or(0),
+        JsonValue::Bool(value) => {
+            if *value {
+                1
+            } else {
+                0
+            }
+        }
+        JsonValue::Null | JsonValue::Array(_) | JsonValue::Object(_) => 0,
+    }
+}
+
+fn coerce_json_bool(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Bool(value) => *value,
+        JsonValue::Number(value) => value.as_f64().unwrap_or(0.0).abs() > f64::EPSILON,
+        JsonValue::String(value) => {
+            let normalized = normalize_name(value);
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        }
+        JsonValue::Null => false,
+        JsonValue::Array(values) => !values.is_empty(),
+        JsonValue::Object(values) => !values.is_empty(),
+    }
+}
+
+fn coerce_json_vec_components(value: &JsonValue, length: usize) -> Vec<f64> {
+    let mut out = vec![0.0; length];
+    if let JsonValue::Object(map) = value {
+        for (index, key) in ["x", "y", "z", "w"].iter().enumerate().take(length) {
+            if let Some(component) = map.get(*key) {
+                out[index] = coerce_json_number(component);
+            }
+        }
+    } else if let JsonValue::Array(values) = value {
+        for (index, component) in values.iter().take(length).enumerate() {
+            out[index] = coerce_json_number(component);
+        }
+    }
+    out
+}
+
+fn coerce_json_string_list(value: &JsonValue) -> JsonValue {
+    let values = match value {
+        JsonValue::Array(values) => values
+            .iter()
+            .map(coerce_json_string)
+            .map(JsonValue::String)
+            .collect::<Vec<_>>(),
+        JsonValue::Null => Vec::new(),
+        other => vec![JsonValue::String(coerce_json_string(other))],
+    };
+    JsonValue::Array(values)
+}
+
+fn coerce_json_number_list(value: &JsonValue) -> JsonValue {
+    let values = match value {
+        JsonValue::Array(values) => values
+            .iter()
+            .map(|value| json_number(coerce_json_number(value)))
+            .collect::<Vec<_>>(),
+        JsonValue::Null => Vec::new(),
+        other => vec![json_number(coerce_json_number(other))],
+    };
+    JsonValue::Array(values)
+}
+
+fn coerce_json_entity_list(value: &JsonValue) -> JsonValue {
+    let values = match value {
+        JsonValue::Array(values) => values
+            .iter()
+            .map(|value| JsonValue::Number(JsonNumber::from(coerce_json_entity(value))))
+            .collect::<Vec<_>>(),
+        JsonValue::Null => Vec::new(),
+        other => vec![JsonValue::Number(JsonNumber::from(coerce_json_entity(
+            other,
+        )))],
+    };
+    JsonValue::Array(values)
+}
+
+fn coerce_json_animation_clip_set(value: &JsonValue) -> JsonValue {
+    let mut object = match value {
+        JsonValue::Object(map) => map.clone(),
+        _ => JsonMap::new(),
+    };
+    let packed_source = object
+        .get("packed_source")
+        .map(coerce_json_string)
+        .unwrap_or_default();
+    let packed_clips = object
+        .get("packed_clips")
+        .cloned()
+        .unwrap_or(JsonValue::Array(Vec::new()));
+    let separate_clips = object
+        .get("separate_clips")
+        .cloned()
+        .unwrap_or(JsonValue::Array(Vec::new()));
+    object.insert(
+        "packed_source".to_string(),
+        JsonValue::String(packed_source),
+    );
+    object.insert(
+        "packed_clips".to_string(),
+        coerce_json_string_list(&packed_clips),
+    );
+    object.insert(
+        "separate_clips".to_string(),
+        coerce_json_string_list(&separate_clips),
+    );
+    JsonValue::Object(object)
+}
+
+pub fn coerce_script_field_value(
+    field_type: ScriptInspectorFieldType,
+    value: &JsonValue,
+) -> JsonValue {
+    match field_type {
+        ScriptInspectorFieldType::Bool => JsonValue::Bool(coerce_json_bool(value)),
+        ScriptInspectorFieldType::Number => json_number(coerce_json_number(value)),
+        ScriptInspectorFieldType::String => JsonValue::String(coerce_json_string(value)),
+        ScriptInspectorFieldType::Entity => {
+            JsonValue::Number(JsonNumber::from(coerce_json_entity(value)))
+        }
+        ScriptInspectorFieldType::Vec2 => {
+            let components = coerce_json_vec_components(value, 2);
+            JsonValue::Object(JsonMap::from_iter([
+                ("x".to_string(), json_number(components[0])),
+                ("y".to_string(), json_number(components[1])),
+            ]))
+        }
+        ScriptInspectorFieldType::Vec3 => {
+            let components = coerce_json_vec_components(value, 3);
+            JsonValue::Object(JsonMap::from_iter([
+                ("x".to_string(), json_number(components[0])),
+                ("y".to_string(), json_number(components[1])),
+                ("z".to_string(), json_number(components[2])),
+            ]))
+        }
+        ScriptInspectorFieldType::Quat => {
+            let mut components = coerce_json_vec_components(value, 4);
+            if components[3].abs() <= f64::EPSILON {
+                components[3] = 1.0;
+            }
+            JsonValue::Object(JsonMap::from_iter([
+                ("x".to_string(), json_number(components[0])),
+                ("y".to_string(), json_number(components[1])),
+                ("z".to_string(), json_number(components[2])),
+                ("w".to_string(), json_number(components[3])),
+            ]))
+        }
+        ScriptInspectorFieldType::AssetPath => JsonValue::String(coerce_json_string(value)),
+        ScriptInspectorFieldType::StringList => coerce_json_string_list(value),
+        ScriptInspectorFieldType::NumberList => coerce_json_number_list(value),
+        ScriptInspectorFieldType::EntityList => coerce_json_entity_list(value),
+        ScriptInspectorFieldType::AssetPathList => coerce_json_string_list(value),
+        ScriptInspectorFieldType::AnimationClipSet => coerce_json_animation_clip_set(value),
+    }
+}
+
+pub fn infer_script_field_type_from_json(value: &JsonValue) -> ScriptInspectorFieldType {
+    match value {
+        JsonValue::Bool(_) => ScriptInspectorFieldType::Bool,
+        JsonValue::Number(_) => ScriptInspectorFieldType::Number,
+        JsonValue::String(_) => ScriptInspectorFieldType::String,
+        JsonValue::Array(values) => {
+            if values
+                .iter()
+                .all(|value| matches!(value, JsonValue::Number(_)))
+            {
+                ScriptInspectorFieldType::NumberList
+            } else if values
+                .iter()
+                .all(|value| matches!(value, JsonValue::Number(_) | JsonValue::String(_)))
+            {
+                ScriptInspectorFieldType::StringList
+            } else {
+                ScriptInspectorFieldType::StringList
+            }
+        }
+        JsonValue::Object(object) => {
+            if object.contains_key("packed_source")
+                || object.contains_key("packed_clips")
+                || object.contains_key("separate_clips")
+            {
+                ScriptInspectorFieldType::AnimationClipSet
+            } else if object.contains_key("w") {
+                ScriptInspectorFieldType::Quat
+            } else if object.contains_key("z") {
+                ScriptInspectorFieldType::Vec3
+            } else {
+                ScriptInspectorFieldType::Vec2
+            }
+        }
+        JsonValue::Null => ScriptInspectorFieldType::String,
     }
 }
 
@@ -506,6 +953,7 @@ pub struct RustScriptHostContext {
     world_ptr: usize,
     owner: Entity,
     script_index: usize,
+    bridge_lua: Mutex<Lua>,
 }
 
 // SAFETY: Script host context is only mutated on the main ECS thread
@@ -533,6 +981,7 @@ pub struct VisualScriptInstance {
     pub path: PathBuf,
     pub program: VisualScriptProgram,
     pub state: VisualScriptRuntimeState,
+    pub inspector_field_names: HashSet<String>,
     pub modified: SystemTime,
 }
 
@@ -632,6 +1081,8 @@ pub struct ScriptInputState {
     pub last_keys: HashSet<KeyCode>,
     pub last_mouse_buttons: HashSet<MouseButton>,
     pub last_gamepad_buttons: HashMap<usize, HashSet<gilrs::Button>>,
+    pub last_gamepad_axes: HashMap<usize, HashMap<gilrs::Axis, f32>>,
+    pub last_gamepad_triggers: HashMap<usize, (f32, f32)>,
     pub last_cursor_position: DVec2,
     pub gamepad_map: HashMap<usize, gilrs::GamepadId>,
     pub gamepad_ids: Vec<usize>,
@@ -665,12 +1116,31 @@ impl ScriptInputState {
         for (id, state) in input.controller_states.iter() {
             let id_value = usize::from(*id);
             active_ids.insert(id_value);
+
             let entry = self.last_gamepad_buttons.entry(id_value).or_default();
             entry.clear();
             entry.extend(state.active_buttons.iter().copied());
+
+            let axis_entry = self.last_gamepad_axes.entry(id_value).or_default();
+            axis_entry.clear();
+            axis_entry.extend(
+                state
+                    .axis_values
+                    .iter()
+                    .map(|(axis, value)| (*axis, *value)),
+            );
+
+            self.last_gamepad_triggers.insert(
+                id_value,
+                (state.left_trigger_value, state.right_trigger_value),
+            );
         }
 
         self.last_gamepad_buttons
+            .retain(|id, _| active_ids.contains(id));
+        self.last_gamepad_axes
+            .retain(|id, _| active_ids.contains(id));
+        self.last_gamepad_triggers
             .retain(|id, _| active_ids.contains(id));
     }
 
@@ -678,6 +1148,8 @@ impl ScriptInputState {
         self.last_keys.clear();
         self.last_mouse_buttons.clear();
         self.last_gamepad_buttons.clear();
+        self.last_gamepad_axes.clear();
+        self.last_gamepad_triggers.clear();
         self.last_cursor_position = DVec2::ZERO;
 
         let Some(input) = input else {
@@ -694,8 +1166,343 @@ impl ScriptInputState {
             let entry = self.last_gamepad_buttons.entry(id_value).or_default();
             entry.clear();
             entry.extend(state.active_buttons.iter().copied());
+
+            let axis_entry = self.last_gamepad_axes.entry(id_value).or_default();
+            axis_entry.clear();
+            axis_entry.extend(
+                state
+                    .axis_values
+                    .iter()
+                    .map(|(axis, value)| (*axis, *value)),
+            );
+
+            self.last_gamepad_triggers.insert(
+                id_value,
+                (state.left_trigger_value, state.right_trigger_value),
+            );
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ScriptInputBinding {
+    Key(LuaKey),
+    MouseButton(MouseButton),
+    GamepadButton(gilrs::Button),
+    GamepadAxis(gilrs::Axis),
+    Trigger(TriggerSide),
+}
+
+#[derive(Debug, Clone)]
+struct ScriptInputActionBinding {
+    binding: ScriptInputBinding,
+    deadzone: f32,
+}
+
+#[derive(Resource, Debug, Clone)]
+struct ScriptInputActionMap {
+    active_context: String,
+    contexts: HashMap<String, HashMap<String, Vec<ScriptInputActionBinding>>>,
+}
+
+impl Default for ScriptInputActionMap {
+    fn default() -> Self {
+        Self {
+            active_context: "default".to_string(),
+            contexts: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScriptContactEvent {
+    other: Entity,
+    normal: Vec3,
+    point: Vec3,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+struct ScriptContactEventState {
+    previous_collisions: HashSet<(u64, u64)>,
+    previous_triggers: HashSet<(u64, u64)>,
+    collision_enter: HashMap<Entity, Vec<ScriptContactEvent>>,
+    collision_stay: HashMap<Entity, Vec<ScriptContactEvent>>,
+    collision_exit: HashMap<Entity, Vec<ScriptContactEvent>>,
+    trigger_enter: HashMap<Entity, Vec<ScriptContactEvent>>,
+    trigger_stay: HashMap<Entity, Vec<ScriptContactEvent>>,
+    trigger_exit: HashMap<Entity, Vec<ScriptContactEvent>>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+struct ScriptCustomEventState {
+    pending: HashMap<Entity, Vec<String>>,
+}
+
+impl ScriptCustomEventState {
+    fn emit(&mut self, target: Entity, name: String) {
+        self.pending.entry(target).or_default().push(name);
+    }
+
+    fn drain_all(&mut self) -> HashMap<Entity, Vec<String>> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct ScriptInputActionEventSnapshot {
+    down: Vec<String>,
+    pressed: Vec<String>,
+    released: Vec<String>,
+}
+
+fn collect_input_action_events(world: &World) -> ScriptInputActionEventSnapshot {
+    if !gameplay_input_capture_allowed(world) {
+        return ScriptInputActionEventSnapshot::default();
+    }
+
+    let Some(map) = world.get_resource::<ScriptInputActionMap>() else {
+        return ScriptInputActionEventSnapshot::default();
+    };
+    let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+        return ScriptInputActionEventSnapshot::default();
+    };
+    let input_manager = input_manager.0.read();
+    let input_state = world.get_resource::<ScriptInputState>();
+
+    let context = context_key(Some(map.active_context.as_str()));
+    let Some(actions) = map.contexts.get(&context) else {
+        return ScriptInputActionEventSnapshot::default();
+    };
+
+    let mut snapshot = ScriptInputActionEventSnapshot::default();
+    for action in actions.keys() {
+        if action_down_for_name(&input_manager, input_state, Some(map), action) {
+            snapshot.down.push(action.clone());
+        }
+        if action_pressed_for_name(&input_manager, input_state, Some(map), action) {
+            snapshot.pressed.push(action.clone());
+        }
+        if action_released_for_name(&input_manager, input_state, Some(map), action) {
+            snapshot.released.push(action.clone());
+        }
+    }
+
+    snapshot.down.sort();
+    snapshot.down.dedup();
+    snapshot.pressed.sort();
+    snapshot.pressed.dedup();
+    snapshot.released.sort();
+    snapshot.released.dedup();
+    snapshot
+}
+
+fn entity_pair_key(a: Entity, b: Entity) -> (u64, u64) {
+    let a_bits = a.to_bits();
+    let b_bits = b.to_bits();
+    if a_bits <= b_bits {
+        (a_bits, b_bits)
+    } else {
+        (b_bits, a_bits)
+    }
+}
+
+fn push_contact_event(
+    map: &mut HashMap<Entity, Vec<ScriptContactEvent>>,
+    entity: Entity,
+    event: ScriptContactEvent,
+) {
+    map.entry(entity).or_default().push(event);
+}
+
+fn refresh_script_contact_events(world: &mut World) {
+    let mut collision_pairs: HashMap<(u64, u64), (Entity, Entity, Vec3)> = HashMap::new();
+    let mut trigger_pairs = HashSet::<(u64, u64)>::new();
+
+    if let Some(phys) = world.get_resource::<PhysicsResource>() {
+        if phys.running {
+            for pair in phys.narrow_phase.contact_pairs() {
+                if !pair.has_any_active_contact() {
+                    continue;
+                }
+                let Some(entity_a) = phys.collider_entities.get(&pair.collider1).copied() else {
+                    continue;
+                };
+                let Some(entity_b) = phys.collider_entities.get(&pair.collider2).copied() else {
+                    continue;
+                };
+                let key = entity_pair_key(entity_a, entity_b);
+                let normal = pair
+                    .manifolds
+                    .first()
+                    .map(|manifold| {
+                        Vec3::new(
+                            manifold.data.normal.x,
+                            manifold.data.normal.y,
+                            manifold.data.normal.z,
+                        )
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                collision_pairs
+                    .entry(key)
+                    .or_insert((entity_a, entity_b, normal));
+            }
+
+            for (collider_a, collider_b, intersecting) in phys.narrow_phase.intersection_pairs() {
+                if !intersecting {
+                    continue;
+                }
+                let Some(entity_a) = phys.collider_entities.get(&collider_a).copied() else {
+                    continue;
+                };
+                let Some(entity_b) = phys.collider_entities.get(&collider_b).copied() else {
+                    continue;
+                };
+                trigger_pairs.insert(entity_pair_key(entity_a, entity_b));
+            }
+        }
+    }
+
+    if world.get_resource::<ScriptContactEventState>().is_none() {
+        world.insert_resource(ScriptContactEventState::default());
+    }
+    let Some(mut state) = world.get_resource_mut::<ScriptContactEventState>() else {
+        return;
+    };
+
+    state.collision_enter.clear();
+    state.collision_stay.clear();
+    state.collision_exit.clear();
+    state.trigger_enter.clear();
+    state.trigger_stay.clear();
+    state.trigger_exit.clear();
+
+    let current_collisions = collision_pairs.keys().copied().collect::<HashSet<_>>();
+    for (key, (entity_a, entity_b, normal)) in collision_pairs {
+        let event_type_map = if state.previous_collisions.contains(&key) {
+            &mut state.collision_stay
+        } else {
+            &mut state.collision_enter
+        };
+        push_contact_event(
+            event_type_map,
+            entity_a,
+            ScriptContactEvent {
+                other: entity_b,
+                normal,
+                point: Vec3::ZERO,
+            },
+        );
+        push_contact_event(
+            event_type_map,
+            entity_b,
+            ScriptContactEvent {
+                other: entity_a,
+                normal: -normal,
+                point: Vec3::ZERO,
+            },
+        );
+    }
+
+    let exited_collisions = state
+        .previous_collisions
+        .iter()
+        .filter(|pair| !current_collisions.contains(pair))
+        .copied()
+        .collect::<Vec<_>>();
+    for key in exited_collisions {
+        let Some(entity_a) = Entity::try_from_bits(key.0) else {
+            continue;
+        };
+        let Some(entity_b) = Entity::try_from_bits(key.1) else {
+            continue;
+        };
+        push_contact_event(
+            &mut state.collision_exit,
+            entity_a,
+            ScriptContactEvent {
+                other: entity_b,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+        push_contact_event(
+            &mut state.collision_exit,
+            entity_b,
+            ScriptContactEvent {
+                other: entity_a,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+    }
+
+    for key in &trigger_pairs {
+        let Some(entity_a) = Entity::try_from_bits(key.0) else {
+            continue;
+        };
+        let Some(entity_b) = Entity::try_from_bits(key.1) else {
+            continue;
+        };
+        let event_type_map = if state.previous_triggers.contains(key) {
+            &mut state.trigger_stay
+        } else {
+            &mut state.trigger_enter
+        };
+        push_contact_event(
+            event_type_map,
+            entity_a,
+            ScriptContactEvent {
+                other: entity_b,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+        push_contact_event(
+            event_type_map,
+            entity_b,
+            ScriptContactEvent {
+                other: entity_a,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+    }
+
+    let exited_triggers = state
+        .previous_triggers
+        .iter()
+        .filter(|pair| !trigger_pairs.contains(pair))
+        .copied()
+        .collect::<Vec<_>>();
+    for key in exited_triggers {
+        let Some(entity_a) = Entity::try_from_bits(key.0) else {
+            continue;
+        };
+        let Some(entity_b) = Entity::try_from_bits(key.1) else {
+            continue;
+        };
+        push_contact_event(
+            &mut state.trigger_exit,
+            entity_a,
+            ScriptContactEvent {
+                other: entity_b,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+        push_contact_event(
+            &mut state.trigger_exit,
+            entity_b,
+            ScriptContactEvent {
+                other: entity_a,
+                normal: Vec3::ZERO,
+                point: Vec3::ZERO,
+            },
+        );
+    }
+
+    state.previous_collisions = current_collisions;
+    state.previous_triggers = trigger_pairs;
 }
 
 pub fn script_execution_system(world: &mut World) {
@@ -723,6 +1530,12 @@ pub fn script_execution_system(world: &mut World) {
         .get_resource::<DeltaTime>()
         .map(|time| time.0)
         .unwrap_or(0.0);
+
+    if current_state != WorldState::Play {
+        if let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>() {
+            cursor_control.script_capture_suspended = false;
+        }
+    }
 
     let script_assets = match world.get_resource::<ScriptRegistry>() {
         Some(registry) => registry.scripts.clone(),
@@ -848,7 +1661,22 @@ pub fn script_execution_system(world: &mut World) {
         if let Some(mut input_state) = world.get_resource_mut::<ScriptInputState>() {
             input_state.refresh_gamepad_cache(&input_manager);
         }
+        if current_state == WorldState::Play && input_manager.was_just_pressed(KeyCode::Escape) {
+            if let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>() {
+                cursor_control.script_capture_suspended = true;
+            }
+        }
     }
+
+    refresh_script_contact_events(world);
+    let contact_events_snapshot = world.get_resource::<ScriptContactEventState>().cloned();
+    let input_action_events = collect_input_action_events(world);
+    let pending_custom_events =
+        if let Some(mut custom_events) = world.get_resource_mut::<ScriptCustomEventState>() {
+            custom_events.drain_all()
+        } else {
+            HashMap::new()
+        };
 
     let (last_state, last_executing) = world
         .get_resource::<ScriptRunState>()
@@ -1244,17 +2072,74 @@ pub fn script_execution_system(world: &mut World) {
                 }
 
                 if let Some(instance) = runtime.visual_instances.get_mut(&key) {
-                    if let Err(err) = run_visual_script_event(
-                        world_ptr,
-                        key,
-                        instance,
-                        VisualScriptEvent::Update,
-                        dt,
-                    ) {
-                        push_script_runtime_error(
-                            &mut runtime,
-                            format!("{}: {}", script_path_label(script), err),
-                        );
+                    let script_label = script_path_label(script);
+                    let mut deferred_errors = Vec::new();
+                    let mut run_event = |event: VisualScriptEvent| {
+                        if let Err(err) =
+                            run_visual_script_event(world_ptr, key, instance, event, dt)
+                        {
+                            deferred_errors.push(format!("{}: {}", script_label, err));
+                        }
+                    };
+
+                    if let Some(contact_events) = contact_events_snapshot.as_ref() {
+                        if contact_events
+                            .collision_enter
+                            .get(&key.entity)
+                            .is_some_and(|events| !events.is_empty())
+                        {
+                            run_event(VisualScriptEvent::CollisionEnter);
+                        }
+                        if contact_events
+                            .collision_stay
+                            .get(&key.entity)
+                            .is_some_and(|events| !events.is_empty())
+                        {
+                            run_event(VisualScriptEvent::CollisionStay);
+                        }
+                        if contact_events
+                            .collision_exit
+                            .get(&key.entity)
+                            .is_some_and(|events| !events.is_empty())
+                        {
+                            run_event(VisualScriptEvent::CollisionExit);
+                        }
+                        if contact_events
+                            .trigger_enter
+                            .get(&key.entity)
+                            .is_some_and(|events| !events.is_empty())
+                        {
+                            run_event(VisualScriptEvent::TriggerEnter);
+                        }
+                        if contact_events
+                            .trigger_exit
+                            .get(&key.entity)
+                            .is_some_and(|events| !events.is_empty())
+                        {
+                            run_event(VisualScriptEvent::TriggerExit);
+                        }
+                    }
+
+                    for action in &input_action_events.pressed {
+                        run_event(VisualScriptEvent::InputActionPressed(action.clone()));
+                    }
+                    for action in &input_action_events.released {
+                        run_event(VisualScriptEvent::InputActionReleased(action.clone()));
+                    }
+                    for action in &input_action_events.down {
+                        run_event(VisualScriptEvent::InputActionDown(action.clone()));
+                    }
+
+                    if let Some(events) = pending_custom_events.get(&key.entity) {
+                        for event_name in events {
+                            run_event(VisualScriptEvent::CustomEvent(event_name.clone()));
+                        }
+                    }
+
+                    run_event(VisualScriptEvent::Update);
+                    drop(run_event);
+                    for message in deferred_errors {
+                        push_script_runtime_error(&mut runtime, message);
                     }
                 }
 
@@ -1404,6 +2289,7 @@ pub fn script_execution_system(world: &mut World) {
         }
     } else if lifecycle_changed {
         if let Some(mut cursor_control) = world.get_resource_mut::<EditorCursorControlState>() {
+            cursor_control.script_capture_suspended = false;
             cursor_control.script_policy = None;
         }
         if let Some(input_manager) = input_manager {
@@ -1464,6 +2350,7 @@ impl VisualScriptExecutionHost {
                 world_ptr,
                 owner,
                 script_index,
+                bridge_lua: Mutex::new(Lua::new()),
             },
         }
     }
@@ -1495,10 +2382,28 @@ fn load_visual_script_instance(
 
     let program =
         compile_visual_script_runtime_source(&asset.source, &runtime_path.to_string_lossy())?;
+    let inspector_field_names = parse_visual_script_document(&asset.source)
+        .map(|document| {
+            document
+                .variables
+                .into_iter()
+                .filter(|variable| variable.inspector_exposed)
+                .filter_map(|variable| {
+                    let trimmed = variable.name.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     Ok(VisualScriptInstance {
         path: runtime_path.to_path_buf(),
         program,
         state: VisualScriptRuntimeState::default(),
+        inspector_field_names,
         modified: asset.modified,
     })
 }
@@ -1510,6 +2415,35 @@ fn run_visual_script_event(
     event: VisualScriptEvent,
     dt: f32,
 ) -> Result<(), String> {
+    let allowed_field_names = &instance.inspector_field_names;
+    let inspector_field_values = {
+        let world = unsafe { &mut *(world_ptr as *mut World) };
+        world
+            .get::<ScriptComponent>(key.entity)
+            .and_then(|component| component.scripts.get(key.script_index))
+            .map(|script| {
+                script
+                    .inspector_fields
+                    .iter()
+                    .filter_map(|field| {
+                        let name = field.name.trim();
+                        if name.is_empty()
+                            || name.starts_with("__visual_")
+                            || !allowed_field_names.contains(name)
+                        {
+                            None
+                        } else {
+                            Some((name.to_string(), field.value.clone()))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    for (name, value) in inspector_field_values {
+        instance.state.variables.insert(name, value);
+    }
+
     let mut host = VisualScriptExecutionHost::new(world_ptr, key.entity, key.script_index);
     instance.program.execute_event(
         event,
@@ -1544,6 +2478,10 @@ fn load_script_instance(
 
     let env = lua.create_table().map_err(|err| err.to_string())?;
     let _ = env.set("entity_id", entity.to_bits());
+    let script_slot = u64::try_from(script_index)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let _ = env.set("script_index", script_slot);
     register_script_api(lua, &env, world_ptr, entity, script_index).map_err(|err| {
         format!(
             "Failed to register script API for {}: {}",
@@ -1835,6 +2773,7 @@ fn create_rust_script_instance(
         world_ptr,
         owner,
         script_index,
+        bridge_lua: Mutex::new(Lua::new()),
     });
     let host_api = Box::new(RustScriptApi {
         abi_version: SCRIPT_API_ABI_VERSION,
@@ -2286,11 +3225,15 @@ fn invoke_json_with_context(
         return Err("Function name cannot be empty".to_string());
     }
 
-    let lua = Lua::new();
+    let lua_guard = context
+        .bridge_lua
+        .lock()
+        .map_err(|_| "Rust script bridge Lua lock poisoned".to_string())?;
+    let lua = &*lua_guard;
     let api_table = match table_name.as_str() {
-        "ecs" => build_ecs_table(&lua, context.world_ptr, context.owner, context.script_index)
+        "ecs" => build_ecs_table(lua, context.world_ptr, context.owner, context.script_index)
             .map_err(|err| err.to_string())?,
-        "input" => build_input_table(&lua, context.world_ptr).map_err(|err| err.to_string())?,
+        "input" => build_input_table(lua, context.world_ptr).map_err(|err| err.to_string())?,
         _ => {
             return Err(format!(
                 "Unknown script API table '{}', expected 'ecs' or 'input'",
@@ -2299,7 +3242,7 @@ fn invoke_json_with_context(
         }
     };
 
-    let args = rust_json_args_to_lua_multivalue(&lua, args_json)?;
+    let args = rust_json_args_to_lua_multivalue(lua, args_json)?;
     let value: Value = api_table
         .get(function_name)
         .map_err(|err| err.to_string())?;
@@ -2596,6 +3539,14 @@ fn build_ecs_table(
 ) -> mlua::Result<Table> {
     let ecs = lua.create_table()?;
     let owner_id = owner.to_bits();
+    let script_slot = u64::try_from(script_index)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+
+    ecs.set(
+        "self_script_index",
+        lua.create_function(move |_, ()| Ok(script_slot))?,
+    )?;
 
     let world_ptr_list = world_ptr;
     ecs.set(
@@ -2616,7 +3567,9 @@ fn build_ecs_table(
         "spawn_entity",
         lua.create_function(move |_, name: Option<String>| {
             let world = unsafe { &mut *(world_ptr_spawn as *mut World) };
-            let owner = Entity::from_bits(owner_id);
+            let Some(owner) = Entity::try_from_bits(owner_id) else {
+                return Ok(0_u64);
+            };
             let mut entity = world.spawn((
                 EditorEntity,
                 BevyTransform::default(),
@@ -2721,7 +3674,7 @@ fn build_ecs_table(
                 "spline_follower" => world.get::<BevySplineFollower>(entity).is_some(),
                 "look_at" => world.get::<BevyLookAt>(entity).is_some(),
                 "entity_follower" => world.get::<BevyEntityFollower>(entity).is_some(),
-                "animator" => world.get::<BevyAnimator>(entity).is_some(),
+                "animator" => resolve_animator_target_entity(world, entity).is_some(),
                 "scene" => world.get::<SceneRoot>(entity).is_some(),
                 "audio" => {
                     world.get::<BevyAudioEmitter>(entity).is_some()
@@ -3131,6 +4084,78 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_get_transform_forward = world_ptr;
+    ecs.set(
+        "get_transform_forward",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_transform_forward as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return vec3_to_table(lua, Vec3::Z);
+            };
+            let Some(transform) = world
+                .get::<BevyTransform>(entity)
+                .map(|component| component.0)
+            else {
+                return vec3_to_table(lua, Vec3::Z);
+            };
+            let mut forward = transform.rotation * Vec3::Z;
+            if forward.length_squared() <= 1.0e-8 {
+                forward = Vec3::Z;
+            } else {
+                forward = forward.normalize();
+            }
+            vec3_to_table(lua, forward)
+        })?,
+    )?;
+
+    let world_ptr_get_transform_right = world_ptr;
+    ecs.set(
+        "get_transform_right",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_transform_right as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return vec3_to_table(lua, Vec3::X);
+            };
+            let Some(transform) = world
+                .get::<BevyTransform>(entity)
+                .map(|component| component.0)
+            else {
+                return vec3_to_table(lua, Vec3::X);
+            };
+            let mut right = transform.rotation * Vec3::X;
+            if right.length_squared() <= 1.0e-8 {
+                right = Vec3::X;
+            } else {
+                right = right.normalize();
+            }
+            vec3_to_table(lua, right)
+        })?,
+    )?;
+
+    let world_ptr_get_transform_up = world_ptr;
+    ecs.set(
+        "get_transform_up",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_transform_up as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return vec3_to_table(lua, Vec3::Y);
+            };
+            let Some(transform) = world
+                .get::<BevyTransform>(entity)
+                .map(|component| component.0)
+            else {
+                return vec3_to_table(lua, Vec3::Y);
+            };
+            let mut up = transform.rotation * Vec3::Y;
+            if up.length_squared() <= 1.0e-8 {
+                up = Vec3::Y;
+            } else {
+                up = up.normalize();
+            }
+            vec3_to_table(lua, up)
+        })?,
+    )?;
+
     let world_ptr_set_transform = world_ptr;
     ecs.set(
         "set_transform",
@@ -3359,6 +4384,79 @@ fn build_ecs_table(
         )?,
     )?;
 
+    let world_ptr_get_look_at = world_ptr;
+    ecs.set(
+        "get_look_at",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_look_at as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(look_at) = world.get::<BevyLookAt>(entity).map(|component| component.0) else {
+                return Ok(None);
+            };
+            Ok(Some(look_at_to_table(lua, look_at)?))
+        })?,
+    )?;
+
+    let world_ptr_set_look_at = world_ptr;
+    ecs.set(
+        "set_look_at",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_look_at as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let mut look_at = world
+                .get::<BevyLookAt>(entity)
+                .cloned()
+                .map(|component| component.0)
+                .unwrap_or_default();
+            patch_look_at(&mut look_at, &data);
+            world.entity_mut(entity).insert(BevyLookAt(look_at));
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_entity_follower = world_ptr;
+    ecs.set(
+        "get_entity_follower",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_entity_follower as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(follower) = world
+                .get::<BevyEntityFollower>(entity)
+                .map(|component| component.0)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(entity_follower_to_table(lua, follower)?))
+        })?,
+    )?;
+
+    let world_ptr_set_entity_follower = world_ptr;
+    ecs.set(
+        "set_entity_follower",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_entity_follower as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let mut follower = world
+                .get::<BevyEntityFollower>(entity)
+                .cloned()
+                .map(|component| component.0)
+                .unwrap_or_default();
+            patch_entity_follower(&mut follower, &data);
+            world
+                .entity_mut(entity)
+                .insert(BevyEntityFollower(follower));
+            Ok(true)
+        })?,
+    )?;
+
     let world_ptr_set_anim_enabled = world_ptr;
     ecs.set(
         "set_animator_enabled",
@@ -3367,11 +4465,19 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+            let animator_entities = resolve_animator_target_entities(world, entity);
+            if animator_entities.is_empty() {
                 return Ok(false);
-            };
-            animator.0.enabled = enabled;
-            Ok(true)
+            }
+            let mut applied = false;
+            for animator_entity in animator_entities {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    continue;
+                };
+                animator.0.enabled = enabled;
+                applied = true;
+            }
+            Ok(applied)
         })?,
     )?;
 
@@ -3383,11 +4489,19 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+            let animator_entities = resolve_animator_target_entities(world, entity);
+            if animator_entities.is_empty() {
                 return Ok(false);
-            };
-            animator.0.time_scale = time_scale.max(0.0);
-            Ok(true)
+            }
+            let mut applied = false;
+            for animator_entity in animator_entities {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    continue;
+                };
+                animator.0.time_scale = time_scale.max(0.0);
+                applied = true;
+            }
+            Ok(applied)
         })?,
     )?;
 
@@ -3399,11 +4513,19 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+            let animator_entities = resolve_animator_target_entities(world, entity);
+            if animator_entities.is_empty() {
                 return Ok(false);
-            };
-            animator.0.parameters.set_float(name, value);
-            Ok(true)
+            }
+            let mut applied = false;
+            for animator_entity in animator_entities {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    continue;
+                };
+                animator.0.parameters.set_float(name.clone(), value);
+                applied = true;
+            }
+            Ok(applied)
         })?,
     )?;
 
@@ -3415,11 +4537,19 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+            let animator_entities = resolve_animator_target_entities(world, entity);
+            if animator_entities.is_empty() {
                 return Ok(false);
-            };
-            animator.0.parameters.set_bool(name, value);
-            Ok(true)
+            }
+            let mut applied = false;
+            for animator_entity in animator_entities {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    continue;
+                };
+                animator.0.parameters.set_bool(name.clone(), value);
+                applied = true;
+            }
+            Ok(applied)
         })?,
     )?;
 
@@ -3431,11 +4561,19 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+            let animator_entities = resolve_animator_target_entities(world, entity);
+            if animator_entities.is_empty() {
                 return Ok(false);
-            };
-            animator.0.parameters.trigger(name);
-            Ok(true)
+            }
+            let mut applied = false;
+            for animator_entity in animator_entities {
+                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    continue;
+                };
+                animator.0.parameters.trigger(name.clone());
+                applied = true;
+            }
+            Ok(applied)
         })?,
     )?;
 
@@ -3447,7 +4585,10 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(animator) = world.get::<BevyAnimator>(entity) else {
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(None);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
                 return Ok(None);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -3462,6 +4603,602 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_anim_state = world_ptr;
+    ecs.set(
+        "get_animator_state",
+        lua.create_function(move |lua, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_anim_state as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(None);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(None);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let Some(layer) = animator.0.layers.get(layer_index) else {
+                return Ok(None);
+            };
+
+            let table = lua.create_table()?;
+            table.set("layer_index", layer_index)?;
+            table.set("layer_name", layer.name.clone())?;
+            table.set("layer_weight", layer.weight)?;
+            table.set("layer_additive", layer.additive)?;
+            table.set("state_time", layer.state_machine.state_time)?;
+            table.set("current_state", layer.state_machine.current_state)?;
+            table.set(
+                "current_state_name",
+                layer
+                    .state_machine
+                    .states
+                    .get(layer.state_machine.current_state)
+                    .map(|state| state.name.clone()),
+            )?;
+
+            let states = lua.create_table()?;
+            for (index, state) in layer.state_machine.states.iter().enumerate() {
+                let state_table = lua.create_table()?;
+                state_table.set("index", index)?;
+                state_table.set("name", state.name.clone())?;
+                state_table.set("node", state.node)?;
+                states.set(index + 1, state_table)?;
+            }
+            table.set("states", states)?;
+
+            let transitions = lua.create_table()?;
+            for (index, transition) in layer.state_machine.transitions.iter().enumerate() {
+                let transition_table = lua.create_table()?;
+                transition_table.set("index", index)?;
+                transition_table.set("from", transition.from)?;
+                transition_table.set("to", transition.to)?;
+                transition_table.set("duration", transition.duration)?;
+                if let Some(exit_time) = transition.exit_time {
+                    transition_table.set("exit_time", exit_time)?;
+                } else {
+                    transition_table.set("exit_time", Value::Nil)?;
+                }
+                transition_table.set("can_interrupt", transition.can_interrupt)?;
+                transition_table.set("condition_count", transition.conditions.len())?;
+                transitions.set(index + 1, transition_table)?;
+            }
+            table.set("transitions", transitions)?;
+
+            if let Some(active) = layer.state_machine.transition_status() {
+                let active_table = lua.create_table()?;
+                active_table.set("from", active.from)?;
+                active_table.set("to", active.to)?;
+                active_table.set("elapsed", active.elapsed)?;
+                active_table.set("duration", active.duration)?;
+                active_table.set("progress", active.progress)?;
+                active_table.set("can_interrupt", active.can_interrupt)?;
+                table.set("transition", active_table)?;
+            } else {
+                table.set("transition", Value::Nil)?;
+            }
+
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_anim_layer_weights = world_ptr;
+    ecs.set(
+        "get_animator_layer_weights",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_anim_layer_weights as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(None);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(None);
+            };
+            let list = lua.create_table()?;
+            for (index, layer) in animator.0.layers.iter().enumerate() {
+                let layer_table = lua.create_table()?;
+                layer_table.set("index", index)?;
+                layer_table.set("name", layer.name.clone())?;
+                layer_table.set("weight", layer.weight)?;
+                layer_table.set("additive", layer.additive)?;
+                list.set(index + 1, layer_table)?;
+            }
+            Ok(Some(list))
+        })?,
+    )?;
+
+    let world_ptr_get_anim_layer_weight = world_ptr;
+    ecs.set(
+        "get_animator_layer_weight",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_layer_weight as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0.0_f32);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let weight = animator
+                .0
+                .layers
+                .get(layer_index)
+                .map(|layer| layer.weight)
+                .unwrap_or(0.0);
+            Ok(weight)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_state_time = world_ptr;
+    ecs.set(
+        "get_animator_state_time",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_state_time as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0.0_f32);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let state_time = animator
+                .0
+                .layers
+                .get(layer_index)
+                .map(|layer| layer.state_machine.state_time)
+                .unwrap_or(0.0);
+            Ok(state_time)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_current_state = world_ptr;
+    ecs.set(
+        "get_animator_current_state",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_current_state as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0_u64);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0_u64);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0_u64);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let state = animator
+                .0
+                .layers
+                .get(layer_index)
+                .map(|layer| layer.state_machine.current_state as u64)
+                .unwrap_or(0_u64);
+            Ok(state)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_current_state_name = world_ptr;
+    ecs.set(
+        "get_animator_current_state_name",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_current_state_name as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(String::new());
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(String::new());
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(String::new());
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let name = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| {
+                    layer
+                        .state_machine
+                        .states
+                        .get(layer.state_machine.current_state)
+                        .map(|state| state.name.clone())
+                })
+                .unwrap_or_default();
+            Ok(name)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_active = world_ptr;
+    ecs.set(
+        "get_animator_transition_active",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_active as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(false);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(false);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let active = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .is_some();
+            Ok(active)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_from = world_ptr;
+    ecs.set(
+        "get_animator_transition_from",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_from as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0_u64);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0_u64);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0_u64);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let from = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .map(|status| status.from as u64)
+                .unwrap_or(0_u64);
+            Ok(from)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_to = world_ptr;
+    ecs.set(
+        "get_animator_transition_to",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_to as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0_u64);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0_u64);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0_u64);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let to = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .map(|status| status.to as u64)
+                .unwrap_or(0_u64);
+            Ok(to)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_progress = world_ptr;
+    ecs.set(
+        "get_animator_transition_progress",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_progress as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0.0_f32);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let progress = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .map(|status| status.progress)
+                .unwrap_or(0.0);
+            Ok(progress)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_elapsed = world_ptr;
+    ecs.set(
+        "get_animator_transition_elapsed",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_elapsed as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0.0_f32);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let elapsed = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .map(|status| status.elapsed)
+                .unwrap_or(0.0);
+            Ok(elapsed)
+        })?,
+    )?;
+
+    let world_ptr_get_anim_transition_duration = world_ptr;
+    ecs.set(
+        "get_animator_transition_duration",
+        lua.create_function(move |_, (entity_id, layer_index): (u64, Option<usize>)| {
+            let world = unsafe { &mut *(world_ptr_get_anim_transition_duration as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
+                return Ok(0.0_f32);
+            };
+            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+                return Ok(0.0_f32);
+            };
+            let layer_index = layer_index.unwrap_or(0);
+            let duration = animator
+                .0
+                .layers
+                .get(layer_index)
+                .and_then(|layer| layer.state_machine.transition_status())
+                .map(|status| status.duration)
+                .unwrap_or(0.0);
+            Ok(duration)
+        })?,
+    )?;
+
+    let world_ptr_set_anim_layer_weight = world_ptr;
+    ecs.set(
+        "set_animator_layer_weight",
+        lua.create_function(
+            move |_, (entity_id, layer_index, weight): (u64, Option<usize>, f32)| {
+                let world = unsafe { &mut *(world_ptr_set_anim_layer_weight as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let animator_entities = resolve_animator_target_entities(world, entity);
+                if animator_entities.is_empty() {
+                    return Ok(false);
+                }
+                let layer_index = layer_index.unwrap_or(0);
+                let mut applied = false;
+                for animator_entity in animator_entities {
+                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                        continue;
+                    };
+                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                        continue;
+                    };
+                    layer.weight = weight.clamp(0.0, 1.0);
+                    applied = true;
+                }
+                Ok(applied)
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_anim_transition = world_ptr;
+    ecs.set(
+        "set_animator_transition",
+        lua.create_function(
+            move |_,
+                  (entity_id, layer_index, transition_index, data): (
+                u64,
+                Option<usize>,
+                usize,
+                Table,
+            )| {
+                let world = unsafe { &mut *(world_ptr_set_anim_transition as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let animator_entities = resolve_animator_target_entities(world, entity);
+                if animator_entities.is_empty() {
+                    return Ok(false);
+                }
+                let layer_index = layer_index.unwrap_or(0);
+                let mut applied = false;
+                for animator_entity in animator_entities {
+                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                        continue;
+                    };
+                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                        continue;
+                    };
+                    let Some(transition) =
+                        layer.state_machine.transitions.get_mut(transition_index)
+                    else {
+                        continue;
+                    };
+
+                    if let Ok(value) = data.get::<usize>("from") {
+                        if value < layer.state_machine.states.len() {
+                            transition.from = value;
+                        }
+                    }
+                    if let Ok(value) = data.get::<usize>("to") {
+                        if value < layer.state_machine.states.len() {
+                            transition.to = value;
+                        }
+                    }
+                    if let Ok(value) = data.get::<f32>("duration") {
+                        transition.duration = value.max(0.0);
+                    }
+                    if let Ok(value) = data.get::<bool>("can_interrupt") {
+                        transition.can_interrupt = value;
+                    }
+                    if let Ok(value) = data.get::<Value>("exit_time") {
+                        match value {
+                            Value::Nil => transition.exit_time = None,
+                            Value::Number(raw) if raw.is_finite() => {
+                                transition.exit_time = Some(raw as f32);
+                            }
+                            Value::Integer(raw) => {
+                                transition.exit_time = Some(raw as f32);
+                            }
+                            _ => {}
+                        }
+                    }
+                    applied = true;
+                }
+                Ok(applied)
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_anim_blend_node = world_ptr;
+    ecs.set(
+        "set_animator_blend_node",
+        lua.create_function(
+            move |_,
+                  (entity_id, layer_index, node_index, normalize, mode): (
+                u64,
+                Option<usize>,
+                usize,
+                Option<bool>,
+                Option<String>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_set_anim_blend_node as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let animator_entities = resolve_animator_target_entities(world, entity);
+                if animator_entities.is_empty() {
+                    return Ok(false);
+                }
+                let layer_index = layer_index.unwrap_or(0);
+                let mut applied = false;
+                for animator_entity in animator_entities {
+                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                        continue;
+                    };
+                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                        continue;
+                    };
+                    let Some(node) = layer.graph.nodes.get_mut(node_index) else {
+                        continue;
+                    };
+                    let helmer::animation::AnimationNode::Blend(blend_node) = node else {
+                        continue;
+                    };
+
+                    if let Some(normalize) = normalize {
+                        blend_node.normalize = normalize;
+                    }
+                    if let Some(mode) = mode.as_deref() {
+                        let normalized = normalize_name(mode);
+                        blend_node.mode = if normalized == "additive" || normalized == "add" {
+                            helmer::animation::BlendMode::Additive
+                        } else {
+                            helmer::animation::BlendMode::Linear
+                        };
+                    };
+                    applied = true;
+                }
+                Ok(applied)
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_anim_blend_child = world_ptr;
+    ecs.set(
+        "set_animator_blend_child",
+        lua.create_function(
+            move |_,
+                  (
+                entity_id,
+                layer_index,
+                node_index,
+                child_index,
+                weight,
+                weight_param,
+                weight_scale,
+                weight_bias,
+            ): (
+                u64,
+                Option<usize>,
+                usize,
+                usize,
+                Option<f32>,
+                Option<String>,
+                Option<f32>,
+                Option<f32>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_set_anim_blend_child as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let animator_entities = resolve_animator_target_entities(world, entity);
+                if animator_entities.is_empty() {
+                    return Ok(false);
+                }
+                let layer_index = layer_index.unwrap_or(0);
+                let mut applied = false;
+                for animator_entity in animator_entities {
+                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                        continue;
+                    };
+                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                        continue;
+                    };
+                    let Some(node) = layer.graph.nodes.get_mut(node_index) else {
+                        continue;
+                    };
+                    let helmer::animation::AnimationNode::Blend(blend_node) = node else {
+                        continue;
+                    };
+                    let Some(child) = blend_node.children.get_mut(child_index) else {
+                        continue;
+                    };
+
+                    if let Some(value) = weight {
+                        child.weight = value.max(0.0);
+                    }
+                    if let Some(value) = weight_param.as_deref() {
+                        let trimmed = value.trim();
+                        child.weight_param = if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        };
+                    }
+                    if let Some(value) = weight_scale {
+                        child.weight_scale = value;
+                    }
+                    if let Some(value) = weight_bias {
+                        child.weight_bias = value;
+                    }
+                    applied = true;
+                }
+                Ok(applied)
+            },
+        )?,
+    )?;
+
     let world_ptr_play_clip = world_ptr;
     ecs.set(
         "play_anim_clip",
@@ -3471,30 +5208,44 @@ fn build_ecs_table(
                 let Some(entity) = lookup_editor_entity(world, entity_id) else {
                     return Ok(false);
                 };
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                let animator_entities = resolve_animator_target_entities(world, entity);
+                if animator_entities.is_empty() {
                     return Ok(false);
-                };
+                }
+                let clip_name = name.trim();
+                if clip_name.is_empty() {
+                    return Ok(false);
+                }
                 let layer_index = layer_index.unwrap_or(0);
-                let Some(layer) = animator.0.layers.get_mut(layer_index) else {
-                    return Ok(false);
-                };
-                let Some(clip_index) = layer.graph.library.clip_index(&name) else {
-                    return Ok(false);
-                };
-                if let Some(state) = layer
-                    .state_machine
-                    .states
-                    .get(layer.state_machine.current_state)
-                {
-                    if let Some(node) = layer.graph.nodes.get_mut(state.node) {
-                        if let helmer::animation::AnimationNode::Clip(clip_node) = node {
-                            clip_node.clip_index = clip_index;
-                            layer.state_machine.state_time = 0.0;
-                            return Ok(true);
+                let mut applied = false;
+                for animator_entity in animator_entities {
+                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                        continue;
+                    };
+                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                        continue;
+                    };
+                    let Some(clip_index) = resolve_clip_index(&layer.graph.library, clip_name)
+                    else {
+                        continue;
+                    };
+                    if let Some(state) = layer
+                        .state_machine
+                        .states
+                        .get(layer.state_machine.current_state)
+                    {
+                        if let Some(node) = layer.graph.nodes.get_mut(state.node) {
+                            if let helmer::animation::AnimationNode::Clip(clip_node) = node {
+                                if clip_node.clip_index != clip_index {
+                                    clip_node.clip_index = clip_index;
+                                    layer.state_machine.state_time = 0.0;
+                                }
+                                applied = true;
+                            }
                         }
                     }
                 }
-                Ok(false)
+                Ok(applied)
             },
         )?,
     )?;
@@ -4030,19 +5781,10 @@ fn build_ecs_table(
             let Some(scripts) = world.get::<ScriptComponent>(entity) else {
                 return Ok(None);
             };
-            let selected_index = match index {
-                Some(Value::Integer(raw)) => Some((raw.max(1) as usize).saturating_sub(1)),
-                Some(Value::Number(raw)) if raw.is_finite() => {
-                    Some((raw.round().max(1.0) as usize).saturating_sub(1))
-                }
-                Some(Value::Nil) | None => None,
-                _ => return Ok(None),
+            let Some(selected_index) = parse_script_slot(index) else {
+                return Ok(None);
             };
-            let script = if let Some(index) = selected_index {
-                scripts.scripts.get(index)
-            } else {
-                scripts.scripts.first()
-            };
+            let script = selected_script_entry(scripts, selected_index);
             let Some(script) = script else {
                 return Ok(None);
             };
@@ -4052,14 +5794,97 @@ fn build_ecs_table(
             let table = lua.create_table()?;
             table.set("path", path.to_string_lossy().to_string())?;
             table.set("language", script.language.clone())?;
+            let fields = lua.create_table()?;
+            for field in &script.inspector_fields {
+                let value = rust_json_to_lua_value(lua, field.value.clone())
+                    .map_err(mlua::Error::external)?;
+                fields.set(field.name.clone(), value)?;
+            }
+            table.set("fields", fields)?;
             Ok(Some(table))
         })?,
+    )?;
+
+    let world_ptr_get_script_count = world_ptr;
+    ecs.set(
+        "get_script_count",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_script_count as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0u64);
+            };
+            let count = world
+                .get::<ScriptComponent>(entity)
+                .map(|scripts| scripts.scripts.len())
+                .unwrap_or(0);
+            Ok(u64::try_from(count).unwrap_or(u64::MAX))
+        })?,
+    )?;
+
+    let world_ptr_find_script_index = world_ptr;
+    ecs.set(
+        "find_script_index",
+        lua.create_function(
+            move |_, (entity_id, path, language): (u64, String, Option<String>)| {
+                let world = unsafe { &mut *(world_ptr_find_script_index as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(None);
+                };
+                let Some(scripts) = world.get::<ScriptComponent>(entity) else {
+                    return Ok(None);
+                };
+
+                let trimmed_path = path.trim();
+                if trimmed_path.is_empty() {
+                    return Ok(None);
+                }
+
+                let project = world.get_resource::<EditorProject>();
+                let resolved_path = resolve_project_path(project, Path::new(trimmed_path));
+                let resolved_key = script_path_lookup_key(resolved_path.as_path());
+                let raw_key = script_path_lookup_key(Path::new(trimmed_path));
+
+                let language_key = language
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| {
+                        normalize_name(&normalize_script_language(
+                            value,
+                            Some(resolved_path.as_path()),
+                        ))
+                    });
+
+                for (index, script) in scripts.scripts.iter().enumerate() {
+                    let Some(script_path) = script.path.as_ref() else {
+                        continue;
+                    };
+                    let script_key = script_path_lookup_key(script_path.as_path());
+                    if script_key != resolved_key && script_key != raw_key {
+                        continue;
+                    }
+                    if let Some(expected_language) = language_key.as_ref() {
+                        let actual_language = normalize_name(&script.language);
+                        if &actual_language != expected_language {
+                            continue;
+                        }
+                    }
+
+                    if let Ok(found) = u64::try_from(index.saturating_add(1)) {
+                        return Ok(Some(found));
+                    }
+                    return Ok(None);
+                }
+
+                Ok(None)
+            },
+        )?,
     )?;
 
     let world_ptr_get_script_path = world_ptr;
     ecs.set(
         "get_script_path",
-        lua.create_function(move |_, entity_id: u64| {
+        lua.create_function(move |_, (entity_id, index): (u64, Option<Value>)| {
             let world = unsafe { &mut *(world_ptr_get_script_path as *mut World) };
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
@@ -4067,7 +5892,11 @@ fn build_ecs_table(
             let Some(scripts) = world.get::<ScriptComponent>(entity) else {
                 return Ok(None);
             };
-            let Some(script) = scripts.scripts.first() else {
+            let Some(selected_index) = parse_script_slot(index) else {
+                return Ok(None);
+            };
+            let script = selected_script_entry(scripts, selected_index);
+            let Some(script) = script else {
                 return Ok(None);
             };
             Ok(script
@@ -4080,7 +5909,7 @@ fn build_ecs_table(
     let world_ptr_get_script_language = world_ptr;
     ecs.set(
         "get_script_language",
-        lua.create_function(move |_, entity_id: u64| {
+        lua.create_function(move |_, (entity_id, index): (u64, Option<Value>)| {
             let world = unsafe { &mut *(world_ptr_get_script_language as *mut World) };
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
@@ -4088,10 +5917,200 @@ fn build_ecs_table(
             let Some(scripts) = world.get::<ScriptComponent>(entity) else {
                 return Ok(None);
             };
-            let Some(script) = scripts.scripts.first() else {
+            let Some(selected_index) = parse_script_slot(index) else {
+                return Ok(None);
+            };
+            let script = selected_script_entry(scripts, selected_index);
+            let Some(script) = script else {
                 return Ok(None);
             };
             Ok(Some(script.language.clone()))
+        })?,
+    )?;
+
+    let world_ptr_list_script_fields = world_ptr;
+    ecs.set(
+        "list_script_fields",
+        lua.create_function(move |lua, (entity_id, index): (u64, Option<Value>)| {
+            let world = unsafe { &mut *(world_ptr_list_script_fields as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(scripts) = world.get::<ScriptComponent>(entity) else {
+                return Ok(None);
+            };
+            let Some(selected_index) = parse_script_slot(index) else {
+                return Ok(None);
+            };
+            let Some(script) = selected_script_entry(scripts, selected_index) else {
+                return Ok(None);
+            };
+
+            let values = lua.create_table()?;
+            let metadata = lua.create_table()?;
+            for (field_index, field) in script.inspector_fields.iter().enumerate() {
+                let meta = script_inspector_field_to_lua_table(lua, field)?;
+                metadata.set(field_index + 1, meta)?;
+                let value = rust_json_to_lua_value(lua, field.value.clone())
+                    .map_err(mlua::Error::external)?;
+                values.set(field.name.clone(), value)?;
+            }
+            values.set("__meta", metadata)?;
+            Ok(Some(values))
+        })?,
+    )?;
+
+    let world_ptr_get_script_field = world_ptr;
+    ecs.set(
+        "get_script_field",
+        lua.create_function(
+            move |lua, (entity_id, field_name, index): (u64, String, Option<Value>)| {
+                let world = unsafe { &mut *(world_ptr_get_script_field as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(None);
+                };
+                let Some(field_name) = parse_script_field_name(&field_name) else {
+                    return Ok(None);
+                };
+                let Some(scripts) = world.get::<ScriptComponent>(entity) else {
+                    return Ok(None);
+                };
+                let Some(selected_index) = parse_script_slot(index) else {
+                    return Ok(None);
+                };
+                let Some(script) = selected_script_entry(scripts, selected_index) else {
+                    return Ok(None);
+                };
+                let Some(field) = script.find_inspector_field(&field_name) else {
+                    return Ok(None);
+                };
+                let value = rust_json_to_lua_value(lua, field.value.clone())
+                    .map_err(mlua::Error::external)?;
+                Ok(Some(value))
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_script_field = world_ptr;
+    ecs.set(
+        "set_script_field",
+        lua.create_function(
+            move |_, (entity_id, field_name, value, index): (u64, String, Value, Option<Value>)| {
+                let world = unsafe { &mut *(world_ptr_set_script_field as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(false);
+                };
+                let Some(field_name) = parse_script_field_name(&field_name) else {
+                    return Ok(false);
+                };
+                let Some(selected_index) = parse_script_slot(index) else {
+                    return Ok(false);
+                };
+                let Some(mut scripts) = world.get_mut::<ScriptComponent>(entity) else {
+                    return Ok(false);
+                };
+                let Some(script) = selected_script_entry_mut(&mut scripts, selected_index) else {
+                    return Ok(false);
+                };
+
+                let json_value = rust_lua_value_to_json(value).map_err(mlua::Error::external)?;
+                if let Some(field) = script.find_inspector_field_mut(&field_name) {
+                    field.value = coerce_script_field_value(field.field_type, &json_value);
+                    field.sanitize();
+                } else {
+                    let inferred_type = infer_script_field_type_from_json(&json_value);
+                    let mut field = ScriptInspectorField::new(field_name, inferred_type);
+                    field.value = coerce_script_field_value(field.field_type, &json_value);
+                    script.upsert_inspector_field(field);
+                }
+                Ok(true)
+            },
+        )?,
+    )?;
+
+    let world_ptr_list_self_script_fields = world_ptr;
+    ecs.set(
+        "list_self_script_fields",
+        lua.create_function(move |lua, ()| {
+            let world = unsafe { &mut *(world_ptr_list_self_script_fields as *mut World) };
+            let Some(owner) = Entity::try_from_bits(owner_id) else {
+                return Ok(None);
+            };
+            let Some(scripts) = world.get::<ScriptComponent>(owner) else {
+                return Ok(None);
+            };
+            let Some(script) = scripts.scripts.get(script_index) else {
+                return Ok(None);
+            };
+
+            let values = lua.create_table()?;
+            let metadata = lua.create_table()?;
+            for (field_index, field) in script.inspector_fields.iter().enumerate() {
+                let meta = script_inspector_field_to_lua_table(lua, field)?;
+                metadata.set(field_index + 1, meta)?;
+                let value = rust_json_to_lua_value(lua, field.value.clone())
+                    .map_err(mlua::Error::external)?;
+                values.set(field.name.clone(), value)?;
+            }
+            values.set("__meta", metadata)?;
+            Ok(Some(values))
+        })?,
+    )?;
+
+    let world_ptr_get_self_script_field = world_ptr;
+    ecs.set(
+        "get_self_script_field",
+        lua.create_function(move |lua, field_name: String| {
+            let world = unsafe { &mut *(world_ptr_get_self_script_field as *mut World) };
+            let Some(field_name) = parse_script_field_name(&field_name) else {
+                return Ok(None);
+            };
+            let Some(owner) = Entity::try_from_bits(owner_id) else {
+                return Ok(None);
+            };
+            let Some(scripts) = world.get::<ScriptComponent>(owner) else {
+                return Ok(None);
+            };
+            let Some(script) = scripts.scripts.get(script_index) else {
+                return Ok(None);
+            };
+            let Some(field) = script.find_inspector_field(&field_name) else {
+                return Ok(None);
+            };
+            let value =
+                rust_json_to_lua_value(lua, field.value.clone()).map_err(mlua::Error::external)?;
+            Ok(Some(value))
+        })?,
+    )?;
+
+    let world_ptr_set_self_script_field = world_ptr;
+    ecs.set(
+        "set_self_script_field",
+        lua.create_function(move |_, (field_name, value): (String, Value)| {
+            let world = unsafe { &mut *(world_ptr_set_self_script_field as *mut World) };
+            let Some(field_name) = parse_script_field_name(&field_name) else {
+                return Ok(false);
+            };
+            let Some(owner) = Entity::try_from_bits(owner_id) else {
+                return Ok(false);
+            };
+            let Some(mut scripts) = world.get_mut::<ScriptComponent>(owner) else {
+                return Ok(false);
+            };
+            let Some(script) = scripts.scripts.get_mut(script_index) else {
+                return Ok(false);
+            };
+            let json_value = rust_lua_value_to_json(value).map_err(mlua::Error::external)?;
+            if let Some(field) = script.find_inspector_field_mut(&field_name) {
+                field.value = coerce_script_field_value(field.field_type, &json_value);
+                field.sanitize();
+            } else {
+                let inferred_type = infer_script_field_type_from_json(&json_value);
+                let mut field = ScriptInspectorField::new(field_name, inferred_type);
+                field.value = coerce_script_field_value(field.field_type, &json_value);
+                script.upsert_inspector_field(field);
+            }
+            Ok(true)
         })?,
     )?;
 
@@ -4099,34 +6118,70 @@ fn build_ecs_table(
     ecs.set(
         "set_script",
         lua.create_function(
-            move |_, (entity_id, path, language): (u64, String, Option<String>)| {
+            move |_,
+                  (entity_id, path, language_or_index, index): (
+                u64,
+                String,
+                Option<Value>,
+                Option<Value>,
+            )| {
                 let world = unsafe { &mut *(world_ptr_set_script as *mut World) };
                 let Some(entity) = lookup_editor_entity(world, entity_id) else {
                     return Ok(false);
                 };
+
+                let mut language: Option<String> = None;
+                let mut script_slot = None;
+
+                if let Some(value) = language_or_index {
+                    match value {
+                        Value::Nil => {}
+                        Value::String(value) => {
+                            language = Some(value.to_string_lossy().to_string());
+                        }
+                        Value::Integer(_) | Value::Number(_) => {
+                            let Some(parsed) = parse_script_slot(Some(value)) else {
+                                return Ok(false);
+                            };
+                            script_slot = parsed;
+                        }
+                        _ => return Ok(false),
+                    }
+                }
+
+                if let Some(value) = index {
+                    let Some(parsed) = parse_script_slot(Some(value)) else {
+                        return Ok(false);
+                    };
+                    script_slot = parsed;
+                }
+
+                let script_slot = script_slot.unwrap_or(0);
                 let project = world.get_resource::<EditorProject>().cloned();
                 let resolved = resolve_project_path(project.as_ref(), Path::new(&path));
                 let language = normalize_script_language(
-                    &language.unwrap_or_default(),
+                    language.as_deref().unwrap_or_default(),
                     Some(resolved.as_path()),
                 );
                 if let Some(mut scripts) = world.get_mut::<ScriptComponent>(entity) {
-                    if scripts.scripts.is_empty() {
-                        scripts.scripts.push(ScriptEntry {
-                            path: Some(resolved),
-                            language,
-                        });
-                    } else {
-                        scripts.scripts[0].path = Some(resolved);
-                        scripts.scripts[0].language = language;
+                    if scripts.scripts.len() <= script_slot {
+                        scripts
+                            .scripts
+                            .resize_with(script_slot + 1, ScriptEntry::new);
                     }
+                    scripts.scripts[script_slot].path = Some(resolved);
+                    scripts.scripts[script_slot].language = language;
                 } else {
-                    world.entity_mut(entity).insert(ScriptComponent {
-                        scripts: vec![ScriptEntry {
-                            path: Some(resolved),
-                            language,
-                        }],
-                    });
+                    let mut entries = Vec::new();
+                    entries.resize_with(script_slot + 1, ScriptEntry::new);
+                    entries[script_slot] = ScriptEntry {
+                        path: Some(resolved),
+                        language,
+                        inspector_fields: Vec::new(),
+                    };
+                    world
+                        .entity_mut(entity)
+                        .insert(ScriptComponent { scripts: entries });
                 }
                 Ok(true)
             },
@@ -4597,7 +6652,7 @@ fn build_ecs_table(
             let table = lua.create_table()?;
             let buses = audio.0.bus_list();
             for (index, bus) in buses.iter().enumerate() {
-                table.set(index + 1, audio_bus_to_lua(lua, *bus)?)?;
+                table.set(index + 1, audio.0.bus_name(*bus))?;
             }
             Ok(table)
         })?,
@@ -4606,13 +6661,13 @@ fn build_ecs_table(
     let world_ptr_audio_create_bus = world_ptr;
     ecs.set(
         "create_audio_bus",
-        lua.create_function(move |lua, name: Option<String>| {
+        lua.create_function(move |_, name: Option<String>| {
             let world = unsafe { &mut *(world_ptr_audio_create_bus as *mut World) };
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
-                return Ok(Value::Nil);
+                return Ok(None);
             };
             let bus = audio.0.create_custom_bus(name);
-            audio_bus_to_lua(lua, bus)
+            Ok(Some(audio.0.bus_name(bus)))
         })?,
     )?;
 
@@ -4899,6 +6954,514 @@ fn build_ecs_table(
         })?,
     )?;
 
+    let world_ptr_set_character_desired = world_ptr;
+    ecs.set(
+        "set_character_controller_desired_translation",
+        lua.create_function(move |_, (entity_id, translation): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_character_desired as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+            let Some(translation) = table_to_vec3(&translation) else {
+                return Ok(false);
+            };
+
+            if world.get::<CharacterControllerInput>(entity).is_none() {
+                world
+                    .entity_mut(entity)
+                    .insert(CharacterControllerInput::default());
+            }
+            let Some(mut input) = world.get_mut::<CharacterControllerInput>(entity) else {
+                return Ok(false);
+            };
+            input.desired_translation = translation;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_character_desired = world_ptr;
+    ecs.set(
+        "get_character_controller_desired_translation",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_desired as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.desired_translation)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_effective = world_ptr;
+    ecs.set(
+        "get_character_controller_effective_translation",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_effective as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.effective_translation)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_remaining = world_ptr;
+    ecs.set(
+        "get_character_controller_remaining_translation",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_remaining as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.remaining_translation)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_grounded = world_ptr;
+    ecs.set(
+        "get_character_controller_grounded",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_grounded as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.grounded))
+        })?,
+    )?;
+
+    let world_ptr_get_character_sliding = world_ptr;
+    ecs.set(
+        "get_character_controller_sliding_down_slope",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_sliding as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.sliding_down_slope))
+        })?,
+    )?;
+
+    let world_ptr_get_character_collision_count = world_ptr;
+    ecs.set(
+        "get_character_controller_collision_count",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_collision_count as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.collision_count))
+        })?,
+    )?;
+
+    let world_ptr_get_character_ground_normal = world_ptr;
+    ecs.set(
+        "get_character_controller_ground_normal",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_ground_normal as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.ground_normal)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_slope_angle = world_ptr;
+    ecs.set(
+        "get_character_controller_slope_angle",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_slope_angle as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.slope_angle))
+        })?,
+    )?;
+
+    let world_ptr_get_character_hit_normal = world_ptr;
+    ecs.set(
+        "get_character_controller_hit_normal",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_hit_normal as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.hit_normal)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_hit_point = world_ptr;
+    ecs.set(
+        "get_character_controller_hit_point",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_hit_point as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.hit_point)?))
+        })?,
+    )?;
+
+    let world_ptr_get_character_hit_entity = world_ptr;
+    ecs.set(
+        "get_character_controller_hit_entity",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_hit_entity as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(output.hit_entity.map(|entity| entity.to_bits()))
+        })?,
+    )?;
+
+    let world_ptr_get_character_stepped = world_ptr;
+    ecs.set(
+        "get_character_controller_stepped_up",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_stepped as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.stepped_up))
+        })?,
+    )?;
+
+    let world_ptr_get_character_step_height = world_ptr;
+    ecs.set(
+        "get_character_controller_step_height",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_step_height as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<CharacterControllerOutput>(entity)
+                .map(|output| output.step_height))
+        })?,
+    )?;
+
+    let world_ptr_get_character_platform_velocity = world_ptr;
+    ecs.set(
+        "get_character_controller_platform_velocity",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_character_platform_velocity as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(output) = world.get::<CharacterControllerOutput>(entity).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(vec3_to_table(lua, output.platform_velocity)?))
+        })?,
+    )?;
+
+    let world_ptr_get_collision_events = world_ptr;
+    ecs.set(
+        "get_collision_events",
+        lua.create_function(move |lua, (entity_id, phase): (u64, Option<String>)| {
+            let world = unsafe { &mut *(world_ptr_get_collision_events as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                return Ok(None);
+            };
+            let phase_name = normalized_contact_phase(phase.as_deref());
+            if phase_name == "all" {
+                let table = lua.create_table()?;
+                let enter_values =
+                    contact_events_for_entity_phase(events, entity, false, Some("enter"));
+                let stay_values =
+                    contact_events_for_entity_phase(events, entity, false, Some("stay"));
+                let exit_values =
+                    contact_events_for_entity_phase(events, entity, false, Some("exit"));
+                table.set("enter", contact_events_to_table(lua, &enter_values)?)?;
+                table.set("stay", contact_events_to_table(lua, &stay_values)?)?;
+                table.set("exit", contact_events_to_table(lua, &exit_values)?)?;
+                return Ok(Some(table));
+            }
+            let values = contact_events_for_entity_phase(events, entity, false, Some(phase_name));
+            Ok(Some(contact_events_to_table(lua, &values)?))
+        })?,
+    )?;
+
+    let world_ptr_get_trigger_events = world_ptr;
+    ecs.set(
+        "get_trigger_events",
+        lua.create_function(move |lua, (entity_id, phase): (u64, Option<String>)| {
+            let world = unsafe { &mut *(world_ptr_get_trigger_events as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                return Ok(None);
+            };
+            let phase_name = normalized_contact_phase(phase.as_deref());
+            if phase_name == "all" {
+                let table = lua.create_table()?;
+                let enter_values =
+                    contact_events_for_entity_phase(events, entity, true, Some("enter"));
+                let stay_values =
+                    contact_events_for_entity_phase(events, entity, true, Some("stay"));
+                let exit_values =
+                    contact_events_for_entity_phase(events, entity, true, Some("exit"));
+                table.set("enter", contact_events_to_table(lua, &enter_values)?)?;
+                table.set("stay", contact_events_to_table(lua, &stay_values)?)?;
+                table.set("exit", contact_events_to_table(lua, &exit_values)?)?;
+                return Ok(Some(table));
+            }
+            let values = contact_events_for_entity_phase(events, entity, true, Some(phase_name));
+            Ok(Some(contact_events_to_table(lua, &values)?))
+        })?,
+    )?;
+
+    let world_ptr_get_collision_event_count = world_ptr;
+    ecs.set(
+        "get_collision_event_count",
+        lua.create_function(move |_, (entity_id, phase): (u64, Option<String>)| {
+            let world = unsafe { &mut *(world_ptr_get_collision_event_count as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0_u64);
+            };
+            let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                return Ok(0_u64);
+            };
+            let values = contact_events_for_entity_phase(events, entity, false, phase.as_deref());
+            Ok(u64::try_from(values.len()).unwrap_or(u64::MAX))
+        })?,
+    )?;
+
+    let world_ptr_get_collision_event_other = world_ptr;
+    ecs.set(
+        "get_collision_event_other",
+        lua.create_function(
+            move |_, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_collision_event_other as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(0_u64);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return Ok(0_u64);
+                };
+                let Some(event) = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    false,
+                    phase.as_deref(),
+                    event_index,
+                ) else {
+                    return Ok(0_u64);
+                };
+                Ok(event.other.to_bits())
+            },
+        )?,
+    )?;
+
+    let world_ptr_get_collision_event_normal = world_ptr;
+    ecs.set(
+        "get_collision_event_normal",
+        lua.create_function(
+            move |lua, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_collision_event_normal as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let normal = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    false,
+                    phase.as_deref(),
+                    event_index,
+                )
+                .map(|event| event.normal)
+                .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, normal)
+            },
+        )?,
+    )?;
+
+    let world_ptr_get_collision_event_point = world_ptr;
+    ecs.set(
+        "get_collision_event_point",
+        lua.create_function(
+            move |lua, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_collision_event_point as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let point = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    false,
+                    phase.as_deref(),
+                    event_index,
+                )
+                .map(|event| event.point)
+                .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, point)
+            },
+        )?,
+    )?;
+
+    let world_ptr_get_trigger_event_count = world_ptr;
+    ecs.set(
+        "get_trigger_event_count",
+        lua.create_function(move |_, (entity_id, phase): (u64, Option<String>)| {
+            let world = unsafe { &mut *(world_ptr_get_trigger_event_count as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(0_u64);
+            };
+            let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                return Ok(0_u64);
+            };
+            let values = contact_events_for_entity_phase(events, entity, true, phase.as_deref());
+            Ok(u64::try_from(values.len()).unwrap_or(u64::MAX))
+        })?,
+    )?;
+
+    let world_ptr_get_trigger_event_other = world_ptr;
+    ecs.set(
+        "get_trigger_event_other",
+        lua.create_function(
+            move |_, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_trigger_event_other as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return Ok(0_u64);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return Ok(0_u64);
+                };
+                let Some(event) = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    true,
+                    phase.as_deref(),
+                    event_index,
+                ) else {
+                    return Ok(0_u64);
+                };
+                Ok(event.other.to_bits())
+            },
+        )?,
+    )?;
+
+    let world_ptr_get_trigger_event_normal = world_ptr;
+    ecs.set(
+        "get_trigger_event_normal",
+        lua.create_function(
+            move |lua, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_trigger_event_normal as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let normal = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    true,
+                    phase.as_deref(),
+                    event_index,
+                )
+                .map(|event| event.normal)
+                .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, normal)
+            },
+        )?,
+    )?;
+
+    let world_ptr_get_trigger_event_point = world_ptr;
+    ecs.set(
+        "get_trigger_event_point",
+        lua.create_function(
+            move |lua, (entity_id, phase, event_index): (u64, Option<String>, Option<u64>)| {
+                let world = unsafe { &mut *(world_ptr_get_trigger_event_point as *mut World) };
+                let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(events) = world.get_resource::<ScriptContactEventState>() else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let point = contact_event_from_phase_index(
+                    events,
+                    entity,
+                    true,
+                    phase.as_deref(),
+                    event_index,
+                )
+                .map(|event| event.point)
+                .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, point)
+            },
+        )?,
+    )?;
+
+    let world_ptr_emit_event = world_ptr;
+    let owner_emit_event = owner;
+    ecs.set(
+        "emit_event",
+        lua.create_function(move |_, (name, target_entity): (String, Option<u64>)| {
+            let world = unsafe { &mut *(world_ptr_emit_event as *mut World) };
+            let event_name = normalize_name(&name);
+            if event_name.is_empty() {
+                return Ok(false);
+            }
+
+            let target = if let Some(target_entity) = target_entity {
+                let Some(entity) = lookup_editor_entity(world, target_entity) else {
+                    return Ok(false);
+                };
+                entity
+            } else {
+                owner_emit_event
+            };
+
+            if world.get_resource::<ScriptCustomEventState>().is_none() {
+                world.insert_resource(ScriptCustomEventState::default());
+            }
+            let Some(mut events) = world.get_resource_mut::<ScriptCustomEventState>() else {
+                return Ok(false);
+            };
+            events.emit(target, event_name);
+            Ok(true)
+        })?,
+    )?;
+
     let world_ptr_get_ray_hit = world_ptr;
     ecs.set(
         "get_physics_ray_cast_hit",
@@ -4986,6 +7549,536 @@ fn build_ecs_table(
                 }
 
                 ray_cast_hit_to_table(lua, hit)
+            },
+        )?,
+    )?;
+
+    let world_ptr_ray_cast_has_hit = world_ptr;
+    ecs.set(
+        "ray_cast_has_hit",
+        lua.create_function(
+            move |_,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast_has_hit as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(false);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(false);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let has_hit = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_ray(
+                            origin,
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            solid.unwrap_or(true),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .has_hit
+                    })
+                    .unwrap_or(false);
+                Ok(has_hit)
+            },
+        )?,
+    )?;
+
+    let world_ptr_ray_cast_hit_entity = world_ptr;
+    ecs.set(
+        "ray_cast_hit_entity",
+        lua.create_function(
+            move |_,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast_hit_entity as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(0_u64);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(0_u64);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let hit_entity = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_ray(
+                            origin,
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            solid.unwrap_or(true),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .hit_entity
+                        .map(|entity| entity.to_bits())
+                        .unwrap_or(0_u64)
+                    })
+                    .unwrap_or(0_u64);
+                Ok(hit_entity)
+            },
+        )?,
+    )?;
+
+    let world_ptr_ray_cast_point = world_ptr;
+    ecs.set(
+        "ray_cast_point",
+        lua.create_function(
+            move |lua,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast_point as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let point = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_ray(
+                            origin,
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            solid.unwrap_or(true),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .point
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, point)
+            },
+        )?,
+    )?;
+
+    let world_ptr_ray_cast_normal = world_ptr;
+    ecs.set(
+        "ray_cast_normal",
+        lua.create_function(
+            move |lua,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast_normal as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let normal = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_ray(
+                            origin,
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            solid.unwrap_or(true),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .normal
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, normal)
+            },
+        )?,
+    )?;
+
+    let world_ptr_ray_cast_toi = world_ptr;
+    ecs.set(
+        "ray_cast_toi",
+        lua.create_function(
+            move |_,
+                  (origin, direction, max_toi, solid, filter, exclude_entity): (
+                Table,
+                Table,
+                Option<f32>,
+                Option<bool>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_ray_cast_toi as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(0.0_f32);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(0.0_f32);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let toi = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_ray(
+                            origin,
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            solid.unwrap_or(true),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .toi
+                    })
+                    .unwrap_or(0.0);
+                Ok(toi)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast = world_ptr;
+    ecs.set(
+        "sphere_cast",
+        lua.create_function(
+            move |lua,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast as *mut World) };
+                let mut hit = PhysicsShapeCastHit::default();
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return shape_cast_hit_to_table(lua, hit);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return shape_cast_hit_to_table(lua, hit);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                if let Some(phys) = world.get_resource::<PhysicsResource>() {
+                    hit = phys.cast_sphere(
+                        origin,
+                        radius.max(0.0001),
+                        direction,
+                        max_toi.unwrap_or(10_000.0),
+                        query_filter,
+                        exclude_entity,
+                    );
+                }
+
+                shape_cast_hit_to_table(lua, hit)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast_has_hit = world_ptr;
+    ecs.set(
+        "sphere_cast_has_hit",
+        lua.create_function(
+            move |_,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast_has_hit as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(false);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(false);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let has_hit = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_sphere(
+                            origin,
+                            radius.max(0.0001),
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .has_hit
+                    })
+                    .unwrap_or(false);
+                Ok(has_hit)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast_hit_entity = world_ptr;
+    ecs.set(
+        "sphere_cast_hit_entity",
+        lua.create_function(
+            move |_,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast_hit_entity as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(0_u64);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(0_u64);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let hit_entity = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_sphere(
+                            origin,
+                            radius.max(0.0001),
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .hit_entity
+                        .map(|entity| entity.to_bits())
+                        .unwrap_or(0_u64)
+                    })
+                    .unwrap_or(0_u64);
+                Ok(hit_entity)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast_point = world_ptr;
+    ecs.set(
+        "sphere_cast_point",
+        lua.create_function(
+            move |lua,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast_point as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let point = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_sphere(
+                            origin,
+                            radius.max(0.0001),
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .witness2
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, point)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast_normal = world_ptr;
+    ecs.set(
+        "sphere_cast_normal",
+        lua.create_function(
+            move |lua,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast_normal as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return vec3_to_table(lua, Vec3::ZERO);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let normal = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_sphere(
+                            origin,
+                            radius.max(0.0001),
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .normal2
+                    })
+                    .unwrap_or(Vec3::ZERO);
+                vec3_to_table(lua, normal)
+            },
+        )?,
+    )?;
+
+    let world_ptr_sphere_cast_toi = world_ptr;
+    ecs.set(
+        "sphere_cast_toi",
+        lua.create_function(
+            move |_,
+                  (origin, radius, direction, max_toi, filter, exclude_entity): (
+                Table,
+                f32,
+                Table,
+                Option<f32>,
+                Option<Table>,
+                Option<u64>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_sphere_cast_toi as *mut World) };
+                let Some(origin) = table_to_vec3(&origin) else {
+                    return Ok(0.0_f32);
+                };
+                let Some(direction) = table_to_vec3(&direction) else {
+                    return Ok(0.0_f32);
+                };
+
+                let mut query_filter = PhysicsQueryFilter::default();
+                if let Some(filter) = filter {
+                    patch_query_filter(&mut query_filter, &filter);
+                }
+
+                let exclude_entity =
+                    exclude_entity.and_then(|entity_id| lookup_editor_entity(world, entity_id));
+
+                let toi = world
+                    .get_resource::<PhysicsResource>()
+                    .map(|phys| {
+                        phys.cast_sphere(
+                            origin,
+                            radius.max(0.0001),
+                            direction,
+                            max_toi.unwrap_or(10_000.0),
+                            query_filter,
+                            exclude_entity,
+                        )
+                        .toi
+                    })
+                    .unwrap_or(0.0);
+                Ok(toi)
             },
         )?,
     )?;
@@ -5384,6 +8477,214 @@ fn has_physics_component(world: &World, entity: Entity) -> bool {
         || world.get::<PhysicsWorldDefaults>(entity).is_some()
 }
 
+fn resolve_animator_target_entity(world: &mut World, entity: Entity) -> Option<Entity> {
+    if world.get::<BevyAnimator>(entity).is_some() {
+        return Some(entity);
+    }
+
+    let scene_root = world
+        .get::<SceneChild>(entity)
+        .map(|child| child.scene_root)
+        .unwrap_or(entity);
+
+    if let Some(children) = world
+        .get_resource::<SceneSpawnedChildren>()
+        .and_then(|spawned| spawned.spawned_scenes.get(&scene_root))
+    {
+        for candidate in children.iter().copied() {
+            if world.get::<BevyAnimator>(candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let mut scene_child_query = world.query::<(Entity, &SceneChild)>();
+    for (candidate, child) in scene_child_query.iter(world) {
+        if child.scene_root == scene_root && world.get::<BevyAnimator>(candidate).is_some() {
+            return Some(candidate);
+        }
+    }
+
+    // build a local parent->children map once so we can traverse normal hierarchy links and find animator-bearing descendants (e.g. rig scene roots parented under controller entity)
+    let mut children_by_parent: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut parent_query = world.query::<(Entity, &EntityParent)>();
+    for (child, parent) in parent_query.iter(world) {
+        children_by_parent
+            .entry(parent.parent)
+            .or_default()
+            .push(child);
+    }
+
+    let mut stack = vec![entity];
+    if let Some(scene_child) = world.get::<SceneChild>(entity) {
+        if scene_child.scene_root != entity {
+            stack.push(scene_child.scene_root);
+        }
+    }
+    let mut visited = HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if world.get::<BevyAnimator>(current).is_some() {
+            return Some(current);
+        }
+
+        if let Some(scene_root) = world
+            .get::<SceneChild>(current)
+            .map(|child| child.scene_root)
+        {
+            if scene_root != current {
+                stack.push(scene_root);
+            }
+        }
+
+        if let Some(children) = world
+            .get_resource::<SceneSpawnedChildren>()
+            .and_then(|spawned| spawned.spawned_scenes.get(&current))
+        {
+            for child in children.iter().copied() {
+                stack.push(child);
+            }
+        }
+
+        if let Some(children) = children_by_parent.get(&current) {
+            for child in children.iter().copied() {
+                stack.push(child);
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_animator_target_entities(world: &mut World, entity: Entity) -> Vec<Entity> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(primary) = resolve_animator_target_entity(world, entity) {
+        if seen.insert(primary) {
+            targets.push(primary);
+        }
+    }
+
+    let scene_root = world
+        .get::<SceneChild>(entity)
+        .map(|child| child.scene_root)
+        .unwrap_or(entity);
+
+    if let Some(children) = world
+        .get_resource::<SceneSpawnedChildren>()
+        .and_then(|spawned| spawned.spawned_scenes.get(&scene_root))
+    {
+        for candidate in children.iter().copied() {
+            if seen.contains(&candidate) || world.get::<BevyAnimator>(candidate).is_none() {
+                continue;
+            }
+            seen.insert(candidate);
+            targets.push(candidate);
+        }
+    }
+
+    let mut scene_child_query = world.query::<(Entity, &SceneChild)>();
+    for (candidate, child) in scene_child_query.iter(world) {
+        if child.scene_root != scene_root {
+            continue;
+        }
+        if seen.contains(&candidate) || world.get::<BevyAnimator>(candidate).is_none() {
+            continue;
+        }
+        seen.insert(candidate);
+        targets.push(candidate);
+    }
+
+    let mut children_by_parent: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    let mut parent_query = world.query::<(Entity, &EntityParent)>();
+    for (child, parent) in parent_query.iter(world) {
+        children_by_parent
+            .entry(parent.parent)
+            .or_default()
+            .push(child);
+    }
+
+    let mut stack = vec![entity];
+    let mut visited = HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        if !seen.contains(&current) && world.get::<BevyAnimator>(current).is_some() {
+            seen.insert(current);
+            targets.push(current);
+        }
+        if let Some(children) = children_by_parent.get(&current) {
+            for child in children.iter().copied() {
+                stack.push(child);
+            }
+        }
+    }
+
+    targets
+}
+
+fn normalized_clip_lookup_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn resolve_clip_index(
+    library: &helmer::animation::AnimationLibrary,
+    clip_name: &str,
+) -> Option<usize> {
+    let clip_name = clip_name.trim();
+    if clip_name.is_empty() {
+        return None;
+    }
+    if let Some(index) = library.clip_index(clip_name) {
+        return Some(index);
+    }
+
+    let clip_name_lower = clip_name.to_ascii_lowercase();
+    for (name, index) in &library.name_to_index {
+        if name.eq_ignore_ascii_case(clip_name) {
+            return Some(*index);
+        }
+    }
+
+    let normalized_requested = normalized_clip_lookup_key(clip_name);
+    if !normalized_requested.is_empty() {
+        for (name, index) in &library.name_to_index {
+            if normalized_clip_lookup_key(name) == normalized_requested {
+                return Some(*index);
+            }
+        }
+    }
+
+    let mut best_match: Option<(usize, usize)> = None;
+    for (name, index) in &library.name_to_index {
+        let name_lower = name.to_ascii_lowercase();
+        let normalized_name = normalized_clip_lookup_key(name);
+        let contains_match = name_lower.contains(&clip_name_lower)
+            || clip_name_lower.contains(&name_lower)
+            || (!normalized_requested.is_empty()
+                && (normalized_name.contains(&normalized_requested)
+                    || normalized_requested.contains(&normalized_name)));
+        if !contains_match {
+            continue;
+        }
+        let rank = name.len();
+        if best_match.is_none_or(|(best_rank, _)| rank < best_rank) {
+            best_match = Some((rank, *index));
+        }
+    }
+
+    best_match.map(|(_, index)| index)
+}
+
 fn set_physics_body_kind(world: &mut World, entity: Entity, body_kind: PhysicsBodyKind) {
     world.entity_mut(entity).remove::<DynamicRigidBody>();
     world.entity_mut(entity).remove::<KinematicRigidBody>();
@@ -5728,12 +9029,17 @@ fn shape_cast_status_name(status: PhysicsShapeCastStatus) -> &'static str {
     }
 }
 
+#[inline]
+fn is_script_visible_entity(world: &World, entity: Entity) -> bool {
+    world.get::<EditorEntity>(entity).is_some() || world.get::<SceneChild>(entity).is_some()
+}
+
 fn lookup_editor_entity_ref(world: &World, entity_id: u64) -> Option<Entity> {
-    let entity = Entity::from_bits(entity_id);
+    let entity = Entity::try_from_bits(entity_id)?;
     if world.get_entity(entity).is_err() {
         return None;
     }
-    if world.get::<EditorEntity>(entity).is_none() {
+    if !is_script_visible_entity(world, entity) {
         return None;
     }
     Some(entity)
@@ -6465,16 +9771,203 @@ fn patch_character_input(input: &mut CharacterControllerInput, data: &Table) {
     }
 }
 
+fn look_at_to_table(lua: &Lua, look_at: LookAt) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    if let Some(target_entity) = look_at.target_entity {
+        table.set("target_entity", target_entity)?;
+    } else {
+        table.set("target_entity", Value::Nil)?;
+    }
+    table.set("target_offset", vec3_to_table(lua, look_at.target_offset)?)?;
+    table.set("offset_in_target_space", look_at.offset_in_target_space)?;
+    table.set("up", vec3_to_table(lua, look_at.up)?)?;
+    table.set("rotation_smooth_time", look_at.rotation_smooth_time)?;
+    Ok(table)
+}
+
+fn patch_look_at(look_at: &mut LookAt, data: &Table) {
+    if let Ok(value) = data.get::<Value>("target_entity") {
+        match value {
+            Value::Nil => look_at.target_entity = None,
+            Value::Integer(raw) if raw >= 0 => look_at.target_entity = Some(raw as u64),
+            Value::Number(raw) if raw.is_finite() && raw >= 0.0 => {
+                look_at.target_entity = Some(raw as u64)
+            }
+            _ => {}
+        }
+    }
+    if let Ok(value) = data.get::<Table>("target_offset") {
+        if let Some(v) = table_to_vec3(&value) {
+            look_at.target_offset = v;
+        }
+    }
+    if let Ok(value) = data.get::<bool>("offset_in_target_space") {
+        look_at.offset_in_target_space = value;
+    }
+    if let Ok(value) = data.get::<Table>("up") {
+        if let Some(v) = table_to_vec3(&value) {
+            look_at.up = v;
+        }
+    }
+    if let Ok(value) = data.get::<f32>("rotation_smooth_time") {
+        look_at.rotation_smooth_time = value.max(0.0);
+    }
+}
+
+fn entity_follower_to_table(lua: &Lua, follower: EntityFollower) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    if let Some(target_entity) = follower.target_entity {
+        table.set("target_entity", target_entity)?;
+    } else {
+        table.set("target_entity", Value::Nil)?;
+    }
+    table.set(
+        "position_offset",
+        vec3_to_table(lua, follower.position_offset)?,
+    )?;
+    table.set("offset_in_target_space", follower.offset_in_target_space)?;
+    table.set("follow_rotation", follower.follow_rotation)?;
+    table.set("position_smooth_time", follower.position_smooth_time)?;
+    table.set("rotation_smooth_time", follower.rotation_smooth_time)?;
+    Ok(table)
+}
+
+fn patch_entity_follower(follower: &mut EntityFollower, data: &Table) {
+    if let Ok(value) = data.get::<Value>("target_entity") {
+        match value {
+            Value::Nil => follower.target_entity = None,
+            Value::Integer(raw) if raw >= 0 => follower.target_entity = Some(raw as u64),
+            Value::Number(raw) if raw.is_finite() && raw >= 0.0 => {
+                follower.target_entity = Some(raw as u64)
+            }
+            _ => {}
+        }
+    }
+    if let Ok(value) = data.get::<Table>("position_offset") {
+        if let Some(v) = table_to_vec3(&value) {
+            follower.position_offset = v;
+        }
+    }
+    if let Ok(value) = data.get::<bool>("offset_in_target_space") {
+        follower.offset_in_target_space = value;
+    }
+    if let Ok(value) = data.get::<bool>("follow_rotation") {
+        follower.follow_rotation = value;
+    }
+    if let Ok(value) = data.get::<f32>("position_smooth_time") {
+        follower.position_smooth_time = value.max(0.0);
+    }
+    if let Ok(value) = data.get::<f32>("rotation_smooth_time") {
+        follower.rotation_smooth_time = value.max(0.0);
+    }
+}
+
 fn character_output_to_table(lua: &Lua, output: CharacterControllerOutput) -> mlua::Result<Table> {
     let table = lua.create_table()?;
+    table.set(
+        "desired_translation",
+        vec3_to_table(lua, output.desired_translation)?,
+    )?;
     table.set(
         "effective_translation",
         vec3_to_table(lua, output.effective_translation)?,
     )?;
+    table.set(
+        "remaining_translation",
+        vec3_to_table(lua, output.remaining_translation)?,
+    )?;
     table.set("grounded", output.grounded)?;
     table.set("sliding_down_slope", output.sliding_down_slope)?;
     table.set("collision_count", output.collision_count)?;
+    table.set("ground_normal", vec3_to_table(lua, output.ground_normal)?)?;
+    table.set("slope_angle", output.slope_angle)?;
+    table.set("hit_normal", vec3_to_table(lua, output.hit_normal)?)?;
+    table.set("hit_point", vec3_to_table(lua, output.hit_point)?)?;
+    if let Some(entity) = output.hit_entity {
+        table.set("hit_entity", entity.to_bits())?;
+    } else {
+        table.set("hit_entity", Value::Nil)?;
+    }
+    table.set("stepped_up", output.stepped_up)?;
+    table.set("step_height", output.step_height)?;
+    table.set(
+        "platform_velocity",
+        vec3_to_table(lua, output.platform_velocity)?,
+    )?;
     Ok(table)
+}
+
+fn contact_event_to_table(lua: &Lua, event: ScriptContactEvent) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("other_entity", event.other.to_bits())?;
+    table.set("normal", vec3_to_table(lua, event.normal)?)?;
+    table.set("point", vec3_to_table(lua, event.point)?)?;
+    Ok(table)
+}
+
+fn contact_events_to_table(lua: &Lua, events: &[ScriptContactEvent]) -> mlua::Result<Table> {
+    let list = lua.create_table()?;
+    for (index, event) in events.iter().copied().enumerate() {
+        list.set(index + 1, contact_event_to_table(lua, event)?)?;
+    }
+    Ok(list)
+}
+
+fn normalized_contact_phase(phase: Option<&str>) -> &'static str {
+    let normalized = phase
+        .map(normalize_name)
+        .unwrap_or_else(|| "all".to_string());
+    match normalized.as_str() {
+        "enter" => "enter",
+        "stay" => "stay",
+        "exit" => "exit",
+        _ => "all",
+    }
+}
+
+fn contact_events_for_entity_phase(
+    state: &ScriptContactEventState,
+    entity: Entity,
+    trigger_events: bool,
+    phase: Option<&str>,
+) -> Vec<ScriptContactEvent> {
+    let (enter, stay, exit) = if trigger_events {
+        (
+            &state.trigger_enter,
+            &state.trigger_stay,
+            &state.trigger_exit,
+        )
+    } else {
+        (
+            &state.collision_enter,
+            &state.collision_stay,
+            &state.collision_exit,
+        )
+    };
+    match normalized_contact_phase(phase) {
+        "enter" => enter.get(&entity).cloned().unwrap_or_default(),
+        "stay" => stay.get(&entity).cloned().unwrap_or_default(),
+        "exit" => exit.get(&entity).cloned().unwrap_or_default(),
+        _ => {
+            let mut values = enter.get(&entity).cloned().unwrap_or_default();
+            values.extend(stay.get(&entity).cloned().unwrap_or_default());
+            values.extend(exit.get(&entity).cloned().unwrap_or_default());
+            values
+        }
+    }
+}
+
+fn contact_event_from_phase_index(
+    state: &ScriptContactEventState,
+    entity: Entity,
+    trigger_events: bool,
+    phase: Option<&str>,
+    event_index: Option<u64>,
+) -> Option<ScriptContactEvent> {
+    let values = contact_events_for_entity_phase(state, entity, trigger_events, phase);
+    let index = event_index.unwrap_or(1).max(1).saturating_sub(1);
+    let index = usize::try_from(index).ok()?;
+    values.get(index).copied()
 }
 
 fn ray_cast_to_table(lua: &Lua, request: PhysicsRayCast) -> mlua::Result<Table> {
@@ -7231,6 +10724,29 @@ fn queue_physics_impulse_at_point(
     true
 }
 
+fn cursor_policy_requests_capture(
+    policy: helmer::runtime::runtime::RuntimeCursorStateSnapshot,
+) -> bool {
+    policy.grab_mode != RuntimeCursorGrabMode::None || !policy.visible
+}
+
+fn script_cursor_capture_active(world: &World) -> bool {
+    let Some(state) = world.get_resource::<EditorCursorControlState>() else {
+        return false;
+    };
+    if state.script_capture_suspended {
+        return false;
+    }
+    let effective = state.effective_policy();
+    if cursor_policy_requests_capture(effective) {
+        return true;
+    }
+    state.script_capture_allowed
+        && state
+            .script_policy
+            .is_some_and(cursor_policy_requests_capture)
+}
+
 fn gameplay_input_capture_allowed(world: &World) -> bool {
     let in_play_mode = world
         .get_resource::<EditorSceneState>()
@@ -7240,10 +10756,28 @@ fn gameplay_input_capture_allowed(world: &World) -> bool {
         return true;
     }
 
+    if world
+        .get_resource::<EditorCursorControlState>()
+        .is_some_and(|state| state.script_capture_suspended)
+    {
+        return false;
+    }
+
+    if script_cursor_capture_active(world) {
+        return true;
+    }
+
     if let Some(runtime) = world.get_resource::<EditorViewportRuntime>() {
         if !runtime.pane_requests.is_empty() {
+            let cursor_position = world.get_resource::<BevyInputManager>().map(|input| {
+                let input = input.0.read();
+                input.cursor_position
+            });
             let pointer_over_play_viewport = runtime.pane_requests.iter().any(|pane| {
-                pane.pointer_over && world.get::<EditorPlayCamera>(pane.camera_entity).is_some()
+                pane.is_play_viewport
+                    && (pane.pointer_over
+                        || cursor_position
+                            .is_some_and(|cursor| pane.viewport_rect.contains(cursor)))
             });
             if pointer_over_play_viewport {
                 return true;
@@ -7256,9 +10790,7 @@ fn gameplay_input_capture_allowed(world: &World) -> bool {
                         .iter()
                         .find(|pane| pane.pane_id == pane_id)
                 }) {
-                    return world
-                        .get::<EditorPlayCamera>(active_pane.camera_entity)
-                        .is_some();
+                    return active_pane.is_play_viewport;
                 }
             }
 
@@ -7329,6 +10861,208 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
     input.set("gamepad_axis_handle", gamepad_axis_handle_fn.clone())?;
     input.set("gamepad_axis_ref", gamepad_axis_handle_fn)?;
 
+    let world_ptr_bind_action = world_ptr;
+    input.set(
+        "bind_action",
+        lua.create_function(
+            move |_,
+                  (action, binding, context, deadzone): (
+                String,
+                Value,
+                Option<String>,
+                Option<f32>,
+            )| {
+                let world = unsafe { &mut *(world_ptr_bind_action as *mut World) };
+                let Some(action_key) = action_key(&action) else {
+                    return Ok(false);
+                };
+                let Some(binding) = script_input_binding_from_value(binding) else {
+                    return Ok(false);
+                };
+                let context_key = context_key(context.as_deref());
+                let default_deadzone = if matches!(
+                    binding,
+                    ScriptInputBinding::GamepadAxis(_) | ScriptInputBinding::Trigger(_)
+                ) {
+                    0.2
+                } else {
+                    0.5
+                };
+                let deadzone = deadzone.unwrap_or(default_deadzone).clamp(0.0, 1.0);
+
+                if world.get_resource::<ScriptInputActionMap>().is_none() {
+                    world.insert_resource(ScriptInputActionMap::default());
+                }
+                let Some(mut maps) = world.get_resource_mut::<ScriptInputActionMap>() else {
+                    return Ok(false);
+                };
+                let context_actions = maps.contexts.entry(context_key).or_default();
+                let bindings = context_actions.entry(action_key).or_default();
+                if let Some(existing) = bindings.iter_mut().find(|entry| entry.binding == binding) {
+                    existing.deadzone = deadzone;
+                } else {
+                    bindings.push(ScriptInputActionBinding { binding, deadzone });
+                }
+                Ok(true)
+            },
+        )?,
+    )?;
+
+    let world_ptr_unbind_action = world_ptr;
+    input.set(
+        "unbind_action",
+        lua.create_function(
+            move |_, (action, binding, context): (String, Option<Value>, Option<String>)| {
+                let world = unsafe { &mut *(world_ptr_unbind_action as *mut World) };
+                let Some(action_key) = action_key(&action) else {
+                    return Ok(false);
+                };
+                let context_key = context_key(context.as_deref());
+                let Some(mut maps) = world.get_resource_mut::<ScriptInputActionMap>() else {
+                    return Ok(false);
+                };
+                let Some(actions) = maps.contexts.get_mut(&context_key) else {
+                    return Ok(false);
+                };
+                let Some(bindings) = actions.get_mut(&action_key) else {
+                    return Ok(false);
+                };
+
+                if let Some(binding) = binding {
+                    let Some(binding) = script_input_binding_from_value(binding) else {
+                        return Ok(false);
+                    };
+                    bindings.retain(|entry| entry.binding != binding);
+                } else {
+                    bindings.clear();
+                }
+
+                if bindings.is_empty() {
+                    actions.remove(&action_key);
+                }
+                if actions.is_empty() {
+                    maps.contexts.remove(&context_key);
+                }
+                Ok(true)
+            },
+        )?,
+    )?;
+
+    let world_ptr_set_action_context = world_ptr;
+    input.set(
+        "set_action_context",
+        lua.create_function(move |_, context: Option<String>| {
+            let world = unsafe { &mut *(world_ptr_set_action_context as *mut World) };
+            let context_key = context_key(context.as_deref());
+            if world.get_resource::<ScriptInputActionMap>().is_none() {
+                world.insert_resource(ScriptInputActionMap::default());
+            }
+            let Some(mut maps) = world.get_resource_mut::<ScriptInputActionMap>() else {
+                return Ok(false);
+            };
+            maps.active_context = context_key;
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_action_context = world_ptr;
+    input.set(
+        "action_context",
+        lua.create_function(move |_, ()| {
+            let world = unsafe { &mut *(world_ptr_get_action_context as *mut World) };
+            let context = world
+                .get_resource::<ScriptInputActionMap>()
+                .map(|map| map.active_context.clone())
+                .unwrap_or_else(|| "default".to_string());
+            Ok(context)
+        })?,
+    )?;
+
+    let world_ptr_action_value = world_ptr;
+    input.set(
+        "action_value",
+        lua.create_function(move |_, action: String| {
+            let world = unsafe { &mut *(world_ptr_action_value as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(0.0f32);
+            }
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(0.0f32);
+            };
+            let input_manager = input_manager.0.read();
+            let value = action_value_for_name(
+                &input_manager,
+                world.get_resource::<ScriptInputState>(),
+                world.get_resource::<ScriptInputActionMap>(),
+                &action,
+            );
+            Ok(value)
+        })?,
+    )?;
+
+    let world_ptr_action_down = world_ptr;
+    input.set(
+        "action_down",
+        lua.create_function(move |_, action: String| {
+            let world = unsafe { &mut *(world_ptr_action_down as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(action_down_for_name(
+                &input_manager,
+                world.get_resource::<ScriptInputState>(),
+                world.get_resource::<ScriptInputActionMap>(),
+                &action,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_action_pressed = world_ptr;
+    input.set(
+        "action_pressed",
+        lua.create_function(move |_, action: String| {
+            let world = unsafe { &mut *(world_ptr_action_pressed as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(action_pressed_for_name(
+                &input_manager,
+                world.get_resource::<ScriptInputState>(),
+                world.get_resource::<ScriptInputActionMap>(),
+                &action,
+            ))
+        })?,
+    )?;
+
+    let world_ptr_action_released = world_ptr;
+    input.set(
+        "action_released",
+        lua.create_function(move |_, action: String| {
+            let world = unsafe { &mut *(world_ptr_action_released as *mut World) };
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(false);
+            }
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(false);
+            };
+            let input_manager = input_manager.0.read();
+            Ok(action_released_for_name(
+                &input_manager,
+                world.get_resource::<ScriptInputState>(),
+                world.get_resource::<ScriptInputActionMap>(),
+                &action,
+            ))
+        })?,
+    )?;
+
     let world_ptr_key = world_ptr;
     input.set(
         "key_down",
@@ -7341,7 +11075,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_key {
+            if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(key) = lua_key_from_value(key) else {
@@ -7363,7 +11097,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_key {
+            if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(key) = lua_key_from_value(key) else {
@@ -7385,7 +11119,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_key {
+            if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(key) = lua_key_from_value(key) else {
@@ -7410,7 +11144,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(button) = lua_mouse_button_from_value(button) else {
@@ -7432,7 +11166,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(button) = lua_mouse_button_from_value(button) else {
@@ -7459,7 +11193,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
             let Some(button) = lua_mouse_button_from_value(button) else {
@@ -7480,14 +11214,14 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_cursor as *mut World) };
             if !gameplay_input_capture_allowed(world) {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
-                return Ok(None);
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             let position = Vec2::new(
                 input_manager.cursor_position.x as f32,
@@ -7503,19 +11237,22 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_cursor_delta as *mut World) };
             if !gameplay_input_capture_allowed(world) {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
-                return Ok(None);
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             let Some(input_state) = world.get_resource::<ScriptInputState>() else {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
-            let delta = input_manager.cursor_position - input_state.last_cursor_position;
+            let mut delta = input_manager.mouse_motion;
+            if delta.length_squared() <= f64::EPSILON {
+                delta = input_manager.cursor_position - input_state.last_cursor_position;
+            }
             let delta = Vec2::new(delta.x as f32, delta.y as f32);
             Ok(Some(vec2_to_table(lua, delta)?))
         })?,
@@ -7527,14 +11264,14 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_wheel as *mut World) };
             if !gameplay_input_capture_allowed(world) {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
             let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_pointer {
-                return Ok(None);
+            if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
             Ok(Some(vec2_to_table(lua, input_manager.mouse_wheel)?))
         })?,
@@ -7546,7 +11283,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_window as *mut World) };
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
+                return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
             let input_manager = input_manager.0.read();
             let size = Vec2::new(
@@ -7563,7 +11300,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         lua.create_function(move |_, ()| {
             let world = unsafe { &mut *(world_ptr_scale as *mut World) };
             let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
+                return Ok(Some(1.0f64));
             };
             let input_manager = input_manager.0.read();
             Ok(Some(input_manager.scale_factor))
@@ -7575,17 +11312,23 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "modifiers",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_mods as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
-                return Ok(None);
-            };
-            let input_manager = input_manager.0.read();
-            if input_manager.egui_wants_key || !gameplay_input_capture_allowed(world) {
+            let default_table = || -> mlua::Result<Table> {
                 let table = lua.create_table()?;
                 table.set("shift", false)?;
                 table.set("ctrl", false)?;
                 table.set("alt", false)?;
                 table.set("super", false)?;
-                return Ok(Some(table));
+                Ok(table)
+            };
+            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+                return Ok(Some(default_table()?));
+            };
+            let input_manager = input_manager.0.read();
+            if !gameplay_input_capture_allowed(world) {
+                return Ok(Some(default_table()?));
+            }
+            if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
+                return Ok(Some(default_table()?));
             }
 
             let shift = input_manager.is_key_active(KeyCode::ShiftLeft)
@@ -7615,6 +11358,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
+            if script_cursor_capture_active(world) {
+                return Ok(false);
+            }
             Ok(input_manager.egui_wants_key || !gameplay_input_capture_allowed(world))
         })?,
     )?;
@@ -7628,6 +11374,9 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             let input_manager = input_manager.0.read();
+            if script_cursor_capture_active(world) {
+                return Ok(false);
+            }
             Ok(input_manager.egui_wants_pointer || !gameplay_input_capture_allowed(world))
         })?,
     )?;
@@ -7660,6 +11409,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             let mut policy = cursor_control.script_policy.unwrap_or_default();
             policy.visible = visible;
             cursor_control.script_policy = Some(policy);
+            cursor_control.script_capture_suspended = false;
             Ok(true)
         })?,
     )?;
@@ -7679,6 +11429,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             let mut policy = cursor_control.script_policy.unwrap_or_default();
             policy.grab_mode = grab_mode;
             cursor_control.script_policy = Some(policy);
+            cursor_control.script_capture_suspended = false;
             Ok(true)
         })?,
     )?;
@@ -7693,6 +11444,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 return Ok(false);
             };
             cursor_control.script_policy = None;
+            cursor_control.script_capture_suspended = false;
             Ok(true)
         })?,
     )?;
@@ -7860,7 +11612,7 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
     Ok(input)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LuaKey {
     Code(KeyCode),
     AnyShift,
@@ -7886,7 +11638,7 @@ struct LuaGamepadAxis(gilrs::Axis);
 
 impl UserData for LuaGamepadAxis {}
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TriggerSide {
     Left,
     Right,
@@ -8228,8 +11980,8 @@ fn lua_key_is_just_pressed(input: &InputManager, key: LuaKey) -> bool {
     }
 }
 
-fn lua_key_is_released(input: &InputManager, state: &ScriptInputState, key: LuaKey) -> bool {
-    let was_down = match key {
+fn lua_key_was_active(state: &ScriptInputState, key: LuaKey) -> bool {
+    match key {
         LuaKey::Code(code) => state.last_keys.contains(&code),
         LuaKey::AnyShift => {
             state.last_keys.contains(&KeyCode::ShiftLeft)
@@ -8247,7 +11999,11 @@ fn lua_key_is_released(input: &InputManager, state: &ScriptInputState, key: LuaK
             state.last_keys.contains(&KeyCode::SuperLeft)
                 || state.last_keys.contains(&KeyCode::SuperRight)
         }
-    };
+    }
+}
+
+fn lua_key_is_released(input: &InputManager, state: &ScriptInputState, key: LuaKey) -> bool {
+    let was_down = lua_key_was_active(state, key);
 
     let is_down = lua_key_is_active(input, key);
     was_down && !is_down
@@ -8443,6 +12199,103 @@ fn parse_gamepad_axis_name(name: &str) -> Option<gilrs::Axis> {
     }
 }
 
+fn parse_script_slot(value: Option<Value>) -> Option<Option<usize>> {
+    match value {
+        Some(Value::Integer(raw)) => Some(Some((raw.max(1) as usize).saturating_sub(1))),
+        Some(Value::Number(raw)) if raw.is_finite() => {
+            Some(Some((raw.round().max(1.0) as usize).saturating_sub(1)))
+        }
+        Some(Value::Nil) | None => Some(None),
+        _ => None,
+    }
+}
+
+fn selected_script_entry(
+    scripts: &ScriptComponent,
+    selected_index: Option<usize>,
+) -> Option<&ScriptEntry> {
+    if let Some(index) = selected_index {
+        scripts.scripts.get(index)
+    } else {
+        scripts.scripts.first()
+    }
+}
+
+fn selected_script_entry_mut(
+    scripts: &mut ScriptComponent,
+    selected_index: Option<usize>,
+) -> Option<&mut ScriptEntry> {
+    if let Some(index) = selected_index {
+        scripts.scripts.get_mut(index)
+    } else {
+        scripts.scripts.first_mut()
+    }
+}
+
+fn parse_script_field_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn script_field_type_name(field_type: ScriptInspectorFieldType) -> &'static str {
+    match field_type {
+        ScriptInspectorFieldType::Bool => "bool",
+        ScriptInspectorFieldType::Number => "number",
+        ScriptInspectorFieldType::String => "string",
+        ScriptInspectorFieldType::Entity => "entity",
+        ScriptInspectorFieldType::Vec2 => "vec2",
+        ScriptInspectorFieldType::Vec3 => "vec3",
+        ScriptInspectorFieldType::Quat => "quat",
+        ScriptInspectorFieldType::AssetPath => "asset_path",
+        ScriptInspectorFieldType::StringList => "string_list",
+        ScriptInspectorFieldType::NumberList => "number_list",
+        ScriptInspectorFieldType::EntityList => "entity_list",
+        ScriptInspectorFieldType::AssetPathList => "asset_path_list",
+        ScriptInspectorFieldType::AnimationClipSet => "animation_clip_set",
+    }
+}
+
+fn script_asset_kind_name(kind: ScriptInspectorAssetKind) -> &'static str {
+    match kind {
+        ScriptInspectorAssetKind::Any => "any",
+        ScriptInspectorAssetKind::Scene => "scene",
+        ScriptInspectorAssetKind::Model => "model",
+        ScriptInspectorAssetKind::Material => "material",
+        ScriptInspectorAssetKind::Audio => "audio",
+        ScriptInspectorAssetKind::Script => "script",
+        ScriptInspectorAssetKind::Animation => "animation",
+    }
+}
+
+fn script_inspector_field_to_lua_table(
+    lua: &Lua,
+    field: &ScriptInspectorField,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("name", field.name.clone())?;
+    table.set("label", field.label.clone())?;
+    table.set("type", script_field_type_name(field.field_type))?;
+    if let Some(kind) = field.asset_kind {
+        table.set("asset_kind", script_asset_kind_name(kind))?;
+    } else {
+        table.set("asset_kind", Value::Nil)?;
+    }
+    let value = rust_json_to_lua_value(lua, field.value.clone()).map_err(mlua::Error::external)?;
+    table.set("value", value)?;
+    Ok(table)
+}
+
+fn script_path_lookup_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 fn parse_cursor_grab_mode(value: Value) -> Option<RuntimeCursorGrabMode> {
     match value {
         Value::Nil => Some(RuntimeCursorGrabMode::None),
@@ -8515,6 +12368,279 @@ fn resolve_gamepad_id(
     }
 
     input_manager.first_gamepad_id()
+}
+
+fn action_key(name: &str) -> Option<String> {
+    let key = normalize_name(name);
+    if key.is_empty() { None } else { Some(key) }
+}
+
+fn context_key(name: Option<&str>) -> String {
+    let normalized = name.map(normalize_name).unwrap_or_default();
+    if normalized.is_empty() {
+        "default".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn script_input_binding_from_value(value: Value) -> Option<ScriptInputBinding> {
+    if let Some(key) = lua_key_from_value(value.clone()) {
+        return Some(ScriptInputBinding::Key(key));
+    }
+    if let Some(button) = lua_mouse_button_from_value(value.clone()) {
+        return Some(ScriptInputBinding::MouseButton(button));
+    }
+    if let Some(button) = lua_gamepad_button_from_value(value.clone()) {
+        return Some(ScriptInputBinding::GamepadButton(button));
+    }
+    if let Some(axis) = lua_gamepad_axis_from_value(value.clone()) {
+        return Some(ScriptInputBinding::GamepadAxis(axis));
+    }
+    if let Some(side) = parse_trigger_side(value) {
+        return Some(ScriptInputBinding::Trigger(side));
+    }
+    None
+}
+
+fn binding_current_previous_value(
+    input: &InputManager,
+    input_state: Option<&ScriptInputState>,
+    binding: &ScriptInputActionBinding,
+) -> (f32, f32) {
+    match binding.binding {
+        ScriptInputBinding::Key(key) => {
+            let current = if lua_key_is_active(input, key) {
+                1.0
+            } else {
+                0.0
+            };
+            let previous = if let Some(state) = input_state {
+                if lua_key_was_active(state, key) {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            (current, previous)
+        }
+        ScriptInputBinding::MouseButton(button) => {
+            let current = if input.is_mouse_button_active(button) {
+                1.0
+            } else {
+                0.0
+            };
+            let previous = if let Some(state) = input_state {
+                if state.last_mouse_buttons.contains(&button) {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            (current, previous)
+        }
+        ScriptInputBinding::GamepadButton(button) => {
+            let mut current = 0.0f32;
+            let mut previous = 0.0f32;
+            for id in input.controller_states.keys().copied() {
+                if input.is_controller_button_active(id, button) {
+                    current = 1.0;
+                }
+                if let Some(state) = input_state {
+                    let id_value = usize::from(id);
+                    if state
+                        .last_gamepad_buttons
+                        .get(&id_value)
+                        .is_some_and(|buttons| buttons.contains(&button))
+                    {
+                        previous = 1.0;
+                    }
+                }
+                if current > 0.0 && previous > 0.0 {
+                    break;
+                }
+            }
+            (current, previous)
+        }
+        ScriptInputBinding::GamepadAxis(axis) => {
+            let mut current = 0.0f32;
+            for id in input.controller_states.keys().copied() {
+                let value = input.get_controller_axis(id, axis);
+                if value.abs() > current.abs() {
+                    current = value;
+                }
+            }
+
+            let mut previous = 0.0f32;
+            if let Some(state) = input_state {
+                for axis_values in state.last_gamepad_axes.values() {
+                    let value = axis_values.get(&axis).copied().unwrap_or(0.0);
+                    if value.abs() > previous.abs() {
+                        previous = value;
+                    }
+                }
+            }
+            (current, previous)
+        }
+        ScriptInputBinding::Trigger(side) => {
+            let mut current = 0.0f32;
+            for id in input.controller_states.keys().copied() {
+                let value = match side {
+                    TriggerSide::Left => input.get_left_trigger_value(id),
+                    TriggerSide::Right => input.get_right_trigger_value(id),
+                };
+                if value.abs() > current.abs() {
+                    current = value;
+                }
+            }
+
+            let mut previous = 0.0f32;
+            if let Some(state) = input_state {
+                for (left, right) in state.last_gamepad_triggers.values().copied() {
+                    let value = match side {
+                        TriggerSide::Left => left,
+                        TriggerSide::Right => right,
+                    };
+                    if value.abs() > previous.abs() {
+                        previous = value;
+                    }
+                }
+            }
+            (current, previous)
+        }
+    }
+}
+
+fn binding_active(value: f32, deadzone: f32) -> bool {
+    let threshold = deadzone.clamp(0.0, 1.0);
+    if threshold <= f32::EPSILON {
+        value.abs() > f32::EPSILON
+    } else {
+        value.abs() >= threshold
+    }
+}
+
+fn action_value_for_name(
+    input: &InputManager,
+    input_state: Option<&ScriptInputState>,
+    map: Option<&ScriptInputActionMap>,
+    action_name: &str,
+) -> f32 {
+    let Some(action_name) = action_key(action_name) else {
+        return 0.0;
+    };
+    let Some(map) = map else {
+        return 0.0;
+    };
+    let context = context_key(Some(map.active_context.as_str()));
+    let Some(context_actions) = map.contexts.get(&context) else {
+        return 0.0;
+    };
+    let Some(bindings) = context_actions.get(&action_name) else {
+        return 0.0;
+    };
+
+    let mut value = 0.0f32;
+    for binding in bindings {
+        let (current, _) = binding_current_previous_value(input, input_state, binding);
+        if current.abs() > value.abs() {
+            value = current;
+        }
+    }
+    value
+}
+
+fn action_down_for_name(
+    input: &InputManager,
+    input_state: Option<&ScriptInputState>,
+    map: Option<&ScriptInputActionMap>,
+    action_name: &str,
+) -> bool {
+    let Some(action_name) = action_key(action_name) else {
+        return false;
+    };
+    let Some(map) = map else {
+        return false;
+    };
+    let context = context_key(Some(map.active_context.as_str()));
+    let Some(context_actions) = map.contexts.get(&context) else {
+        return false;
+    };
+    let Some(bindings) = context_actions.get(&action_name) else {
+        return false;
+    };
+
+    for binding in bindings {
+        let (current, _) = binding_current_previous_value(input, input_state, binding);
+        if binding_active(current, binding.deadzone) {
+            return true;
+        }
+    }
+    false
+}
+
+fn action_pressed_for_name(
+    input: &InputManager,
+    input_state: Option<&ScriptInputState>,
+    map: Option<&ScriptInputActionMap>,
+    action_name: &str,
+) -> bool {
+    let Some(action_name) = action_key(action_name) else {
+        return false;
+    };
+    let Some(map) = map else {
+        return false;
+    };
+    let context = context_key(Some(map.active_context.as_str()));
+    let Some(context_actions) = map.contexts.get(&context) else {
+        return false;
+    };
+    let Some(bindings) = context_actions.get(&action_name) else {
+        return false;
+    };
+
+    for binding in bindings {
+        let (current, previous) = binding_current_previous_value(input, input_state, binding);
+        if binding_active(current, binding.deadzone) && !binding_active(previous, binding.deadzone)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn action_released_for_name(
+    input: &InputManager,
+    input_state: Option<&ScriptInputState>,
+    map: Option<&ScriptInputActionMap>,
+    action_name: &str,
+) -> bool {
+    let Some(action_name) = action_key(action_name) else {
+        return false;
+    };
+    let Some(map) = map else {
+        return false;
+    };
+    let context = context_key(Some(map.active_context.as_str()));
+    let Some(context_actions) = map.contexts.get(&context) else {
+        return false;
+    };
+    let Some(bindings) = context_actions.get(&action_name) else {
+        return false;
+    };
+
+    for binding in bindings {
+        let (current, previous) = binding_current_previous_value(input, input_state, binding);
+        if !binding_active(current, binding.deadzone) && binding_active(previous, binding.deadzone)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize_name(name: &str) -> String {
@@ -8660,11 +12786,11 @@ fn lua_value_to_string(value: Value) -> String {
 }
 
 fn lookup_editor_entity(world: &mut World, entity_id: u64) -> Option<Entity> {
-    let entity = Entity::from_bits(entity_id);
+    let entity = Entity::try_from_bits(entity_id)?;
     if world.get_entity(entity).is_err() {
         return None;
     }
-    if world.get::<EditorEntity>(entity).is_none() {
+    if !is_script_visible_entity(world, entity) {
         return None;
     }
     Some(entity)

@@ -81,6 +81,10 @@ use crate::editor::{
 };
 
 const RUST_SCRIPT_PLUGIN_SYMBOL: &[u8] = b"helmer_get_script_plugin\0";
+const BRIDGE_ECS_TABLE_CACHE_KEY: &str = "__helmer_bridge_ecs_table";
+const BRIDGE_INPUT_TABLE_CACHE_KEY: &str = "__helmer_bridge_input_table";
+const BRIDGE_ECS_TABLE_CACHE_META_KEY: &str = "__helmer_bridge_ecs_table_meta";
+const BRIDGE_INPUT_TABLE_CACHE_META_KEY: &str = "__helmer_bridge_input_table_meta";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -976,13 +980,13 @@ unsafe impl Send for RustScriptInstance {}
 // SAFETY: Script instances are only created, updated, and destroyed on the main ECS thread
 unsafe impl Sync for RustScriptInstance {}
 
-#[derive(Debug)]
 pub struct VisualScriptInstance {
     pub path: PathBuf,
     pub program: VisualScriptProgram,
     pub state: VisualScriptRuntimeState,
     pub inspector_field_names: HashSet<String>,
     pub modified: SystemTime,
+    host: VisualScriptExecutionHost,
 }
 
 #[derive(Resource)]
@@ -2045,7 +2049,13 @@ pub fn script_execution_system(world: &mut World) {
                         stop_visual_script_instance(world, world_ptr, key, old_instance);
                     }
 
-                    match load_visual_script_instance(runtime_path, asset) {
+                    match load_visual_script_instance(
+                        runtime_path,
+                        asset,
+                        world_ptr,
+                        key.entity,
+                        key.script_index,
+                    ) {
                         Ok(mut instance) => {
                             if let Err(err) = run_visual_script_event(
                                 world_ptr,
@@ -2363,8 +2373,7 @@ impl VisualScriptHost for VisualScriptExecutionHost {
         function: &str,
         args: &[JsonValue],
     ) -> Result<JsonValue, String> {
-        let args_json = serde_json::to_string(args).map_err(|err| err.to_string())?;
-        invoke_json_with_context(&self.context, table.as_str(), function, &args_json)
+        invoke_api_with_context(&self.context, table, function, args)
     }
 
     fn log(&mut self, message: &str) {
@@ -2375,6 +2384,9 @@ impl VisualScriptHost for VisualScriptExecutionHost {
 fn load_visual_script_instance(
     runtime_path: &Path,
     asset: &ScriptAsset,
+    world_ptr: usize,
+    owner: Entity,
+    script_index: usize,
 ) -> Result<VisualScriptInstance, String> {
     if let Some(error) = asset.error.as_ref() {
         return Err(format!("{}: {}", runtime_path.to_string_lossy(), error));
@@ -2405,6 +2417,7 @@ fn load_visual_script_instance(
         state: VisualScriptRuntimeState::default(),
         inspector_field_names,
         modified: asset.modified,
+        host: VisualScriptExecutionHost::new(world_ptr, owner, script_index),
     })
 }
 
@@ -2444,13 +2457,15 @@ fn run_visual_script_event(
         instance.state.variables.insert(name, value);
     }
 
-    let mut host = VisualScriptExecutionHost::new(world_ptr, key.entity, key.script_index);
+    instance.host.context.world_ptr = world_ptr;
+    instance.host.context.owner = key.entity;
+    instance.host.context.script_index = key.script_index;
     instance.program.execute_event(
         event,
         key.entity.to_bits(),
         dt,
         &mut instance.state,
-        &mut host,
+        &mut instance.host,
     )
 }
 
@@ -3219,49 +3234,20 @@ fn invoke_json_with_context(
     function_name: &str,
     args_json: &str,
 ) -> Result<JsonValue, String> {
-    let table_name = table_name.trim().to_ascii_lowercase();
-    let function_name = function_name.trim();
-    if function_name.is_empty() {
-        return Err("Function name cannot be empty".to_string());
-    }
+    let Some(table) = parse_bridge_api_table_name(table_name) else {
+        return Err(format!(
+            "Unknown script API table '{}', expected 'ecs' or 'input'",
+            table_name.trim()
+        ));
+    };
 
     let lua_guard = context
         .bridge_lua
         .lock()
         .map_err(|_| "Rust script bridge Lua lock poisoned".to_string())?;
     let lua = &*lua_guard;
-    let api_table = match table_name.as_str() {
-        "ecs" => build_ecs_table(lua, context.world_ptr, context.owner, context.script_index)
-            .map_err(|err| err.to_string())?,
-        "input" => build_input_table(lua, context.world_ptr).map_err(|err| err.to_string())?,
-        _ => {
-            return Err(format!(
-                "Unknown script API table '{}', expected 'ecs' or 'input'",
-                table_name
-            ));
-        }
-    };
-
     let args = rust_json_args_to_lua_multivalue(lua, args_json)?;
-    let value: Value = api_table
-        .get(function_name)
-        .map_err(|err| err.to_string())?;
-
-    match value {
-        Value::Function(function) => {
-            let result: MultiValue = function.call(args).map_err(|err| err.to_string())?;
-            rust_lua_multivalue_to_json(result)
-        }
-        value => {
-            if !args.is_empty() {
-                return Err(format!(
-                    "Table field '{}.{}' is not callable",
-                    table_name, function_name
-                ));
-            }
-            rust_lua_value_to_json(value)
-        }
-    }
+    invoke_lua_api_with_multivalue(lua, context, table, function_name, args)
 }
 
 fn rust_json_args_to_lua_multivalue(lua: &Lua, args_json: &str) -> Result<MultiValue, String> {
@@ -3282,6 +3268,181 @@ fn rust_json_args_to_lua_multivalue(lua: &Lua, args_json: &str) -> Result<MultiV
         value => out.push_back(rust_json_to_lua_value(lua, value)?),
     }
     Ok(out)
+}
+
+fn rust_json_values_to_lua_multivalue(lua: &Lua, args: &[JsonValue]) -> Result<MultiValue, String> {
+    let mut out = MultiValue::new();
+    for value in args {
+        out.push_back(rust_json_ref_to_lua_value(lua, value)?);
+    }
+    Ok(out)
+}
+
+fn rust_json_ref_to_lua_value(lua: &Lua, value: &JsonValue) -> Result<Value, String> {
+    match value {
+        JsonValue::Null => Ok(Value::Nil),
+        JsonValue::Bool(value) => Ok(Value::Boolean(*value)),
+        JsonValue::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Integer(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Number(value))
+            } else {
+                Ok(Value::Nil)
+            }
+        }
+        JsonValue::String(value) => lua
+            .create_string(value)
+            .map(Value::String)
+            .map_err(|err| err.to_string()),
+        JsonValue::Array(values) => {
+            let table = lua.create_table().map_err(|err| err.to_string())?;
+            for (index, value) in values.iter().enumerate() {
+                table
+                    .set(index + 1, rust_json_ref_to_lua_value(lua, value)?)
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(Value::Table(table))
+        }
+        JsonValue::Object(values) => {
+            let table = lua.create_table().map_err(|err| err.to_string())?;
+            for (key, value) in values {
+                table
+                    .set(key.as_str(), rust_json_ref_to_lua_value(lua, value)?)
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(Value::Table(table))
+        }
+    }
+}
+
+fn parse_bridge_api_table_name(table_name: &str) -> Option<VisualScriptApiTable> {
+    let table_name = table_name.trim();
+    if table_name.eq_ignore_ascii_case("ecs") {
+        Some(VisualScriptApiTable::Ecs)
+    } else if table_name.eq_ignore_ascii_case("input") {
+        Some(VisualScriptApiTable::Input)
+    } else {
+        None
+    }
+}
+
+fn bridge_table_cache_key(table: VisualScriptApiTable) -> &'static str {
+    match table {
+        VisualScriptApiTable::Ecs => BRIDGE_ECS_TABLE_CACHE_KEY,
+        VisualScriptApiTable::Input => BRIDGE_INPUT_TABLE_CACHE_KEY,
+    }
+}
+
+fn bridge_table_cache_meta_key(table: VisualScriptApiTable) -> &'static str {
+    match table {
+        VisualScriptApiTable::Ecs => BRIDGE_ECS_TABLE_CACHE_META_KEY,
+        VisualScriptApiTable::Input => BRIDGE_INPUT_TABLE_CACHE_META_KEY,
+    }
+}
+
+fn bridge_table_cache_signature(
+    table: VisualScriptApiTable,
+    context: &RustScriptHostContext,
+) -> String {
+    match table {
+        VisualScriptApiTable::Ecs => format!(
+            "{}:{}:{}",
+            context.world_ptr,
+            context.owner.to_bits(),
+            context.script_index
+        ),
+        VisualScriptApiTable::Input => context.world_ptr.to_string(),
+    }
+}
+
+fn get_or_build_bridge_api_table(
+    lua: &Lua,
+    context: &RustScriptHostContext,
+    table: VisualScriptApiTable,
+) -> Result<Table, String> {
+    let cache_key = bridge_table_cache_key(table);
+    let cache_meta_key = bridge_table_cache_meta_key(table);
+    let expected_signature = bridge_table_cache_signature(table, context);
+    let globals = lua.globals();
+    if let Some(cached) = globals
+        .get::<Option<Table>>(cache_key)
+        .map_err(|err| err.to_string())?
+    {
+        if globals
+            .get::<Option<String>>(cache_meta_key)
+            .map_err(|err| err.to_string())?
+            .is_some_and(|value| value == expected_signature)
+        {
+            return Ok(cached);
+        }
+    }
+
+    let built = match table {
+        VisualScriptApiTable::Ecs => {
+            build_ecs_table(lua, context.world_ptr, context.owner, context.script_index)
+        }
+        VisualScriptApiTable::Input => build_input_table(lua, context.world_ptr),
+    }
+    .map_err(|err| err.to_string())?;
+
+    globals
+        .set(cache_key, built.clone())
+        .map_err(|err| err.to_string())?;
+    globals
+        .set(cache_meta_key, expected_signature)
+        .map_err(|err| err.to_string())?;
+    Ok(built)
+}
+
+fn invoke_lua_api_with_multivalue(
+    lua: &Lua,
+    context: &RustScriptHostContext,
+    table: VisualScriptApiTable,
+    function_name: &str,
+    args: MultiValue,
+) -> Result<JsonValue, String> {
+    let function_name = function_name.trim();
+    if function_name.is_empty() {
+        return Err("Function name cannot be empty".to_string());
+    }
+
+    let api_table = get_or_build_bridge_api_table(lua, context, table)?;
+    let value: Value = api_table
+        .get(function_name)
+        .map_err(|err| err.to_string())?;
+
+    match value {
+        Value::Function(function) => {
+            let result: MultiValue = function.call(args).map_err(|err| err.to_string())?;
+            rust_lua_multivalue_to_json(result)
+        }
+        value => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "Table field '{}.{}' is not callable",
+                    table.as_str(),
+                    function_name
+                ));
+            }
+            rust_lua_value_to_json(value)
+        }
+    }
+}
+
+fn invoke_api_with_context(
+    context: &RustScriptHostContext,
+    table: VisualScriptApiTable,
+    function_name: &str,
+    args: &[JsonValue],
+) -> Result<JsonValue, String> {
+    let lua_guard = context
+        .bridge_lua
+        .lock()
+        .map_err(|_| "Rust script bridge Lua lock poisoned".to_string())?;
+    let lua = &*lua_guard;
+    let args = rust_json_values_to_lua_multivalue(lua, args)?;
+    invoke_lua_api_with_multivalue(lua, context, table, function_name, args)
 }
 
 fn rust_json_to_lua_value(lua: &Lua, value: JsonValue) -> Result<Value, String> {

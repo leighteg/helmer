@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fs,
@@ -7189,26 +7190,26 @@ impl VisualScriptProgram {
             state.elapsed_seconds += f64::from(dt.max(0.0));
         }
 
-        let roots: Vec<u64> = match &event {
-            VisualScriptEvent::Start => self.on_start_nodes.clone(),
-            VisualScriptEvent::Update => self.on_update_nodes.clone(),
-            VisualScriptEvent::Stop => self.on_stop_nodes.clone(),
-            VisualScriptEvent::CollisionEnter => self.on_collision_enter_nodes.clone(),
-            VisualScriptEvent::CollisionStay => self.on_collision_stay_nodes.clone(),
-            VisualScriptEvent::CollisionExit => self.on_collision_exit_nodes.clone(),
-            VisualScriptEvent::TriggerEnter => self.on_trigger_enter_nodes.clone(),
-            VisualScriptEvent::TriggerExit => self.on_trigger_exit_nodes.clone(),
-            VisualScriptEvent::InputActionPressed(action) => {
-                self.filter_input_action_roots(&self.on_input_action_pressed_nodes, action)
-            }
-            VisualScriptEvent::InputActionReleased(action) => {
-                self.filter_input_action_roots(&self.on_input_action_released_nodes, action)
-            }
+        let roots: Cow<'_, [u64]> = match &event {
+            VisualScriptEvent::Start => Cow::Borrowed(&self.on_start_nodes),
+            VisualScriptEvent::Update => Cow::Borrowed(&self.on_update_nodes),
+            VisualScriptEvent::Stop => Cow::Borrowed(&self.on_stop_nodes),
+            VisualScriptEvent::CollisionEnter => Cow::Borrowed(&self.on_collision_enter_nodes),
+            VisualScriptEvent::CollisionStay => Cow::Borrowed(&self.on_collision_stay_nodes),
+            VisualScriptEvent::CollisionExit => Cow::Borrowed(&self.on_collision_exit_nodes),
+            VisualScriptEvent::TriggerEnter => Cow::Borrowed(&self.on_trigger_enter_nodes),
+            VisualScriptEvent::TriggerExit => Cow::Borrowed(&self.on_trigger_exit_nodes),
+            VisualScriptEvent::InputActionPressed(action) => Cow::Owned(
+                self.filter_input_action_roots(&self.on_input_action_pressed_nodes, action),
+            ),
+            VisualScriptEvent::InputActionReleased(action) => Cow::Owned(
+                self.filter_input_action_roots(&self.on_input_action_released_nodes, action),
+            ),
             VisualScriptEvent::InputActionDown(action) => {
-                self.filter_input_action_roots(&self.on_input_action_down_nodes, action)
+                Cow::Owned(self.filter_input_action_roots(&self.on_input_action_down_nodes, action))
             }
             VisualScriptEvent::CustomEvent(name) => {
-                self.filter_custom_event_roots(&self.on_custom_event_nodes, name)
+                Cow::Owned(self.filter_custom_event_roots(&self.on_custom_event_nodes, name))
             }
         };
 
@@ -7231,7 +7232,7 @@ impl VisualScriptProgram {
             context.resume_pending_function_calls()?;
         }
 
-        for root in roots {
+        for root in roots.iter().copied() {
             context.execute_exec_targets(root, 0)?;
         }
 
@@ -7375,14 +7376,15 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
     }
 
     fn execute_exec_targets(&mut self, node_id: u64, output_index: usize) -> Result<(), String> {
-        let targets = self
+        let mut index = 0usize;
+        while let Some(target) = self
             .program
             .exec_edges
             .get(&(node_id, output_index))
-            .cloned()
-            .unwrap_or_default();
-
-        for target in targets {
+            .and_then(|targets| targets.get(index))
+            .copied()
+        {
+            index += 1;
             self.execute_node(target)?;
         }
 
@@ -13171,6 +13173,7 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
     const VAR_CLIP_SPRINT: u64 = 35;
     const VAR_CLIP_JUMP: u64 = 36;
     const VAR_CLIP_CROUCH: u64 = 37;
+    const VAR_ACTIVE_ANIM_CLIP: u64 = 38;
 
     let make_var = |id: u64,
                     name: &str,
@@ -13415,6 +13418,13 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
             true,
         ),
         make_var(
+            VAR_ACTIVE_ANIM_CLIP,
+            "active_anim_clip",
+            VisualValueType::String,
+            "",
+            false,
+        ),
+        make_var(
             VAR_MOVE_MAGNITUDE,
             "move_magnitude",
             VisualValueType::Number,
@@ -13649,6 +13659,17 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
         0,
     );
     start_cursor = start_reset_vertical_velocity;
+    bind_x += 320.0;
+
+    let start_reset_active_anim_clip = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(bind_x, 90.0),
+        VAR_ACTIVE_ANIM_CLIP,
+        "active_anim_clip",
+        "",
+    );
+    template_connect_exec(&mut snarl, start_cursor, 0, start_reset_active_anim_clip, 0);
+    start_cursor = start_reset_active_anim_clip;
     bind_x += 320.0;
 
     let start_add_transform = template_insert_api_node(
@@ -14998,15 +15019,46 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
     template_connect_data(&mut snarl, do_jump, 0, desired_anim_clip, 0);
     template_connect_data(&mut snarl, clip_jump, 0, desired_anim_clip, 1);
     template_connect_data(&mut snarl, crouch_or_base, 0, desired_anim_clip, 2);
+    let active_anim_clip = template_get_variable_node(
+        &mut snarl,
+        egui::pos2(5000.0, 1620.0),
+        VAR_ACTIVE_ANIM_CLIP,
+        "active_anim_clip",
+    );
+    let clip_changed = snarl.insert_node(
+        egui::pos2(5200.0, 1620.0),
+        VisualScriptNodeKind::Compare {
+            op: VisualCompareOp::NotEquals,
+        },
+    );
+    template_connect_data(&mut snarl, desired_anim_clip, 0, clip_changed, 0);
+    template_connect_data(&mut snarl, active_anim_clip, 0, clip_changed, 1);
+    let play_clip_branch = snarl.insert_node(
+        egui::pos2(5000.0, 1380.0),
+        VisualScriptNodeKind::Branch {
+            condition: "true".to_string(),
+        },
+    );
     let play_anim_clip = template_insert_api_node(
         &mut snarl,
         egui::pos2(5000.0, 1460.0),
         VisualApiOperation::EcsPlayAnimClip,
     );
+    let set_active_anim_clip = template_set_variable_node(
+        &mut snarl,
+        egui::pos2(5200.0, 1460.0),
+        VAR_ACTIVE_ANIM_CLIP,
+        "active_anim_clip",
+        "",
+    );
     template_set_api_arg(&mut snarl, play_anim_clip, 2, "0");
-    template_connect_exec(&mut snarl, set_anim_slope, 0, play_anim_clip, 0);
+    template_connect_exec(&mut snarl, set_anim_slope, 0, play_clip_branch, 0);
+    template_connect_data(&mut snarl, clip_changed, 0, play_clip_branch, 0);
+    template_connect_exec(&mut snarl, play_clip_branch, 0, play_anim_clip, 0);
+    template_connect_exec(&mut snarl, play_anim_clip, 0, set_active_anim_clip, 0);
     template_connect_data(&mut snarl, self_entity, 0, play_anim_clip, 0);
     template_connect_data(&mut snarl, desired_anim_clip, 0, play_anim_clip, 1);
+    template_connect_data(&mut snarl, desired_anim_clip, 0, set_active_anim_clip, 0);
 
     let camera_entity_var = template_get_variable_node(
         &mut snarl,
@@ -15045,23 +15097,6 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
     );
     template_connect_data(&mut snarl, cursor_delta, 0, cursor_x, 0);
     template_connect_data(&mut snarl, cursor_delta, 0, cursor_y, 0);
-    let cursor_weight = template_number_node(&mut snarl, egui::pos2(920.0, 3205.0), 1.0);
-    let cursor_x_weighted = snarl.insert_node(
-        egui::pos2(1120.0, 3160.0),
-        VisualScriptNodeKind::MathBinary {
-            op: VisualMathOp::Multiply,
-        },
-    );
-    let cursor_y_weighted = snarl.insert_node(
-        egui::pos2(1120.0, 3250.0),
-        VisualScriptNodeKind::MathBinary {
-            op: VisualMathOp::Multiply,
-        },
-    );
-    template_connect_data(&mut snarl, cursor_x, 0, cursor_x_weighted, 0);
-    template_connect_data(&mut snarl, cursor_weight, 0, cursor_x_weighted, 1);
-    template_connect_data(&mut snarl, cursor_y, 0, cursor_y_weighted, 0);
-    template_connect_data(&mut snarl, cursor_weight, 0, cursor_y_weighted, 1);
     let yaw_var = template_get_variable_node(
         &mut snarl,
         egui::pos2(520.0, 3330.0),
@@ -15124,14 +15159,14 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
         stick_pitch_delta,
         1,
     );
-    let neg_one_mouse = template_number_node(&mut snarl, egui::pos2(1120.0, 3510.0), 1.0);
+    let neg_one_mouse = template_number_node(&mut snarl, egui::pos2(1120.0, 3510.0), -1.0);
     let cursor_x_inverted = snarl.insert_node(
         egui::pos2(1220.0, 3510.0),
         VisualScriptNodeKind::MathBinary {
             op: VisualMathOp::Multiply,
         },
     );
-    template_connect_data(&mut snarl, cursor_x_weighted, 0, cursor_x_inverted, 0);
+    template_connect_data(&mut snarl, cursor_x, 0, cursor_x_inverted, 0);
     template_connect_data(&mut snarl, neg_one_mouse, 0, cursor_x_inverted, 1);
     let mouse_yaw_delta = snarl.insert_node(
         egui::pos2(1420.0, 3510.0),
@@ -15147,7 +15182,7 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
     );
     template_connect_data(&mut snarl, cursor_x_inverted, 0, mouse_yaw_delta, 0);
     template_connect_data(&mut snarl, camera_mouse_sensitivity, 0, mouse_yaw_delta, 1);
-    template_connect_data(&mut snarl, cursor_y_weighted, 0, mouse_pitch_delta, 0);
+    template_connect_data(&mut snarl, cursor_y, 0, mouse_pitch_delta, 0);
     template_connect_data(
         &mut snarl,
         camera_mouse_sensitivity,
@@ -15531,7 +15566,8 @@ fn default_visual_script_document_third_person() -> VisualScriptDocument {
     template_set_api_arg(&mut snarl, camera_set_follower, 6, "0.0");
     template_set_api_arg(&mut snarl, camera_set_look_at, 3, "true");
     template_set_api_arg(&mut snarl, camera_set_look_at, 5, "0.0");
-    template_connect_exec(&mut snarl, play_anim_clip, 0, camera_set_follower, 0);
+    template_connect_exec(&mut snarl, play_clip_branch, 1, camera_set_follower, 0);
+    template_connect_exec(&mut snarl, set_active_anim_clip, 0, camera_set_follower, 0);
     template_connect_exec(&mut snarl, camera_set_follower, 0, camera_set_look_at, 0);
     template_connect_data(&mut snarl, camera_entity_var, 0, camera_set_follower, 0);
     template_connect_data(&mut snarl, self_entity, 0, camera_set_follower, 1);

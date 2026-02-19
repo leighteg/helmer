@@ -3771,6 +3771,62 @@ impl StatsUI {
                                 .changed();
                         });
 
+                        ui.collapsing("sprite streaming", |ui| {
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(
+                                        &mut tuning.sprite_screen_priority_multiplier,
+                                    )
+                                    .speed(0.05)
+                                    .prefix("screen priority multiplier: "),
+                                )
+                                .changed();
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(
+                                        &mut tuning.sprite_screen_distance_bias_min,
+                                    )
+                                    .speed(0.01)
+                                    .prefix("screen distance bias min: "),
+                                )
+                                .changed();
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(
+                                        &mut tuning.sprite_sequence_prefetch_frames,
+                                    )
+                                    .speed(1.0)
+                                    .prefix("sequence prefetch frames: "),
+                                )
+                                .changed();
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(
+                                        &mut tuning.sprite_sequence_prefetch_priority_scale,
+                                    )
+                                    .speed(0.01)
+                                    .prefix("sequence prefetch scale: "),
+                                )
+                                .changed();
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(
+                                        &mut tuning
+                                            .sprite_sequence_pingpong_prefetch_priority_scale,
+                                    )
+                                    .speed(0.01)
+                                    .prefix("pingpong prefetch scale: "),
+                                )
+                                .changed();
+                            tuning_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut tuning.sprite_texture_priority_scale)
+                                        .speed(0.01)
+                                        .prefix("base texture scale: "),
+                                )
+                                .changed();
+                        });
+
                         ui.collapsing("timing", |ui| {
                             tuning_changed |= ui
                                 .add(

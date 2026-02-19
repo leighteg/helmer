@@ -171,11 +171,10 @@ fn resolve_sprite_sheet_frame(sheet: &SpriteSheetAnimation, elapsed_time_sec: f3
 }
 
 #[inline]
-fn resolve_sprite_sequence_texture_id(
-    sprite: &crate::graphics::common::renderer::RenderSprite,
+fn resolve_sprite_sequence_frame_index(
+    sequence: &crate::graphics::common::renderer::RenderSpriteImageSequence,
     elapsed_time_sec: f32,
 ) -> Option<usize> {
-    let sequence = sprite.image_sequence.as_ref()?;
     if !sequence.enabled {
         return None;
     }
@@ -195,7 +194,45 @@ fn resolve_sprite_sequence_texture_id(
         sequence.paused_frame,
         elapsed_time_sec,
     ) as usize;
+    Some(frame.min(ids.len().saturating_sub(1)))
+}
+
+#[inline]
+fn resolve_sprite_sequence_texture_id(
+    sprite: &crate::graphics::common::renderer::RenderSprite,
+    elapsed_time_sec: f32,
+) -> Option<usize> {
+    let sequence = sprite.image_sequence.as_ref()?;
+    let ids = sequence.texture_ids.as_ref();
+    let frame = resolve_sprite_sequence_frame_index(sequence, elapsed_time_sec)?;
     ids.get(frame).copied()
+}
+
+#[inline]
+fn sprite_stream_priority(
+    sprite: &crate::graphics::common::renderer::RenderSprite,
+    camera_pos: Vec3,
+    tuning: &StreamingTuning,
+) -> f32 {
+    let size = sprite.size.x.abs().max(sprite.size.y.abs());
+    let size_bias = tuning.priority_size_bias.max(0.0);
+    let distance_bias = tuning.priority_distance_bias.max(0.0);
+    let mut priority = match sprite.space {
+        SpriteSpace::World => {
+            let distance = (sprite.position - camera_pos).length();
+            let denom = (distance + distance_bias).max(f32::EPSILON);
+            (size + size_bias) / denom
+        }
+        SpriteSpace::Screen => {
+            let denom = distance_bias.max(tuning.sprite_screen_distance_bias_min.max(f32::EPSILON));
+            ((size + size_bias) / denom)
+                .max(tuning.priority_near * tuning.sprite_screen_priority_multiplier.max(0.0))
+        }
+    };
+    if !priority.is_finite() {
+        priority = 0.0;
+    }
+    priority.max(0.0)
 }
 
 #[inline]
@@ -2014,6 +2051,7 @@ pub struct GraphRenderer {
     streaming_texture_requests: Vec<StreamRequest>,
     streaming_request_cursor: usize,
     streaming_scan_cursor: usize,
+    streaming_sprite_scan_cursor: usize,
     egui_texture_cache: EguiTextureCache,
     sprite_font_ctx: ParleyFontContext,
     sprite_layout_ctx: ParleyLayoutContext<[u8; 4]>,
@@ -3115,6 +3153,7 @@ impl GraphRenderer {
             streaming_texture_requests: Vec::new(),
             streaming_request_cursor: 0,
             streaming_scan_cursor: 0,
+            streaming_sprite_scan_cursor: 0,
             egui_texture_cache: EguiTextureCache::default(),
             sprite_font_ctx,
             sprite_layout_ctx,
@@ -4460,6 +4499,7 @@ impl GraphRenderer {
         self.streaming_last_frame = 0;
         self.streaming_request_cursor = 0;
         self.streaming_scan_cursor = 0;
+        self.streaming_sprite_scan_cursor = 0;
         self.force_bindgroups_backend = self.use_uniform_materials;
         self.rt_blas_targets.clear();
         self.rt_blas_last_rebuild_frame = self.frame_index;
@@ -6575,6 +6615,7 @@ impl GraphRenderer {
         self.streaming_dirty = true;
         if reset_scan_cursor {
             self.streaming_scan_cursor = 0;
+            self.streaming_sprite_scan_cursor = 0;
         }
         self.materials_dirty = true;
         self.instances_dirty = true;
@@ -6761,6 +6802,164 @@ impl GraphRenderer {
                     fallback
                 }
             }
+        }
+    }
+
+    fn accumulate_texture_stream_request(
+        &mut self,
+        texture_id: usize,
+        base_priority: f32,
+        force_low_res: bool,
+        priority_floor: f32,
+        critical_threshold: f32,
+    ) {
+        let texture_resource = self
+            .pool
+            .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+        let mut texture_priority =
+            self.adjust_request_priority(texture_resource, texture_id, base_priority);
+        let resident = self.pool.texture_view(texture_resource).is_some();
+        let critical = !resident || texture_priority >= critical_threshold;
+        if !critical && priority_floor > 0.0 && texture_priority < priority_floor {
+            return;
+        }
+        if critical && priority_floor > 0.0 && texture_priority < priority_floor {
+            texture_priority = priority_floor;
+        }
+        let texture_estimated_bytes = self.estimate_stream_request_bytes(
+            AssetStreamKind::Texture,
+            texture_id,
+            None,
+            force_low_res,
+        );
+        self.streaming_texture_scratch.upsert(
+            texture_id,
+            texture_resource,
+            AssetStreamKind::Texture,
+            None,
+            texture_priority,
+            texture_estimated_bytes,
+            force_low_res,
+            critical,
+        );
+    }
+
+    fn accumulate_streaming_for_sprite(
+        &mut self,
+        sprite: &crate::graphics::common::renderer::RenderSprite,
+        camera_pos: Vec3,
+        pressure: MemoryPressure,
+        priority_floor: f32,
+        critical_threshold: f32,
+        sprite_animation_time_sec: f32,
+    ) {
+        if sprite.size.x.abs() <= f32::EPSILON || sprite.size.y.abs() <= f32::EPSILON {
+            return;
+        }
+        let priority = sprite_stream_priority(sprite, camera_pos, &self.streaming_tuning);
+        let force_low_res = match pressure {
+            MemoryPressure::Hard => {
+                self.streaming_tuning.force_low_res_hard
+                    || priority < self.streaming_tuning.low_res_priority_hard
+            }
+            MemoryPressure::Soft => priority < self.streaming_tuning.low_res_priority_soft,
+            MemoryPressure::None => false,
+        };
+
+        if let Some(sequence) = sprite
+            .image_sequence
+            .as_ref()
+            .filter(|sequence| sequence.enabled)
+        {
+            if let Some(frame_index) =
+                resolve_sprite_sequence_frame_index(sequence, sprite_animation_time_sec)
+            {
+                let sequence_ids = sequence.texture_ids.as_ref();
+                let prefetch_frames =
+                    self.streaming_tuning.sprite_sequence_prefetch_frames as usize;
+                let prefetch_priority_scale = if self
+                    .streaming_tuning
+                    .sprite_sequence_prefetch_priority_scale
+                    .is_finite()
+                {
+                    self.streaming_tuning
+                        .sprite_sequence_prefetch_priority_scale
+                        .max(0.0)
+                } else {
+                    0.0
+                };
+                let pingpong_prefetch_priority_scale = if self
+                    .streaming_tuning
+                    .sprite_sequence_pingpong_prefetch_priority_scale
+                    .is_finite()
+                {
+                    self.streaming_tuning
+                        .sprite_sequence_pingpong_prefetch_priority_scale
+                        .max(0.0)
+                } else {
+                    0.0
+                };
+                if let Some(texture_id) = sequence_ids.get(frame_index).copied() {
+                    self.accumulate_texture_stream_request(
+                        texture_id,
+                        priority,
+                        force_low_res,
+                        priority_floor,
+                        critical_threshold,
+                    );
+                }
+
+                let fps = if sequence.fps.is_finite() {
+                    sequence.fps.abs()
+                } else {
+                    0.0
+                };
+                if fps > 0.0 && !sequence.paused && prefetch_frames > 0 {
+                    for step in 1..=prefetch_frames {
+                        let dt = step as f32 / fps.max(f32::EPSILON);
+                        if let Some(next_frame) = resolve_sprite_sequence_frame_index(
+                            sequence,
+                            sprite_animation_time_sec + dt,
+                        ) {
+                            if let Some(texture_id) = sequence_ids.get(next_frame).copied() {
+                                self.accumulate_texture_stream_request(
+                                    texture_id,
+                                    priority * prefetch_priority_scale,
+                                    force_low_res,
+                                    priority_floor,
+                                    critical_threshold,
+                                );
+                            }
+                        }
+                        if matches!(sequence.playback, SpriteAnimationPlayback::PingPong) {
+                            if let Some(prev_frame) = resolve_sprite_sequence_frame_index(
+                                sequence,
+                                (sprite_animation_time_sec - dt).max(0.0),
+                            ) {
+                                if let Some(texture_id) = sequence_ids.get(prev_frame).copied() {
+                                    self.accumulate_texture_stream_request(
+                                        texture_id,
+                                        priority * pingpong_prefetch_priority_scale,
+                                        force_low_res,
+                                        priority_floor,
+                                        critical_threshold,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(texture_id) = sprite.texture_id {
+            self.accumulate_texture_stream_request(
+                texture_id,
+                priority * self.streaming_tuning.sprite_texture_priority_scale.max(0.0),
+                force_low_res,
+                priority_floor,
+                critical_threshold,
+            );
         }
     }
 
@@ -6960,11 +7159,14 @@ impl GraphRenderer {
         self.streaming_texture_scratch.clear();
 
         let critical_threshold = self.streaming_tuning.priority_critical;
+        let sprite_animation_time_sec = self.sprite_animation_epoch.elapsed().as_secs_f32();
 
         let do_full_scan = allow_full_scan;
         let scan_budget = data.render_config.streaming_scan_budget as usize;
         let object_count = data.objects.len();
-        if do_full_scan || scan_budget == 0 || object_count <= scan_budget {
+        let sprite_count = data.sprites.len();
+        let total_scan_count = object_count.saturating_add(sprite_count);
+        if do_full_scan || scan_budget == 0 || total_scan_count <= scan_budget {
             for obj in &data.objects {
                 self.accumulate_streaming_for_object(
                     obj,
@@ -6977,28 +7179,82 @@ impl GraphRenderer {
                     require_meshlets,
                 );
             }
+            for sprite in &data.sprites {
+                self.accumulate_streaming_for_sprite(
+                    sprite,
+                    camera_pos,
+                    pressure,
+                    priority_floor,
+                    critical_threshold,
+                    sprite_animation_time_sec,
+                );
+            }
             if object_count > 0 {
                 self.streaming_scan_cursor = 0;
             }
-        } else if object_count > 0 {
-            let start = self.streaming_scan_cursor.min(object_count);
-            let mut scanned = 0usize;
-            while scanned < scan_budget {
-                let idx = (start + scanned) % object_count;
-                let obj = &data.objects[idx];
-                self.accumulate_streaming_for_object(
-                    obj,
-                    camera_pos,
-                    predicted_cam,
-                    pressure,
-                    priority_floor,
-                    base_lod_bias,
-                    critical_threshold,
-                    require_meshlets,
-                );
-                scanned += 1;
+            if sprite_count > 0 {
+                self.streaming_sprite_scan_cursor = 0;
             }
-            self.streaming_scan_cursor = (start + scanned) % object_count;
+        } else if total_scan_count > 0 {
+            let mut object_budget = 0usize;
+            let mut sprite_budget = 0usize;
+            if object_count > 0 && sprite_count > 0 {
+                if scan_budget <= 1 {
+                    if object_count >= sprite_count {
+                        object_budget = 1;
+                    } else {
+                        sprite_budget = 1;
+                    }
+                } else {
+                    object_budget = (scan_budget.saturating_mul(object_count)) / total_scan_count;
+                    object_budget = object_budget.clamp(1, scan_budget.saturating_sub(1));
+                    sprite_budget = scan_budget.saturating_sub(object_budget);
+                }
+            } else if object_count > 0 {
+                object_budget = scan_budget;
+            } else {
+                sprite_budget = scan_budget;
+            }
+
+            if object_count > 0 && object_budget > 0 {
+                let start = self.streaming_scan_cursor.min(object_count);
+                let mut scanned = 0usize;
+                while scanned < object_budget {
+                    let idx = (start + scanned) % object_count;
+                    let obj = &data.objects[idx];
+                    self.accumulate_streaming_for_object(
+                        obj,
+                        camera_pos,
+                        predicted_cam,
+                        pressure,
+                        priority_floor,
+                        base_lod_bias,
+                        critical_threshold,
+                        require_meshlets,
+                    );
+                    scanned += 1;
+                }
+                self.streaming_scan_cursor = (start + scanned) % object_count;
+            }
+
+            if sprite_count > 0 && sprite_budget > 0 {
+                let start = self.streaming_sprite_scan_cursor.min(sprite_count);
+                let mut scanned = 0usize;
+                while scanned < sprite_budget {
+                    let idx = (start + scanned) % sprite_count;
+                    let sprite = &data.sprites[idx];
+                    self.accumulate_streaming_for_sprite(
+                        sprite,
+                        camera_pos,
+                        pressure,
+                        priority_floor,
+                        critical_threshold,
+                        sprite_animation_time_sec,
+                    );
+                    scanned += 1;
+                }
+                self.streaming_sprite_scan_cursor = (start + scanned) % sprite_count;
+            }
         }
 
         if let Some(requests) = extra_requests {
@@ -8004,8 +8260,12 @@ impl GraphRenderer {
         let mut sprite_instances: Vec<SpriteInstanceRaw> = Vec::new();
         let mut sprite_textures: Vec<wgpu::TextureView> = vec![self.fallback_albedo_view.clone()];
         let mut texture_slots: HashMap<usize, u32> = HashMap::new();
+        let mut missing_sprite_requests: HashMap<usize, AssetStreamingRequest> = HashMap::new();
         let mut glyph_texture_slot: Option<u32> = None;
         let sprite_animation_time_sec = self.sprite_animation_epoch.elapsed().as_secs_f32();
+        let sprite_stream_camera_pos = render_data.current_camera_transform.position;
+        let force_low_res_on_miss = matches!(self.current_pressure(), MemoryPressure::Hard)
+            && self.streaming_tuning.force_low_res_hard;
 
         let camera_rot = Quat::from(render_data.current_camera_transform.rotation);
         let camera_right = camera_rot * -Vec3::X;
@@ -8046,27 +8306,38 @@ impl GraphRenderer {
             Mat4::perspective_infinite_reverse_rh(camera_fov, camera_aspect, camera_near)
                 * camera_view;
 
-        let mut resolve_texture_slot = |renderer: &mut Self, texture_id: Option<usize>| -> u32 {
-            let Some(texture_id) = texture_id else {
-                return 0;
+        let mut resolve_texture_slot =
+            |renderer: &mut Self, texture_id: Option<usize>, request_priority: f32| -> u32 {
+                let Some(texture_id) = texture_id else {
+                    return 0;
+                };
+                if let Some(slot) = texture_slots.get(&texture_id) {
+                    return *slot;
+                }
+                let rid = renderer
+                    .pool
+                    .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+                let view = if let Some(view) = renderer.pool.texture_view(rid).cloned() {
+                    view
+                } else {
+                    missing_sprite_requests
+                        .entry(texture_id)
+                        .and_modify(|req| req.priority = req.priority.max(request_priority))
+                        .or_insert(AssetStreamingRequest {
+                            id: texture_id,
+                            kind: AssetStreamKind::Texture,
+                            priority: request_priority,
+                            max_lod: None,
+                            force_low_res: force_low_res_on_miss,
+                        });
+                    renderer.fallback_albedo_view.clone()
+                };
+                renderer.pool.mark_used(rid, renderer.frame_index);
+                let slot = sprite_textures.len() as u32;
+                sprite_textures.push(view);
+                texture_slots.insert(texture_id, slot);
+                slot
             };
-            if let Some(slot) = texture_slots.get(&texture_id) {
-                return *slot;
-            }
-            let rid = renderer
-                .pool
-                .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
-            let view = renderer
-                .pool
-                .texture_view(rid)
-                .cloned()
-                .unwrap_or_else(|| renderer.fallback_albedo_view.clone());
-            renderer.pool.mark_used(rid, renderer.frame_index);
-            let slot = sprite_textures.len() as u32;
-            sprite_textures.push(view);
-            texture_slots.insert(texture_id, slot);
-            slot
-        };
 
         for sprite in &render_data.sprites {
             let size = Vec2::new(sprite.size.x.max(0.0), sprite.size.y.max(0.0));
@@ -8097,7 +8368,10 @@ impl GraphRenderer {
             };
             let texture_id = resolve_sprite_sequence_texture_id(sprite, sprite_animation_time_sec)
                 .or(sprite.texture_id);
-            let texture_slot = resolve_texture_slot(self, texture_id);
+            let stream_priority =
+                sprite_stream_priority(sprite, sprite_stream_camera_pos, &self.streaming_tuning)
+                    .max(self.streaming_tuning.priority_near);
+            let texture_slot = resolve_texture_slot(self, texture_id, stream_priority);
             let pick_id = if sprite.pick_id != 0 {
                 sprite.pick_id
             } else {
@@ -8433,6 +8707,27 @@ impl GraphRenderer {
                     meta: [0, decoration_flags, pick_id, text.blend_mode as u32],
                 });
             }
+        }
+
+        if !missing_sprite_requests.is_empty() {
+            let requests = self.streaming_requests.get_or_insert_with(Vec::new);
+            for request in missing_sprite_requests.into_values() {
+                if let Some(existing) = requests
+                    .iter_mut()
+                    .find(|existing| existing.kind == request.kind && existing.id == request.id)
+                {
+                    existing.priority = existing.priority.max(request.priority);
+                    existing.max_lod = match (existing.max_lod, request.max_lod) {
+                        (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+                        (None, rhs) => rhs,
+                        (lhs, None) => lhs,
+                    };
+                    existing.force_low_res &= request.force_low_res;
+                } else {
+                    requests.push(request);
+                }
+            }
+            self.streaming_dirty = true;
         }
 
         let sprite_batches = if sprite_instances.is_empty() {

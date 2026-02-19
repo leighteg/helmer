@@ -569,6 +569,39 @@ impl Default for SpriteSheetAnimation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderSpriteImageSequence {
+    pub enabled: bool,
+    pub texture_ids: Arc<Vec<usize>>,
+    pub start_frame: u32,
+    pub frame_count: u32,
+    pub fps: f32,
+    pub playback: SpriteAnimationPlayback,
+    pub phase: f32,
+    pub paused: bool,
+    pub paused_frame: u32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+impl Default for RenderSpriteImageSequence {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            texture_ids: Arc::new(Vec::new()),
+            start_frame: 0,
+            frame_count: 0,
+            fps: 12.0,
+            playback: SpriteAnimationPlayback::Loop,
+            phase: 0.0,
+            paused: false,
+            paused_frame: 0,
+            flip_x: false,
+            flip_y: false,
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlignH {
@@ -620,6 +653,7 @@ pub struct RenderSprite {
     pub size: Vec2,
     pub color: [f32; 4],
     pub texture_id: Option<usize>,
+    pub image_sequence: Option<RenderSpriteImageSequence>,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
     pub sheet_animation: SpriteSheetAnimation,
@@ -641,6 +675,7 @@ impl Default for RenderSprite {
             size: Vec2::splat(1.0),
             color: [1.0; 4],
             texture_id: None,
+            image_sequence: None,
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
             sheet_animation: SpriteSheetAnimation::default(),

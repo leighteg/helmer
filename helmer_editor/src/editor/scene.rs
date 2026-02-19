@@ -16,7 +16,7 @@ use helmer::{
     provided::components::{
         AudioEmitter, AudioListener, Camera, EntityFollower, Light, LightType, LookAt,
         MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
-        SpriteRenderer, Text2d, Transform,
+        SpriteImageSequence, SpriteRenderer, Text2d, Transform,
     },
     runtime::asset_server::{Handle, Scene},
 };
@@ -30,7 +30,8 @@ use helmer_becs::physics::components::{
 use helmer_becs::{
     BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
     BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
-    BevySplineFollower, BevySpriteRenderer, BevyText2d, BevyTransform, BevyWrapper,
+    BevySplineFollower, BevySpriteImageSequence, BevySpriteRenderer, BevyText2d, BevyTransform,
+    BevyWrapper,
     systems::scene_system::{
         EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, SpawnedScene,
         build_default_animator,
@@ -1397,6 +1398,102 @@ impl SpriteSheetAnimationData {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpriteImageSequenceData {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub textures: Vec<String>,
+    #[serde(default)]
+    pub start_frame: u32,
+    #[serde(default)]
+    pub frame_count: u32,
+    #[serde(default = "sprite_sheet_default_fps")]
+    pub fps: f32,
+    #[serde(default)]
+    pub playback: SpriteAnimationPlaybackData,
+    #[serde(default)]
+    pub phase: f32,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub paused_frame: u32,
+    #[serde(default)]
+    pub flip_x: bool,
+    #[serde(default)]
+    pub flip_y: bool,
+}
+
+impl Default for SpriteImageSequenceData {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            textures: Vec::new(),
+            start_frame: 0,
+            frame_count: 0,
+            fps: sprite_sheet_default_fps(),
+            playback: SpriteAnimationPlaybackData::default(),
+            phase: 0.0,
+            paused: false,
+            paused_frame: 0,
+            flip_x: false,
+            flip_y: false,
+        }
+    }
+}
+
+impl SpriteImageSequenceData {
+    fn from_component(component: &SpriteImageSequence, texture_paths: Vec<String>) -> Self {
+        Self {
+            enabled: component.enabled,
+            textures: texture_paths,
+            start_frame: component.start_frame,
+            frame_count: component.frame_count,
+            fps: component.fps,
+            playback: component.playback.into(),
+            phase: component.phase,
+            paused: component.paused,
+            paused_frame: component.paused_frame,
+            flip_x: component.flip_x,
+            flip_y: component.flip_y,
+        }
+    }
+
+    fn has_component_state(&self) -> bool {
+        self.enabled
+            || !self.textures.is_empty()
+            || self.start_frame != 0
+            || self.frame_count != 0
+            || (self.fps - sprite_sheet_default_fps()).abs() > f32::EPSILON
+            || self.playback != SpriteAnimationPlaybackData::default()
+            || self.phase != 0.0
+            || self.paused
+            || self.paused_frame != 0
+            || self.flip_x
+            || self.flip_y
+    }
+
+    fn to_component(&self, texture_ids: Vec<usize>) -> SpriteImageSequence {
+        SpriteImageSequence {
+            enabled: self.enabled,
+            texture_ids,
+            start_frame: self.start_frame,
+            frame_count: self.frame_count,
+            fps: if self.fps.is_finite() { self.fps } else { 12.0 },
+            playback: self.playback.to_playback(),
+            phase: if self.phase.is_finite() {
+                self.phase
+            } else {
+                0.0
+            },
+            paused: self.paused,
+            paused_frame: self.paused_frame,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextAlignHData {
     Left,
@@ -1531,6 +1628,8 @@ pub struct SpriteComponentData {
     pub uv_max: [f32; 2],
     #[serde(default)]
     pub sheet_animation: SpriteSheetAnimationData,
+    #[serde(default)]
+    pub image_sequence: SpriteImageSequenceData,
     #[serde(default = "sprite_default_pivot")]
     pub pivot: [f32; 2],
     #[serde(default)]
@@ -1557,6 +1656,7 @@ impl Default for SpriteComponentData {
             uv_min: sprite_default_uv_min(),
             uv_max: sprite_default_uv_max(),
             sheet_animation: SpriteSheetAnimationData::default(),
+            image_sequence: SpriteImageSequenceData::default(),
             pivot: sprite_default_pivot(),
             clip_rect: None,
             layer: 0.0,
@@ -3018,8 +3118,9 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             })
         });
         let sprite = world.get::<BevySpriteRenderer>(entity).map(|sprite| {
-            let texture = world
-                .get::<EditorSprite>(entity)
+            let editor_sprite = world.get::<EditorSprite>(entity).cloned();
+            let texture = editor_sprite
+                .as_ref()
                 .and_then(|editor| editor.texture_path.clone())
                 .and_then(|path| {
                     let path = path.trim().to_string();
@@ -3029,12 +3130,33 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                         Some(normalize_path(&path, root))
                     }
                 });
+            let image_sequence = world
+                .get::<BevySpriteImageSequence>(entity)
+                .map(|sequence| {
+                    let texture_paths = editor_sprite
+                        .as_ref()
+                        .map(|editor| editor.sequence_texture_paths.clone())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|path| {
+                            let path = path.trim().to_string();
+                            if path.is_empty() {
+                                None
+                            } else {
+                                Some(normalize_path(&path, root))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    SpriteImageSequenceData::from_component(&sequence.0, texture_paths)
+                })
+                .unwrap_or_default();
             SpriteComponentData {
                 texture,
                 color: sprite.0.color,
                 uv_min: sprite.0.uv_min,
                 uv_max: sprite.0.uv_max,
                 sheet_animation: SpriteSheetAnimationData::from_sheet(sprite.0.sheet_animation),
+                image_sequence,
                 pivot: sprite.0.pivot,
                 clip_rect: sprite.0.clip_rect,
                 layer: sprite.0.layer,
@@ -3560,6 +3682,22 @@ pub fn spawn_scene_from_document(
                 let resolved = resolve_path(path, root);
                 cached_texture_handle(asset_cache, asset_server, &resolved).id
             });
+            let sequence_texture_paths = sprite
+                .image_sequence
+                .textures
+                .iter()
+                .filter_map(|path| {
+                    let path = path.trim().to_string();
+                    if path.is_empty() { None } else { Some(path) }
+                })
+                .collect::<Vec<_>>();
+            let sequence_texture_ids = sequence_texture_paths
+                .iter()
+                .map(|path| {
+                    let resolved = resolve_path(path, root);
+                    cached_texture_handle(asset_cache, asset_server, &resolved).id
+                })
+                .collect::<Vec<_>>();
             entity.insert(BevyWrapper(SpriteRenderer {
                 color: sprite.color,
                 texture_id,
@@ -3575,8 +3713,14 @@ pub fn spawn_scene_from_document(
                 visible: sprite.visible,
                 pick_id: sprite.pick_id,
             }));
+            if sprite.image_sequence.has_component_state() {
+                entity.insert(BevySpriteImageSequence(
+                    sprite.image_sequence.to_component(sequence_texture_ids),
+                ));
+            }
             entity.insert(EditorSprite {
                 texture_path: texture_path.clone(),
+                sequence_texture_paths,
             });
         }
 

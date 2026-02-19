@@ -101,35 +101,35 @@ const SPRITE_SHEET_MAX_UV_INSET: f32 = 0.49;
 const SWASH_GLYPH_SOURCES: [SwashSource; 1] = [SwashSource::Outline];
 
 #[inline]
-fn resolve_sprite_sheet_frame(sheet: &SpriteSheetAnimation, elapsed_time_sec: f32) -> u32 {
-    let columns = sheet.columns.max(1);
-    let rows = sheet.rows.max(1);
-    let total_frames = columns.saturating_mul(rows).max(1);
-    let start_frame = sheet.start_frame.min(total_frames.saturating_sub(1));
+fn resolve_animation_frame(
+    total_frames: u32,
+    start_frame: u32,
+    frame_count: u32,
+    fps: f32,
+    playback: SpriteAnimationPlayback,
+    phase: f32,
+    paused: bool,
+    paused_frame: u32,
+    elapsed_time_sec: f32,
+) -> u32 {
+    let total_frames = total_frames.max(1);
+    let start_frame = start_frame.min(total_frames.saturating_sub(1));
     let available_frames = total_frames.saturating_sub(start_frame).max(1);
-    let active_frame_count = if sheet.frame_count == 0 {
+    let active_frame_count = if frame_count == 0 {
         available_frames
     } else {
-        sheet.frame_count.min(available_frames).max(1)
+        frame_count.min(available_frames).max(1)
     };
 
-    let fps = if sheet.fps.is_finite() {
-        sheet.fps.max(0.0)
-    } else {
-        0.0
-    };
-    let phase = if sheet.phase.is_finite() {
-        sheet.phase
-    } else {
-        0.0
-    };
+    let fps = if fps.is_finite() { fps.max(0.0) } else { 0.0 };
+    let phase = if phase.is_finite() { phase } else { 0.0 };
 
-    let local_frame = if sheet.paused || fps <= 0.0 {
-        sheet.paused_frame.min(active_frame_count.saturating_sub(1))
+    let local_frame = if paused || fps <= 0.0 {
+        paused_frame.min(active_frame_count.saturating_sub(1))
     } else {
         let frame_counter = ((elapsed_time_sec + phase).max(0.0) * fps).floor().max(0.0) as u64;
         let count_u64 = active_frame_count as u64;
-        let local = match sheet.playback {
+        let local = match playback {
             SpriteAnimationPlayback::Loop => frame_counter % count_u64,
             SpriteAnimationPlayback::Once => frame_counter.min(count_u64.saturating_sub(1)),
             SpriteAnimationPlayback::PingPong => {
@@ -150,6 +150,52 @@ fn resolve_sprite_sheet_frame(sheet: &SpriteSheetAnimation, elapsed_time_sec: f3
     };
 
     start_frame.saturating_add(local_frame)
+}
+
+#[inline]
+fn resolve_sprite_sheet_frame(sheet: &SpriteSheetAnimation, elapsed_time_sec: f32) -> u32 {
+    let columns = sheet.columns.max(1);
+    let rows = sheet.rows.max(1);
+    let total_frames = columns.saturating_mul(rows).max(1);
+    resolve_animation_frame(
+        total_frames,
+        sheet.start_frame,
+        sheet.frame_count,
+        sheet.fps,
+        sheet.playback,
+        sheet.phase,
+        sheet.paused,
+        sheet.paused_frame,
+        elapsed_time_sec,
+    )
+}
+
+#[inline]
+fn resolve_sprite_sequence_texture_id(
+    sprite: &crate::graphics::common::renderer::RenderSprite,
+    elapsed_time_sec: f32,
+) -> Option<usize> {
+    let sequence = sprite.image_sequence.as_ref()?;
+    if !sequence.enabled {
+        return None;
+    }
+    let ids = sequence.texture_ids.as_ref();
+    if ids.is_empty() {
+        return None;
+    }
+    let total_frames = ids.len().min(u32::MAX as usize) as u32;
+    let frame = resolve_animation_frame(
+        total_frames,
+        sequence.start_frame,
+        sequence.frame_count,
+        sequence.fps,
+        sequence.playback,
+        sequence.phase,
+        sequence.paused,
+        sequence.paused_frame,
+        elapsed_time_sec,
+    ) as usize;
+    ids.get(frame).copied()
 }
 
 #[inline]
@@ -182,8 +228,20 @@ fn resolve_sprite_uv_rect(
         },
     );
     let sheet = sprite.sheet_animation;
+    let mut frame_min = base_min;
+    let mut frame_max = base_max;
     if !sheet.enabled {
-        return [base_min.x, base_min.y, base_max.x, base_max.y];
+        if let Some(sequence) = sprite.image_sequence.as_ref() {
+            if sequence.enabled {
+                if sequence.flip_x {
+                    std::mem::swap(&mut frame_min.x, &mut frame_max.x);
+                }
+                if sequence.flip_y {
+                    std::mem::swap(&mut frame_min.y, &mut frame_max.y);
+                }
+            }
+        }
+        return [frame_min.x, frame_min.y, frame_max.x, frame_max.y];
     }
 
     let columns = sheet.columns.max(1);
@@ -195,8 +253,8 @@ fn resolve_sprite_uv_rect(
     let span = base_max - base_min;
     let cell = Vec2::new(span.x / columns as f32, span.y / rows as f32);
     let cell_origin = base_min + Vec2::new(cell.x * col as f32, cell.y * row as f32);
-    let mut frame_min = cell_origin;
-    let mut frame_max = cell_origin + cell;
+    frame_min = cell_origin;
+    frame_max = cell_origin + cell;
 
     let inset = Vec2::new(
         sheet.frame_uv_inset[0].clamp(0.0, SPRITE_SHEET_MAX_UV_INSET),
@@ -8037,7 +8095,9 @@ impl GraphRenderer {
             } else {
                 [0.0, 0.0, 0.0, 0.0]
             };
-            let texture_slot = resolve_texture_slot(self, sprite.texture_id);
+            let texture_id = resolve_sprite_sequence_texture_id(sprite, sprite_animation_time_sec)
+                .or(sprite.texture_id);
+            let texture_slot = resolve_texture_slot(self, texture_id);
             let pick_id = if sprite.pick_id != 0 {
                 sprite.pick_id
             } else {

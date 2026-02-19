@@ -295,6 +295,38 @@ type SpriteSheetAnimationPatch = {
     frame_uv_inset: Vec2?,
 }
 
+type SpriteImageSequenceTextureValue = { string } | string
+
+type SpriteImageSequenceData = {
+    enabled: boolean,
+    textures: { string },
+    start_frame: number,
+    frame_count: number,
+    fps: number,
+    playback: string,
+    phase: number,
+    paused: boolean,
+    paused_frame: number,
+    flip_x: boolean,
+    flip_y: boolean,
+}
+
+type SpriteImageSequencePatch = {
+    enabled: boolean?,
+    textures: SpriteImageSequenceTextureValue?,
+    texture_paths: SpriteImageSequenceTextureValue?,
+    frames: SpriteImageSequenceTextureValue?,
+    start_frame: number?,
+    frame_count: number?,
+    fps: number?,
+    playback: SpriteSheetPlaybackValue?,
+    phase: number?,
+    paused: boolean?,
+    paused_frame: number?,
+    flip_x: boolean?,
+    flip_y: boolean?,
+}
+
 type SpriteRendererData = {
     color: { number },
     texture_id: number?,
@@ -302,6 +334,8 @@ type SpriteRendererData = {
     uv_min: Vec2,
     uv_max: Vec2,
     sheet_animation: SpriteSheetAnimationData,
+    image_sequence: SpriteImageSequenceData,
+    sequence: SpriteImageSequenceData,
     pivot: Vec2,
     clip_rect: { number }?,
     layer: number,
@@ -320,6 +354,8 @@ type SpriteRendererPatch = {
     uv_max: Vec2?,
     sheet_animation: SpriteSheetAnimationPatch?,
     sheet: SpriteSheetAnimationPatch?,
+    image_sequence: SpriteImageSequencePatch?,
+    sequence: SpriteImageSequencePatch?,
     pivot: Vec2?,
     clip_rect: { number }?,
     layer: number?,
@@ -2096,6 +2132,7 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_mesh_renderer_material_path(id, path) -> bool
 --   ecs.get_sprite_renderer(id) -> table|nil
 --     sprite.sheet_animation: {enabled, columns, rows, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y, frame_uv_inset={x,y}}
+--     sprite.image_sequence: {enabled, textures={path,...}, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y}
 --   ecs.get_sprite_renderer_texture_path(id) -> path|nil
 --   ecs.set_sprite_renderer(id, patch) -> bool
 --   ecs.set_sprite_renderer_texture_path(id, path) -> bool

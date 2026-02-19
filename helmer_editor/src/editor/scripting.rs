@@ -42,7 +42,7 @@ use helmer::graphics::{
 };
 use helmer::provided::components::{
     AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer, Spline,
-    SplineFollower, SplineMode, SpriteRenderer, Text2d,
+    SplineFollower, SplineMode, SpriteImageSequence, SpriteRenderer, Text2d,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
@@ -66,8 +66,9 @@ use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
     BevyMeshRenderer, BevyRenderSender, BevyRendererStats, BevyRuntimeConfig, BevyRuntimeTuning,
-    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevySpriteRenderer,
-    BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform, BevyWrapper, DeltaTime,
+    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevySpriteImageSequence,
+    BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform,
+    BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
@@ -3929,9 +3930,7 @@ fn build_ecs_table(
                     world
                         .entity_mut(entity)
                         .insert(BevyWrapper(SpriteRenderer::default()));
-                    world
-                        .entity_mut(entity)
-                        .insert(EditorSprite { texture_path: None });
+                    world.entity_mut(entity).insert(EditorSprite::default());
                 }
                 "text" | "text2d" | "text_2d" => {
                     ensure_transform(world, entity);
@@ -4131,6 +4130,7 @@ fn build_ecs_table(
                 }
                 "sprite" | "sprite_renderer" => {
                     world.entity_mut(entity).remove::<BevySpriteRenderer>();
+                    world.entity_mut(entity).remove::<BevySpriteImageSequence>();
                     world.entity_mut(entity).remove::<EditorSprite>();
                 }
                 "text" | "text2d" | "text_2d" => {
@@ -5896,6 +5896,14 @@ fn build_ecs_table(
             else {
                 return Ok(None);
             };
+            let editor_sprite = world
+                .get::<EditorSprite>(entity)
+                .cloned()
+                .unwrap_or_default();
+            let sprite_sequence = world
+                .get::<BevySpriteImageSequence>(entity)
+                .map(|component| component.0.clone())
+                .unwrap_or_default();
 
             let table = lua.create_table()?;
             table.set("color", vec4_to_table(lua, sprite.color)?)?;
@@ -5903,10 +5911,7 @@ fn build_ecs_table(
                 Some(texture_id) => table.set("texture_id", texture_id as u64)?,
                 None => table.set("texture_id", Value::Nil)?,
             }
-            match world
-                .get::<EditorSprite>(entity)
-                .and_then(|sprite| sprite.texture_path.clone())
-            {
+            match editor_sprite.texture_path {
                 Some(path) => table.set("texture", path)?,
                 None => table.set("texture", Value::Nil)?,
             }
@@ -5940,6 +5945,29 @@ fn build_ecs_table(
             )?;
             table.set("sheet_animation", sheet_table.clone())?;
             table.set("sheet", sheet_table)?;
+            let sequence_table = lua.create_table()?;
+            sequence_table.set("enabled", sprite_sequence.enabled)?;
+            sequence_table.set("start_frame", sprite_sequence.start_frame)?;
+            sequence_table.set("frame_count", sprite_sequence.frame_count)?;
+            sequence_table.set("fps", sprite_sequence.fps)?;
+            sequence_table.set(
+                "playback",
+                sprite_animation_playback_name(sprite_sequence.playback),
+            )?;
+            sequence_table.set("phase", sprite_sequence.phase)?;
+            sequence_table.set("paused", sprite_sequence.paused)?;
+            sequence_table.set("paused_frame", sprite_sequence.paused_frame)?;
+            sequence_table.set("flip_x", sprite_sequence.flip_x)?;
+            sequence_table.set("flip_y", sprite_sequence.flip_y)?;
+            let sequence_textures = lua.create_table()?;
+            for (index, path) in editor_sprite.sequence_texture_paths.iter().enumerate() {
+                sequence_textures.set(index + 1, path.as_str())?;
+            }
+            sequence_table.set("textures", sequence_textures.clone())?;
+            sequence_table.set("texture_paths", sequence_textures.clone())?;
+            sequence_table.set("frames", sequence_textures)?;
+            table.set("image_sequence", sequence_table.clone())?;
+            table.set("sequence", sequence_table)?;
             table.set("pivot", vec2_to_table(lua, Vec2::from_array(sprite.pivot))?)?;
             if let Some(clip_rect) = sprite.clip_rect {
                 table.set("clip_rect", vec4_to_table(lua, clip_rect)?)?;
@@ -5991,7 +6019,13 @@ fn build_ecs_table(
             let mut editor_sprite = world
                 .get::<EditorSprite>(entity)
                 .cloned()
-                .unwrap_or(EditorSprite { texture_path: None });
+                .unwrap_or_default();
+            let mut sprite_sequence = world
+                .get::<BevySpriteImageSequence>(entity)
+                .map(|component| component.0.clone())
+                .unwrap_or_default();
+            let mut sprite_sequence_present =
+                world.get::<BevySpriteImageSequence>(entity).is_some();
 
             if let Ok(color) = data.get::<Table>("color") {
                 if let Some(color) = table_to_vec4(&color) {
@@ -6094,11 +6128,55 @@ fn build_ecs_table(
                     _ => {}
                 }
             }
+            if let Ok(sequence_patch) = data.get::<Value>("image_sequence") {
+                match sequence_patch {
+                    Value::Nil => {
+                        sprite_sequence = SpriteImageSequence::default();
+                        editor_sprite.sequence_texture_paths.clear();
+                        sprite_sequence_present = false;
+                    }
+                    Value::Table(table) => {
+                        apply_sprite_image_sequence_patch(
+                            world,
+                            project.as_ref(),
+                            &mut sprite_sequence,
+                            &mut editor_sprite.sequence_texture_paths,
+                            &table,
+                        );
+                        sprite_sequence_present = true;
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(sequence_patch) = data.get::<Value>("sequence") {
+                match sequence_patch {
+                    Value::Nil => {
+                        sprite_sequence = SpriteImageSequence::default();
+                        editor_sprite.sequence_texture_paths.clear();
+                        sprite_sequence_present = false;
+                    }
+                    Value::Table(table) => {
+                        apply_sprite_image_sequence_patch(
+                            world,
+                            project.as_ref(),
+                            &mut sprite_sequence,
+                            &mut editor_sprite.sequence_texture_paths,
+                            &table,
+                        );
+                        sprite_sequence_present = true;
+                    }
+                    _ => {}
+                }
+            }
 
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert((BevyWrapper(sprite), editor_sprite));
+            let mut entity_ref = world.entity_mut(entity);
+            entity_ref.insert((BevyWrapper(sprite), editor_sprite));
+            if sprite_sequence_present {
+                entity_ref.insert(BevySpriteImageSequence(sprite_sequence));
+            } else {
+                entity_ref.remove::<BevySpriteImageSequence>();
+            }
             mark_entity_render_dirty(world, entity);
             Ok(true)
         })?,
@@ -6121,7 +6199,7 @@ fn build_ecs_table(
             let mut editor_sprite = world
                 .get::<EditorSprite>(entity)
                 .cloned()
-                .unwrap_or(EditorSprite { texture_path: None });
+                .unwrap_or_default();
 
             let trimmed = path.trim();
             if trimmed.is_empty() {
@@ -15063,6 +15141,118 @@ fn sprite_animation_playback_from_value(value: Value) -> Option<SpriteAnimationP
             }
         }
         _ => None,
+    }
+}
+
+fn sprite_sequence_paths_from_value(
+    value: Value,
+    project: Option<&EditorProject>,
+) -> Option<Vec<String>> {
+    match value {
+        Value::Nil => Some(Vec::new()),
+        Value::String(path) => {
+            let path = path.to_string_lossy();
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(vec![normalize_project_path(project, Path::new(trimmed))])
+            }
+        }
+        Value::Table(paths) => {
+            let mut normalized = Vec::new();
+            for value in paths.sequence_values::<Value>() {
+                let Ok(value) = value else {
+                    continue;
+                };
+                let Value::String(path) = value else {
+                    continue;
+                };
+                let path = path.to_string_lossy();
+                let trimmed = path.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                normalized.push(normalize_project_path(project, Path::new(trimmed)));
+            }
+            Some(normalized)
+        }
+        _ => None,
+    }
+}
+
+fn load_sprite_sequence_texture_ids(
+    world: &mut World,
+    project: Option<&EditorProject>,
+    paths: &[String],
+) -> Option<Vec<usize>> {
+    let mut texture_ids = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Some(texture_id) = load_texture_id(world, project, path) else {
+            return None;
+        };
+        texture_ids.push(texture_id);
+    }
+    Some(texture_ids)
+}
+
+fn apply_sprite_image_sequence_patch(
+    world: &mut World,
+    project: Option<&EditorProject>,
+    sequence: &mut SpriteImageSequence,
+    sequence_paths: &mut Vec<String>,
+    patch: &Table,
+) {
+    if let Ok(enabled) = patch.get::<bool>("enabled") {
+        sequence.enabled = enabled;
+    }
+    if let Ok(start_frame) = patch.get::<u32>("start_frame") {
+        sequence.start_frame = start_frame;
+    }
+    if let Ok(frame_count) = patch.get::<u32>("frame_count") {
+        sequence.frame_count = frame_count;
+    }
+    if let Ok(fps) = patch.get::<f32>("fps") {
+        if fps.is_finite() {
+            sequence.fps = fps;
+        }
+    }
+    if let Ok(playback) = patch.get::<Value>("playback") {
+        if let Some(playback) = sprite_animation_playback_from_value(playback) {
+            sequence.playback = playback;
+        }
+    }
+    if let Ok(phase) = patch.get::<f32>("phase") {
+        if phase.is_finite() {
+            sequence.phase = phase;
+        }
+    }
+    if let Ok(paused) = patch.get::<bool>("paused") {
+        sequence.paused = paused;
+    }
+    if let Ok(paused_frame) = patch.get::<u32>("paused_frame") {
+        sequence.paused_frame = paused_frame;
+    }
+    if let Ok(flip_x) = patch.get::<bool>("flip_x") {
+        sequence.flip_x = flip_x;
+    }
+    if let Ok(flip_y) = patch.get::<bool>("flip_y") {
+        sequence.flip_y = flip_y;
+    }
+
+    for key in ["textures", "texture_paths", "frames"] {
+        let Ok(texture_paths) = patch.get::<Value>(key) else {
+            continue;
+        };
+        let Some(texture_paths) = sprite_sequence_paths_from_value(texture_paths, project) else {
+            continue;
+        };
+        let Some(texture_ids) = load_sprite_sequence_texture_ids(world, project, &texture_paths)
+        else {
+            continue;
+        };
+        *sequence_paths = texture_paths;
+        sequence.texture_ids = texture_ids;
     }
 }
 

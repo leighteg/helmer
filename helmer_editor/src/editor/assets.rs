@@ -125,9 +125,10 @@ pub struct EditorAudio {
     pub streaming: bool,
 }
 
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Default)]
 pub struct EditorSprite {
     pub texture_path: Option<String>,
+    pub sequence_texture_paths: Vec<String>,
 }
 
 #[derive(Component, Debug, Clone)]

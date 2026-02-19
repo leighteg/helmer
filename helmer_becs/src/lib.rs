@@ -18,8 +18,8 @@ use helmer::{
     graphics::common::renderer::{RenderMessage, RendererStats, StreamingTuning},
     provided::components::{
         ActiveCamera, AudioEmitter, AudioListener, Camera, EntityFollower, Light, LookAt,
-        MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SpriteRenderer,
-        Text2d, Transform,
+        MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower,
+        SpriteImageSequence, SpriteRenderer, Text2d, Transform,
     },
     runtime::{
         asset_server::AssetServer,
@@ -103,6 +103,9 @@ pub struct BevyEntityFollower(pub EntityFollower);
 
 #[derive(Component, Clone, Debug)]
 pub struct BevyText2d(pub Text2d);
+
+#[derive(Component, Clone, Debug)]
+pub struct BevySpriteImageSequence(pub SpriteImageSequence);
 
 // Resource Wrappers
 #[cfg_attr(not(target_arch = "wasm32"), derive(Resource))]

@@ -28,7 +28,8 @@ use helmer::graphics::{
 };
 use helmer::provided::components::{
     AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer,
-    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, SpriteRenderer, Text2d,
+    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, SpriteImageSequence,
+    SpriteRenderer, Text2d,
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::{EguiClipboard, EguiInputPassthrough, EguiResource};
@@ -50,7 +51,8 @@ use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
     BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevySpriteRenderer, BevySystemProfiler, BevyText2d, BevyTransform, BevyWrapper,
+    BevySpriteImageSequence, BevySpriteRenderer, BevySystemProfiler, BevyText2d, BevyTransform,
+    BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -10445,6 +10447,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
     }
 
     let has_sprite_panel = world.get::<BevySpriteRenderer>(entity).is_some()
+        || world.get::<BevySpriteImageSequence>(entity).is_some()
         || world.get::<EditorSprite>(entity).is_some();
     if has_sprite_panel {
         let mut remove = false;
@@ -10457,6 +10460,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
         if remove {
             world.entity_mut(entity).remove::<BevySpriteRenderer>();
+            world.entity_mut(entity).remove::<BevySpriteImageSequence>();
             world.entity_mut(entity).remove::<EditorSprite>();
             push_undo_snapshot(world, "Remove Sprite");
         } else {
@@ -10464,12 +10468,22 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 .get::<BevySpriteRenderer>(entity)
                 .map(|component| component.0)
                 .unwrap_or_default();
+            let mut editor_sprite = world
+                .get::<EditorSprite>(entity)
+                .cloned()
+                .unwrap_or_default();
+            let mut sprite_sequence = world
+                .get::<BevySpriteImageSequence>(entity)
+                .map(|component| component.0.clone())
+                .unwrap_or_default();
+            let mut sprite_sequence_present =
+                world.get::<BevySpriteImageSequence>(entity).is_some();
             let mut discrete_changed = false;
             let mut edit_response = EditResponse::default();
 
-            let texture_label = world
-                .get::<EditorSprite>(entity)
-                .and_then(|sprite| sprite.texture_path.as_ref())
+            let texture_label = editor_sprite
+                .texture_path
+                .as_ref()
                 .map(|path| format!("Texture: {path}"))
                 .unwrap_or_else(|| "Texture: <none>".to_string());
             let texture_button = ui.button(texture_label);
@@ -10478,6 +10492,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     if apply_sprite_texture_from_asset(world, entity, &project, path) {
                         if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
                             sprite.texture_id = updated.0.texture_id;
+                        }
+                        if let Some(updated) = world.get::<EditorSprite>(entity) {
+                            editor_sprite = updated.clone();
                         }
                         discrete_changed = true;
                     }
@@ -10490,6 +10507,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
                                 sprite.texture_id = updated.0.texture_id;
                             }
+                            if let Some(updated) = world.get::<EditorSprite>(entity) {
+                                editor_sprite = updated.clone();
+                            }
                             discrete_changed = true;
                         }
                     }
@@ -10500,13 +10520,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             ui.horizontal(|ui| {
                 if ui.button("Clear Texture").clicked() {
                     sprite.texture_id = None;
-                    if let Some(mut editor_sprite) = world.get_mut::<EditorSprite>(entity) {
-                        editor_sprite.texture_path = None;
-                    } else {
-                        world
-                            .entity_mut(entity)
-                            .insert(EditorSprite { texture_path: None });
-                    }
+                    editor_sprite.texture_path = None;
                     discrete_changed = true;
                 }
             });
@@ -10666,6 +10680,224 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
             });
 
+            let mut sequence_paths_changed = false;
+            ui.collapsing("Image Sequence", |ui| {
+                if ui
+                    .checkbox(&mut sprite_sequence.enabled, "Enabled")
+                    .changed()
+                {
+                    discrete_changed = true;
+                    sprite_sequence_present = true;
+                }
+
+                let start_response = edit_u32_range(
+                    ui,
+                    "Start Frame",
+                    &mut sprite_sequence.start_frame,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(start_response);
+                if start_response.changed {
+                    sprite_sequence_present = true;
+                }
+
+                let frame_count_response = edit_u32_range(
+                    ui,
+                    "Frame Count (0=Auto)",
+                    &mut sprite_sequence.frame_count,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(frame_count_response);
+                if frame_count_response.changed {
+                    sprite_sequence_present = true;
+                }
+
+                let fps_response = edit_float(ui, "FPS", &mut sprite_sequence.fps, 0.1);
+                edit_response.merge(fps_response);
+                if fps_response.changed {
+                    sprite_sequence_present = true;
+                }
+
+                let mut playback = sprite_sequence.playback;
+                let playback_label = match playback {
+                    SpriteAnimationPlayback::Loop => "Loop",
+                    SpriteAnimationPlayback::Once => "Once",
+                    SpriteAnimationPlayback::PingPong => "PingPong",
+                };
+                ComboBox::from_id_source(format!("sprite_sequence_playback_{}", entity.to_bits()))
+                    .selected_text(playback_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::Loop),
+                                "Loop",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::Loop;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::Once),
+                                "Once",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::Once;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::PingPong),
+                                "PingPong",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::PingPong;
+                        }
+                    });
+                if playback != sprite_sequence.playback {
+                    sprite_sequence.playback = playback;
+                    discrete_changed = true;
+                    sprite_sequence_present = true;
+                }
+
+                let phase_response =
+                    edit_float(ui, "Phase (sec)", &mut sprite_sequence.phase, 0.05);
+                edit_response.merge(phase_response);
+                if phase_response.changed {
+                    sprite_sequence_present = true;
+                }
+
+                if ui.checkbox(&mut sprite_sequence.paused, "Paused").changed() {
+                    discrete_changed = true;
+                    sprite_sequence_present = true;
+                }
+
+                let paused_frame_response = edit_u32_range(
+                    ui,
+                    "Paused Frame",
+                    &mut sprite_sequence.paused_frame,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(paused_frame_response);
+                if paused_frame_response.changed {
+                    sprite_sequence_present = true;
+                }
+
+                if ui.checkbox(&mut sprite_sequence.flip_x, "Flip X").changed() {
+                    discrete_changed = true;
+                    sprite_sequence_present = true;
+                }
+                if ui.checkbox(&mut sprite_sequence.flip_y, "Flip Y").changed() {
+                    discrete_changed = true;
+                    sprite_sequence_present = true;
+                }
+
+                ui.separator();
+                ui.label("Frame Textures");
+                let mut remove_texture_index = None;
+                for (index, path) in editor_sprite.sequence_texture_paths.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("#{}", index));
+                        let response = ui.text_edit_singleline(path);
+                        if response.changed() {
+                            sequence_paths_changed = true;
+                            discrete_changed = true;
+                            sprite_sequence_present = true;
+                        }
+                        if let Some(payload) =
+                            typed_dnd_release_payload::<AssetDragPayload>(&response)
+                        {
+                            if let Some(dropped) =
+                                payload.paths.iter().find(|path| is_texture_file(path))
+                            {
+                                *path = project_relative_path(&project, dropped);
+                                sequence_paths_changed = true;
+                                discrete_changed = true;
+                                sprite_sequence_present = true;
+                            }
+                        }
+                        highlight_drop_target(ui, &response);
+                        if ui.small_button("X").clicked() {
+                            remove_texture_index = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove_texture_index {
+                    if index < editor_sprite.sequence_texture_paths.len() {
+                        editor_sprite.sequence_texture_paths.remove(index);
+                        sequence_paths_changed = true;
+                        discrete_changed = true;
+                        sprite_sequence_present = true;
+                    }
+                }
+
+                let append_button = ui.button("Append Selected Texture");
+                if append_button.clicked() {
+                    if let Some(path) = selected_asset.as_ref().filter(|path| is_texture_file(path))
+                    {
+                        editor_sprite
+                            .sequence_texture_paths
+                            .push(project_relative_path(&project, path));
+                        sequence_paths_changed = true;
+                        discrete_changed = true;
+                        sprite_sequence_present = true;
+                    }
+                }
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&append_button)
+                {
+                    let mut appended = false;
+                    for path in payload.paths.iter().filter(|path| is_texture_file(path)) {
+                        editor_sprite
+                            .sequence_texture_paths
+                            .push(project_relative_path(&project, path));
+                        appended = true;
+                    }
+                    if appended {
+                        sequence_paths_changed = true;
+                        discrete_changed = true;
+                        sprite_sequence_present = true;
+                    }
+                }
+                highlight_drop_target(ui, &append_button);
+
+                ui.horizontal(|ui| {
+                    if ui.button("Add Empty Frame").clicked() {
+                        editor_sprite.sequence_texture_paths.push(String::new());
+                        sequence_paths_changed = true;
+                        discrete_changed = true;
+                        sprite_sequence_present = true;
+                    }
+                    if ui.button("Clear Frames").clicked() {
+                        editor_sprite.sequence_texture_paths.clear();
+                        sequence_paths_changed = true;
+                        discrete_changed = true;
+                        sprite_sequence_present = true;
+                    }
+                    if ui.button("Reset Sequence").clicked() {
+                        sprite_sequence = SpriteImageSequence::default();
+                        editor_sprite.sequence_texture_paths.clear();
+                        sprite_sequence.texture_ids.clear();
+                        sprite_sequence_present = false;
+                        sequence_paths_changed = false;
+                        discrete_changed = true;
+                    }
+                });
+            });
+            if sequence_paths_changed {
+                if let Some((normalized_paths, texture_ids)) = resolve_sprite_sequence_textures(
+                    world,
+                    &project,
+                    &editor_sprite.sequence_texture_paths,
+                ) {
+                    editor_sprite.sequence_texture_paths = normalized_paths;
+                    sprite_sequence.texture_ids = texture_ids;
+                }
+            }
+
             let mut pivot = sprite.pivot;
             let pivot_response = edit_vec2f(ui, "Pivot", &mut pivot, 0.01);
             edit_response.merge(pivot_response);
@@ -10785,7 +11017,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             begin_edit_undo(world, "Sprite", edit_response);
             if edit_response.changed || discrete_changed {
-                world.entity_mut(entity).insert(BevyWrapper(sprite));
+                let mut entity_ref = world.entity_mut(entity);
+                entity_ref.insert((BevyWrapper(sprite), editor_sprite));
+                if sprite_sequence_present {
+                    entity_ref.insert(BevySpriteImageSequence(sprite_sequence));
+                } else {
+                    entity_ref.remove::<BevySpriteImageSequence>();
+                }
                 mark_entity_render_dirty(world, entity);
             }
             end_edit_undo(world, edit_response);
@@ -17648,9 +17886,7 @@ fn draw_add_component_menu(
             world
                 .entity_mut(entity)
                 .insert(BevyWrapper(SpriteRenderer::default()));
-            world
-                .entity_mut(entity)
-                .insert(EditorSprite { texture_path: None });
+            world.entity_mut(entity).insert(EditorSprite::default());
             push_undo_snapshot(world, "Add Sprite");
             ui.close_menu();
         }
@@ -18781,6 +19017,47 @@ fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
     }
 }
 
+fn resolve_sprite_sequence_textures(
+    world: &mut World,
+    project: &Option<EditorProject>,
+    paths: &[String],
+) -> Option<(Vec<String>, Vec<usize>)> {
+    let Some(asset_server) = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))
+    else {
+        set_status(world, "Asset server missing".to_string());
+        return None;
+    };
+
+    let normalized_paths = paths
+        .iter()
+        .filter_map(|path| {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(project_relative_path(project, Path::new(trimmed)))
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut texture_ids = Vec::with_capacity(normalized_paths.len());
+    for path in &normalized_paths {
+        let resolved = resolve_asset_path(project.as_ref(), path);
+        let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+            cached_texture_handle(&mut cache, &asset_server, &resolved)
+        } else {
+            asset_server
+                .0
+                .lock()
+                .load_texture(&resolved, helmer::runtime::asset_server::AssetKind::Albedo)
+        };
+        texture_ids.push(handle.id);
+    }
+
+    Some((normalized_paths, texture_ids))
+}
+
 fn apply_sprite_texture_from_asset(
     world: &mut World,
     entity: Entity,
@@ -18812,14 +19089,16 @@ fn apply_sprite_texture_from_asset(
         .map(|component| component.0)
         .unwrap_or_default();
     sprite.texture_id = Some(texture_handle.id);
+    let mut editor_sprite = world
+        .get::<EditorSprite>(entity)
+        .cloned()
+        .unwrap_or_default();
+    editor_sprite.texture_path = Some(relative_path);
 
     ensure_transform(world, entity);
-    world.entity_mut(entity).insert((
-        BevyWrapper(sprite),
-        EditorSprite {
-            texture_path: Some(relative_path),
-        },
-    ));
+    world
+        .entity_mut(entity)
+        .insert((BevyWrapper(sprite), editor_sprite));
     mark_entity_render_dirty(world, entity);
     true
 }

@@ -1,8 +1,8 @@
 use crate::animation::{Pose, Skeleton, Skin};
 use crate::audio::{AudioBus, AudioPlaybackState};
 use crate::graphics::common::renderer::{
-    AlphaMode, SpriteBlendMode, SpriteSheetAnimation, SpriteSpace, TextAlignH, TextAlignV,
-    TextFontStyle, Vertex,
+    AlphaMode, SpriteAnimationPlayback, SpriteBlendMode, SpriteSheetAnimation, SpriteSpace,
+    TextAlignH, TextAlignV, TextFontStyle, Vertex,
 };
 use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::HashMap;
@@ -127,6 +127,39 @@ impl Default for SpriteRenderer {
             billboard: false,
             visible: true,
             pick_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpriteImageSequence {
+    pub enabled: bool,
+    pub texture_ids: Vec<usize>,
+    pub start_frame: u32,
+    pub frame_count: u32,
+    pub fps: f32,
+    pub playback: SpriteAnimationPlayback,
+    pub phase: f32,
+    pub paused: bool,
+    pub paused_frame: u32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+impl Default for SpriteImageSequence {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            texture_ids: Vec::new(),
+            start_frame: 0,
+            frame_count: 0,
+            fps: 12.0,
+            playback: SpriteAnimationPlayback::Loop,
+            phase: 0.0,
+            paused: false,
+            paused_frame: 0,
+            flip_x: false,
+            flip_y: false,
         }
     }
 }

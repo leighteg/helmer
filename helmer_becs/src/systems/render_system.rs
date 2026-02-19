@@ -15,14 +15,15 @@ use helmer::{
             graph::RenderGraphSpec,
             renderer::{
                 Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
-                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderSprite, RenderText2d,
-                RenderViewportRequest, StreamingTuning,
+                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderSprite,
+                RenderSpriteImageSequence, RenderText2d, RenderViewportRequest, StreamingTuning,
             },
         },
         render_graphs::default_graph_spec,
     },
     provided::components::{
-        Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteRenderer, Text2d, Transform,
+        Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteImageSequence, SpriteRenderer,
+        Text2d, Transform,
     },
     runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},
 };
@@ -37,7 +38,8 @@ use crate::systems::animation_system::SkinningResource;
 use crate::{
     BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
     BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
-    BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform,
+    BevySpriteImageSequence, BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler,
+    BevyText2d, BevyTransform,
 };
 
 //================================================================================
@@ -489,6 +491,7 @@ fn to_render_sprite(
     entity: Entity,
     transform: &Transform,
     sprite: &SpriteRenderer,
+    image_sequence: Option<&SpriteImageSequence>,
 ) -> RenderSprite {
     let scale = transform.scale.abs();
     RenderSprite {
@@ -498,6 +501,19 @@ fn to_render_sprite(
         size: Vec2::new(scale.x, scale.y),
         color: sprite.color,
         texture_id: sprite.texture_id,
+        image_sequence: image_sequence.map(|sequence| RenderSpriteImageSequence {
+            enabled: sequence.enabled,
+            texture_ids: Arc::new(sequence.texture_ids.clone()),
+            start_frame: sequence.start_frame,
+            frame_count: sequence.frame_count,
+            fps: sequence.fps,
+            playback: sequence.playback,
+            phase: sequence.phase,
+            paused: sequence.paused,
+            paused_frame: sequence.paused_frame,
+            flip_x: sequence.flip_x,
+            flip_y: sequence.flip_y,
+        }),
         uv_min: sprite.uv_min,
         uv_max: sprite.uv_max,
         sheet_animation: sprite.sheet_animation,
@@ -582,16 +598,32 @@ pub struct SpriteTextQueries<'w, 's> {
         'w,
         's,
         (
-            Query<'w, 's, (Entity, &'static BevyTransform, &'static BevySpriteRenderer)>,
             Query<
                 'w,
                 's,
-                (Entity, &'static BevyTransform, &'static BevySpriteRenderer),
+                (
+                    Entity,
+                    &'static BevyTransform,
+                    &'static BevySpriteRenderer,
+                    Option<&'static BevySpriteImageSequence>,
+                ),
+            >,
+            Query<
+                'w,
+                's,
+                (
+                    Entity,
+                    &'static BevyTransform,
+                    &'static BevySpriteRenderer,
+                    Option<&'static BevySpriteImageSequence>,
+                ),
                 Or<(
                     Added<BevyTransform>,
                     Added<BevySpriteRenderer>,
+                    Added<BevySpriteImageSequence>,
                     Changed<BevyTransform>,
                     Changed<BevySpriteRenderer>,
+                    Changed<BevySpriteImageSequence>,
                 )>,
             >,
         ),
@@ -615,6 +647,7 @@ pub struct SpriteTextQueries<'w, 's> {
         ),
     >,
     removed_sprite_renderers: RemovedComponents<'w, 's, BevySpriteRenderer>,
+    removed_sprite_sequences: RemovedComponents<'w, 's, BevySpriteImageSequence>,
     removed_text2d: RemovedComponents<'w, 's, BevyText2d>,
 }
 
@@ -2537,6 +2570,7 @@ pub fn render_data_system(
     let full_sync = worker_state.needs_full_sync;
     let sprite_changed = full_sync
         || sprite_text.removed_sprite_renderers.len() > 0
+        || sprite_text.removed_sprite_sequences.len() > 0
         || removed_transforms.len() > 0
         || !sprite_text.sprite_queries.p1().is_empty();
     if sprite_changed {
@@ -2544,12 +2578,17 @@ pub fn render_data_system(
         let iter = query.iter();
         let (count, _) = iter.size_hint();
         let mut sprites = Vec::with_capacity(count);
-        for (entity, transform, sprite) in iter {
+        for (entity, transform, sprite, image_sequence) in iter {
             let sprite = sprite.0;
             if !sprite.visible {
                 continue;
             }
-            sprites.push(to_render_sprite(entity, &transform.0, &sprite));
+            sprites.push(to_render_sprite(
+                entity,
+                &transform.0,
+                &sprite,
+                image_sequence.map(|sequence| &sequence.0),
+            ));
         }
         direct_delta.sprites = Some(sprites);
     }

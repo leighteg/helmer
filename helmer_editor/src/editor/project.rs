@@ -957,6 +957,21 @@ type RenderConfigData = {
     egui_pass: boolean,
     gizmo_pass: boolean,
     transparent_pass: boolean,
+    text_world_pixels_per_unit: number,
+    text_world_raster_oversample: number,
+    text_world_raster_min_scale: number,
+    text_world_raster_max_scale: number,
+    text_world_glyph_max_raster_px: number,
+    text_world_raster_scale_step: number,
+    text_world_auto_quality: boolean,
+    text_world_auto_quality_min_factor: number,
+    text_world_auto_quality_max_factor: number,
+    text_layout_scale: number,
+    text_screen_layout_quantize: boolean,
+    text_world_layout_quantize: boolean,
+    text_min_font_px: number,
+    text_glyph_atlas_padding_px: number,
+    text_glyph_uv_inset_px: number,
     freeze_render_camera: boolean,
     max_lights_forward: number,
     max_lights_deferred: number,
@@ -1115,6 +1130,21 @@ type RenderConfigPatch = {
     egui_pass: boolean?,
     gizmo_pass: boolean?,
     transparent_pass: boolean?,
+    text_world_pixels_per_unit: number?,
+    text_world_raster_oversample: number?,
+    text_world_raster_min_scale: number?,
+    text_world_raster_max_scale: number?,
+    text_world_glyph_max_raster_px: number?,
+    text_world_raster_scale_step: number?,
+    text_world_auto_quality: boolean?,
+    text_world_auto_quality_min_factor: number?,
+    text_world_auto_quality_max_factor: number?,
+    text_layout_scale: number?,
+    text_screen_layout_quantize: boolean?,
+    text_world_layout_quantize: boolean?,
+    text_min_font_px: number?,
+    text_glyph_atlas_padding_px: number?,
+    text_glyph_uv_inset_px: number?,
     freeze_render_camera: boolean?,
     max_lights_forward: number?,
     max_lights_deferred: number?,
@@ -1913,7 +1943,7 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.add_component(id, component) -> bool
 --   ecs.remove_component(id, component) -> bool
 --     component:
---       "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"spline"|"spline_follower"|"look_at"|"entity_follower"|"animator"|"scene"|"audio"|"audio_emitter"|"audio_listener"|"script"|"dynamic"|"physics"|"collider_shape"|"dynamic_rigid_body"|"kinematic_rigid_body"|"fixed_collider"|"collider_properties"|"collider_inheritance"|"rigid_body_properties"|"rigid_body_inheritance"|"physics_joint"|"character_controller"|"character_controller_input"|"character_controller_output"|"physics_ray_cast"|"physics_ray_cast_hit"|"physics_point_projection"|"physics_point_projection_hit"|"physics_shape_cast"|"physics_shape_cast_hit"|"physics_world_defaults"
+--       "name"|"transform"|"camera"|"light"|"mesh"|"mesh_renderer"|"sprite"|"sprite_renderer"|"text"|"text2d"|"text_2d"|"spline"|"spline_follower"|"look_at"|"entity_follower"|"animator"|"scene"|"audio"|"audio_emitter"|"audio_listener"|"script"|"dynamic"|"physics"|"collider_shape"|"dynamic_rigid_body"|"kinematic_rigid_body"|"fixed_collider"|"collider_properties"|"collider_inheritance"|"rigid_body_properties"|"rigid_body_inheritance"|"physics_joint"|"character_controller"|"character_controller_input"|"character_controller_output"|"physics_ray_cast"|"physics_ray_cast_hit"|"physics_point_projection"|"physics_point_projection_hit"|"physics_shape_cast"|"physics_shape_cast_hit"|"physics_world_defaults"
 --   ecs.get_transform(id) -> {position={x,y,z}, rotation={x,y,z,w}, scale={x,y,z}}|nil
 --   ecs.set_transform(id, {position?, rotation?, scale?}) -> bool
 --   ecs.get_spline(id) -> {points={{x,y,z}}, closed, tension, mode}|nil
@@ -1991,6 +2021,12 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_mesh_renderer(id, {source?, material?, casts_shadow?, visible?}) -> bool
 --   ecs.set_mesh_renderer_source_path(id, path) -> bool
 --   ecs.set_mesh_renderer_material_path(id, path) -> bool
+--   ecs.get_sprite_renderer(id) -> table|nil
+--   ecs.get_sprite_renderer_texture_path(id) -> path|nil
+--   ecs.set_sprite_renderer(id, patch) -> bool
+--   ecs.set_sprite_renderer_texture_path(id, path) -> bool
+--   ecs.get_text2d(id) -> table|nil
+--   ecs.set_text2d(id, patch) -> bool
 --   ecs.get_scene_asset(id) -> path|nil
 --   ecs.set_scene_asset(id, path) -> bool
 --   ecs.open_scene(path) -> bool

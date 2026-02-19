@@ -16,6 +16,7 @@ pub mod rt_reflections;
 pub mod rt_reflections_denoise;
 pub mod shadow;
 pub mod sky;
+pub mod sprite;
 pub mod ssgi;
 pub mod ssgi_denoise;
 pub mod ssgi_upsample;
@@ -30,7 +31,7 @@ use crate::graphics::{
     backend::binding_backend::BindingBackendKind,
     common::{
         config::RenderConfig,
-        renderer::{LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms},
+        renderer::{LightData, RenderDeviceCaps, ShaderConstants, SkyUniforms, SpriteBlendMode},
     },
     graph::definition::resource_id::ResourceId,
 };
@@ -124,6 +125,9 @@ pub struct FrameGlobals {
     pub gpu_instance_count: u32,
     pub transparent_instances: Option<InstanceBuffer>,
     pub transparent_batches: Arc<Vec<TransparentDrawBatch>>,
+    pub sprite_instances: Option<InstanceBuffer>,
+    pub sprite_batches: Arc<Vec<SpriteDrawBatch>>,
+    pub sprite_textures: Arc<Vec<wgpu::TextureView>>,
     pub alpha: f32,
     pub camera_view_proj: Mat4,
     pub prev_view_proj: Mat4,
@@ -268,6 +272,27 @@ pub struct DrawBatch {
 pub struct TransparentDrawBatch {
     pub blend_mode: ForwardBlendMode,
     pub batch: DrawBatch,
+}
+
+#[derive(Clone)]
+pub struct SpriteDrawBatch {
+    pub texture_slot: u32,
+    pub flags: u32,
+    pub blend_mode: SpriteBlendMode,
+    pub instance_range: Range<u32>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SpriteInstanceRaw {
+    pub origin_mode: [f32; 4],
+    pub right_size_x: [f32; 4],
+    pub up_size_y: [f32; 4],
+    pub uv_rect: [f32; 4],
+    pub color: [f32; 4],
+    pub pivot_clip_min: [f32; 4],
+    pub clip_max_layer: [f32; 4],
+    pub meta: [u32; 4],
 }
 
 #[derive(Clone)]

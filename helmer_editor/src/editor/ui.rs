@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -18,14 +18,16 @@ use egui::{
 use glam::{DVec2, EulerRot, Mat3, Quat, Vec3};
 use helmer::animation::{AnimationClip, Pose, Skeleton};
 use helmer::audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
-use helmer::graphics::common::config::SkinningMode;
+use helmer::graphics::common::config::{RenderConfig, SkinningMode};
 use helmer::graphics::{
-    common::renderer::GizmoMode,
+    common::renderer::{
+        GizmoMode, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle,
+    },
     render_graphs::{graph_templates, template_for_graph},
 };
 use helmer::provided::components::{
     AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer,
-    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
+    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, SpriteRenderer, Text2d,
 };
 use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
 use helmer_becs::egui_integration::{EguiClipboard, EguiInputPassthrough, EguiResource};
@@ -47,7 +49,7 @@ use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
     BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevySystemProfiler, BevyTransform, BevyWrapper,
+    BevySpriteRenderer, BevySystemProfiler, BevyText2d, BevyTransform, BevyWrapper,
 };
 use ron::ser::PrettyConfig;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -72,8 +74,9 @@ use crate::editor::{
     UndoEntry, ViewportRectPixels, ViewportResolutionPreset,
     assets::{
         AssetBrowserState, AssetEntry, AssetRenameSelection, AssetRenameView, EditorAssetCache,
-        EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind, SceneAssetPath,
-        cached_audio_handle, cached_scene_handle, is_entry_visible,
+        EditorAudio, EditorMesh, EditorSkinnedMesh, EditorSprite, MeshSource, PrimitiveKind,
+        SceneAssetPath, cached_audio_handle, cached_scene_handle, cached_texture_handle,
+        is_entry_visible,
     },
     begin_material_undo_group, begin_undo_group,
     commands::{AssetCreateKind, EditorCommand, EditorCommandQueue, SpawnKind},
@@ -122,6 +125,12 @@ pub struct EditorUiState {
     pub open_project_path: String,
     pub status: Option<String>,
     pub recent_projects: Vec<PathBuf>,
+}
+
+#[derive(Default, Debug, Clone, Resource)]
+struct Text2dFontFamilyCache {
+    project_root: Option<PathBuf>,
+    families: Vec<String>,
 }
 
 #[derive(Debug, Clone, Resource)]
@@ -3922,6 +3931,19 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             });
 
                             ui.separator();
+                            ui.collapsing("Text/Sprite Quality", |ui| {
+                                if let Some(mut runtime_config) =
+                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                {
+                                    let mut render_config = runtime_config.0.render_config;
+                                    draw_world_text_quality_controls(ui, &mut render_config);
+                                    runtime_config.0.render_config = render_config;
+                                } else {
+                                    ui.label("Runtime config unavailable");
+                                }
+                            });
+
+                            ui.separator();
                             ui.collapsing("Camera", |ui| {
                                 let camera_snapshot = world
                                     .get::<BevyCamera>(camera_entity)
@@ -5206,6 +5228,19 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                             .speed(1),
                                         );
                                     });
+                                    runtime_config.0.render_config = render_config;
+                                } else {
+                                    ui.label("Runtime config unavailable");
+                                }
+                            });
+
+                            ui.separator();
+                            ui.collapsing("Text/Sprite Quality", |ui| {
+                                if let Some(mut runtime_config) =
+                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                {
+                                    let mut render_config = runtime_config.0.render_config;
+                                    draw_world_text_quality_controls(ui, &mut render_config);
                                     runtime_config.0.render_config = render_config;
                                 } else {
                                     ui.label("Runtime config unavailable");
@@ -8794,6 +8829,8 @@ fn collect_hierarchy_entries(world: &mut World) -> HierarchyData {
         let light = world.get::<BevyLight>(entity);
         let mesh = world.get::<BevyMeshRenderer>(entity);
         let skinned = world.get::<BevySkinnedMeshRenderer>(entity);
+        let sprite = world.get::<BevySpriteRenderer>(entity);
+        let text_2d = world.get::<BevyText2d>(entity);
         let editor_skinned = world.get::<EditorSkinnedMesh>(entity);
         let editor_mesh = world.get::<EditorMesh>(entity);
         let script = world.get::<ScriptComponent>(entity);
@@ -8821,6 +8858,12 @@ fn collect_hierarchy_entries(world: &mut World) -> HierarchyData {
         }
         if skinned.is_some() || editor_skinned.is_some() {
             tags.push("Skinned");
+        }
+        if sprite.is_some() {
+            tags.push("Sprite");
+        }
+        if text_2d.is_some() {
+            tags.push("Text2D");
         }
         if scene_root.is_some() {
             if let Some(scene) = scene_asset {
@@ -10395,6 +10438,692 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if skinned_changed {
                 mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Skinned Mesh");
+            }
+        }
+        ui.separator();
+    }
+
+    let has_sprite_panel = world.get::<BevySpriteRenderer>(entity).is_some()
+        || world.get::<EditorSprite>(entity).is_some();
+    if has_sprite_panel {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Sprite Renderer");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevySpriteRenderer>();
+            world.entity_mut(entity).remove::<EditorSprite>();
+            push_undo_snapshot(world, "Remove Sprite");
+        } else {
+            let mut sprite = world
+                .get::<BevySpriteRenderer>(entity)
+                .map(|component| component.0)
+                .unwrap_or_default();
+            let mut discrete_changed = false;
+            let mut edit_response = EditResponse::default();
+
+            let texture_label = world
+                .get::<EditorSprite>(entity)
+                .and_then(|sprite| sprite.texture_path.as_ref())
+                .map(|path| format!("Texture: {path}"))
+                .unwrap_or_else(|| "Texture: <none>".to_string());
+            let texture_button = ui.button(texture_label);
+            if texture_button.clicked() {
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_texture_file(path)) {
+                    if apply_sprite_texture_from_asset(world, entity, &project, path) {
+                        if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
+                            sprite.texture_id = updated.0.texture_id;
+                        }
+                        discrete_changed = true;
+                    }
+                }
+            }
+            if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&texture_button) {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_texture_file(path) {
+                        if apply_sprite_texture_from_asset(world, entity, &project, path) {
+                            if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
+                                sprite.texture_id = updated.0.texture_id;
+                            }
+                            discrete_changed = true;
+                        }
+                    }
+                }
+            }
+            highlight_drop_target(ui, &texture_button);
+
+            ui.horizontal(|ui| {
+                if ui.button("Clear Texture").clicked() {
+                    sprite.texture_id = None;
+                    if let Some(mut editor_sprite) = world.get_mut::<EditorSprite>(entity) {
+                        editor_sprite.texture_path = None;
+                    } else {
+                        world
+                            .entity_mut(entity)
+                            .insert(EditorSprite { texture_path: None });
+                    }
+                    discrete_changed = true;
+                }
+            });
+
+            let mut color = sprite.color;
+            let color_response = ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.color_edit_button_rgba_unmultiplied(&mut color)
+            });
+            let color_response = EditResponse::from_response(&color_response.inner);
+            edit_response.merge(color_response);
+            if color_response.changed {
+                sprite.color = color;
+            }
+
+            let mut uv_min = sprite.uv_min;
+            let uv_min_response = edit_vec2f(ui, "UV Min", &mut uv_min, 0.0025);
+            edit_response.merge(uv_min_response);
+            if uv_min_response.changed {
+                sprite.uv_min = uv_min;
+            }
+
+            let mut uv_max = sprite.uv_max;
+            let uv_max_response = edit_vec2f(ui, "UV Max", &mut uv_max, 0.0025);
+            edit_response.merge(uv_max_response);
+            if uv_max_response.changed {
+                sprite.uv_max = uv_max;
+            }
+
+            let mut pivot = sprite.pivot;
+            let pivot_response = edit_vec2f(ui, "Pivot", &mut pivot, 0.01);
+            edit_response.merge(pivot_response);
+            if pivot_response.changed {
+                sprite.pivot = pivot;
+            }
+
+            let layer_response = edit_float(ui, "Layer", &mut sprite.layer, 0.1);
+            edit_response.merge(layer_response);
+
+            let mut has_clip_rect = sprite.clip_rect.is_some();
+            if ui.checkbox(&mut has_clip_rect, "Clip Rect").changed() {
+                sprite.clip_rect = if has_clip_rect {
+                    Some([0.0, 0.0, 1.0, 1.0])
+                } else {
+                    None
+                };
+                discrete_changed = true;
+            }
+            if let Some(mut clip_rect) = sprite.clip_rect {
+                let clip_response = edit_vec4f(ui, "Clip Rect", &mut clip_rect, 0.01);
+                edit_response.merge(clip_response);
+                if clip_response.changed {
+                    sprite.clip_rect = Some(clip_rect);
+                }
+            }
+
+            let mut space = sprite.space;
+            let space_label = match space {
+                SpriteSpace::Screen => "Screen",
+                SpriteSpace::World => "World",
+            };
+            ComboBox::from_id_source(format!("sprite_space_{}", entity.to_bits()))
+                .selected_text(space_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(space, SpriteSpace::World), "World")
+                        .clicked()
+                    {
+                        space = SpriteSpace::World;
+                    }
+                    if ui
+                        .selectable_label(matches!(space, SpriteSpace::Screen), "Screen")
+                        .clicked()
+                    {
+                        space = SpriteSpace::Screen;
+                    }
+                });
+            if space != sprite.space {
+                sprite.space = space;
+                discrete_changed = true;
+            }
+
+            let mut blend_mode = sprite.blend_mode;
+            let blend_label = match blend_mode {
+                SpriteBlendMode::Alpha => "Alpha",
+                SpriteBlendMode::Premultiplied => "Premultiplied",
+                SpriteBlendMode::Additive => "Additive",
+            };
+            ComboBox::from_id_source(format!("sprite_blend_{}", entity.to_bits()))
+                .selected_text(blend_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(blend_mode, SpriteBlendMode::Alpha), "Alpha")
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Alpha;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(blend_mode, SpriteBlendMode::Premultiplied),
+                            "Premultiplied",
+                        )
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Premultiplied;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(blend_mode, SpriteBlendMode::Additive),
+                            "Additive",
+                        )
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Additive;
+                    }
+                });
+            if blend_mode != sprite.blend_mode {
+                sprite.blend_mode = blend_mode;
+                discrete_changed = true;
+            }
+
+            if ui.checkbox(&mut sprite.billboard, "Billboard").changed() {
+                discrete_changed = true;
+            }
+            if ui.checkbox(&mut sprite.visible, "Visible").changed() {
+                discrete_changed = true;
+            }
+
+            let mut has_pick_id = sprite.pick_id.is_some();
+            if ui.checkbox(&mut has_pick_id, "Pick ID").changed() {
+                sprite.pick_id = if has_pick_id {
+                    Some(sprite.pick_id.unwrap_or(0))
+                } else {
+                    None
+                };
+                discrete_changed = true;
+            }
+            if let Some(mut pick_id) = sprite.pick_id {
+                let pick_response =
+                    edit_u32_range(ui, "Pick Value", &mut pick_id, 1.0, 0..=u32::MAX);
+                edit_response.merge(pick_response);
+                if pick_response.changed {
+                    sprite.pick_id = Some(pick_id);
+                }
+            }
+
+            begin_edit_undo(world, "Sprite", edit_response);
+            if edit_response.changed || discrete_changed {
+                world.entity_mut(entity).insert(BevyWrapper(sprite));
+                mark_entity_render_dirty(world, entity);
+            }
+            end_edit_undo(world, edit_response);
+            if discrete_changed {
+                push_undo_snapshot(world, "Sprite");
+            }
+        }
+        ui.separator();
+    }
+
+    if world.get::<BevyText2d>(entity).is_some() {
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.heading("Text 2D");
+            if ui.button("Remove").clicked() {
+                remove = true;
+            }
+        });
+
+        if remove {
+            world.entity_mut(entity).remove::<BevyText2d>();
+            push_undo_snapshot(world, "Remove Text 2D");
+        } else if let Some(mut text) = world
+            .get::<BevyText2d>(entity)
+            .map(|component| component.0.clone())
+        {
+            let mut discrete_changed = false;
+            let mut edit_response = EditResponse::default();
+
+            let text_response = ui.text_edit_multiline(&mut text.text);
+            edit_response.merge(EditResponse::from_response(&text_response));
+
+            let mut color = text.color;
+            let color_response = ui.horizontal(|ui| {
+                ui.label("Color");
+                ui.color_edit_button_rgba_unmultiplied(&mut color)
+            });
+            let color_response = EditResponse::from_response(&color_response.inner);
+            edit_response.merge(color_response);
+            if color_response.changed {
+                text.color = color;
+            }
+
+            let mut font_path_value = text.font_path.clone().unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.label("Font Path");
+                let path_response = ui.text_edit_singleline(&mut font_path_value);
+                let path_edit_response = EditResponse::from_response(&path_response);
+                edit_response.merge(path_edit_response);
+                if path_edit_response.changed {
+                    let trimmed = font_path_value.trim();
+                    text.font_path = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            resolve_asset_path(project.as_ref(), trimmed)
+                                .to_string_lossy()
+                                .to_string(),
+                        )
+                    };
+                }
+                if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&path_response)
+                {
+                    if let Some(path) = payload_primary_path(&payload) {
+                        if is_font_file(path) {
+                            text.font_path = Some(path.to_string_lossy().to_string());
+                            font_path_value = path.to_string_lossy().to_string();
+                            discrete_changed = true;
+                        } else {
+                            set_status(world, "Select a font asset to assign".to_string());
+                        }
+                    }
+                }
+                highlight_drop_target(ui, &path_response);
+            });
+
+            let font_button = ui.button("Use Selected Font Asset");
+            if font_button.clicked() {
+                if let Some(path) = selected_asset.as_ref().filter(|path| is_font_file(path)) {
+                    text.font_path = Some(path.to_string_lossy().to_string());
+                    discrete_changed = true;
+                }
+            }
+            if let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(&font_button) {
+                if let Some(path) = payload_primary_path(&payload) {
+                    if is_font_file(path) {
+                        text.font_path = Some(path.to_string_lossy().to_string());
+                        discrete_changed = true;
+                    }
+                }
+            }
+            highlight_drop_target(ui, &font_button);
+
+            ui.horizontal(|ui| {
+                if ui.button("Clear Font Path").clicked() {
+                    text.font_path = None;
+                    discrete_changed = true;
+                }
+            });
+
+            let mut available_families = text2d_font_family_options(world, project.as_ref(), false);
+            let selected_family_label = text
+                .font_family
+                .clone()
+                .unwrap_or_else(|| "<Default>".to_string());
+            let mut refresh_families = false;
+            ui.horizontal(|ui| {
+                ui.label("Font Family");
+                ComboBox::from_id_source(format!("text2d_font_family_{}", entity.to_bits()))
+                    .selected_text(selected_family_label.as_str())
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(text.font_family.is_none(), "<Default>")
+                            .clicked()
+                        {
+                            text.font_family = None;
+                            discrete_changed = true;
+                        }
+                        for family in &available_families {
+                            if ui
+                                .selectable_label(
+                                    text.font_family.as_deref() == Some(family.as_str()),
+                                    family,
+                                )
+                                .clicked()
+                            {
+                                text.font_family = Some(family.clone());
+                                discrete_changed = true;
+                            }
+                        }
+                    });
+                if ui.small_button("Refresh").clicked() {
+                    refresh_families = true;
+                }
+            });
+            if refresh_families {
+                available_families = text2d_font_family_options(world, project.as_ref(), true);
+            }
+            if available_families.is_empty() {
+                ui.label("No font families discovered. Drag a font asset or set Font Path");
+            }
+
+            let font_size_response =
+                edit_float_range(ui, "Font Size", &mut text.font_size, 0.05, 0.01..=4096.0);
+            edit_response.merge(font_size_response);
+            if font_size_response.changed {
+                text.font_size = text.font_size.max(0.01);
+            }
+
+            ui.horizontal(|ui| {
+                let mut bold = text.font_weight >= 700.0;
+                if ui.checkbox(&mut bold, "Bold").changed() {
+                    text.font_weight = if bold {
+                        text.font_weight.max(700.0)
+                    } else {
+                        text.font_weight.min(400.0)
+                    };
+                    discrete_changed = true;
+                }
+
+                let mut italic = matches!(text.font_style, TextFontStyle::Italic);
+                if ui.checkbox(&mut italic, "Italic").changed() {
+                    text.font_style = if italic {
+                        TextFontStyle::Italic
+                    } else if matches!(text.font_style, TextFontStyle::Italic) {
+                        TextFontStyle::Normal
+                    } else {
+                        text.font_style
+                    };
+                    discrete_changed = true;
+                }
+
+                if ui.checkbox(&mut text.underline, "Underline").changed() {
+                    discrete_changed = true;
+                }
+                if ui
+                    .checkbox(&mut text.strikethrough, "Strikethrough")
+                    .changed()
+                {
+                    discrete_changed = true;
+                }
+            });
+
+            let font_weight_response =
+                edit_float_range(ui, "Weight", &mut text.font_weight, 1.0, 1.0..=1000.0);
+            edit_response.merge(font_weight_response);
+            if font_weight_response.changed {
+                text.font_weight = text.font_weight.clamp(1.0, 1000.0);
+            }
+
+            let font_width_response =
+                edit_float_range(ui, "Width Axis", &mut text.font_width, 0.01, 0.25..=4.0);
+            edit_response.merge(font_width_response);
+            if font_width_response.changed {
+                text.font_width = text.font_width.clamp(0.25, 4.0);
+            }
+
+            let mut font_style = text.font_style;
+            let font_style_label = match font_style {
+                TextFontStyle::Normal => "Normal",
+                TextFontStyle::Italic => "Italic",
+                TextFontStyle::Oblique => "Oblique",
+            };
+            ComboBox::from_id_source(format!("text2d_font_style_{}", entity.to_bits()))
+                .selected_text(font_style_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(font_style, TextFontStyle::Normal), "Normal")
+                        .clicked()
+                    {
+                        font_style = TextFontStyle::Normal;
+                    }
+                    if ui
+                        .selectable_label(matches!(font_style, TextFontStyle::Italic), "Italic")
+                        .clicked()
+                    {
+                        font_style = TextFontStyle::Italic;
+                    }
+                    if ui
+                        .selectable_label(matches!(font_style, TextFontStyle::Oblique), "Oblique")
+                        .clicked()
+                    {
+                        font_style = TextFontStyle::Oblique;
+                    }
+                });
+            if font_style != text.font_style {
+                text.font_style = font_style;
+                discrete_changed = true;
+            }
+
+            let line_height_response = edit_float_range(
+                ui,
+                "Line Height",
+                &mut text.line_height_scale,
+                0.01,
+                0.1..=8.0,
+            );
+            edit_response.merge(line_height_response);
+            if line_height_response.changed {
+                text.line_height_scale = text.line_height_scale.max(0.1);
+            }
+
+            let letter_spacing_response = edit_float_range(
+                ui,
+                "Letter Spacing",
+                &mut text.letter_spacing,
+                0.01,
+                -128.0..=128.0,
+            );
+            edit_response.merge(letter_spacing_response);
+
+            let word_spacing_response = edit_float_range(
+                ui,
+                "Word Spacing",
+                &mut text.word_spacing,
+                0.01,
+                -128.0..=128.0,
+            );
+            edit_response.merge(word_spacing_response);
+
+            let mut has_max_width = text.max_width.is_some();
+            if ui.checkbox(&mut has_max_width, "Max Width").changed() {
+                text.max_width = if has_max_width {
+                    Some(text.max_width.unwrap_or(256.0))
+                } else {
+                    None
+                };
+                discrete_changed = true;
+            }
+            if let Some(mut max_width) = text.max_width {
+                let max_width_response =
+                    edit_float_range(ui, "Width", &mut max_width, 0.25, 1.0..=16384.0);
+                edit_response.merge(max_width_response);
+                if max_width_response.changed {
+                    text.max_width = Some(max_width.max(1.0));
+                }
+            }
+
+            let mut align_h = text.align_h;
+            let align_h_label = match align_h {
+                TextAlignH::Left => "Left",
+                TextAlignH::Center => "Center",
+                TextAlignH::Right => "Right",
+            };
+            ComboBox::from_id_source(format!("text2d_align_h_{}", entity.to_bits()))
+                .selected_text(align_h_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(align_h, TextAlignH::Left), "Left")
+                        .clicked()
+                    {
+                        align_h = TextAlignH::Left;
+                    }
+                    if ui
+                        .selectable_label(matches!(align_h, TextAlignH::Center), "Center")
+                        .clicked()
+                    {
+                        align_h = TextAlignH::Center;
+                    }
+                    if ui
+                        .selectable_label(matches!(align_h, TextAlignH::Right), "Right")
+                        .clicked()
+                    {
+                        align_h = TextAlignH::Right;
+                    }
+                });
+            if align_h != text.align_h {
+                text.align_h = align_h;
+                discrete_changed = true;
+            }
+
+            let mut align_v = text.align_v;
+            let align_v_label = match align_v {
+                TextAlignV::Top => "Top",
+                TextAlignV::Center => "Center",
+                TextAlignV::Bottom => "Bottom",
+                TextAlignV::Baseline => "Baseline",
+            };
+            ComboBox::from_id_source(format!("text2d_align_v_{}", entity.to_bits()))
+                .selected_text(align_v_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(align_v, TextAlignV::Top), "Top")
+                        .clicked()
+                    {
+                        align_v = TextAlignV::Top;
+                    }
+                    if ui
+                        .selectable_label(matches!(align_v, TextAlignV::Center), "Center")
+                        .clicked()
+                    {
+                        align_v = TextAlignV::Center;
+                    }
+                    if ui
+                        .selectable_label(matches!(align_v, TextAlignV::Bottom), "Bottom")
+                        .clicked()
+                    {
+                        align_v = TextAlignV::Bottom;
+                    }
+                    if ui
+                        .selectable_label(matches!(align_v, TextAlignV::Baseline), "Baseline")
+                        .clicked()
+                    {
+                        align_v = TextAlignV::Baseline;
+                    }
+                });
+            if align_v != text.align_v {
+                text.align_v = align_v;
+                discrete_changed = true;
+            }
+
+            let mut space = text.space;
+            let space_label = match space {
+                SpriteSpace::Screen => "Screen",
+                SpriteSpace::World => "World",
+            };
+            ComboBox::from_id_source(format!("text2d_space_{}", entity.to_bits()))
+                .selected_text(space_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(space, SpriteSpace::World), "World")
+                        .clicked()
+                    {
+                        space = SpriteSpace::World;
+                    }
+                    if ui
+                        .selectable_label(matches!(space, SpriteSpace::Screen), "Screen")
+                        .clicked()
+                    {
+                        space = SpriteSpace::Screen;
+                    }
+                });
+            if space != text.space {
+                text.space = space;
+                discrete_changed = true;
+            }
+
+            let mut blend_mode = text.blend_mode;
+            let blend_label = match blend_mode {
+                SpriteBlendMode::Alpha => "Alpha",
+                SpriteBlendMode::Premultiplied => "Premultiplied",
+                SpriteBlendMode::Additive => "Additive",
+            };
+            ComboBox::from_id_source(format!("text2d_blend_{}", entity.to_bits()))
+                .selected_text(blend_label)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(matches!(blend_mode, SpriteBlendMode::Alpha), "Alpha")
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Alpha;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(blend_mode, SpriteBlendMode::Premultiplied),
+                            "Premultiplied",
+                        )
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Premultiplied;
+                    }
+                    if ui
+                        .selectable_label(
+                            matches!(blend_mode, SpriteBlendMode::Additive),
+                            "Additive",
+                        )
+                        .clicked()
+                    {
+                        blend_mode = SpriteBlendMode::Additive;
+                    }
+                });
+            if blend_mode != text.blend_mode {
+                text.blend_mode = blend_mode;
+                discrete_changed = true;
+            }
+
+            let layer_response = edit_float(ui, "Layer", &mut text.layer, 0.1);
+            edit_response.merge(layer_response);
+
+            if ui.checkbox(&mut text.billboard, "Billboard").changed() {
+                discrete_changed = true;
+            }
+            if ui.checkbox(&mut text.visible, "Visible").changed() {
+                discrete_changed = true;
+            }
+
+            let mut has_clip_rect = text.clip_rect.is_some();
+            if ui.checkbox(&mut has_clip_rect, "Clip Rect").changed() {
+                text.clip_rect = if has_clip_rect {
+                    Some([0.0, 0.0, 1.0, 1.0])
+                } else {
+                    None
+                };
+                discrete_changed = true;
+            }
+            if let Some(mut clip_rect) = text.clip_rect {
+                let clip_response = edit_vec4f(ui, "Clip Rect", &mut clip_rect, 0.01);
+                edit_response.merge(clip_response);
+                if clip_response.changed {
+                    text.clip_rect = Some(clip_rect);
+                }
+            }
+
+            let mut has_pick_id = text.pick_id.is_some();
+            if ui.checkbox(&mut has_pick_id, "Pick ID").changed() {
+                text.pick_id = if has_pick_id {
+                    Some(text.pick_id.unwrap_or(0))
+                } else {
+                    None
+                };
+                discrete_changed = true;
+            }
+            if let Some(mut pick_id) = text.pick_id {
+                let pick_response =
+                    edit_u32_range(ui, "Pick Value", &mut pick_id, 1.0, 0..=u32::MAX);
+                edit_response.merge(pick_response);
+                if pick_response.changed {
+                    text.pick_id = Some(pick_id);
+                }
+            }
+
+            begin_edit_undo(world, "Text 2D", edit_response);
+            if edit_response.changed || discrete_changed {
+                world.entity_mut(entity).insert(BevyText2d(text));
+                mark_entity_render_dirty(world, entity);
+            }
+            end_edit_undo(world, edit_response);
+            if discrete_changed {
+                push_undo_snapshot(world, "Text 2D");
             }
         }
         ui.separator();
@@ -16642,6 +17371,8 @@ fn draw_add_component_menu(
     let has_camera = world.get::<BevyCamera>(entity).is_some();
     let has_light = world.get::<BevyLight>(entity).is_some();
     let has_mesh = world.get::<BevyMeshRenderer>(entity).is_some();
+    let has_sprite = world.get::<BevySpriteRenderer>(entity).is_some();
+    let has_text_2d = world.get::<BevyText2d>(entity).is_some();
     let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some()
         || world.get::<EditorSkinnedMesh>(entity).is_some()
         || world.get::<PendingSkinnedMeshAsset>(entity).is_some();
@@ -16779,6 +17510,25 @@ fn draw_add_component_menu(
                 true,
             );
             push_undo_snapshot(world, "Add Mesh");
+            ui.close_menu();
+        }
+        if !has_sprite && ui.button("Sprite Renderer").clicked() {
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert(BevyWrapper(SpriteRenderer::default()));
+            world
+                .entity_mut(entity)
+                .insert(EditorSprite { texture_path: None });
+            push_undo_snapshot(world, "Add Sprite");
+            ui.close_menu();
+        }
+        if !has_text_2d && ui.button("Text 2D").clicked() {
+            ensure_transform(world, entity);
+            let mut text = Text2d::default();
+            text.text = "Text".to_string();
+            world.entity_mut(entity).insert(BevyText2d(text));
+            push_undo_snapshot(world, "Add Text 2D");
             ui.close_menu();
         }
         if !has_skinned {
@@ -17406,6 +18156,130 @@ fn edit_u32_range(
     response
 }
 
+fn draw_world_text_quality_controls(ui: &mut Ui, render_config: &mut RenderConfig) {
+    let _ = edit_float_range(
+        ui,
+        "Pixels / World Unit",
+        &mut render_config.text_world_pixels_per_unit,
+        0.1,
+        0.01..=4096.0,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Raster Oversample",
+        &mut render_config.text_world_raster_oversample,
+        0.05,
+        0.01..=64.0,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Min Raster Scale",
+        &mut render_config.text_world_raster_min_scale,
+        0.1,
+        0.000001..=4096.0,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Max Raster Scale",
+        &mut render_config.text_world_raster_max_scale,
+        0.5,
+        0.000001..=32768.0,
+    );
+    let _ = edit_u32_range(
+        ui,
+        "Max Glyph Raster Px",
+        &mut render_config.text_world_glyph_max_raster_px,
+        1.0,
+        1..=u32::MAX,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Raster Scale Step",
+        &mut render_config.text_world_raster_scale_step,
+        0.01,
+        0.0..=32.0,
+    );
+
+    ui.checkbox(
+        &mut render_config.text_world_auto_quality,
+        "Auto Scale By VRAM Budget",
+    );
+    let _ = edit_float_range(
+        ui,
+        "Auto Quality Min",
+        &mut render_config.text_world_auto_quality_min_factor,
+        0.01,
+        0.0..=8.0,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Auto Quality Max",
+        &mut render_config.text_world_auto_quality_max_factor,
+        0.01,
+        0.01..=8.0,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Layout Scale",
+        &mut render_config.text_layout_scale,
+        0.05,
+        0.000001..=16.0,
+    );
+    ui.checkbox(
+        &mut render_config.text_screen_layout_quantize,
+        "Screen Layout Quantize",
+    );
+    ui.checkbox(
+        &mut render_config.text_world_layout_quantize,
+        "World Layout Quantize",
+    );
+    let _ = edit_float_range(
+        ui,
+        "Text Min Font Px",
+        &mut render_config.text_min_font_px,
+        0.001,
+        0.000001..=16.0,
+    );
+    let _ = edit_u32_range(
+        ui,
+        "Glyph Atlas Padding Px",
+        &mut render_config.text_glyph_atlas_padding_px,
+        1.0,
+        0..=1024,
+    );
+    let _ = edit_float_range(
+        ui,
+        "Glyph UV Inset Px",
+        &mut render_config.text_glyph_uv_inset_px,
+        0.01,
+        0.0..=64.0,
+    );
+
+    render_config.text_min_font_px = render_config.text_min_font_px.max(f32::EPSILON);
+    render_config.text_world_pixels_per_unit = render_config
+        .text_world_pixels_per_unit
+        .max(render_config.text_min_font_px);
+    render_config.text_world_raster_oversample =
+        render_config.text_world_raster_oversample.max(f32::EPSILON);
+    render_config.text_world_raster_min_scale = render_config
+        .text_world_raster_min_scale
+        .max(render_config.text_min_font_px);
+    render_config.text_world_raster_max_scale = render_config
+        .text_world_raster_max_scale
+        .max(render_config.text_world_raster_min_scale);
+    render_config.text_world_glyph_max_raster_px =
+        render_config.text_world_glyph_max_raster_px.max(1);
+    render_config.text_world_raster_scale_step =
+        render_config.text_world_raster_scale_step.max(0.0);
+    render_config.text_world_auto_quality_min_factor =
+        render_config.text_world_auto_quality_min_factor.max(0.0);
+    render_config.text_world_auto_quality_max_factor = render_config
+        .text_world_auto_quality_max_factor
+        .max(render_config.text_world_auto_quality_min_factor);
+    render_config.text_layout_scale = render_config.text_layout_scale.max(f32::EPSILON);
+    render_config.text_glyph_uv_inset_px = render_config.text_glyph_uv_inset_px.max(0.0);
+}
+
 fn edit_color(ui: &mut Ui, label: &str, color: &mut [f32; 3]) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -17463,6 +18337,34 @@ fn edit_vec3(ui: &mut Ui, label: &str, value: &mut Vec3, speed: f32) -> EditResp
         response.merge(EditResponse::from_response(&y_response));
         let z_response = ui.add(DragValue::new(&mut value.z).speed(speed));
         response.merge(EditResponse::from_response(&z_response));
+    });
+    response
+}
+
+fn edit_vec2f(ui: &mut Ui, label: &str, value: &mut [f32; 2], speed: f32) -> EditResponse {
+    let mut response = EditResponse::default();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let x_response = ui.add(DragValue::new(&mut value[0]).speed(speed));
+        response.merge(EditResponse::from_response(&x_response));
+        let y_response = ui.add(DragValue::new(&mut value[1]).speed(speed));
+        response.merge(EditResponse::from_response(&y_response));
+    });
+    response
+}
+
+fn edit_vec4f(ui: &mut Ui, label: &str, value: &mut [f32; 4], speed: f32) -> EditResponse {
+    let mut response = EditResponse::default();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let x_response = ui.add(DragValue::new(&mut value[0]).speed(speed));
+        response.merge(EditResponse::from_response(&x_response));
+        let y_response = ui.add(DragValue::new(&mut value[1]).speed(speed));
+        response.merge(EditResponse::from_response(&y_response));
+        let z_response = ui.add(DragValue::new(&mut value[2]).speed(speed));
+        response.merge(EditResponse::from_response(&z_response));
+        let w_response = ui.add(DragValue::new(&mut value[3]).speed(speed));
+        response.merge(EditResponse::from_response(&w_response));
     });
     response
 }
@@ -17746,6 +18648,49 @@ fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
         let current = transform.0;
         transform.0 = current;
     }
+}
+
+fn apply_sprite_texture_from_asset(
+    world: &mut World,
+    entity: Entity,
+    project: &Option<EditorProject>,
+    path: &Path,
+) -> bool {
+    let Some(asset_server) = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))
+    else {
+        set_status(world, "Asset server missing".to_string());
+        return false;
+    };
+    let path_str = path.to_string_lossy();
+    let resolved_path = resolve_asset_path(project.as_ref(), path_str.as_ref());
+    let relative_path = project_relative_path(project, path);
+
+    let texture_handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+        cached_texture_handle(&mut cache, &asset_server, &resolved_path)
+    } else {
+        asset_server.0.lock().load_texture(
+            &resolved_path,
+            helmer::runtime::asset_server::AssetKind::Albedo,
+        )
+    };
+
+    let mut sprite = world
+        .get::<BevySpriteRenderer>(entity)
+        .map(|component| component.0)
+        .unwrap_or_default();
+    sprite.texture_id = Some(texture_handle.id);
+
+    ensure_transform(world, entity);
+    world.entity_mut(entity).insert((
+        BevyWrapper(sprite),
+        EditorSprite {
+            texture_path: Some(relative_path),
+        },
+    ));
+    mark_entity_render_dirty(world, entity);
+    true
 }
 
 fn apply_mesh_renderer(
@@ -18474,6 +19419,89 @@ fn is_model_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "glb" | "gltf"))
+        .unwrap_or(false)
+}
+
+fn is_texture_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "ktx2" | "png" | "jpg" | "jpeg" | "tga"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn text2d_font_family_options(
+    world: &mut World,
+    project: Option<&EditorProject>,
+    force_refresh: bool,
+) -> Vec<String> {
+    let project_root = project.and_then(|state| state.root.clone());
+    let refresh_required = world
+        .get_resource::<Text2dFontFamilyCache>()
+        .map_or(true, |cache| cache.project_root != project_root);
+    if force_refresh || refresh_required {
+        let families = discover_text2d_font_families(project);
+        if let Some(mut cache) = world.get_resource_mut::<Text2dFontFamilyCache>() {
+            cache.project_root = project_root;
+            cache.families = families;
+        } else {
+            world.insert_resource(Text2dFontFamilyCache {
+                project_root,
+                families,
+            });
+        }
+    }
+    world
+        .get_resource::<Text2dFontFamilyCache>()
+        .map(|cache| cache.families.clone())
+        .unwrap_or_default()
+}
+
+fn discover_text2d_font_families(project: Option<&EditorProject>) -> Vec<String> {
+    let mut font_db = fontdb::Database::new();
+    font_db.load_system_fonts();
+
+    if let Some(project_root) = project.and_then(|state| state.root.as_ref()) {
+        let assets_root = project
+            .and_then(|state| state.config.as_ref())
+            .map(|config| config.assets_root(project_root))
+            .unwrap_or_else(|| project_root.join("assets"));
+        if assets_root.exists() {
+            for entry in WalkDir::new(&assets_root)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                if !is_font_file(entry.path()) {
+                    continue;
+                }
+                let _ = font_db.load_font_file(entry.path());
+            }
+        }
+    }
+
+    let mut families = BTreeSet::new();
+    for face in font_db.faces() {
+        for (name, _) in &face.families {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                families.insert(trimmed.to_string());
+            }
+        }
+    }
+    families.into_iter().collect()
+}
+
+fn is_font_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
         .unwrap_or(false)
 }
 

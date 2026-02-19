@@ -1,11 +1,29 @@
 use crossbeam_channel::{Sender, TrySendError};
 use hashbrown::{HashMap, HashSet};
+use parley::fontique::{Blob as FontBlob, FontInfoOverride};
+use parley::style::{
+    FontStyle as ParleyFontStyle, FontWeight as ParleyFontWeight, FontWidth as ParleyFontWidth,
+};
+use parley::{
+    Alignment as ParleyAlignment, AlignmentOptions as ParleyAlignmentOptions,
+    FontContext as ParleyFontContext, FontStack as ParleyFontStack, Layout as ParleyLayout,
+    LayoutContext as ParleyLayoutContext, LineHeight as ParleyLineHeight,
+    PositionedLayoutItem as ParleyPositionedLayoutItem, StyleProperty as ParleyStyleProperty,
+};
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
     env,
     hash::{Hash, Hasher},
+    path::PathBuf,
     sync::Arc,
 };
+use swash::scale::{
+    Render as SwashRender, ScaleContext as SwashScaleContext, Source as SwashSource,
+    image::{Content as SwashContent, Image as SwashImage},
+};
+use swash::zeno::Format as SwashFormat;
+use swash::{CacheKey as SwashCacheKey, FontRef as SwashFontRef};
 use tracing::{info, warn};
 use web_time::Instant;
 use wgpu::util::DeviceExt;
@@ -42,9 +60,10 @@ use crate::graphics::{
             OCCLUSION_STATUS_NO_HIZ, OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN,
             RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
             RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
-            RenderViewportGizmoOptions, RenderViewportRequest, RendererStats, ShaderConstants,
-            ShadowUniforms, SkyUniforms, StreamingTuning, Vertex, apply_egui_delta,
-            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            RenderText2d, RenderViewportGizmoOptions, RenderViewportRequest, RendererStats,
+            ShaderConstants, ShadowUniforms, SkyUniforms, SpriteBlendMode, SpriteSpace,
+            StreamingTuning, Vertex, apply_egui_delta, build_mip_uploads, calc_mip_level_count,
+            mesh_task_tiling,
         },
     },
     graph::{
@@ -64,17 +83,21 @@ use crate::graphics::{
     passes::{
         BundleMode, ForwardBlendMode, FrameGlobals, GBufferBundleKey, GizmoIconParams,
         GizmoLineParams, GizmoParams, IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput,
-        RayTracingTextureArrays, ShadowBundleKey, SwapchainFrameInput, TransparentDrawBatch,
+        RayTracingTextureArrays, ShadowBundleKey, SpriteDrawBatch, SpriteInstanceRaw,
+        SwapchainFrameInput, TransparentDrawBatch,
     },
     render_graphs::{default_graph_spec, template_for_graph},
 };
 use crate::graphics::{common::constants::MAX_SHADOW_CASCADES, passes::gbuffer::GBufferPass};
 use crate::provided::components::{Camera, LightType, Transform};
 use crate::runtime::asset_server::MaterialGpuData;
-use glam::{Mat3, Mat4, Quat, Vec3, Vec4Swizzles};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4Swizzles};
 
 const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
+const SPRITE_FLAG_CLIP_ENABLED: u32 = 1u32;
+const SPRITE_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
+const SWASH_GLYPH_SOURCES: [SwashSource; 1] = [SwashSource::Outline];
 
 fn format_supports_usage(
     adapter: &wgpu::Adapter,
@@ -481,6 +504,12 @@ fn hash_gizmo_icons(icons: &[GizmoIcon]) -> u64 {
         }
     }
     hash
+}
+
+fn hash_str64(value: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1061,6 +1090,58 @@ struct RayTracingSnapshot {
     tlas_leaf_size: usize,
 }
 
+#[derive(Clone)]
+struct CachedFontFace {
+    font_hash: u64,
+    font_data: Arc<[u8]>,
+    font_offset: u32,
+    font_cache_key: SwashCacheKey,
+}
+
+impl CachedFontFace {
+    fn swash_font(&self) -> SwashFontRef<'_> {
+        SwashFontRef {
+            data: self.font_data.as_ref(),
+            offset: self.font_offset,
+            key: self.font_cache_key,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FontFaceKey {
+    blob_id: u64,
+    face_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GlyphRasterKey {
+    font_hash: u64,
+    glyph_id: u16,
+    px_size: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlyphAtlasEntry {
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+struct GlyphAtlasState {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    cursor_x: u32,
+    cursor_y: u32,
+    row_height: u32,
+    entries: HashMap<GlyphRasterKey, GlyphAtlasEntry>,
+}
+
 struct BufferCache {
     camera: ReusableBuffer,
     skin_palette: ReusableBuffer,
@@ -1081,6 +1162,7 @@ struct BufferCache {
     gbuffer_instances: ReusableBuffer,
     transparent_instances: ReusableBuffer,
     shadow_instances: ReusableBuffer,
+    sprite_instances: ReusableBuffer,
 }
 
 #[repr(C)]
@@ -1133,6 +1215,10 @@ impl BufferCache {
                 "GraphRenderer/ShadowInstances",
                 frames_in_flight,
             ),
+            sprite_instances: ReusableBuffer::new(
+                "GraphRenderer/SpriteInstances",
+                frames_in_flight,
+            ),
         }
     }
 
@@ -1155,6 +1241,7 @@ impl BufferCache {
         self.gbuffer_instances.resize_slots(frames_in_flight);
         self.transparent_instances.resize_slots(frames_in_flight);
         self.shadow_instances.resize_slots(frames_in_flight);
+        self.sprite_instances.resize_slots(frames_in_flight);
     }
 }
 
@@ -1753,6 +1840,12 @@ pub struct GraphRenderer {
     streaming_request_cursor: usize,
     streaming_scan_cursor: usize,
     egui_texture_cache: EguiTextureCache,
+    sprite_font_ctx: ParleyFontContext,
+    sprite_layout_ctx: ParleyLayoutContext<[u8; 4]>,
+    sprite_scale_ctx: SwashScaleContext,
+    sprite_fonts: HashMap<FontFaceKey, CachedFontFace>,
+    sprite_registered_font_paths: HashMap<String, String>,
+    sprite_glyph_atlas: GlyphAtlasState,
     prev_idle_frames_before_evict: Option<u32>,
     pending_render_delta: Option<RenderDelta>,
     material_version: u64,
@@ -2197,6 +2290,77 @@ impl GraphRenderer {
             },
         );
         let fallback_volume_view = fallback_volume_texture.create_view(&Default::default());
+
+        let glyph_atlas_size = device.limits().max_texture_dimension_2d.min(4096).max(512);
+        let sprite_glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Renderer/SpriteGlyphAtlas"),
+            size: wgpu::Extent3d {
+                width: glyph_atlas_size,
+                height: glyph_atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let sprite_glyph_view = sprite_glyph_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            ..Default::default()
+        });
+        let sprite_glyph_clear = vec![0u8; (glyph_atlas_size * glyph_atlas_size) as usize];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &sprite_glyph_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &sprite_glyph_clear,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(glyph_atlas_size),
+                rows_per_image: Some(glyph_atlas_size),
+            },
+            wgpu::Extent3d {
+                width: glyph_atlas_size,
+                height: glyph_atlas_size,
+                depth_or_array_layers: 1,
+            },
+        );
+        let sprite_glyph_atlas = GlyphAtlasState {
+            texture: sprite_glyph_texture,
+            view: sprite_glyph_view,
+            width: glyph_atlas_size,
+            height: glyph_atlas_size,
+            cursor_x: 1,
+            cursor_y: 1,
+            row_height: 0,
+            entries: HashMap::new(),
+        };
+        let mut sprite_font_ctx = ParleyFontContext::new();
+        let sprite_layout_ctx = ParleyLayoutContext::new();
+        let sprite_scale_ctx = SwashScaleContext::new();
+        let mut sprite_font_db = fontdb::Database::new();
+        sprite_font_db.load_system_fonts();
+        let mut sprite_registered_sources = HashSet::new();
+        for face in sprite_font_db.faces() {
+            let Some(bytes) = sprite_font_db.with_face_data(face.id, |data, _| data.to_vec())
+            else {
+                continue;
+            };
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            let source_hash = hasher.finish();
+            if !sprite_registered_sources.insert(source_hash) {
+                continue;
+            }
+            let _ = sprite_font_ctx
+                .collection
+                .register_fonts(FontBlob::from(bytes), None);
+        }
 
         // Deterministic blue noise texture for stochastic passes (SSGI, etc.).
         let blue_noise_extent = wgpu::Extent3d {
@@ -2776,6 +2940,12 @@ impl GraphRenderer {
             streaming_request_cursor: 0,
             streaming_scan_cursor: 0,
             egui_texture_cache: EguiTextureCache::default(),
+            sprite_font_ctx,
+            sprite_layout_ctx,
+            sprite_scale_ctx,
+            sprite_fonts: HashMap::new(),
+            sprite_registered_font_paths: HashMap::new(),
+            sprite_glyph_atlas,
             prev_idle_frames_before_evict: None,
             pending_render_delta: None,
             material_version: 0,
@@ -3664,6 +3834,8 @@ impl GraphRenderer {
             objects_remove,
             lights_upsert,
             lights_remove,
+            sprites,
+            text_2d,
             camera,
             render_main_scene_to_swapchain,
             viewports,
@@ -3679,6 +3851,8 @@ impl GraphRenderer {
         let config_changed = render_config.is_some();
         let mut materials_needed = false;
         let material_version = self.material_version;
+        let sprites_value = sprites.clone().unwrap_or_default();
+        let text_value = text_2d.clone().unwrap_or_default();
         let gizmo_value = gizmo.clone().unwrap_or_default();
         let palette_value = skin_palette.clone().unwrap_or_default();
 
@@ -3692,6 +3866,8 @@ impl GraphRenderer {
             let data = RenderData {
                 objects: Vec::new(),
                 lights: Vec::new(),
+                sprites: sprites_value.clone(),
+                text_2d: text_value.clone(),
                 previous_camera_transform: camera_transform,
                 current_camera_transform: camera_transform,
                 camera_component,
@@ -3716,6 +3892,8 @@ impl GraphRenderer {
         if full {
             state.clear_objects();
             state.clear_lights();
+            state.data.sprites = sprites_value;
+            state.data.text_2d = text_value;
             state.data.skin_palette = palette_value;
             self.gpu_instance_updates.clear();
             self.gpu_instances_dirty = true;
@@ -3749,6 +3927,12 @@ impl GraphRenderer {
         }
         if let Some(graph) = render_graph {
             state.data.render_graph = graph;
+        }
+        if let Some(sprites) = sprites {
+            state.data.sprites = sprites;
+        }
+        if let Some(text_2d) = text_2d {
+            state.data.text_2d = text_2d;
         }
         if let Some(gizmo) = gizmo {
             state.data.gizmo = gizmo;
@@ -7249,6 +7433,890 @@ impl GraphRenderer {
         }
     }
 
+    fn ensure_text_font_family_from_path(&mut self, path: &str) -> Option<String> {
+        let key = path.trim();
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(family) = self.sprite_registered_font_paths.get(key) {
+            return Some(family.clone());
+        }
+
+        let bytes = std::fs::read(PathBuf::from(key)).ok()?;
+        let family_name = format!("helmer-font-{:016x}", hash_str64(key));
+        let register = self.sprite_font_ctx.collection.register_fonts(
+            FontBlob::from(bytes),
+            Some(FontInfoOverride {
+                family_name: Some(family_name.as_str()),
+                ..Default::default()
+            }),
+        );
+        if register.is_empty() {
+            return None;
+        }
+        self.sprite_registered_font_paths
+            .insert(key.to_string(), family_name.clone());
+        Some(family_name)
+    }
+
+    fn resolve_text_font_stack(&mut self, text: &RenderText2d) -> Option<String> {
+        if let Some(path) = text
+            .font_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            if let Some(family) = self.ensure_text_font_family_from_path(path) {
+                return Some(family);
+            }
+        }
+
+        text.font_family
+            .as_deref()
+            .map(str::trim)
+            .filter(|family| !family.is_empty())
+            .map(str::to_string)
+            .or_else(|| Some("sans-serif".to_string()))
+    }
+
+    fn resolve_parley_font_face(&mut self, font_data: &parley::FontData) -> Option<CachedFontFace> {
+        let key = FontFaceKey {
+            blob_id: font_data.data.id(),
+            face_index: font_data.index,
+        };
+        if let Some(face) = self.sprite_fonts.get(&key) {
+            return Some(face.clone());
+        }
+
+        let font_data: Arc<[u8]> = Arc::from(font_data.data.as_ref().to_vec());
+        let swash_font = SwashFontRef::from_index(font_data.as_ref(), key.face_index as usize)
+            .or_else(|| SwashFontRef::from_index(font_data.as_ref(), 0))?;
+        let (font_offset, font_cache_key) = (swash_font.offset, swash_font.key);
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let face = CachedFontFace {
+            font_hash: hasher.finish(),
+            font_data,
+            font_offset,
+            font_cache_key,
+        };
+        self.sprite_fonts.insert(key, face.clone());
+        Some(face)
+    }
+
+    fn parley_alignment(align: crate::graphics::common::renderer::TextAlignH) -> ParleyAlignment {
+        match align {
+            crate::graphics::common::renderer::TextAlignH::Left => ParleyAlignment::Left,
+            crate::graphics::common::renderer::TextAlignH::Center => ParleyAlignment::Center,
+            crate::graphics::common::renderer::TextAlignH::Right => ParleyAlignment::Right,
+        }
+    }
+
+    fn parley_font_style(
+        style: crate::graphics::common::renderer::TextFontStyle,
+    ) -> ParleyFontStyle {
+        match style {
+            crate::graphics::common::renderer::TextFontStyle::Normal => ParleyFontStyle::Normal,
+            crate::graphics::common::renderer::TextFontStyle::Italic => ParleyFontStyle::Italic,
+            crate::graphics::common::renderer::TextFontStyle::Oblique => {
+                ParleyFontStyle::Oblique(None)
+            }
+        }
+    }
+
+    fn quantize_world_text_raster_scale(scale: f32, step: f32) -> f32 {
+        let clamped = scale.max(f32::EPSILON);
+        if !step.is_finite() || step <= 0.0 {
+            return clamped;
+        }
+        ((clamped / step).round() * step).max(f32::EPSILON)
+    }
+
+    fn project_world_to_viewport(view_proj: Mat4, viewport: Vec2, world: Vec3) -> Option<Vec2> {
+        let clip = view_proj * world.extend(1.0);
+        if !clip.is_finite() || clip.w.abs() <= 1e-6 {
+            return None;
+        }
+        let ndc = clip.xyz() / clip.w;
+        if !ndc.is_finite() {
+            return None;
+        }
+        Some(Vec2::new(
+            (ndc.x * 0.5 + 0.5) * viewport.x,
+            (1.0 - (ndc.y * 0.5 + 0.5)) * viewport.y,
+        ))
+    }
+
+    fn world_text_quality_budget_factor(&self, render_config: &RenderConfig) -> f32 {
+        let min_factor = render_config.text_world_auto_quality_min_factor.max(0.0);
+        let max_factor = render_config
+            .text_world_auto_quality_max_factor
+            .max(min_factor);
+        if !render_config.text_world_auto_quality {
+            return max_factor;
+        }
+
+        let budget = self.pool.vram_budget().global.clone();
+        let soft = budget.soft_limit_bytes.max(1);
+        let hard = budget.hard_limit_bytes.max(soft);
+        if budget.current_bytes <= soft {
+            return max_factor;
+        }
+        if hard <= soft || budget.current_bytes >= hard {
+            return min_factor;
+        }
+        let t = ((budget.current_bytes - soft) as f64 / (hard - soft) as f64) as f32;
+        max_factor + (min_factor - max_factor) * t.clamp(0.0, 1.0)
+    }
+
+    fn world_text_raster_scale(
+        &self,
+        render_config: &RenderConfig,
+        text: &RenderText2d,
+        axis_right: Vec3,
+        axis_up: Vec3,
+        run_font_px: f32,
+        view_proj: Mat4,
+        viewport: Vec2,
+    ) -> f32 {
+        let Some(origin_px) = Self::project_world_to_viewport(view_proj, viewport, text.position)
+        else {
+            return 1.0;
+        };
+
+        let min_font_px = render_config.text_min_font_px.max(f32::EPSILON);
+        let pixels_per_unit = render_config.text_world_pixels_per_unit.max(min_font_px);
+        let right_step_world = axis_right * (text.scale.x.abs() / pixels_per_unit);
+        let up_step_world = axis_up * (text.scale.y.abs() / pixels_per_unit);
+
+        let Some(right_px) =
+            Self::project_world_to_viewport(view_proj, viewport, text.position + right_step_world)
+        else {
+            return 1.0;
+        };
+        let Some(up_px) =
+            Self::project_world_to_viewport(view_proj, viewport, text.position + up_step_world)
+        else {
+            return 1.0;
+        };
+
+        let px_per_text_unit = (right_px - origin_px)
+            .length()
+            .max((up_px - origin_px).length());
+        if !px_per_text_unit.is_finite() || px_per_text_unit <= 0.0 {
+            return 1.0;
+        }
+
+        let quality_factor = self.world_text_quality_budget_factor(render_config);
+        let oversample = (render_config.text_world_raster_oversample.max(f32::EPSILON)
+            * quality_factor)
+            .max(f32::EPSILON);
+        let min_scale = render_config.text_world_raster_min_scale.max(min_font_px);
+        let max_scale_budgeted = (render_config.text_world_raster_max_scale.max(min_scale)
+            * quality_factor)
+            .max(min_scale);
+        let max_scale_glyph = (render_config.text_world_glyph_max_raster_px.max(1) as f32
+            / run_font_px.max(min_font_px))
+        .max(min_scale);
+        let max_scale = max_scale_budgeted.min(max_scale_glyph).max(min_scale);
+
+        let desired_scale = Self::quantize_world_text_raster_scale(
+            px_per_text_unit * oversample,
+            render_config.text_world_raster_scale_step,
+        );
+        desired_scale.clamp(min_scale, max_scale)
+    }
+
+    fn reset_sprite_glyph_atlas(&mut self) {
+        let atlas = &mut self.sprite_glyph_atlas;
+        atlas.entries.clear();
+        atlas.cursor_x = 1;
+        atlas.cursor_y = 1;
+        atlas.row_height = 0;
+
+        let clear = vec![0u8; (atlas.width * atlas.height) as usize];
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &atlas.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &clear,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas.width),
+                rows_per_image: Some(atlas.height),
+            },
+            wgpu::Extent3d {
+                width: atlas.width,
+                height: atlas.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn rasterize_swash_glyph(
+        &mut self,
+        font_face: &CachedFontFace,
+        glyph_id: u16,
+        px_size: f32,
+    ) -> Option<SwashImage> {
+        let mut scaler = self
+            .sprite_scale_ctx
+            .builder(font_face.swash_font())
+            .size(px_size.max(f32::EPSILON))
+            .hint(false)
+            .build();
+        let mut render = SwashRender::new(&SWASH_GLYPH_SOURCES);
+        render.format(SwashFormat::Alpha);
+        let image = render.render(&mut scaler, glyph_id)?;
+        if image.content != SwashContent::Mask {
+            return None;
+        }
+        Some(image)
+    }
+
+    fn ensure_sprite_glyph(
+        &mut self,
+        render_config: &RenderConfig,
+        font_face: &CachedFontFace,
+        glyph_id: u16,
+        font_px: f32,
+        raster_scale: f32,
+    ) -> Option<GlyphAtlasEntry> {
+        let min_font_px = render_config.text_min_font_px.max(f32::EPSILON);
+        let logical_px = font_px.max(min_font_px);
+        let raster_scale = raster_scale.max(f32::EPSILON);
+        let px_size = (logical_px * raster_scale * 64.0)
+            .round()
+            .clamp(1.0, u16::MAX as f32) as u16;
+        let scale = (px_size as f32 / 64.0).max(min_font_px);
+        let key = GlyphRasterKey {
+            font_hash: font_face.font_hash,
+            glyph_id,
+            px_size,
+        };
+
+        if let Some(entry) = self.sprite_glyph_atlas.entries.get(&key) {
+            return Some(*entry);
+        }
+
+        let logical_image = self.rasterize_swash_glyph(font_face, glyph_id, logical_px)?;
+        let logical_left = logical_image.placement.left as f32;
+        let logical_top = -(logical_image.placement.top as f32);
+        let logical_width = logical_image.placement.width as f32;
+        let logical_height = logical_image.placement.height as f32;
+
+        let raster_image = if (scale - logical_px).abs() <= (1.0 / 64.0) {
+            logical_image
+        } else {
+            self.rasterize_swash_glyph(font_face, glyph_id, scale)?
+        };
+        let glyph_width = raster_image.placement.width;
+        let glyph_height = raster_image.placement.height;
+        let pixels = raster_image.data;
+        if pixels.len() != (glyph_width as usize).saturating_mul(glyph_height as usize) {
+            return None;
+        }
+
+        if glyph_width == 0 || glyph_height == 0 {
+            let entry = GlyphAtlasEntry {
+                uv_min: [0.0, 0.0],
+                uv_max: [0.0, 0.0],
+                left: logical_left,
+                top: logical_top,
+                width: logical_width.max(0.0),
+                height: logical_height.max(0.0),
+            };
+            self.sprite_glyph_atlas.entries.insert(key, entry);
+            return Some(entry);
+        }
+
+        let padding = render_config.text_glyph_atlas_padding_px;
+        let alloc_w = glyph_width + padding * 2;
+        let alloc_h = glyph_height + padding * 2;
+
+        let mut reset_once = false;
+        loop {
+            let atlas = &mut self.sprite_glyph_atlas;
+            if atlas.cursor_x + alloc_w + 1 >= atlas.width {
+                atlas.cursor_x = 1;
+                atlas.cursor_y = atlas
+                    .cursor_y
+                    .saturating_add(atlas.row_height.saturating_add(1));
+                atlas.row_height = 0;
+            }
+
+            if atlas.cursor_y + alloc_h + 1 >= atlas.height {
+                if reset_once {
+                    return None;
+                }
+                reset_once = true;
+                self.reset_sprite_glyph_atlas();
+                continue;
+            }
+
+            let dst_x = atlas.cursor_x + padding;
+            let dst_y = atlas.cursor_y + padding;
+            atlas.cursor_x = atlas.cursor_x.saturating_add(alloc_w + 1);
+            atlas.row_height = atlas.row_height.max(alloc_h + 1);
+
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &atlas.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: dst_x,
+                        y: dst_y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(glyph_width),
+                    rows_per_image: Some(glyph_height),
+                },
+                wgpu::Extent3d {
+                    width: glyph_width,
+                    height: glyph_height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            let uv_inset = render_config.text_glyph_uv_inset_px.max(0.0);
+            let inset_x = if glyph_width > 1 {
+                uv_inset.min(glyph_width as f32 * 0.5)
+            } else {
+                0.0
+            };
+            let inset_y = if glyph_height > 1 {
+                uv_inset.min(glyph_height as f32 * 0.5)
+            } else {
+                0.0
+            };
+            let entry = GlyphAtlasEntry {
+                uv_min: [
+                    (dst_x as f32 + inset_x) / atlas.width as f32,
+                    (dst_y as f32 + inset_y) / atlas.height as f32,
+                ],
+                uv_max: [
+                    ((dst_x + glyph_width) as f32 - inset_x) / atlas.width as f32,
+                    ((dst_y + glyph_height) as f32 - inset_y) / atlas.height as f32,
+                ],
+                left: logical_left,
+                top: logical_top,
+                width: logical_width.max(0.0),
+                height: logical_height.max(0.0),
+            };
+            atlas.entries.insert(key, entry);
+            return Some(entry);
+        }
+    }
+
+    fn build_sprite_draw_data(
+        &mut self,
+        render_data: &RenderData,
+    ) -> (
+        Option<crate::graphics::passes::InstanceBuffer>,
+        Arc<Vec<SpriteDrawBatch>>,
+        Arc<Vec<wgpu::TextureView>>,
+    ) {
+        let mut sprite_instances: Vec<SpriteInstanceRaw> = Vec::new();
+        let mut sprite_textures: Vec<wgpu::TextureView> = vec![self.fallback_albedo_view.clone()];
+        let mut texture_slots: HashMap<usize, u32> = HashMap::new();
+        let mut glyph_texture_slot: Option<u32> = None;
+
+        let camera_rot = Quat::from(render_data.current_camera_transform.rotation);
+        let camera_right = camera_rot * -Vec3::X;
+        let camera_up = camera_rot * -Vec3::Y;
+        let camera_forward = camera_rot * Vec3::Z;
+
+        let graph_surface_size = self
+            .active_graph
+            .as_ref()
+            .map(|graph| graph.surface_size)
+            .unwrap_or(self.surface_size);
+        let viewport_size = Vec2::new(
+            graph_surface_size.width.max(1) as f32,
+            graph_surface_size.height.max(1) as f32,
+        );
+        let camera = &render_data.camera_component;
+        let camera_aspect = if camera.aspect_ratio.is_finite() && camera.aspect_ratio > 0.0 {
+            camera.aspect_ratio
+        } else {
+            viewport_size.x / viewport_size.y.max(1.0)
+        };
+        let camera_fov = if camera.fov_y_rad.is_finite() && camera.fov_y_rad > 1e-4 {
+            camera.fov_y_rad
+        } else {
+            1.0
+        };
+        let camera_near = if camera.near_plane.is_finite() && camera.near_plane > 1e-4 {
+            camera.near_plane
+        } else {
+            0.01
+        };
+        let camera_view = Mat4::look_at_rh(
+            render_data.current_camera_transform.position,
+            render_data.current_camera_transform.position + camera_forward,
+            camera_rot * Vec3::Y,
+        );
+        let camera_view_proj =
+            Mat4::perspective_infinite_reverse_rh(camera_fov, camera_aspect, camera_near)
+                * camera_view;
+
+        let mut resolve_texture_slot = |renderer: &mut Self, texture_id: Option<usize>| -> u32 {
+            let Some(texture_id) = texture_id else {
+                return 0;
+            };
+            if let Some(slot) = texture_slots.get(&texture_id) {
+                return *slot;
+            }
+            let rid = renderer
+                .pool
+                .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+            let view = renderer
+                .pool
+                .texture_view(rid)
+                .cloned()
+                .unwrap_or_else(|| renderer.fallback_albedo_view.clone());
+            renderer.pool.mark_used(rid, renderer.frame_index);
+            let slot = sprite_textures.len() as u32;
+            sprite_textures.push(view);
+            texture_slots.insert(texture_id, slot);
+            slot
+        };
+
+        for sprite in &render_data.sprites {
+            let size = Vec2::new(sprite.size.x.max(0.0), sprite.size.y.max(0.0));
+            if size.x <= 0.0 || size.y <= 0.0 {
+                continue;
+            }
+            let (right, up, mode) = match sprite.space {
+                SpriteSpace::World => {
+                    let rotation = if sprite.billboard {
+                        Quat::IDENTITY
+                    } else {
+                        sprite.rotation
+                    };
+                    if sprite.billboard {
+                        (camera_right, camera_up, 1.0f32)
+                    } else {
+                        (rotation * -Vec3::X, rotation * -Vec3::Y, 1.0f32)
+                    }
+                }
+                SpriteSpace::Screen => (Vec3::X, Vec3::Y, 0.0f32),
+            };
+            let mut flags = 0u32;
+            let clip = if let Some(rect) = sprite.clip_rect {
+                flags |= SPRITE_FLAG_CLIP_ENABLED;
+                rect
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            let texture_slot = resolve_texture_slot(self, sprite.texture_id);
+            let pick_id = if sprite.pick_id != 0 {
+                sprite.pick_id
+            } else {
+                sprite.id as u32
+            };
+            sprite_instances.push(SpriteInstanceRaw {
+                origin_mode: [
+                    sprite.position.x,
+                    sprite.position.y,
+                    sprite.position.z,
+                    mode,
+                ],
+                right_size_x: [right.x, right.y, right.z, size.x],
+                up_size_y: [up.x, up.y, up.z, size.y],
+                uv_rect: [
+                    sprite.uv_min[0],
+                    sprite.uv_min[1],
+                    sprite.uv_max[0],
+                    sprite.uv_max[1],
+                ],
+                color: sprite.color,
+                pivot_clip_min: [sprite.pivot[0], sprite.pivot[1], clip[0], clip[1]],
+                clip_max_layer: [clip[2], clip[3], sprite.layer, 0.0],
+                meta: [texture_slot, flags, pick_id, sprite.blend_mode as u32],
+            });
+        }
+
+        for text in &render_data.text_2d {
+            if text.text.is_empty() {
+                continue;
+            }
+            let is_world_space = matches!(text.space, SpriteSpace::World);
+            let (text_axis_right, text_axis_up, mode) = match text.space {
+                SpriteSpace::World => {
+                    let rotation = if text.billboard {
+                        Quat::IDENTITY
+                    } else {
+                        text.rotation
+                    };
+                    if text.billboard {
+                        (camera_right, camera_up, 1.0f32)
+                    } else {
+                        (rotation * -Vec3::X, rotation * -Vec3::Y, 1.0f32)
+                    }
+                }
+                SpriteSpace::Screen => (Vec3::X, Vec3::Y, 0.0f32),
+            };
+
+            let glyph_slot = if let Some(slot) = glyph_texture_slot {
+                slot
+            } else {
+                let slot = sprite_textures.len() as u32;
+                sprite_textures.push(self.sprite_glyph_atlas.view.clone());
+                glyph_texture_slot = Some(slot);
+                slot
+            };
+
+            let min_font_px = render_data.render_config.text_min_font_px.max(f32::EPSILON);
+            let font_size = text.font_size.max(min_font_px);
+            let max_width = text.max_width.filter(|w| w.is_finite() && *w > 0.0);
+            let layout_scale = render_data
+                .render_config
+                .text_layout_scale
+                .max(f32::EPSILON);
+            let layout_quantize = if is_world_space {
+                render_data.render_config.text_world_layout_quantize
+            } else {
+                render_data.render_config.text_screen_layout_quantize
+            };
+            let font_stack = self.resolve_text_font_stack(text);
+            let mut builder = self.sprite_layout_ctx.ranged_builder(
+                &mut self.sprite_font_ctx,
+                text.text.as_str(),
+                layout_scale,
+                layout_quantize,
+            );
+            builder.push_default(ParleyStyleProperty::FontSize(font_size));
+            builder.push_default(ParleyStyleProperty::FontWeight(ParleyFontWeight::new(
+                text.font_weight.clamp(1.0, 1000.0),
+            )));
+            builder.push_default(ParleyStyleProperty::FontWidth(ParleyFontWidth::from_ratio(
+                text.font_width.clamp(0.25, 4.0),
+            )));
+            builder.push_default(ParleyStyleProperty::FontStyle(Self::parley_font_style(
+                text.font_style,
+            )));
+            builder.push_default(ParleyStyleProperty::LineHeight(
+                ParleyLineHeight::FontSizeRelative(text.line_height_scale.max(0.05)),
+            ));
+            builder.push_default(ParleyStyleProperty::LetterSpacing(text.letter_spacing));
+            builder.push_default(ParleyStyleProperty::WordSpacing(text.word_spacing));
+            builder.push_default(ParleyStyleProperty::Underline(text.underline));
+            builder.push_default(ParleyStyleProperty::Strikethrough(text.strikethrough));
+            if let Some(font_stack) = font_stack {
+                builder.push_default(ParleyStyleProperty::FontStack(ParleyFontStack::Source(
+                    Cow::Owned(font_stack),
+                )));
+            }
+            let mut layout: ParleyLayout<[u8; 4]> = builder.build(text.text.as_str());
+            layout.break_all_lines(max_width);
+            layout.align(
+                max_width,
+                Self::parley_alignment(text.align_h),
+                ParleyAlignmentOptions {
+                    align_when_overflowing: true,
+                },
+            );
+
+            struct PlacedGlyph {
+                entry: GlyphAtlasEntry,
+                x: f32,
+                y: f32,
+            }
+
+            struct PlacedDecoration {
+                x: f32,
+                y: f32,
+                width: f32,
+                height: f32,
+            }
+
+            let mut placed_glyphs: Vec<PlacedGlyph> = Vec::new();
+            let mut placed_decorations: Vec<PlacedDecoration> = Vec::new();
+            let mut glyph_bounds_min = Vec2::splat(f32::INFINITY);
+            let mut glyph_bounds_max = Vec2::splat(f32::NEG_INFINITY);
+            let mut layout_bounds_min = Vec2::splat(f32::INFINITY);
+            let mut layout_bounds_max = Vec2::splat(f32::NEG_INFINITY);
+
+            for line in layout.lines() {
+                let line_metrics = line.metrics();
+                layout_bounds_min.y = layout_bounds_min.y.min(line_metrics.min_coord);
+                layout_bounds_max.y = layout_bounds_max.y.max(line_metrics.max_coord);
+                for item in line.items() {
+                    let ParleyPositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                        continue;
+                    };
+                    let run = glyph_run.run();
+                    let run_x_start = glyph_run.offset();
+                    let run_y = glyph_run.baseline();
+                    let run_advance = glyph_run.advance().max(0.0);
+                    let run_metrics = run.metrics();
+                    let style = glyph_run.style();
+                    if run_advance > 0.0 {
+                        layout_bounds_min.x = layout_bounds_min.x.min(run_x_start);
+                        layout_bounds_max.x = layout_bounds_max.x.max(run_x_start + run_advance);
+                    }
+
+                    if let Some(underline) = &style.underline {
+                        let thickness = underline
+                            .size
+                            .unwrap_or(run_metrics.underline_size)
+                            .max(0.0);
+                        if run_advance > 0.0 && thickness > 0.0 {
+                            let y =
+                                run_y - underline.offset.unwrap_or(run_metrics.underline_offset);
+                            let min = Vec2::new(run_x_start, y);
+                            let max = min + Vec2::new(run_advance, thickness);
+                            glyph_bounds_min = glyph_bounds_min.min(min);
+                            glyph_bounds_max = glyph_bounds_max.max(max);
+                            placed_decorations.push(PlacedDecoration {
+                                x: run_x_start,
+                                y,
+                                width: run_advance,
+                                height: thickness,
+                            });
+                        }
+                    }
+
+                    if let Some(strikethrough) = &style.strikethrough {
+                        let thickness = strikethrough
+                            .size
+                            .unwrap_or(run_metrics.strikethrough_size)
+                            .max(0.0);
+                        if run_advance > 0.0 && thickness > 0.0 {
+                            let y = run_y
+                                - strikethrough
+                                    .offset
+                                    .unwrap_or(run_metrics.strikethrough_offset);
+                            let min = Vec2::new(run_x_start, y);
+                            let max = min + Vec2::new(run_advance, thickness);
+                            glyph_bounds_min = glyph_bounds_min.min(min);
+                            glyph_bounds_max = glyph_bounds_max.max(max);
+                            placed_decorations.push(PlacedDecoration {
+                                x: run_x_start,
+                                y,
+                                width: run_advance,
+                                height: thickness,
+                            });
+                        }
+                    }
+
+                    let Some(font_face) = self.resolve_parley_font_face(run.font()) else {
+                        continue;
+                    };
+                    let mut run_x = run_x_start;
+                    let run_font_px = run.font_size().max(min_font_px);
+                    let glyph_raster_scale = if is_world_space {
+                        self.world_text_raster_scale(
+                            &render_data.render_config,
+                            text,
+                            text_axis_right,
+                            text_axis_up,
+                            run_font_px,
+                            camera_view_proj,
+                            viewport_size,
+                        )
+                    } else {
+                        1.0
+                    };
+                    for glyph in glyph_run.glyphs() {
+                        let advance = glyph.advance;
+                        let Ok(glyph_id) = u16::try_from(glyph.id) else {
+                            run_x += advance;
+                            continue;
+                        };
+                        let Some(entry) = self.ensure_sprite_glyph(
+                            &render_data.render_config,
+                            &font_face,
+                            glyph_id,
+                            run_font_px,
+                            glyph_raster_scale,
+                        ) else {
+                            run_x += advance;
+                            continue;
+                        };
+                        let gx = run_x + glyph.x;
+                        let gy = run_y - glyph.y;
+                        run_x += advance;
+                        let min = Vec2::new(gx + entry.left, gy + entry.top);
+                        let max = min + Vec2::new(entry.width, entry.height);
+                        glyph_bounds_min = glyph_bounds_min.min(min);
+                        glyph_bounds_max = glyph_bounds_max.max(max);
+                        placed_glyphs.push(PlacedGlyph {
+                            entry,
+                            x: gx,
+                            y: gy,
+                        });
+                    }
+                }
+            }
+
+            if (placed_glyphs.is_empty() && placed_decorations.is_empty())
+                || !glyph_bounds_min.is_finite()
+                || !glyph_bounds_max.is_finite()
+            {
+                continue;
+            }
+
+            let (align_bounds_min, align_bounds_max) =
+                if layout_bounds_min.is_finite() && layout_bounds_max.is_finite() {
+                    (layout_bounds_min, layout_bounds_max)
+                } else {
+                    (glyph_bounds_min, glyph_bounds_max)
+                };
+            let align_x = match text.align_h {
+                crate::graphics::common::renderer::TextAlignH::Left => -align_bounds_min.x,
+                crate::graphics::common::renderer::TextAlignH::Center => {
+                    -0.5 * (align_bounds_min.x + align_bounds_max.x)
+                }
+                crate::graphics::common::renderer::TextAlignH::Right => -align_bounds_max.x,
+            };
+            let align_y = match text.align_v {
+                crate::graphics::common::renderer::TextAlignV::Top => -align_bounds_min.y,
+                crate::graphics::common::renderer::TextAlignV::Center => {
+                    -0.5 * (align_bounds_min.y + align_bounds_max.y)
+                }
+                crate::graphics::common::renderer::TextAlignV::Bottom => -align_bounds_max.y,
+                crate::graphics::common::renderer::TextAlignV::Baseline => 0.0,
+            };
+
+            let mut text_flags = SPRITE_FLAG_TEXT_ALPHA;
+            let clip = if let Some(rect) = text.clip_rect {
+                text_flags |= SPRITE_FLAG_CLIP_ENABLED;
+                rect
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            let pick_id = if text.pick_id != 0 {
+                text.pick_id
+            } else {
+                text.id as u32
+            };
+
+            let (mut right, mut up) = (text_axis_right, text_axis_up);
+            let world_unit_scale = if is_world_space {
+                1.0 / render_data
+                    .render_config
+                    .text_world_pixels_per_unit
+                    .max(render_data.render_config.text_min_font_px.max(f32::EPSILON))
+            } else {
+                1.0
+            };
+            right *= text.scale.x * world_unit_scale;
+            up *= text.scale.y * world_unit_scale;
+
+            for glyph in &placed_glyphs {
+                if glyph.entry.width <= 0.0 || glyph.entry.height <= 0.0 {
+                    continue;
+                }
+                let local_x = glyph.x + glyph.entry.left + align_x;
+                let local_y = glyph.y + glyph.entry.top + align_y;
+                let origin = text.position + right * local_x + up * local_y;
+
+                sprite_instances.push(SpriteInstanceRaw {
+                    origin_mode: [origin.x, origin.y, origin.z, mode],
+                    right_size_x: [right.x, right.y, right.z, glyph.entry.width],
+                    up_size_y: [up.x, up.y, up.z, glyph.entry.height],
+                    uv_rect: [
+                        glyph.entry.uv_min[0],
+                        glyph.entry.uv_min[1],
+                        glyph.entry.uv_max[0],
+                        glyph.entry.uv_max[1],
+                    ],
+                    color: text.color,
+                    pivot_clip_min: [0.0, 0.0, clip[0], clip[1]],
+                    clip_max_layer: [clip[2], clip[3], text.layer, 0.0],
+                    meta: [glyph_slot, text_flags, pick_id, text.blend_mode as u32],
+                });
+            }
+
+            let decoration_flags = text_flags & !SPRITE_FLAG_TEXT_ALPHA;
+            for decoration in &placed_decorations {
+                if decoration.width <= 0.0 || decoration.height <= 0.0 {
+                    continue;
+                }
+                let local_x = decoration.x + align_x;
+                let local_y = decoration.y + align_y;
+                let origin = text.position + right * local_x + up * local_y;
+                sprite_instances.push(SpriteInstanceRaw {
+                    origin_mode: [origin.x, origin.y, origin.z, mode],
+                    right_size_x: [right.x, right.y, right.z, decoration.width],
+                    up_size_y: [up.x, up.y, up.z, decoration.height],
+                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                    color: text.color,
+                    pivot_clip_min: [0.0, 0.0, clip[0], clip[1]],
+                    clip_max_layer: [clip[2], clip[3], text.layer, 0.0],
+                    meta: [0, decoration_flags, pick_id, text.blend_mode as u32],
+                });
+            }
+        }
+
+        let sprite_batches = if sprite_instances.is_empty() {
+            Vec::new()
+        } else {
+            let mut batches = Vec::new();
+            let mut start = 0usize;
+            while start < sprite_instances.len() {
+                let texture_slot = sprite_instances[start].meta[0];
+                let flags = sprite_instances[start].meta[1];
+                let blend = sprite_instances[start].meta[3];
+                let mut end = start + 1;
+                while end < sprite_instances.len()
+                    && sprite_instances[end].meta[0] == texture_slot
+                    && sprite_instances[end].meta[1] == flags
+                    && sprite_instances[end].meta[3] == blend
+                {
+                    end += 1;
+                }
+                let blend_mode = match blend {
+                    1 => SpriteBlendMode::Premultiplied,
+                    2 => SpriteBlendMode::Additive,
+                    _ => SpriteBlendMode::Alpha,
+                };
+                batches.push(SpriteDrawBatch {
+                    texture_slot,
+                    flags,
+                    blend_mode,
+                    instance_range: start as u32..end as u32,
+                });
+                start = end;
+            }
+            batches
+        };
+
+        let sprite_instance_buffer = if sprite_instances.is_empty() {
+            None
+        } else {
+            let bytes = bytemuck::cast_slice(&sprite_instances);
+            let buffer = self.buffer_cache.sprite_instances.ensure(
+                &self.device,
+                bytes.len() as u64,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buffer, 0, bytes);
+            Some(crate::graphics::passes::InstanceBuffer {
+                buffer: buffer.clone(),
+                count: sprite_instances.len() as u32,
+                stride: std::mem::size_of::<SpriteInstanceRaw>() as u64,
+            })
+        };
+
+        (
+            sprite_instance_buffer,
+            Arc::new(sprite_batches),
+            Arc::new(sprite_textures),
+        )
+    }
+
     fn prepare_frame_globals(&mut self, scene: &RenderSceneState) -> Option<FrameGlobals> {
         let render_data = &scene.data;
         let alpha = 1.0;
@@ -8143,6 +9211,9 @@ impl GraphRenderer {
             }
         };
 
+        let (sprite_instances, sprite_batches, sprite_textures) =
+            self.build_sprite_draw_data(render_data);
+
         let occlusion_camera_stable = {
             let prev_pos = render_data.previous_camera_transform.position;
             let cur_pos = render_data.current_camera_transform.position;
@@ -8231,6 +9302,9 @@ impl GraphRenderer {
             gpu_instance_count,
             transparent_instances,
             transparent_batches,
+            sprite_instances,
+            sprite_batches,
+            sprite_textures,
             alpha,
             camera_view_proj: view_proj,
             prev_view_proj,

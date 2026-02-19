@@ -2120,6 +2120,122 @@ impl StatsUI {
                         ui.label("0 = immediate resize apply");
 
                         ui.separator();
+                        ui.heading("text/sprite quality");
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_pixels_per_unit)
+                                .speed(0.1)
+                                .range(0.01..=4096.0)
+                                .prefix("pixels/world unit: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_raster_oversample)
+                                .speed(0.05)
+                                .range(0.01..=64.0)
+                                .prefix("raster oversample: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_raster_min_scale)
+                                .speed(0.1)
+                                .range(0.000001..=4096.0)
+                                .prefix("min raster scale: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_raster_max_scale)
+                                .speed(0.5)
+                                .range(0.000001..=32768.0)
+                                .prefix("max raster scale: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_glyph_max_raster_px)
+                                .speed(1.0)
+                                .range(1..=u32::MAX)
+                                .prefix("max glyph raster px: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_world_raster_scale_step)
+                                .speed(0.01)
+                                .range(0.0..=32.0)
+                                .prefix("raster scale step: "),
+                        );
+                        ui.checkbox(
+                            &mut render_cfg.text_world_auto_quality,
+                            "auto scale by VRAM budget",
+                        );
+                        ui.add(
+                            egui::DragValue::new(
+                                &mut render_cfg.text_world_auto_quality_min_factor,
+                            )
+                            .speed(0.01)
+                            .range(0.0..=8.0)
+                            .prefix("auto quality min: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(
+                                &mut render_cfg.text_world_auto_quality_max_factor,
+                            )
+                            .speed(0.01)
+                            .range(0.0..=8.0)
+                            .prefix("auto quality max: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_layout_scale)
+                                .speed(0.05)
+                                .range(0.000001..=16.0)
+                                .prefix("layout scale: "),
+                        );
+                        ui.checkbox(
+                            &mut render_cfg.text_screen_layout_quantize,
+                            "screen layout quantize",
+                        );
+                        ui.checkbox(
+                            &mut render_cfg.text_world_layout_quantize,
+                            "world layout quantize",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_min_font_px)
+                                .speed(0.001)
+                                .range(0.000001..=16.0)
+                                .prefix("text min font px: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_glyph_atlas_padding_px)
+                                .speed(1.0)
+                                .range(0..=1024)
+                                .prefix("glyph atlas padding px: "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut render_cfg.text_glyph_uv_inset_px)
+                                .speed(0.01)
+                                .range(0.0..=64.0)
+                                .prefix("glyph uv inset px: "),
+                        );
+                        render_cfg.text_min_font_px = render_cfg.text_min_font_px.max(f32::EPSILON);
+                        render_cfg.text_world_pixels_per_unit = render_cfg
+                            .text_world_pixels_per_unit
+                            .max(render_cfg.text_min_font_px);
+                        render_cfg.text_world_raster_oversample =
+                            render_cfg.text_world_raster_oversample.max(f32::EPSILON);
+                        render_cfg.text_world_raster_min_scale = render_cfg
+                            .text_world_raster_min_scale
+                            .max(render_cfg.text_min_font_px);
+                        render_cfg.text_world_raster_max_scale = render_cfg
+                            .text_world_raster_max_scale
+                            .max(render_cfg.text_world_raster_min_scale);
+                        render_cfg.text_world_glyph_max_raster_px =
+                            render_cfg.text_world_glyph_max_raster_px.max(1);
+                        render_cfg.text_world_raster_scale_step =
+                            render_cfg.text_world_raster_scale_step.max(0.0);
+                        render_cfg.text_world_auto_quality_min_factor =
+                            render_cfg.text_world_auto_quality_min_factor.max(0.0);
+                        render_cfg.text_world_auto_quality_max_factor = render_cfg
+                            .text_world_auto_quality_max_factor
+                            .max(render_cfg.text_world_auto_quality_min_factor);
+                        render_cfg.text_layout_scale =
+                            render_cfg.text_layout_scale.max(f32::EPSILON);
+                        render_cfg.text_glyph_uv_inset_px =
+                            render_cfg.text_glyph_uv_inset_px.max(0.0);
+
+                        ui.separator();
                         ui.heading("Culling & LOD");
                         ui.checkbox(&mut render_cfg.frustum_culling, "Frustum Culling");
                         ui.checkbox(

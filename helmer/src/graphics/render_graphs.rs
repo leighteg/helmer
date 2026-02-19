@@ -39,6 +39,7 @@ use crate::graphics::{
         rt_reflections_denoise::{RtReflectionsDenoiseOutputs, RtReflectionsDenoisePass},
         shadow::{ShadowOutputs, ShadowPass},
         sky::{SkyOutputs, SkyPass},
+        sprite::{SpriteOutputs, SpritePass},
         ssgi::{SsgiOutputs, SsgiPass},
         ssgi_denoise::{SsgiDenoiseOutputs, SsgiDenoisePass},
         ssgi_upsample::{SsgiUpsampleOutputs, SsgiUpsamplePass},
@@ -56,6 +57,7 @@ pub enum RenderPassToggleFlag {
     SsgiDenoise,
     Ssr,
     Ddgi,
+    Sprite,
     Egui,
     Gizmo,
     Occlusion,
@@ -73,6 +75,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::SsgiDenoise => config.ssgi_denoise_pass,
             RenderPassToggleFlag::Ssr => config.ssr_pass,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass,
+            RenderPassToggleFlag::Sprite => config.sprite_pass,
             RenderPassToggleFlag::Egui => config.egui_pass,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling,
@@ -90,6 +93,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::SsgiDenoise => config.ssgi_denoise_pass = value,
             RenderPassToggleFlag::Ssr => config.ssr_pass = value,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass = value,
+            RenderPassToggleFlag::Sprite => config.sprite_pass = value,
             RenderPassToggleFlag::Egui => config.egui_pass = value,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass = value,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling = value,
@@ -153,6 +157,10 @@ const DEFAULT_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Transparent,
     },
     RenderPassToggle {
+        label: "Sprite + Text",
+        toggle: RenderPassToggleFlag::Sprite,
+    },
+    RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
     },
@@ -190,6 +198,10 @@ const HYBRID_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "Transparency",
         toggle: RenderPassToggleFlag::Transparent,
+    },
+    RenderPassToggle {
+        label: "Sprite + Text",
+        toggle: RenderPassToggleFlag::Sprite,
     },
     RenderPassToggle {
         label: "Egui",
@@ -239,6 +251,10 @@ const DEBUG_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Transparent,
     },
     RenderPassToggle {
+        label: "Sprite + Text",
+        toggle: RenderPassToggleFlag::Sprite,
+    },
+    RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
     },
@@ -280,6 +296,10 @@ const DEBUG_GRAPH_FLAGS: &[DebugFlagToggle] = &[
 ];
 
 const TRACED_GRAPH_PASSES: &[RenderPassToggle] = &[
+    RenderPassToggle {
+        label: "Sprite + Text",
+        toggle: RenderPassToggleFlag::Sprite,
+    },
     RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
@@ -504,6 +524,12 @@ impl PassResourceOutput for ForwardOutputs {
 impl PassResourceOutput for EguiOutputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.swapchain]
+    }
+}
+
+impl PassResourceOutput for SpriteOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.swapchain, self.pick_map]
     }
 }
 
@@ -868,6 +894,22 @@ fn build_default_graph(
         });
     }
 
+    if toggles.sprite_pass {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+            let pass = SpritePass::new(
+                pool,
+                swapchain_id,
+                params.surface_format,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
@@ -1213,6 +1255,22 @@ fn build_hybrid_graph(
         });
     }
 
+    if toggles.sprite_pass {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+            let pass = SpritePass::new(
+                pool,
+                swapchain_id,
+                params.surface_format,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
@@ -1538,6 +1596,22 @@ fn build_debug_graph(
         });
     }
 
+    if toggles.sprite_pass {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+            let pass = SpritePass::new(
+                pool,
+                swapchain_id,
+                params.surface_format,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
@@ -1596,6 +1670,22 @@ fn build_traced_graph(
             (pass, outputs)
         });
     let swapchain_id = composite.outputs.swapchain;
+
+    if toggles.sprite_pass {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+            let pass = SpritePass::new(
+                pool,
+                swapchain_id,
+                params.surface_format,
+                size.width,
+                size.height,
+                params.config.use_transient_textures,
+                params.config.use_transient_aliasing,
+            );
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
 
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {

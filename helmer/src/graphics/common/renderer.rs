@@ -24,7 +24,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use crossbeam_channel::Sender;
 use egui::{Color32, ColorImage, Vec2 as EguiVec2};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::{HashMap, HashSet};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -491,6 +491,180 @@ pub struct RenderLight {
     pub light_type: LightType,
 }
 
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteSpace {
+    Screen = 0,
+    World = 1,
+}
+
+impl Default for SpriteSpace {
+    fn default() -> Self {
+        SpriteSpace::World
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteBlendMode {
+    Alpha = 0,
+    Premultiplied = 1,
+    Additive = 2,
+}
+
+impl Default for SpriteBlendMode {
+    fn default() -> Self {
+        SpriteBlendMode::Alpha
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlignH {
+    Left = 0,
+    Center = 1,
+    Right = 2,
+}
+
+impl Default for TextAlignH {
+    fn default() -> Self {
+        TextAlignH::Left
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlignV {
+    Top = 0,
+    Center = 1,
+    Bottom = 2,
+    Baseline = 3,
+}
+
+impl Default for TextAlignV {
+    fn default() -> Self {
+        TextAlignV::Baseline
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextFontStyle {
+    Normal = 0,
+    Italic = 1,
+    Oblique = 2,
+}
+
+impl Default for TextFontStyle {
+    fn default() -> Self {
+        TextFontStyle::Normal
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderSprite {
+    pub id: u64,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub size: Vec2,
+    pub color: [f32; 4],
+    pub texture_id: Option<usize>,
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub pivot: [f32; 2],
+    pub clip_rect: Option<[f32; 4]>,
+    pub layer: f32,
+    pub space: SpriteSpace,
+    pub blend_mode: SpriteBlendMode,
+    pub billboard: bool,
+    pub pick_id: u32,
+}
+
+impl Default for RenderSprite {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            size: Vec2::splat(1.0),
+            color: [1.0; 4],
+            texture_id: None,
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            pivot: [0.5, 0.5],
+            clip_rect: None,
+            layer: 0.0,
+            space: SpriteSpace::World,
+            blend_mode: SpriteBlendMode::Alpha,
+            billboard: false,
+            pick_id: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderText2d {
+    pub id: u64,
+    pub text: String,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec2,
+    pub color: [f32; 4],
+    pub font_path: Option<String>,
+    pub font_family: Option<String>,
+    pub font_size: f32,
+    pub font_weight: f32,
+    pub font_width: f32,
+    pub font_style: TextFontStyle,
+    pub line_height_scale: f32,
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub max_width: Option<f32>,
+    pub align_h: TextAlignH,
+    pub align_v: TextAlignV,
+    pub space: SpriteSpace,
+    pub billboard: bool,
+    pub blend_mode: SpriteBlendMode,
+    pub layer: f32,
+    pub clip_rect: Option<[f32; 4]>,
+    pub pick_id: u32,
+}
+
+impl Default for RenderText2d {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            text: String::new(),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec2::ONE,
+            color: [1.0; 4],
+            font_path: None,
+            font_family: None,
+            font_size: 16.0,
+            font_weight: 400.0,
+            font_width: 1.0,
+            font_style: TextFontStyle::Normal,
+            line_height_scale: 1.0,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            underline: false,
+            strikethrough: false,
+            max_width: None,
+            align_h: TextAlignH::Left,
+            align_v: TextAlignV::Baseline,
+            space: SpriteSpace::World,
+            billboard: false,
+            blend_mode: SpriteBlendMode::Alpha,
+            layer: 0.0,
+            clip_rect: None,
+            pick_id: 0,
+        }
+    }
+}
+
 /// Hint describing how urgently an asset should be (re)streamed to the GPU
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetStreamKind {
@@ -523,6 +697,8 @@ pub struct MeshLodPayload {
 pub struct RenderData {
     pub objects: Vec<RenderObject>,
     pub lights: Vec<RenderLight>,
+    pub sprites: Vec<RenderSprite>,
+    pub text_2d: Vec<RenderText2d>,
     pub previous_camera_transform: Transform,
     pub current_camera_transform: Transform,
     pub camera_component: Camera,
@@ -848,6 +1024,8 @@ pub struct RenderDelta {
     pub objects_remove: Vec<usize>,
     pub lights_upsert: Vec<RenderLightDelta>,
     pub lights_remove: Vec<usize>,
+    pub sprites: Option<Vec<RenderSprite>>,
+    pub text_2d: Option<Vec<RenderText2d>>,
     pub camera: Option<RenderCameraDelta>,
     pub render_main_scene_to_swapchain: Option<bool>,
     pub viewports: Option<Vec<RenderViewportRequest>>,
@@ -865,6 +1043,8 @@ impl RenderDelta {
             && self.objects_remove.is_empty()
             && self.lights_upsert.is_empty()
             && self.lights_remove.is_empty()
+            && self.sprites.is_none()
+            && self.text_2d.is_none()
             && self.camera.is_none()
             && self.render_main_scene_to_swapchain.is_none()
             && self.viewports.is_none()
@@ -917,6 +1097,12 @@ impl RenderDelta {
         if other.camera.is_some() {
             self.camera = other.camera;
         }
+        if other.sprites.is_some() {
+            self.sprites = other.sprites;
+        }
+        if other.text_2d.is_some() {
+            self.text_2d = other.text_2d;
+        }
         if other.render_main_scene_to_swapchain.is_some() {
             self.render_main_scene_to_swapchain = other.render_main_scene_to_swapchain;
         }
@@ -965,6 +1151,12 @@ impl RenderDelta {
 
         if delta.camera.is_some() {
             self.camera = delta.camera;
+        }
+        if delta.sprites.is_some() {
+            self.sprites = delta.sprites.clone();
+        }
+        if delta.text_2d.is_some() {
+            self.text_2d = delta.text_2d.clone();
         }
         if delta.render_main_scene_to_swapchain.is_some() {
             self.render_main_scene_to_swapchain = delta.render_main_scene_to_swapchain;

@@ -33,13 +33,16 @@ use winit::{event::MouseButton, keyboard::KeyCode};
 use helmer::audio::{AudioBus, AudioPlaybackState};
 use helmer::graphics::{
     backend::binding_backend::BindingBackendChoice,
-    common::renderer::{RenderControl, RenderMessage, WgpuBackend},
+    common::renderer::{
+        RenderControl, RenderMessage, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV,
+        TextFontStyle, WgpuBackend,
+    },
     graph::definition::resource_id::ResourceKind,
     render_graphs::{graph_templates, template_for_graph},
 };
 use helmer::provided::components::{
     AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer, Spline,
-    SplineFollower, SplineMode,
+    SplineFollower, SplineMode, SpriteRenderer, Text2d,
 };
 use helmer::runtime::asset_server::{Handle, Material, Mesh};
 use helmer::runtime::input_manager::InputManager;
@@ -63,15 +66,15 @@ use helmer_becs::{
     AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
     BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
     BevyMeshRenderer, BevyRenderSender, BevyRendererStats, BevyRuntimeConfig, BevyRuntimeTuning,
-    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevyStreamingTuning,
-    BevySystemProfiler, BevyTransform, BevyWrapper, DeltaTime,
+    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevySpriteRenderer,
+    BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform, BevyWrapper, DeltaTime,
 };
 
 use crate::editor::{
     EditorPlayCamera, activate_play_camera,
     assets::{
-        EditorAssetCache, EditorAudio, EditorMesh, MeshSource, PrimitiveKind, SceneAssetPath,
-        cached_audio_handle, cached_scene_handle,
+        EditorAssetCache, EditorAudio, EditorMesh, EditorSprite, MeshSource, PrimitiveKind,
+        SceneAssetPath, cached_audio_handle, cached_scene_handle, cached_texture_handle,
     },
     commands::{EditorCommand, EditorCommandQueue},
     dynamic::{DynamicComponent, DynamicComponents, DynamicField, DynamicValue},
@@ -3843,6 +3846,8 @@ fn build_ecs_table(
                 "camera" => world.get::<BevyCamera>(entity).is_some(),
                 "light" => world.get::<BevyLight>(entity).is_some(),
                 "mesh" | "mesh_renderer" => world.get::<BevyMeshRenderer>(entity).is_some(),
+                "sprite" | "sprite_renderer" => world.get::<BevySpriteRenderer>(entity).is_some(),
+                "text" | "text2d" | "text_2d" => world.get::<BevyText2d>(entity).is_some(),
                 "spline" => world.get::<BevySpline>(entity).is_some(),
                 "spline_follower" => world.get::<BevySplineFollower>(entity).is_some(),
                 "look_at" => world.get::<BevyLookAt>(entity).is_some(),
@@ -3918,6 +3923,21 @@ fn build_ecs_table(
                     world
                         .entity_mut(entity)
                         .insert(BevyWrapper(Light::point(Vec3::ONE, 10.0)));
+                }
+                "sprite" | "sprite_renderer" => {
+                    ensure_transform(world, entity);
+                    world
+                        .entity_mut(entity)
+                        .insert(BevyWrapper(SpriteRenderer::default()));
+                    world
+                        .entity_mut(entity)
+                        .insert(EditorSprite { texture_path: None });
+                }
+                "text" | "text2d" | "text_2d" => {
+                    ensure_transform(world, entity);
+                    let mut text = Text2d::default();
+                    text.text = "Text".to_string();
+                    world.entity_mut(entity).insert(BevyText2d(text));
                 }
                 "spline" => {
                     ensure_transform(world, entity);
@@ -4108,6 +4128,13 @@ fn build_ecs_table(
                 "mesh" | "mesh_renderer" => {
                     world.entity_mut(entity).remove::<BevyMeshRenderer>();
                     world.entity_mut(entity).remove::<EditorMesh>();
+                }
+                "sprite" | "sprite_renderer" => {
+                    world.entity_mut(entity).remove::<BevySpriteRenderer>();
+                    world.entity_mut(entity).remove::<EditorSprite>();
+                }
+                "text" | "text2d" | "text_2d" => {
+                    world.entity_mut(entity).remove::<BevyText2d>();
                 }
                 "spline" => {
                     world.entity_mut(entity).remove::<BevySpline>();
@@ -5852,6 +5879,432 @@ fn build_ecs_table(
                 casts_shadow,
                 visible,
             ))
+        })?,
+    )?;
+
+    let world_ptr_get_sprite = world_ptr;
+    ecs.set(
+        "get_sprite_renderer",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_sprite as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(sprite) = world
+                .get::<BevySpriteRenderer>(entity)
+                .map(|component| component.0)
+            else {
+                return Ok(None);
+            };
+
+            let table = lua.create_table()?;
+            table.set("color", vec4_to_table(lua, sprite.color)?)?;
+            match sprite.texture_id {
+                Some(texture_id) => table.set("texture_id", texture_id as u64)?,
+                None => table.set("texture_id", Value::Nil)?,
+            }
+            match world
+                .get::<EditorSprite>(entity)
+                .and_then(|sprite| sprite.texture_path.clone())
+            {
+                Some(path) => table.set("texture", path)?,
+                None => table.set("texture", Value::Nil)?,
+            }
+            table.set(
+                "uv_min",
+                vec2_to_table(lua, Vec2::from_array(sprite.uv_min))?,
+            )?;
+            table.set(
+                "uv_max",
+                vec2_to_table(lua, Vec2::from_array(sprite.uv_max))?,
+            )?;
+            table.set("pivot", vec2_to_table(lua, Vec2::from_array(sprite.pivot))?)?;
+            if let Some(clip_rect) = sprite.clip_rect {
+                table.set("clip_rect", vec4_to_table(lua, clip_rect)?)?;
+            } else {
+                table.set("clip_rect", Value::Nil)?;
+            }
+            table.set("layer", sprite.layer)?;
+            table.set("space", sprite_space_name(sprite.space))?;
+            table.set("blend_mode", sprite_blend_mode_name(sprite.blend_mode))?;
+            table.set("billboard", sprite.billboard)?;
+            table.set("visible", sprite.visible)?;
+            match sprite.pick_id {
+                Some(pick_id) => table.set("pick_id", pick_id as u64)?,
+                None => table.set("pick_id", Value::Nil)?,
+            }
+
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_get_sprite_texture_path = world_ptr;
+    ecs.set(
+        "get_sprite_renderer_texture_path",
+        lua.create_function(move |_, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_sprite_texture_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            Ok(world
+                .get::<EditorSprite>(entity)
+                .and_then(|sprite| sprite.texture_path.clone()))
+        })?,
+    )?;
+
+    let world_ptr_set_sprite = world_ptr;
+    ecs.set(
+        "set_sprite_renderer",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_sprite as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+
+            let project = world.get_resource::<EditorProject>().cloned();
+            let mut sprite = world
+                .get::<BevySpriteRenderer>(entity)
+                .map(|component| component.0)
+                .unwrap_or_default();
+            let mut editor_sprite = world
+                .get::<EditorSprite>(entity)
+                .cloned()
+                .unwrap_or(EditorSprite { texture_path: None });
+
+            if let Ok(color) = data.get::<Table>("color") {
+                if let Some(color) = table_to_vec4(&color) {
+                    sprite.color = color;
+                }
+            }
+            if let Ok(uv_min) = data.get::<Table>("uv_min") {
+                if let Some(uv_min) = table_to_vec2(&uv_min) {
+                    sprite.uv_min = uv_min.to_array();
+                }
+            }
+            if let Ok(uv_max) = data.get::<Table>("uv_max") {
+                if let Some(uv_max) = table_to_vec2(&uv_max) {
+                    sprite.uv_max = uv_max.to_array();
+                }
+            }
+            if let Ok(pivot) = data.get::<Table>("pivot") {
+                if let Some(pivot) = table_to_vec2(&pivot) {
+                    sprite.pivot = pivot.to_array();
+                }
+            }
+            if let Ok(clip_rect) = data.get::<Value>("clip_rect") {
+                match clip_rect {
+                    Value::Nil => sprite.clip_rect = None,
+                    Value::Table(table) => {
+                        if let Some(rect) = table_to_vec4(&table) {
+                            sprite.clip_rect = Some(rect);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(layer) = data.get::<f32>("layer") {
+                sprite.layer = layer;
+            }
+            if let Ok(space) = data.get::<Value>("space") {
+                if let Some(space) = sprite_space_from_value(space) {
+                    sprite.space = space;
+                }
+            }
+            if let Ok(blend_mode) = data.get::<Value>("blend_mode") {
+                if let Some(blend_mode) = sprite_blend_mode_from_value(blend_mode) {
+                    sprite.blend_mode = blend_mode;
+                }
+            }
+            if let Ok(billboard) = data.get::<bool>("billboard") {
+                sprite.billboard = billboard;
+            }
+            if let Ok(visible) = data.get::<bool>("visible") {
+                sprite.visible = visible;
+            }
+            if let Ok(pick_id) = data.get::<Value>("pick_id") {
+                sprite.pick_id = value_to_optional_u32(pick_id).flatten();
+            }
+            if let Ok(texture_id) = data.get::<Value>("texture_id") {
+                if let Some(texture_id) = value_to_optional_u32(texture_id) {
+                    sprite.texture_id = texture_id.map(|id| id as usize);
+                }
+            }
+            if let Ok(texture_path) = data.get::<Value>("texture") {
+                match texture_path {
+                    Value::Nil => {
+                        sprite.texture_id = None;
+                        editor_sprite.texture_path = None;
+                    }
+                    Value::String(path) => {
+                        let path = path.to_string_lossy().to_string();
+                        if path.trim().is_empty() {
+                            sprite.texture_id = None;
+                            editor_sprite.texture_path = None;
+                        } else {
+                            let normalized =
+                                normalize_project_path(project.as_ref(), Path::new(path.trim()));
+                            if let Some(texture_id) =
+                                load_texture_id(world, project.as_ref(), &normalized)
+                            {
+                                sprite.texture_id = Some(texture_id);
+                                editor_sprite.texture_path = Some(normalized);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert((BevyWrapper(sprite), editor_sprite));
+            mark_entity_render_dirty(world, entity);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_set_sprite_texture_path = world_ptr;
+    ecs.set(
+        "set_sprite_renderer_texture_path",
+        lua.create_function(move |_, (entity_id, path): (u64, String)| {
+            let world = unsafe { &mut *(world_ptr_set_sprite_texture_path as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+
+            let project = world.get_resource::<EditorProject>().cloned();
+            let mut sprite = world
+                .get::<BevySpriteRenderer>(entity)
+                .map(|component| component.0)
+                .unwrap_or_default();
+            let mut editor_sprite = world
+                .get::<EditorSprite>(entity)
+                .cloned()
+                .unwrap_or(EditorSprite { texture_path: None });
+
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                sprite.texture_id = None;
+                editor_sprite.texture_path = None;
+            } else {
+                let normalized = normalize_project_path(project.as_ref(), Path::new(trimmed));
+                let Some(texture_id) = load_texture_id(world, project.as_ref(), &normalized) else {
+                    return Ok(false);
+                };
+                sprite.texture_id = Some(texture_id);
+                editor_sprite.texture_path = Some(normalized);
+            }
+
+            ensure_transform(world, entity);
+            world
+                .entity_mut(entity)
+                .insert((BevyWrapper(sprite), editor_sprite));
+            mark_entity_render_dirty(world, entity);
+            Ok(true)
+        })?,
+    )?;
+
+    let world_ptr_get_text2d = world_ptr;
+    ecs.set(
+        "get_text2d",
+        lua.create_function(move |lua, entity_id: u64| {
+            let world = unsafe { &mut *(world_ptr_get_text2d as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(None);
+            };
+            let Some(text) = world
+                .get::<BevyText2d>(entity)
+                .map(|component| component.0.clone())
+            else {
+                return Ok(None);
+            };
+
+            let table = lua.create_table()?;
+            table.set("text", text.text)?;
+            table.set("color", vec4_to_table(lua, text.color)?)?;
+            match text.font_path {
+                Some(path) => table.set("font_path", path)?,
+                None => table.set("font_path", Value::Nil)?,
+            }
+            match text.font_family {
+                Some(family) => table.set("font_family", family)?,
+                None => table.set("font_family", Value::Nil)?,
+            }
+            table.set("font_size", text.font_size)?;
+            table.set("font_weight", text.font_weight)?;
+            table.set("font_width", text.font_width)?;
+            table.set("font_style", text_font_style_name(text.font_style))?;
+            table.set("line_height_scale", text.line_height_scale)?;
+            table.set("letter_spacing", text.letter_spacing)?;
+            table.set("word_spacing", text.word_spacing)?;
+            table.set("underline", text.underline)?;
+            table.set("strikethrough", text.strikethrough)?;
+            match text.max_width {
+                Some(max_width) => table.set("max_width", max_width)?,
+                None => table.set("max_width", Value::Nil)?,
+            }
+            table.set("align_h", text_align_h_name(text.align_h))?;
+            table.set("align_v", text_align_v_name(text.align_v))?;
+            table.set("space", sprite_space_name(text.space))?;
+            table.set("blend_mode", sprite_blend_mode_name(text.blend_mode))?;
+            table.set("billboard", text.billboard)?;
+            table.set("visible", text.visible)?;
+            table.set("layer", text.layer)?;
+            if let Some(clip_rect) = text.clip_rect {
+                table.set("clip_rect", vec4_to_table(lua, clip_rect)?)?;
+            } else {
+                table.set("clip_rect", Value::Nil)?;
+            }
+            match text.pick_id {
+                Some(pick_id) => table.set("pick_id", pick_id as u64)?,
+                None => table.set("pick_id", Value::Nil)?,
+            }
+
+            Ok(Some(table))
+        })?,
+    )?;
+
+    let world_ptr_set_text2d = world_ptr;
+    ecs.set(
+        "set_text2d",
+        lua.create_function(move |_, (entity_id, data): (u64, Table)| {
+            let world = unsafe { &mut *(world_ptr_set_text2d as *mut World) };
+            let Some(entity) = lookup_editor_entity(world, entity_id) else {
+                return Ok(false);
+            };
+
+            let project = world.get_resource::<EditorProject>().cloned();
+            let mut text = world
+                .get::<BevyText2d>(entity)
+                .map(|component| component.0.clone())
+                .unwrap_or_default();
+
+            if let Ok(value) = data.get::<String>("text") {
+                text.text = value;
+            }
+            if let Ok(color) = data.get::<Table>("color") {
+                if let Some(color) = table_to_vec4(&color) {
+                    text.color = color;
+                }
+            }
+            if let Ok(font_path) = data.get::<Value>("font_path") {
+                match font_path {
+                    Value::Nil => text.font_path = None,
+                    Value::String(path) => {
+                        let path = path.to_string_lossy().to_string();
+                        if path.trim().is_empty() {
+                            text.font_path = None;
+                        } else {
+                            let normalized =
+                                normalize_project_path(project.as_ref(), Path::new(path.trim()));
+                            let resolved =
+                                resolve_project_path(project.as_ref(), Path::new(&normalized));
+                            text.font_path = Some(resolved.to_string_lossy().to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(font_family) = data.get::<Value>("font_family") {
+                match font_family {
+                    Value::Nil => text.font_family = None,
+                    Value::String(family) => {
+                        let family = family.to_string_lossy().trim().to_string();
+                        text.font_family = if family.is_empty() {
+                            None
+                        } else {
+                            Some(family)
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(font_size) = data.get::<f32>("font_size") {
+                text.font_size = font_size.max(0.01);
+            }
+            if let Ok(font_weight) = data.get::<f32>("font_weight") {
+                text.font_weight = font_weight.clamp(1.0, 1000.0);
+            }
+            if let Ok(font_width) = data.get::<f32>("font_width") {
+                text.font_width = font_width.clamp(0.25, 4.0);
+            }
+            if let Ok(font_style) = data.get::<Value>("font_style") {
+                if let Some(font_style) = text_font_style_from_value(font_style) {
+                    text.font_style = font_style;
+                }
+            }
+            if let Ok(line_height_scale) = data.get::<f32>("line_height_scale") {
+                text.line_height_scale = line_height_scale.max(0.1);
+            }
+            if let Ok(letter_spacing) = data.get::<f32>("letter_spacing") {
+                text.letter_spacing = letter_spacing;
+            }
+            if let Ok(word_spacing) = data.get::<f32>("word_spacing") {
+                text.word_spacing = word_spacing;
+            }
+            if let Ok(underline) = data.get::<bool>("underline") {
+                text.underline = underline;
+            }
+            if let Ok(strikethrough) = data.get::<bool>("strikethrough") {
+                text.strikethrough = strikethrough;
+            }
+            if let Ok(max_width) = data.get::<Value>("max_width") {
+                text.max_width = match max_width {
+                    Value::Nil => None,
+                    Value::Integer(width) if width > 0 => Some(width as f32),
+                    Value::Number(width) if width.is_finite() && width > 0.0 => Some(width as f32),
+                    _ => text.max_width,
+                };
+            }
+            if let Ok(align_h) = data.get::<Value>("align_h") {
+                if let Some(align_h) = text_align_h_from_value(align_h) {
+                    text.align_h = align_h;
+                }
+            }
+            if let Ok(align_v) = data.get::<Value>("align_v") {
+                if let Some(align_v) = text_align_v_from_value(align_v) {
+                    text.align_v = align_v;
+                }
+            }
+            if let Ok(space) = data.get::<Value>("space") {
+                if let Some(space) = sprite_space_from_value(space) {
+                    text.space = space;
+                }
+            }
+            if let Ok(blend_mode) = data.get::<Value>("blend_mode") {
+                if let Some(blend_mode) = sprite_blend_mode_from_value(blend_mode) {
+                    text.blend_mode = blend_mode;
+                }
+            }
+            if let Ok(billboard) = data.get::<bool>("billboard") {
+                text.billboard = billboard;
+            }
+            if let Ok(visible) = data.get::<bool>("visible") {
+                text.visible = visible;
+            }
+            if let Ok(layer) = data.get::<f32>("layer") {
+                text.layer = layer;
+            }
+            if let Ok(clip_rect) = data.get::<Value>("clip_rect") {
+                match clip_rect {
+                    Value::Nil => text.clip_rect = None,
+                    Value::Table(table) => {
+                        if let Some(rect) = table_to_vec4(&table) {
+                            text.clip_rect = Some(rect);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(pick_id) = data.get::<Value>("pick_id") {
+                text.pick_id = value_to_optional_u32(pick_id).flatten();
+            }
+
+            ensure_transform(world, entity);
+            world.entity_mut(entity).insert(BevyText2d(text));
+            mark_entity_render_dirty(world, entity);
+            Ok(true)
         })?,
     )?;
 
@@ -14304,6 +14757,23 @@ fn vec2_to_table(lua: &Lua, value: Vec2) -> mlua::Result<Table> {
     Ok(table)
 }
 
+fn vec4_to_table(lua: &Lua, value: [f32; 4]) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("x", value[0])?;
+    table.set("y", value[1])?;
+    table.set("z", value[2])?;
+    table.set("w", value[3])?;
+    table.set("r", value[0])?;
+    table.set("g", value[1])?;
+    table.set("b", value[2])?;
+    table.set("a", value[3])?;
+    table.set(1, value[0])?;
+    table.set(2, value[1])?;
+    table.set(3, value[2])?;
+    table.set(4, value[3])?;
+    Ok(table)
+}
+
 fn vec3_to_table(lua: &Lua, value: Vec3) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("x", value.x)?;
@@ -14342,6 +14812,44 @@ fn table_to_vec3(table: &Table) -> Option<Vec3> {
         .ok()
         .or_else(|| table.get::<f32>(3).ok())?;
     Some(Vec3::new(x, y, z))
+}
+
+fn table_to_vec2(table: &Table) -> Option<Vec2> {
+    let x = table
+        .get::<f32>("x")
+        .ok()
+        .or_else(|| table.get::<f32>("u").ok())
+        .or_else(|| table.get::<f32>(1).ok())?;
+    let y = table
+        .get::<f32>("y")
+        .ok()
+        .or_else(|| table.get::<f32>("v").ok())
+        .or_else(|| table.get::<f32>(2).ok())?;
+    Some(Vec2::new(x, y))
+}
+
+fn table_to_vec4(table: &Table) -> Option<[f32; 4]> {
+    let x = table
+        .get::<f32>("x")
+        .ok()
+        .or_else(|| table.get::<f32>("r").ok())
+        .or_else(|| table.get::<f32>(1).ok())?;
+    let y = table
+        .get::<f32>("y")
+        .ok()
+        .or_else(|| table.get::<f32>("g").ok())
+        .or_else(|| table.get::<f32>(2).ok())?;
+    let z = table
+        .get::<f32>("z")
+        .ok()
+        .or_else(|| table.get::<f32>("b").ok())
+        .or_else(|| table.get::<f32>(3).ok())?;
+    let w = table
+        .get::<f32>("w")
+        .ok()
+        .or_else(|| table.get::<f32>("a").ok())
+        .or_else(|| table.get::<f32>(4).ok())?;
+    Some([x, y, z, w])
 }
 
 fn table_to_quat(table: &Table) -> Option<Quat> {
@@ -14400,6 +14908,201 @@ fn parse_light_type(value: &str, current: LightType) -> LightType {
             },
         },
         _ => current,
+    }
+}
+
+fn sprite_space_name(space: SpriteSpace) -> &'static str {
+    match space {
+        SpriteSpace::Screen => "screen",
+        SpriteSpace::World => "world",
+    }
+}
+
+fn sprite_space_from_value(value: Value) -> Option<SpriteSpace> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "screen" => Some(SpriteSpace::Screen),
+                "world" => Some(SpriteSpace::World),
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(SpriteSpace::Screen),
+            1 => Some(SpriteSpace::World),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(SpriteSpace::Screen),
+                1 => Some(SpriteSpace::World),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn sprite_blend_mode_name(mode: SpriteBlendMode) -> &'static str {
+    match mode {
+        SpriteBlendMode::Alpha => "alpha",
+        SpriteBlendMode::Premultiplied => "premultiplied",
+        SpriteBlendMode::Additive => "additive",
+    }
+}
+
+fn sprite_blend_mode_from_value(value: Value) -> Option<SpriteBlendMode> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "alpha" => Some(SpriteBlendMode::Alpha),
+                "premultiplied" | "premul" | "premult" => Some(SpriteBlendMode::Premultiplied),
+                "additive" | "add" => Some(SpriteBlendMode::Additive),
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(SpriteBlendMode::Alpha),
+            1 => Some(SpriteBlendMode::Premultiplied),
+            2 => Some(SpriteBlendMode::Additive),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(SpriteBlendMode::Alpha),
+                1 => Some(SpriteBlendMode::Premultiplied),
+                2 => Some(SpriteBlendMode::Additive),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn text_font_style_name(style: TextFontStyle) -> &'static str {
+    match style {
+        TextFontStyle::Normal => "normal",
+        TextFontStyle::Italic => "italic",
+        TextFontStyle::Oblique => "oblique",
+    }
+}
+
+fn text_font_style_from_value(value: Value) -> Option<TextFontStyle> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "normal" => Some(TextFontStyle::Normal),
+                "italic" => Some(TextFontStyle::Italic),
+                "oblique" => Some(TextFontStyle::Oblique),
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(TextFontStyle::Normal),
+            1 => Some(TextFontStyle::Italic),
+            2 => Some(TextFontStyle::Oblique),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(TextFontStyle::Normal),
+                1 => Some(TextFontStyle::Italic),
+                2 => Some(TextFontStyle::Oblique),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn text_align_h_name(align: TextAlignH) -> &'static str {
+    match align {
+        TextAlignH::Left => "left",
+        TextAlignH::Center => "center",
+        TextAlignH::Right => "right",
+    }
+}
+
+fn text_align_h_from_value(value: Value) -> Option<TextAlignH> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "left" => Some(TextAlignH::Left),
+                "center" | "centre" => Some(TextAlignH::Center),
+                "right" => Some(TextAlignH::Right),
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(TextAlignH::Left),
+            1 => Some(TextAlignH::Center),
+            2 => Some(TextAlignH::Right),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(TextAlignH::Left),
+                1 => Some(TextAlignH::Center),
+                2 => Some(TextAlignH::Right),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn text_align_v_name(align: TextAlignV) -> &'static str {
+    match align {
+        TextAlignV::Top => "top",
+        TextAlignV::Center => "center",
+        TextAlignV::Bottom => "bottom",
+        TextAlignV::Baseline => "baseline",
+    }
+}
+
+fn text_align_v_from_value(value: Value) -> Option<TextAlignV> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "top" => Some(TextAlignV::Top),
+                "center" | "centre" => Some(TextAlignV::Center),
+                "bottom" => Some(TextAlignV::Bottom),
+                "baseline" => Some(TextAlignV::Baseline),
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(TextAlignV::Top),
+            1 => Some(TextAlignV::Center),
+            2 => Some(TextAlignV::Bottom),
+            3 => Some(TextAlignV::Baseline),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(TextAlignV::Top),
+                1 => Some(TextAlignV::Center),
+                2 => Some(TextAlignV::Bottom),
+                3 => Some(TextAlignV::Baseline),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -14479,6 +15182,48 @@ fn resolve_project_path(project: Option<&EditorProject>, path: &Path) -> PathBuf
         }
     }
     path.to_path_buf()
+}
+
+fn value_to_optional_u32(value: Value) -> Option<Option<u32>> {
+    match value {
+        Value::Nil => Some(None),
+        Value::Integer(raw) => {
+            if raw < 0 {
+                return None;
+            }
+            Some(Some(raw as u32))
+        }
+        Value::Number(raw) => {
+            if !raw.is_finite() || raw < 0.0 {
+                return None;
+            }
+            Some(Some(raw as u32))
+        }
+        _ => None,
+    }
+}
+
+fn load_texture_id(
+    world: &mut World,
+    project: Option<&EditorProject>,
+    path: &str,
+) -> Option<usize> {
+    let full_path = resolve_project_path(project, Path::new(path));
+    let asset_server = world
+        .get_resource::<BevyAssetServer>()
+        .map(|server| BevyAssetServer(server.0.clone()))?;
+
+    if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
+        let handle = cached_texture_handle(&mut cache, &asset_server, &full_path);
+        return Some(handle.id);
+    }
+    Some(
+        asset_server
+            .0
+            .lock()
+            .load_texture(full_path, helmer::runtime::asset_server::AssetKind::Albedo)
+            .id,
+    )
 }
 
 fn mark_entity_render_dirty(world: &mut World, entity: Entity) {

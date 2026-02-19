@@ -8,7 +8,7 @@ use bevy_ecs::prelude::{Component, Resource};
 use egui::Pos2;
 use helmer::audio::AudioLoadMode;
 use helmer::provided::components::MeshAsset;
-use helmer::runtime::asset_server::{Handle, Material, Mesh, Scene};
+use helmer::runtime::asset_server::{AssetKind, Handle, Material, Mesh, Scene, Texture};
 use helmer_becs::BevyAssetServer;
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
@@ -126,6 +126,11 @@ pub struct EditorAudio {
 }
 
 #[derive(Component, Debug, Clone)]
+pub struct EditorSprite {
+    pub texture_path: Option<String>,
+}
+
+#[derive(Component, Debug, Clone)]
 pub struct SceneAssetPath {
     pub path: PathBuf,
 }
@@ -138,6 +143,7 @@ pub struct EditorAssetCache {
     pub primitive_meshes: HashMap<PrimitiveKind, Handle<Mesh>>,
     pub scene_handles: HashMap<String, Handle<Scene>>,
     pub audio_handles: HashMap<String, Handle<helmer::audio::AudioClip>>,
+    pub texture_handles: HashMap<String, Handle<Texture>>,
 }
 
 pub fn scene_cache_key(path: &Path) -> String {
@@ -181,6 +187,20 @@ pub fn cached_audio_handle(
     };
     let handle = asset_server.0.lock().load_audio(path, mode);
     cache.audio_handles.insert(key, handle.clone());
+    handle
+}
+
+pub fn cached_texture_handle(
+    cache: &mut EditorAssetCache,
+    asset_server: &BevyAssetServer,
+    path: &Path,
+) -> Handle<Texture> {
+    let key = scene_cache_key(path);
+    if let Some(handle) = cache.texture_handles.get(&key) {
+        return handle.clone();
+    }
+    let handle = asset_server.0.lock().load_texture(path, AssetKind::Albedo);
+    cache.texture_handles.insert(key, handle.clone());
     handle
 }
 

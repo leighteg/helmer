@@ -970,6 +970,8 @@ impl System for RenderDataSystem {
             objects_remove,
             lights_upsert,
             lights_remove,
+            sprites: None,
+            text_2d: None,
             camera: None,
             render_main_scene_to_swapchain: None,
             viewports: None,

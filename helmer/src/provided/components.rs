@@ -1,6 +1,8 @@
 use crate::animation::{Pose, Skeleton, Skin};
 use crate::audio::{AudioBus, AudioPlaybackState};
-use crate::graphics::common::renderer::{AlphaMode, Vertex};
+use crate::graphics::common::renderer::{
+    AlphaMode, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle, Vertex,
+};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::HashMap;
 use std::sync::Arc;
@@ -86,6 +88,100 @@ impl MeshRenderer {
             material_id,
             casts_shadow,
             visible,
+        }
+    }
+}
+
+// --- Sprite Rendering Component ---
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteRenderer {
+    pub color: [f32; 4],
+    pub texture_id: Option<usize>,
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub pivot: [f32; 2],
+    pub clip_rect: Option<[f32; 4]>,
+    pub layer: f32,
+    pub space: SpriteSpace,
+    pub blend_mode: SpriteBlendMode,
+    pub billboard: bool,
+    pub visible: bool,
+    pub pick_id: Option<u32>,
+}
+
+impl Default for SpriteRenderer {
+    fn default() -> Self {
+        Self {
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture_id: None,
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            pivot: [0.5, 0.5],
+            clip_rect: None,
+            layer: 0.0,
+            space: SpriteSpace::World,
+            blend_mode: SpriteBlendMode::Alpha,
+            billboard: false,
+            visible: true,
+            pick_id: None,
+        }
+    }
+}
+
+// --- World/Screen Text Rendering Component ---
+#[derive(Debug, Clone, PartialEq)]
+pub struct Text2d {
+    pub text: String,
+    pub color: [f32; 4],
+    pub font_path: Option<String>,
+    pub font_family: Option<String>,
+    pub font_size: f32,
+    pub font_weight: f32,
+    pub font_width: f32,
+    pub font_style: TextFontStyle,
+    pub line_height_scale: f32,
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub max_width: Option<f32>,
+    pub align_h: TextAlignH,
+    pub align_v: TextAlignV,
+    pub space: SpriteSpace,
+    pub billboard: bool,
+    pub blend_mode: SpriteBlendMode,
+    pub layer: f32,
+    pub clip_rect: Option<[f32; 4]>,
+    pub visible: bool,
+    pub pick_id: Option<u32>,
+}
+
+impl Default for Text2d {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            color: [1.0, 1.0, 1.0, 1.0],
+            font_path: None,
+            font_family: None,
+            font_size: 16.0,
+            font_weight: 400.0,
+            font_width: 1.0,
+            font_style: TextFontStyle::Normal,
+            line_height_scale: 1.0,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            underline: false,
+            strikethrough: false,
+            max_width: None,
+            align_h: TextAlignH::Left,
+            align_v: TextAlignV::Baseline,
+            space: SpriteSpace::World,
+            billboard: false,
+            blend_mode: SpriteBlendMode::Alpha,
+            layer: 0.0,
+            clip_rect: None,
+            visible: true,
+            pick_id: None,
         }
     }
 }

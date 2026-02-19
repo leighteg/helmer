@@ -9,10 +9,13 @@ use bevy_ecs::prelude::{Component, Entity, Resource, World};
 use bevy_ecs::query::{With, Without};
 use helmer::{
     animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
+    graphics::common::renderer::{
+        SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle,
+    },
     provided::components::{
         AudioEmitter, AudioListener, Camera, EntityFollower, Light, LightType, LookAt,
         MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
-        Transform,
+        SpriteRenderer, Text2d, Transform,
     },
     runtime::asset_server::{Handle, Scene},
 };
@@ -26,7 +29,7 @@ use helmer_becs::physics::components::{
 use helmer_becs::{
     BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
     BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
-    BevySplineFollower, BevyTransform, BevyWrapper,
+    BevySplineFollower, BevySpriteRenderer, BevyText2d, BevyTransform, BevyWrapper,
     systems::scene_system::{
         EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, SpawnedScene,
         build_default_animator,
@@ -39,8 +42,9 @@ use crate::editor::{
     EditorPlayCamera, EditorTimelineState, EditorViewportCamera, FREECAM_ORBIT_DISTANCE_DEFAULT,
     Freecam,
     assets::{
-        EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh, MeshSource, PrimitiveKind,
-        SceneAssetPath, cached_audio_handle, cached_scene_handle,
+        EditorAssetCache, EditorAudio, EditorMesh, EditorSkinnedMesh, EditorSprite, MeshSource,
+        PrimitiveKind, SceneAssetPath, cached_audio_handle, cached_scene_handle,
+        cached_texture_handle,
     },
     dynamic::{DynamicComponent, DynamicComponents},
     project::EditorProject,
@@ -177,6 +181,10 @@ pub struct SceneComponents {
     pub mesh: Option<MeshComponentData>,
     #[serde(default)]
     pub skinned: Option<SkinnedMeshComponentData>,
+    #[serde(default)]
+    pub sprite: Option<SpriteComponentData>,
+    #[serde(default)]
+    pub text_2d: Option<Text2dComponentData>,
     pub light: Option<LightComponentData>,
     pub camera: Option<CameraComponentData>,
     pub scene: Option<SceneAssetData>,
@@ -1185,6 +1193,334 @@ pub struct SkinnedMeshComponentData {
     pub scene_node_index: Option<usize>,
     pub casts_shadow: bool,
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteSpaceData {
+    Screen,
+    World,
+}
+
+impl From<SpriteSpace> for SpriteSpaceData {
+    fn from(value: SpriteSpace) -> Self {
+        match value {
+            SpriteSpace::Screen => Self::Screen,
+            SpriteSpace::World => Self::World,
+        }
+    }
+}
+
+impl Default for SpriteSpaceData {
+    fn default() -> Self {
+        Self::World
+    }
+}
+
+impl SpriteSpaceData {
+    fn to_space(self) -> SpriteSpace {
+        match self {
+            Self::Screen => SpriteSpace::Screen,
+            Self::World => SpriteSpace::World,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteBlendModeData {
+    Alpha,
+    Premultiplied,
+    Additive,
+}
+
+impl From<SpriteBlendMode> for SpriteBlendModeData {
+    fn from(value: SpriteBlendMode) -> Self {
+        match value {
+            SpriteBlendMode::Alpha => Self::Alpha,
+            SpriteBlendMode::Premultiplied => Self::Premultiplied,
+            SpriteBlendMode::Additive => Self::Additive,
+        }
+    }
+}
+
+impl Default for SpriteBlendModeData {
+    fn default() -> Self {
+        Self::Alpha
+    }
+}
+
+impl SpriteBlendModeData {
+    fn to_blend_mode(self) -> SpriteBlendMode {
+        match self {
+            Self::Alpha => SpriteBlendMode::Alpha,
+            Self::Premultiplied => SpriteBlendMode::Premultiplied,
+            Self::Additive => SpriteBlendMode::Additive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlignHData {
+    Left,
+    Center,
+    Right,
+}
+
+impl From<TextAlignH> for TextAlignHData {
+    fn from(value: TextAlignH) -> Self {
+        match value {
+            TextAlignH::Left => Self::Left,
+            TextAlignH::Center => Self::Center,
+            TextAlignH::Right => Self::Right,
+        }
+    }
+}
+
+impl Default for TextAlignHData {
+    fn default() -> Self {
+        Self::Left
+    }
+}
+
+impl TextAlignHData {
+    fn to_align(self) -> TextAlignH {
+        match self {
+            Self::Left => TextAlignH::Left,
+            Self::Center => TextAlignH::Center,
+            Self::Right => TextAlignH::Right,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlignVData {
+    Top,
+    Center,
+    Bottom,
+    Baseline,
+}
+
+impl From<TextAlignV> for TextAlignVData {
+    fn from(value: TextAlignV) -> Self {
+        match value {
+            TextAlignV::Top => Self::Top,
+            TextAlignV::Center => Self::Center,
+            TextAlignV::Bottom => Self::Bottom,
+            TextAlignV::Baseline => Self::Baseline,
+        }
+    }
+}
+
+impl Default for TextAlignVData {
+    fn default() -> Self {
+        Self::Baseline
+    }
+}
+
+impl TextAlignVData {
+    fn to_align(self) -> TextAlignV {
+        match self {
+            Self::Top => TextAlignV::Top,
+            Self::Center => TextAlignV::Center,
+            Self::Bottom => TextAlignV::Bottom,
+            Self::Baseline => TextAlignV::Baseline,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextFontStyleData {
+    Normal,
+    Italic,
+    Oblique,
+}
+
+impl From<TextFontStyle> for TextFontStyleData {
+    fn from(value: TextFontStyle) -> Self {
+        match value {
+            TextFontStyle::Normal => Self::Normal,
+            TextFontStyle::Italic => Self::Italic,
+            TextFontStyle::Oblique => Self::Oblique,
+        }
+    }
+}
+
+impl Default for TextFontStyleData {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl TextFontStyleData {
+    fn to_style(self) -> TextFontStyle {
+        match self {
+            Self::Normal => TextFontStyle::Normal,
+            Self::Italic => TextFontStyle::Italic,
+            Self::Oblique => TextFontStyle::Oblique,
+        }
+    }
+}
+
+fn sprite_default_color() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+fn sprite_default_uv_min() -> [f32; 2] {
+    [0.0, 0.0]
+}
+
+fn sprite_default_uv_max() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
+fn sprite_default_pivot() -> [f32; 2] {
+    [0.5, 0.5]
+}
+
+fn scene_component_visible_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpriteComponentData {
+    #[serde(default)]
+    pub texture: Option<String>,
+    #[serde(default = "sprite_default_color")]
+    pub color: [f32; 4],
+    #[serde(default = "sprite_default_uv_min")]
+    pub uv_min: [f32; 2],
+    #[serde(default = "sprite_default_uv_max")]
+    pub uv_max: [f32; 2],
+    #[serde(default = "sprite_default_pivot")]
+    pub pivot: [f32; 2],
+    #[serde(default)]
+    pub clip_rect: Option<[f32; 4]>,
+    #[serde(default)]
+    pub layer: f32,
+    #[serde(default)]
+    pub space: SpriteSpaceData,
+    #[serde(default)]
+    pub blend_mode: SpriteBlendModeData,
+    #[serde(default)]
+    pub billboard: bool,
+    #[serde(default = "scene_component_visible_default")]
+    pub visible: bool,
+    #[serde(default)]
+    pub pick_id: Option<u32>,
+}
+
+impl Default for SpriteComponentData {
+    fn default() -> Self {
+        Self {
+            texture: None,
+            color: sprite_default_color(),
+            uv_min: sprite_default_uv_min(),
+            uv_max: sprite_default_uv_max(),
+            pivot: sprite_default_pivot(),
+            clip_rect: None,
+            layer: 0.0,
+            space: SpriteSpaceData::default(),
+            blend_mode: SpriteBlendModeData::default(),
+            billboard: false,
+            visible: true,
+            pick_id: None,
+        }
+    }
+}
+
+fn text_default_font_size() -> f32 {
+    16.0
+}
+
+fn text_default_font_weight() -> f32 {
+    400.0
+}
+
+fn text_default_font_width() -> f32 {
+    1.0
+}
+
+fn text_default_line_height_scale() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Text2dComponentData {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default = "sprite_default_color")]
+    pub color: [f32; 4],
+    #[serde(default)]
+    pub font_path: Option<String>,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default = "text_default_font_size")]
+    pub font_size: f32,
+    #[serde(default = "text_default_font_weight")]
+    pub font_weight: f32,
+    #[serde(default = "text_default_font_width")]
+    pub font_width: f32,
+    #[serde(default)]
+    pub font_style: TextFontStyleData,
+    #[serde(default = "text_default_line_height_scale")]
+    pub line_height_scale: f32,
+    #[serde(default)]
+    pub letter_spacing: f32,
+    #[serde(default)]
+    pub word_spacing: f32,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strikethrough: bool,
+    #[serde(default)]
+    pub max_width: Option<f32>,
+    #[serde(default)]
+    pub align_h: TextAlignHData,
+    #[serde(default)]
+    pub align_v: TextAlignVData,
+    #[serde(default)]
+    pub space: SpriteSpaceData,
+    #[serde(default)]
+    pub billboard: bool,
+    #[serde(default)]
+    pub blend_mode: SpriteBlendModeData,
+    #[serde(default)]
+    pub layer: f32,
+    #[serde(default)]
+    pub clip_rect: Option<[f32; 4]>,
+    #[serde(default = "scene_component_visible_default")]
+    pub visible: bool,
+    #[serde(default)]
+    pub pick_id: Option<u32>,
+}
+
+impl Default for Text2dComponentData {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            color: sprite_default_color(),
+            font_path: None,
+            font_family: None,
+            font_size: text_default_font_size(),
+            font_weight: text_default_font_weight(),
+            font_width: text_default_font_width(),
+            font_style: TextFontStyleData::default(),
+            line_height_scale: text_default_line_height_scale(),
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            underline: false,
+            strikethrough: false,
+            max_width: None,
+            align_h: TextAlignHData::default(),
+            align_v: TextAlignVData::default(),
+            space: SpriteSpaceData::default(),
+            billboard: false,
+            blend_mode: SpriteBlendModeData::default(),
+            layer: 0.0,
+            clip_rect: None,
+            visible: true,
+            pick_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -2539,6 +2875,67 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 visible,
             })
         });
+        let sprite = world.get::<BevySpriteRenderer>(entity).map(|sprite| {
+            let texture = world
+                .get::<EditorSprite>(entity)
+                .and_then(|editor| editor.texture_path.clone())
+                .and_then(|path| {
+                    let path = path.trim().to_string();
+                    if path.is_empty() {
+                        None
+                    } else {
+                        Some(normalize_path(&path, root))
+                    }
+                });
+            SpriteComponentData {
+                texture,
+                color: sprite.0.color,
+                uv_min: sprite.0.uv_min,
+                uv_max: sprite.0.uv_max,
+                pivot: sprite.0.pivot,
+                clip_rect: sprite.0.clip_rect,
+                layer: sprite.0.layer,
+                space: sprite.0.space.into(),
+                blend_mode: sprite.0.blend_mode.into(),
+                billboard: sprite.0.billboard,
+                visible: sprite.0.visible,
+                pick_id: sprite.0.pick_id,
+            }
+        });
+        let text_2d = world
+            .get::<BevyText2d>(entity)
+            .map(|text| Text2dComponentData {
+                text: text.0.text.clone(),
+                color: text.0.color,
+                font_path: text.0.font_path.as_ref().and_then(|path| {
+                    let path = path.trim();
+                    if path.is_empty() {
+                        None
+                    } else {
+                        Some(normalize_path(path, root))
+                    }
+                }),
+                font_family: text.0.font_family.clone(),
+                font_size: text.0.font_size,
+                font_weight: text.0.font_weight,
+                font_width: text.0.font_width,
+                font_style: text.0.font_style.into(),
+                line_height_scale: text.0.line_height_scale,
+                letter_spacing: text.0.letter_spacing,
+                word_spacing: text.0.word_spacing,
+                underline: text.0.underline,
+                strikethrough: text.0.strikethrough,
+                max_width: text.0.max_width,
+                align_h: text.0.align_h.into(),
+                align_v: text.0.align_v.into(),
+                space: text.0.space.into(),
+                billboard: text.0.billboard,
+                blend_mode: text.0.blend_mode.into(),
+                layer: text.0.layer,
+                clip_rect: text.0.clip_rect,
+                visible: text.0.visible,
+                pick_id: text.0.pick_id,
+            });
         let scene_child_renderer =
             if scene_child_meta.is_some() && mesh.is_none() && skinned.is_none() {
                 if let Some(renderer) = skinned_renderer {
@@ -2794,6 +3191,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
         let components = SceneComponents {
             mesh,
             skinned,
+            sprite,
+            text_2d,
             light,
             camera,
             scene,
@@ -3007,6 +3406,70 @@ pub fn spawn_scene_from_document(
                 any_play_camera = true;
                 entity.insert(EditorPlayCamera);
             }
+        }
+
+        if let Some(sprite) = &entity_data.components.sprite {
+            let texture_path = sprite.texture.as_ref().and_then(|path| {
+                let path = path.trim().to_string();
+                if path.is_empty() { None } else { Some(path) }
+            });
+            let texture_id = texture_path.as_ref().map(|path| {
+                let resolved = resolve_path(path, root);
+                cached_texture_handle(asset_cache, asset_server, &resolved).id
+            });
+            entity.insert(BevyWrapper(SpriteRenderer {
+                color: sprite.color,
+                texture_id,
+                uv_min: sprite.uv_min,
+                uv_max: sprite.uv_max,
+                pivot: sprite.pivot,
+                clip_rect: sprite.clip_rect,
+                layer: sprite.layer,
+                space: sprite.space.to_space(),
+                blend_mode: sprite.blend_mode.to_blend_mode(),
+                billboard: sprite.billboard,
+                visible: sprite.visible,
+                pick_id: sprite.pick_id,
+            }));
+            entity.insert(EditorSprite {
+                texture_path: texture_path.clone(),
+            });
+        }
+
+        if let Some(text) = &entity_data.components.text_2d {
+            let font_path = text.font_path.as_ref().and_then(|path| {
+                let path = path.trim();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(resolve_path(path, root).to_string_lossy().to_string())
+                }
+            });
+            entity.insert(BevyText2d(Text2d {
+                text: text.text.clone(),
+                color: text.color,
+                font_path,
+                font_family: text.font_family.clone(),
+                font_size: text.font_size,
+                font_weight: text.font_weight,
+                font_width: text.font_width,
+                font_style: text.font_style.to_style(),
+                line_height_scale: text.line_height_scale,
+                letter_spacing: text.letter_spacing,
+                word_spacing: text.word_spacing,
+                underline: text.underline,
+                strikethrough: text.strikethrough,
+                max_width: text.max_width,
+                align_h: text.align_h.to_align(),
+                align_v: text.align_v.to_align(),
+                space: text.space.to_space(),
+                billboard: text.billboard,
+                blend_mode: text.blend_mode.to_blend_mode(),
+                layer: text.layer,
+                clip_rect: text.clip_rect,
+                visible: text.visible,
+                pick_id: text.pick_id,
+            }));
         }
 
         if let Some(listener) = &entity_data.components.audio_listener {

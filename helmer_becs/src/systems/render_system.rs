@@ -15,13 +15,15 @@ use helmer::{
             graph::RenderGraphSpec,
             renderer::{
                 Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
-                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderViewportRequest,
-                StreamingTuning,
+                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderSprite, RenderText2d,
+                RenderViewportRequest, StreamingTuning,
             },
         },
         render_graphs::default_graph_spec,
     },
-    provided::components::{Camera, Light, MeshRenderer, SkinnedMeshRenderer, Transform},
+    provided::components::{
+        Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteRenderer, Text2d, Transform,
+    },
     runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},
 };
 use parking_lot::RwLock;
@@ -35,7 +37,7 @@ use crate::systems::animation_system::SkinningResource;
 use crate::{
     BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
     BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
-    BevyStreamingTuning, BevySystemProfiler, BevyTransform,
+    BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform,
 };
 
 //================================================================================
@@ -482,6 +484,65 @@ struct RenderLightUpdate {
     light: Light,
 }
 
+#[inline]
+fn to_render_sprite(
+    entity: Entity,
+    transform: &Transform,
+    sprite: &SpriteRenderer,
+) -> RenderSprite {
+    let scale = transform.scale.abs();
+    RenderSprite {
+        id: entity.to_bits(),
+        position: transform.position,
+        rotation: transform.rotation,
+        size: Vec2::new(scale.x, scale.y),
+        color: sprite.color,
+        texture_id: sprite.texture_id,
+        uv_min: sprite.uv_min,
+        uv_max: sprite.uv_max,
+        pivot: sprite.pivot,
+        clip_rect: sprite.clip_rect,
+        layer: sprite.layer,
+        space: sprite.space,
+        blend_mode: sprite.blend_mode,
+        billboard: sprite.billboard,
+        pick_id: sprite.pick_id.unwrap_or(entity.to_bits() as u32),
+    }
+}
+
+#[inline]
+fn to_render_text(entity: Entity, transform: &Transform, text: &Text2d) -> RenderText2d {
+    let scale = transform.scale.abs();
+    RenderText2d {
+        id: entity.to_bits(),
+        text: text.text.clone(),
+        position: transform.position,
+        rotation: transform.rotation,
+        scale: Vec2::new(scale.x, scale.y),
+        color: text.color,
+        font_path: text.font_path.clone(),
+        font_family: text.font_family.clone(),
+        font_size: text.font_size,
+        font_weight: text.font_weight,
+        font_width: text.font_width,
+        font_style: text.font_style,
+        line_height_scale: text.line_height_scale,
+        letter_spacing: text.letter_spacing,
+        word_spacing: text.word_spacing,
+        underline: text.underline,
+        strikethrough: text.strikethrough,
+        max_width: text.max_width,
+        align_h: text.align_h,
+        align_v: text.align_v,
+        space: text.space,
+        billboard: text.billboard,
+        blend_mode: text.blend_mode,
+        layer: text.layer,
+        clip_rect: text.clip_rect,
+        pick_id: text.pick_id.unwrap_or(entity.to_bits() as u32),
+    }
+}
+
 #[derive(Default)]
 pub struct RenderWorkerState {
     worker: Option<RenderWorker>,
@@ -512,6 +573,48 @@ pub struct RenderSystemResources<'w> {
     lod_tuning: Option<Res<'w, BevyLodTuning>>,
     worker_tuning: Option<Res<'w, BevyRenderWorkerTuning>>,
     runtime_profiling: Option<Res<'w, BevyRuntimeProfiling>>,
+}
+
+#[derive(SystemParam)]
+pub struct SpriteTextQueries<'w, 's> {
+    sprite_queries: ParamSet<
+        'w,
+        's,
+        (
+            Query<'w, 's, (Entity, &'static BevyTransform, &'static BevySpriteRenderer)>,
+            Query<
+                'w,
+                's,
+                (Entity, &'static BevyTransform, &'static BevySpriteRenderer),
+                Or<(
+                    Added<BevyTransform>,
+                    Added<BevySpriteRenderer>,
+                    Changed<BevyTransform>,
+                    Changed<BevySpriteRenderer>,
+                )>,
+            >,
+        ),
+    >,
+    text_queries: ParamSet<
+        'w,
+        's,
+        (
+            Query<'w, 's, (Entity, &'static BevyTransform, &'static BevyText2d)>,
+            Query<
+                'w,
+                's,
+                (Entity, &'static BevyTransform, &'static BevyText2d),
+                Or<(
+                    Added<BevyTransform>,
+                    Added<BevyText2d>,
+                    Changed<BevyTransform>,
+                    Changed<BevyText2d>,
+                )>,
+            >,
+        ),
+    >,
+    removed_sprite_renderers: RemovedComponents<'w, 's, BevySpriteRenderer>,
+    removed_text2d: RemovedComponents<'w, 's, BevyText2d>,
 }
 
 struct ProfilingScope {
@@ -1787,6 +1890,8 @@ impl RenderWorkerCore {
             objects_remove,
             lights_upsert,
             lights_remove,
+            sprites: None,
+            text_2d: None,
             camera: None,
             render_main_scene_to_swapchain: None,
             viewports: None,
@@ -2150,6 +2255,7 @@ pub fn render_data_system(
             )>,
         >,
     )>,
+    mut sprite_text: SpriteTextQueries,
     mut removed_mesh_renderers: RemovedComponents<BevyMeshRenderer>,
     mut removed_skinned_renderers: RemovedComponents<BevySkinnedMeshRenderer>,
     mut removed_transforms: RemovedComponents<BevyTransform>,
@@ -2428,6 +2534,42 @@ pub fn render_data_system(
     }
 
     let full_sync = worker_state.needs_full_sync;
+    let sprite_changed = full_sync
+        || sprite_text.removed_sprite_renderers.len() > 0
+        || removed_transforms.len() > 0
+        || !sprite_text.sprite_queries.p1().is_empty();
+    if sprite_changed {
+        let query = sprite_text.sprite_queries.p0();
+        let iter = query.iter();
+        let (count, _) = iter.size_hint();
+        let mut sprites = Vec::with_capacity(count);
+        for (entity, transform, sprite) in iter {
+            let sprite = sprite.0;
+            if !sprite.visible {
+                continue;
+            }
+            sprites.push(to_render_sprite(entity, &transform.0, &sprite));
+        }
+        direct_delta.sprites = Some(sprites);
+    }
+
+    let text_changed = full_sync
+        || sprite_text.removed_text2d.len() > 0
+        || removed_transforms.len() > 0
+        || !sprite_text.text_queries.p1().is_empty();
+    if text_changed {
+        let query = sprite_text.text_queries.p0();
+        let iter = query.iter();
+        let (count, _) = iter.size_hint();
+        let mut text_2d = Vec::with_capacity(count);
+        for (entity, transform, text) in iter {
+            if !text.0.visible || text.0.text.is_empty() {
+                continue;
+            }
+            text_2d.push(to_render_text(entity, &transform.0, &text.0));
+        }
+        direct_delta.text_2d = Some(text_2d);
+    }
 
     if full_sync && !send_failed {
         if !try_send_change(

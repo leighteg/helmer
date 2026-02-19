@@ -37,6 +37,9 @@ bitflags = "2.10.0"
 dyn-clone = "1.0.20"
 web-time = "1.1.0"
 bincode = "1.3.3"
+fontdb = "0.23.0"
+parley = { version = "0.7.0", default-features = false, features = ["std"] }
+swash = "0.2.6"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.11.0"

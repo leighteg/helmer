@@ -3153,7 +3153,7 @@ impl GraphRenderer {
                 || scene.data.camera_component.aspect_ratio <= 0.0
             {
                 scene.data.camera_component.aspect_ratio =
-                    target_width as f32 / target_height as f32;
+                    viewport_surface_size.width as f32 / viewport_surface_size.height as f32;
             }
             let mut viewport_render_config = saved_viewport_render_config;
             // offscreen viewport rendering does not share a stable on screen depth history, so occlusion culling can become too aggressive
@@ -3212,7 +3212,7 @@ impl GraphRenderer {
                 self.frame_inputs.set(SwapchainFrameInput {
                     view: target_view.clone(),
                     format: self.surface_config.format,
-                    size_in_pixels: [target_width, target_height],
+                    size_in_pixels: [viewport_surface_size.width, viewport_surface_size.height],
                 });
                 let (graph, compiled_graph) = match self.active_graph.as_ref() {
                     Some(active) => (&active.graph, &active.compiled),

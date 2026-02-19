@@ -1,7 +1,8 @@
 use crate::animation::{Pose, Skeleton, Skin};
 use crate::audio::{AudioBus, AudioPlaybackState};
 use crate::graphics::common::renderer::{
-    AlphaMode, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle, Vertex,
+    AlphaMode, SpriteBlendMode, SpriteSheetAnimation, SpriteSpace, TextAlignH, TextAlignV,
+    TextFontStyle, Vertex,
 };
 use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::HashMap;
@@ -99,6 +100,7 @@ pub struct SpriteRenderer {
     pub texture_id: Option<usize>,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
+    pub sheet_animation: SpriteSheetAnimation,
     pub pivot: [f32; 2],
     pub clip_rect: Option<[f32; 4]>,
     pub layer: f32,
@@ -116,6 +118,7 @@ impl Default for SpriteRenderer {
             texture_id: None,
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
+            sheet_animation: SpriteSheetAnimation::default(),
             pivot: [0.5, 0.5],
             clip_rect: None,
             layer: 0.0,

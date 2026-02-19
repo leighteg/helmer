@@ -520,6 +520,57 @@ impl Default for SpriteBlendMode {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteAnimationPlayback {
+    Loop = 0,
+    Once = 1,
+    PingPong = 2,
+}
+
+impl Default for SpriteAnimationPlayback {
+    fn default() -> Self {
+        Self::Loop
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteSheetAnimation {
+    pub enabled: bool,
+    pub columns: u32,
+    pub rows: u32,
+    pub start_frame: u32,
+    pub frame_count: u32,
+    pub fps: f32,
+    pub playback: SpriteAnimationPlayback,
+    pub phase: f32,
+    pub paused: bool,
+    pub paused_frame: u32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub frame_uv_inset: [f32; 2],
+}
+
+impl Default for SpriteSheetAnimation {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            columns: 1,
+            rows: 1,
+            start_frame: 0,
+            frame_count: 0,
+            fps: 12.0,
+            playback: SpriteAnimationPlayback::Loop,
+            phase: 0.0,
+            paused: false,
+            paused_frame: 0,
+            flip_x: false,
+            flip_y: false,
+            frame_uv_inset: [0.0, 0.0],
+        }
+    }
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAlignH {
     Left = 0,
     Center = 1,
@@ -571,6 +622,7 @@ pub struct RenderSprite {
     pub texture_id: Option<usize>,
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
+    pub sheet_animation: SpriteSheetAnimation,
     pub pivot: [f32; 2],
     pub clip_rect: Option<[f32; 4]>,
     pub layer: f32,
@@ -591,6 +643,7 @@ impl Default for RenderSprite {
             texture_id: None,
             uv_min: [0.0, 0.0],
             uv_max: [1.0, 1.0],
+            sheet_animation: SpriteSheetAnimation::default(),
             pivot: [0.5, 0.5],
             clip_rect: None,
             layer: 0.0,

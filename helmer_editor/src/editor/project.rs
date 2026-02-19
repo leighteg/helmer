@@ -261,6 +261,75 @@ type MeshRendererPatch = {
     visible: boolean?,
 }
 
+type SpriteSheetPlaybackValue = "loop" | "once" | "pingpong" | "ping_pong" | "ping-pong" | number | string
+
+type SpriteSheetAnimationData = {
+    enabled: boolean,
+    columns: number,
+    rows: number,
+    start_frame: number,
+    frame_count: number,
+    fps: number,
+    playback: string,
+    phase: number,
+    paused: boolean,
+    paused_frame: number,
+    flip_x: boolean,
+    flip_y: boolean,
+    frame_uv_inset: Vec2,
+}
+
+type SpriteSheetAnimationPatch = {
+    enabled: boolean?,
+    columns: number?,
+    rows: number?,
+    start_frame: number?,
+    frame_count: number?,
+    fps: number?,
+    playback: SpriteSheetPlaybackValue?,
+    phase: number?,
+    paused: boolean?,
+    paused_frame: number?,
+    flip_x: boolean?,
+    flip_y: boolean?,
+    frame_uv_inset: Vec2?,
+}
+
+type SpriteRendererData = {
+    color: { number },
+    texture_id: number?,
+    texture: string?,
+    uv_min: Vec2,
+    uv_max: Vec2,
+    sheet_animation: SpriteSheetAnimationData,
+    pivot: Vec2,
+    clip_rect: { number }?,
+    layer: number,
+    space: string,
+    blend_mode: string,
+    billboard: boolean,
+    visible: boolean,
+    pick_id: number?,
+}
+
+type SpriteRendererPatch = {
+    color: { number }?,
+    texture_id: number?,
+    texture: string?,
+    uv_min: Vec2?,
+    uv_max: Vec2?,
+    sheet_animation: SpriteSheetAnimationPatch?,
+    sheet: SpriteSheetAnimationPatch?,
+    pivot: Vec2?,
+    clip_rect: { number }?,
+    layer: number?,
+    space: string?,
+    blend_mode: string?,
+    billboard: boolean?,
+    visible: boolean?,
+    pick_id: number?,
+}
+
 type ScriptData = {
     path: string,
     language: string,
@@ -1687,6 +1756,10 @@ type HelmerEcs = {
     set_mesh_renderer: (id: EntityId, data: MeshRendererPatch) -> boolean,
     set_mesh_renderer_source_path: (id: EntityId, path: string) -> boolean,
     set_mesh_renderer_material_path: (id: EntityId, path: string) -> boolean,
+    get_sprite_renderer: (id: EntityId) -> SpriteRendererData?,
+    get_sprite_renderer_texture_path: (id: EntityId) -> string?,
+    set_sprite_renderer: (id: EntityId, data: SpriteRendererPatch) -> boolean,
+    set_sprite_renderer_texture_path: (id: EntityId, path: string) -> boolean,
 
     get_scene_asset: (id: EntityId) -> string?,
     set_scene_asset: (id: EntityId, path: string) -> boolean,
@@ -2022,6 +2095,7 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_mesh_renderer_source_path(id, path) -> bool
 --   ecs.set_mesh_renderer_material_path(id, path) -> bool
 --   ecs.get_sprite_renderer(id) -> table|nil
+--     sprite.sheet_animation: {enabled, columns, rows, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y, frame_uv_inset={x,y}}
 --   ecs.get_sprite_renderer_texture_path(id) -> path|nil
 --   ecs.set_sprite_renderer(id, patch) -> bool
 --   ecs.set_sprite_renderer_texture_path(id, path) -> bool

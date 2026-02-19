@@ -61,9 +61,9 @@ use crate::graphics::{
             RenderControl, RenderData, RenderDelta, RenderDeviceCaps, RenderLight,
             RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
             RenderText2d, RenderViewportGizmoOptions, RenderViewportRequest, RendererStats,
-            ShaderConstants, ShadowUniforms, SkyUniforms, SpriteBlendMode, SpriteSpace,
-            StreamingTuning, Vertex, apply_egui_delta, build_mip_uploads, calc_mip_level_count,
-            mesh_task_tiling,
+            ShaderConstants, ShadowUniforms, SkyUniforms, SpriteAnimationPlayback, SpriteBlendMode,
+            SpriteSheetAnimation, SpriteSpace, StreamingTuning, Vertex, apply_egui_delta,
+            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -97,7 +97,124 @@ const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
 const SPRITE_FLAG_CLIP_ENABLED: u32 = 1u32;
 const SPRITE_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
+const SPRITE_SHEET_MAX_UV_INSET: f32 = 0.49;
 const SWASH_GLYPH_SOURCES: [SwashSource; 1] = [SwashSource::Outline];
+
+#[inline]
+fn resolve_sprite_sheet_frame(sheet: &SpriteSheetAnimation, elapsed_time_sec: f32) -> u32 {
+    let columns = sheet.columns.max(1);
+    let rows = sheet.rows.max(1);
+    let total_frames = columns.saturating_mul(rows).max(1);
+    let start_frame = sheet.start_frame.min(total_frames.saturating_sub(1));
+    let available_frames = total_frames.saturating_sub(start_frame).max(1);
+    let active_frame_count = if sheet.frame_count == 0 {
+        available_frames
+    } else {
+        sheet.frame_count.min(available_frames).max(1)
+    };
+
+    let fps = if sheet.fps.is_finite() {
+        sheet.fps.max(0.0)
+    } else {
+        0.0
+    };
+    let phase = if sheet.phase.is_finite() {
+        sheet.phase
+    } else {
+        0.0
+    };
+
+    let local_frame = if sheet.paused || fps <= 0.0 {
+        sheet.paused_frame.min(active_frame_count.saturating_sub(1))
+    } else {
+        let frame_counter = ((elapsed_time_sec + phase).max(0.0) * fps).floor().max(0.0) as u64;
+        let count_u64 = active_frame_count as u64;
+        let local = match sheet.playback {
+            SpriteAnimationPlayback::Loop => frame_counter % count_u64,
+            SpriteAnimationPlayback::Once => frame_counter.min(count_u64.saturating_sub(1)),
+            SpriteAnimationPlayback::PingPong => {
+                if count_u64 <= 1 {
+                    0
+                } else {
+                    let period = count_u64.saturating_sub(1).saturating_mul(2);
+                    let p = frame_counter % period;
+                    if p < count_u64 {
+                        p
+                    } else {
+                        period.saturating_sub(p)
+                    }
+                }
+            }
+        };
+        local as u32
+    };
+
+    start_frame.saturating_add(local_frame)
+}
+
+#[inline]
+fn resolve_sprite_uv_rect(
+    sprite: &crate::graphics::common::renderer::RenderSprite,
+    time_sec: f32,
+) -> [f32; 4] {
+    let base_min = Vec2::new(
+        if sprite.uv_min[0].is_finite() {
+            sprite.uv_min[0]
+        } else {
+            0.0
+        },
+        if sprite.uv_min[1].is_finite() {
+            sprite.uv_min[1]
+        } else {
+            0.0
+        },
+    );
+    let base_max = Vec2::new(
+        if sprite.uv_max[0].is_finite() {
+            sprite.uv_max[0]
+        } else {
+            1.0
+        },
+        if sprite.uv_max[1].is_finite() {
+            sprite.uv_max[1]
+        } else {
+            1.0
+        },
+    );
+    let sheet = sprite.sheet_animation;
+    if !sheet.enabled {
+        return [base_min.x, base_min.y, base_max.x, base_max.y];
+    }
+
+    let columns = sheet.columns.max(1);
+    let rows = sheet.rows.max(1);
+    let frame = resolve_sprite_sheet_frame(&sheet, time_sec);
+    let col = frame % columns;
+    let row = frame / columns;
+
+    let span = base_max - base_min;
+    let cell = Vec2::new(span.x / columns as f32, span.y / rows as f32);
+    let cell_origin = base_min + Vec2::new(cell.x * col as f32, cell.y * row as f32);
+    let mut frame_min = cell_origin;
+    let mut frame_max = cell_origin + cell;
+
+    let inset = Vec2::new(
+        sheet.frame_uv_inset[0].clamp(0.0, SPRITE_SHEET_MAX_UV_INSET),
+        sheet.frame_uv_inset[1].clamp(0.0, SPRITE_SHEET_MAX_UV_INSET),
+    );
+    let delta = frame_max - frame_min;
+    frame_min += delta * inset;
+    frame_max -= delta * inset;
+
+    if sheet.flip_x {
+        std::mem::swap(&mut frame_min.x, &mut frame_max.x);
+    }
+    if sheet.flip_y {
+        std::mem::swap(&mut frame_min.y, &mut frame_max.y);
+    }
+
+    [frame_min.x, frame_min.y, frame_max.x, frame_max.y]
+}
 
 fn format_supports_usage(
     adapter: &wgpu::Adapter,
@@ -1846,6 +1963,7 @@ pub struct GraphRenderer {
     sprite_fonts: HashMap<FontFaceKey, CachedFontFace>,
     sprite_registered_font_paths: HashMap<String, String>,
     sprite_glyph_atlas: GlyphAtlasState,
+    sprite_animation_epoch: Instant,
     prev_idle_frames_before_evict: Option<u32>,
     pending_render_delta: Option<RenderDelta>,
     material_version: u64,
@@ -2946,6 +3064,7 @@ impl GraphRenderer {
             sprite_fonts: HashMap::new(),
             sprite_registered_font_paths: HashMap::new(),
             sprite_glyph_atlas,
+            sprite_animation_epoch: Instant::now(),
             prev_idle_frames_before_evict: None,
             pending_render_delta: None,
             material_version: 0,
@@ -7828,6 +7947,7 @@ impl GraphRenderer {
         let mut sprite_textures: Vec<wgpu::TextureView> = vec![self.fallback_albedo_view.clone()];
         let mut texture_slots: HashMap<usize, u32> = HashMap::new();
         let mut glyph_texture_slot: Option<u32> = None;
+        let sprite_animation_time_sec = self.sprite_animation_epoch.elapsed().as_secs_f32();
 
         let camera_rot = Quat::from(render_data.current_camera_transform.rotation);
         let camera_right = camera_rot * -Vec3::X;
@@ -7923,6 +8043,7 @@ impl GraphRenderer {
             } else {
                 sprite.id as u32
             };
+            let uv_rect = resolve_sprite_uv_rect(sprite, sprite_animation_time_sec);
             sprite_instances.push(SpriteInstanceRaw {
                 origin_mode: [
                     sprite.position.x,
@@ -7932,12 +8053,7 @@ impl GraphRenderer {
                 ],
                 right_size_x: [right.x, right.y, right.z, size.x],
                 up_size_y: [up.x, up.y, up.z, size.y],
-                uv_rect: [
-                    sprite.uv_min[0],
-                    sprite.uv_min[1],
-                    sprite.uv_max[0],
-                    sprite.uv_max[1],
-                ],
+                uv_rect,
                 color: sprite.color,
                 pivot_clip_min: [sprite.pivot[0], sprite.pivot[1], clip[0], clip[1]],
                 clip_max_layer: [clip[2], clip[3], sprite.layer, 0.0],

@@ -500,6 +500,7 @@ fn to_render_sprite(
         texture_id: sprite.texture_id,
         uv_min: sprite.uv_min,
         uv_max: sprite.uv_max,
+        sheet_animation: sprite.sheet_animation,
         pivot: sprite.pivot,
         clip_rect: sprite.clip_rect,
         layer: sprite.layer,

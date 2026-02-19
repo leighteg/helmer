@@ -10,7 +10,8 @@ use bevy_ecs::query::{With, Without};
 use helmer::{
     animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
     graphics::common::renderer::{
-        SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle,
+        SpriteAnimationPlayback, SpriteBlendMode, SpriteSheetAnimation, SpriteSpace, TextAlignH,
+        TextAlignV, TextFontStyle,
     },
     provided::components::{
         AudioEmitter, AudioListener, Camera, EntityFollower, Light, LightType, LookAt,
@@ -1259,6 +1260,144 @@ impl SpriteBlendModeData {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteAnimationPlaybackData {
+    Loop,
+    Once,
+    PingPong,
+}
+
+impl From<SpriteAnimationPlayback> for SpriteAnimationPlaybackData {
+    fn from(value: SpriteAnimationPlayback) -> Self {
+        match value {
+            SpriteAnimationPlayback::Loop => Self::Loop,
+            SpriteAnimationPlayback::Once => Self::Once,
+            SpriteAnimationPlayback::PingPong => Self::PingPong,
+        }
+    }
+}
+
+impl Default for SpriteAnimationPlaybackData {
+    fn default() -> Self {
+        Self::Loop
+    }
+}
+
+impl SpriteAnimationPlaybackData {
+    fn to_playback(self) -> SpriteAnimationPlayback {
+        match self {
+            Self::Loop => SpriteAnimationPlayback::Loop,
+            Self::Once => SpriteAnimationPlayback::Once,
+            Self::PingPong => SpriteAnimationPlayback::PingPong,
+        }
+    }
+}
+
+fn sprite_sheet_default_columns() -> u32 {
+    1
+}
+
+fn sprite_sheet_default_rows() -> u32 {
+    1
+}
+
+fn sprite_sheet_default_fps() -> f32 {
+    12.0
+}
+
+fn sprite_sheet_default_uv_inset() -> [f32; 2] {
+    [0.0, 0.0]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpriteSheetAnimationData {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "sprite_sheet_default_columns")]
+    pub columns: u32,
+    #[serde(default = "sprite_sheet_default_rows")]
+    pub rows: u32,
+    #[serde(default)]
+    pub start_frame: u32,
+    #[serde(default)]
+    pub frame_count: u32,
+    #[serde(default = "sprite_sheet_default_fps")]
+    pub fps: f32,
+    #[serde(default)]
+    pub playback: SpriteAnimationPlaybackData,
+    #[serde(default)]
+    pub phase: f32,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub paused_frame: u32,
+    #[serde(default)]
+    pub flip_x: bool,
+    #[serde(default)]
+    pub flip_y: bool,
+    #[serde(default = "sprite_sheet_default_uv_inset")]
+    pub frame_uv_inset: [f32; 2],
+}
+
+impl Default for SpriteSheetAnimationData {
+    fn default() -> Self {
+        Self::from_sheet(SpriteSheetAnimation::default())
+    }
+}
+
+impl SpriteSheetAnimationData {
+    fn from_sheet(value: SpriteSheetAnimation) -> Self {
+        Self {
+            enabled: value.enabled,
+            columns: value.columns,
+            rows: value.rows,
+            start_frame: value.start_frame,
+            frame_count: value.frame_count,
+            fps: value.fps,
+            playback: value.playback.into(),
+            phase: value.phase,
+            paused: value.paused,
+            paused_frame: value.paused_frame,
+            flip_x: value.flip_x,
+            flip_y: value.flip_y,
+            frame_uv_inset: value.frame_uv_inset,
+        }
+    }
+
+    fn to_sheet(self) -> SpriteSheetAnimation {
+        SpriteSheetAnimation {
+            enabled: self.enabled,
+            columns: self.columns.max(1),
+            rows: self.rows.max(1),
+            start_frame: self.start_frame,
+            frame_count: self.frame_count,
+            fps: if self.fps.is_finite() { self.fps } else { 12.0 },
+            playback: self.playback.to_playback(),
+            phase: if self.phase.is_finite() {
+                self.phase
+            } else {
+                0.0
+            },
+            paused: self.paused,
+            paused_frame: self.paused_frame,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            frame_uv_inset: [
+                if self.frame_uv_inset[0].is_finite() {
+                    self.frame_uv_inset[0].clamp(0.0, 0.49)
+                } else {
+                    0.0
+                },
+                if self.frame_uv_inset[1].is_finite() {
+                    self.frame_uv_inset[1].clamp(0.0, 0.49)
+                } else {
+                    0.0
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextAlignHData {
     Left,
     Center,
@@ -1390,6 +1529,8 @@ pub struct SpriteComponentData {
     pub uv_min: [f32; 2],
     #[serde(default = "sprite_default_uv_max")]
     pub uv_max: [f32; 2],
+    #[serde(default)]
+    pub sheet_animation: SpriteSheetAnimationData,
     #[serde(default = "sprite_default_pivot")]
     pub pivot: [f32; 2],
     #[serde(default)]
@@ -1415,6 +1556,7 @@ impl Default for SpriteComponentData {
             color: sprite_default_color(),
             uv_min: sprite_default_uv_min(),
             uv_max: sprite_default_uv_max(),
+            sheet_animation: SpriteSheetAnimationData::default(),
             pivot: sprite_default_pivot(),
             clip_rect: None,
             layer: 0.0,
@@ -2892,6 +3034,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 color: sprite.0.color,
                 uv_min: sprite.0.uv_min,
                 uv_max: sprite.0.uv_max,
+                sheet_animation: SpriteSheetAnimationData::from_sheet(sprite.0.sheet_animation),
                 pivot: sprite.0.pivot,
                 clip_rect: sprite.0.clip_rect,
                 layer: sprite.0.layer,
@@ -3422,6 +3565,7 @@ pub fn spawn_scene_from_document(
                 texture_id,
                 uv_min: sprite.uv_min,
                 uv_max: sprite.uv_max,
+                sheet_animation: sprite.sheet_animation.to_sheet(),
                 pivot: sprite.pivot,
                 clip_rect: sprite.clip_rect,
                 layer: sprite.layer,

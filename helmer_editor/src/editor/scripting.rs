@@ -34,8 +34,8 @@ use helmer::audio::{AudioBus, AudioPlaybackState};
 use helmer::graphics::{
     backend::binding_backend::BindingBackendChoice,
     common::renderer::{
-        RenderControl, RenderMessage, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV,
-        TextFontStyle, WgpuBackend,
+        RenderControl, RenderMessage, SpriteAnimationPlayback, SpriteBlendMode,
+        SpriteSheetAnimation, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle, WgpuBackend,
     },
     graph::definition::resource_id::ResourceKind,
     render_graphs::{graph_templates, template_for_graph},
@@ -5918,6 +5918,28 @@ fn build_ecs_table(
                 "uv_max",
                 vec2_to_table(lua, Vec2::from_array(sprite.uv_max))?,
             )?;
+            let sheet_table = lua.create_table()?;
+            sheet_table.set("enabled", sprite.sheet_animation.enabled)?;
+            sheet_table.set("columns", sprite.sheet_animation.columns)?;
+            sheet_table.set("rows", sprite.sheet_animation.rows)?;
+            sheet_table.set("start_frame", sprite.sheet_animation.start_frame)?;
+            sheet_table.set("frame_count", sprite.sheet_animation.frame_count)?;
+            sheet_table.set("fps", sprite.sheet_animation.fps)?;
+            sheet_table.set(
+                "playback",
+                sprite_animation_playback_name(sprite.sheet_animation.playback),
+            )?;
+            sheet_table.set("phase", sprite.sheet_animation.phase)?;
+            sheet_table.set("paused", sprite.sheet_animation.paused)?;
+            sheet_table.set("paused_frame", sprite.sheet_animation.paused_frame)?;
+            sheet_table.set("flip_x", sprite.sheet_animation.flip_x)?;
+            sheet_table.set("flip_y", sprite.sheet_animation.flip_y)?;
+            sheet_table.set(
+                "frame_uv_inset",
+                vec2_to_table(lua, Vec2::from_array(sprite.sheet_animation.frame_uv_inset))?,
+            )?;
+            table.set("sheet_animation", sheet_table.clone())?;
+            table.set("sheet", sheet_table)?;
             table.set("pivot", vec2_to_table(lua, Vec2::from_array(sprite.pivot))?)?;
             if let Some(clip_rect) = sprite.clip_rect {
                 table.set("clip_rect", vec4_to_table(lua, clip_rect)?)?;
@@ -5984,6 +6006,24 @@ fn build_ecs_table(
             if let Ok(uv_max) = data.get::<Table>("uv_max") {
                 if let Some(uv_max) = table_to_vec2(&uv_max) {
                     sprite.uv_max = uv_max.to_array();
+                }
+            }
+            if let Ok(sheet_patch) = data.get::<Value>("sheet_animation") {
+                match sheet_patch {
+                    Value::Nil => sprite.sheet_animation = SpriteSheetAnimation::default(),
+                    Value::Table(table) => {
+                        apply_sprite_sheet_animation_patch(&mut sprite.sheet_animation, &table)
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(sheet_patch) = data.get::<Value>("sheet") {
+                match sheet_patch {
+                    Value::Nil => sprite.sheet_animation = SpriteSheetAnimation::default(),
+                    Value::Table(table) => {
+                        apply_sprite_sheet_animation_patch(&mut sprite.sheet_animation, &table)
+                    }
+                    _ => {}
                 }
             }
             if let Ok(pivot) = data.get::<Table>("pivot") {
@@ -14982,6 +15022,97 @@ fn sprite_blend_mode_from_value(value: Value) -> Option<SpriteBlendMode> {
             }
         }
         _ => None,
+    }
+}
+
+fn sprite_animation_playback_name(mode: SpriteAnimationPlayback) -> &'static str {
+    match mode {
+        SpriteAnimationPlayback::Loop => "loop",
+        SpriteAnimationPlayback::Once => "once",
+        SpriteAnimationPlayback::PingPong => "pingpong",
+    }
+}
+
+fn sprite_animation_playback_from_value(value: Value) -> Option<SpriteAnimationPlayback> {
+    match value {
+        Value::String(value) => {
+            match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+                "loop" | "repeat" => Some(SpriteAnimationPlayback::Loop),
+                "once" | "one_shot" | "oneshot" => Some(SpriteAnimationPlayback::Once),
+                "pingpong" | "ping_pong" | "ping-pong" | "pong" => {
+                    Some(SpriteAnimationPlayback::PingPong)
+                }
+                _ => None,
+            }
+        }
+        Value::Integer(raw) => match raw {
+            0 => Some(SpriteAnimationPlayback::Loop),
+            1 => Some(SpriteAnimationPlayback::Once),
+            2 => Some(SpriteAnimationPlayback::PingPong),
+            _ => None,
+        },
+        Value::Number(raw) => {
+            if !raw.is_finite() {
+                return None;
+            }
+            match raw as i64 {
+                0 => Some(SpriteAnimationPlayback::Loop),
+                1 => Some(SpriteAnimationPlayback::Once),
+                2 => Some(SpriteAnimationPlayback::PingPong),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn apply_sprite_sheet_animation_patch(sheet: &mut SpriteSheetAnimation, patch: &Table) {
+    if let Ok(enabled) = patch.get::<bool>("enabled") {
+        sheet.enabled = enabled;
+    }
+    if let Ok(columns) = patch.get::<u32>("columns") {
+        sheet.columns = columns.max(1);
+    }
+    if let Ok(rows) = patch.get::<u32>("rows") {
+        sheet.rows = rows.max(1);
+    }
+    if let Ok(start_frame) = patch.get::<u32>("start_frame") {
+        sheet.start_frame = start_frame;
+    }
+    if let Ok(frame_count) = patch.get::<u32>("frame_count") {
+        sheet.frame_count = frame_count;
+    }
+    if let Ok(fps) = patch.get::<f32>("fps") {
+        if fps.is_finite() {
+            sheet.fps = fps;
+        }
+    }
+    if let Ok(playback) = patch.get::<Value>("playback") {
+        if let Some(playback) = sprite_animation_playback_from_value(playback) {
+            sheet.playback = playback;
+        }
+    }
+    if let Ok(phase) = patch.get::<f32>("phase") {
+        if phase.is_finite() {
+            sheet.phase = phase;
+        }
+    }
+    if let Ok(paused) = patch.get::<bool>("paused") {
+        sheet.paused = paused;
+    }
+    if let Ok(paused_frame) = patch.get::<u32>("paused_frame") {
+        sheet.paused_frame = paused_frame;
+    }
+    if let Ok(flip_x) = patch.get::<bool>("flip_x") {
+        sheet.flip_x = flip_x;
+    }
+    if let Ok(flip_y) = patch.get::<bool>("flip_y") {
+        sheet.flip_y = flip_y;
+    }
+    if let Ok(frame_uv_inset) = patch.get::<Table>("frame_uv_inset") {
+        if let Some(inset) = table_to_vec2(&frame_uv_inset) {
+            sheet.frame_uv_inset = [inset.x.clamp(0.0, 0.49), inset.y.clamp(0.0, 0.49)];
+        }
     }
 }
 

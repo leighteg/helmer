@@ -21,7 +21,8 @@ use helmer::audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
 use helmer::graphics::common::config::{RenderConfig, SkinningMode};
 use helmer::graphics::{
     common::renderer::{
-        GizmoMode, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle,
+        GizmoMode, SpriteAnimationPlayback, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV,
+        TextFontStyle,
     },
     render_graphs::{graph_templates, template_for_graph},
 };
@@ -10534,6 +10535,136 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if uv_max_response.changed {
                 sprite.uv_max = uv_max;
             }
+
+            ui.collapsing("Spritesheet Animation", |ui| {
+                if ui
+                    .checkbox(&mut sprite.sheet_animation.enabled, "Enabled")
+                    .changed()
+                {
+                    discrete_changed = true;
+                }
+
+                let mut columns = sprite.sheet_animation.columns;
+                let columns_response =
+                    edit_u32_range(ui, "Columns", &mut columns, 1.0, 1..=u32::MAX);
+                edit_response.merge(columns_response);
+                if columns_response.changed {
+                    sprite.sheet_animation.columns = columns.max(1);
+                }
+
+                let mut rows = sprite.sheet_animation.rows;
+                let rows_response = edit_u32_range(ui, "Rows", &mut rows, 1.0, 1..=u32::MAX);
+                edit_response.merge(rows_response);
+                if rows_response.changed {
+                    sprite.sheet_animation.rows = rows.max(1);
+                }
+
+                let start_response = edit_u32_range(
+                    ui,
+                    "Start Frame",
+                    &mut sprite.sheet_animation.start_frame,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(start_response);
+
+                let frame_count_response = edit_u32_range(
+                    ui,
+                    "Frame Count (0=Auto)",
+                    &mut sprite.sheet_animation.frame_count,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(frame_count_response);
+
+                let fps_response = edit_float(ui, "FPS", &mut sprite.sheet_animation.fps, 0.1);
+                edit_response.merge(fps_response);
+
+                let mut playback = sprite.sheet_animation.playback;
+                let playback_label = match playback {
+                    SpriteAnimationPlayback::Loop => "Loop",
+                    SpriteAnimationPlayback::Once => "Once",
+                    SpriteAnimationPlayback::PingPong => "PingPong",
+                };
+                ComboBox::from_id_source(format!("sprite_sheet_playback_{}", entity.to_bits()))
+                    .selected_text(playback_label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::Loop),
+                                "Loop",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::Loop;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::Once),
+                                "Once",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::Once;
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(playback, SpriteAnimationPlayback::PingPong),
+                                "PingPong",
+                            )
+                            .clicked()
+                        {
+                            playback = SpriteAnimationPlayback::PingPong;
+                        }
+                    });
+                if playback != sprite.sheet_animation.playback {
+                    sprite.sheet_animation.playback = playback;
+                    discrete_changed = true;
+                }
+
+                let phase_response =
+                    edit_float(ui, "Phase (sec)", &mut sprite.sheet_animation.phase, 0.05);
+                edit_response.merge(phase_response);
+
+                if ui
+                    .checkbox(&mut sprite.sheet_animation.paused, "Paused")
+                    .changed()
+                {
+                    discrete_changed = true;
+                }
+
+                let paused_frame_response = edit_u32_range(
+                    ui,
+                    "Paused Frame",
+                    &mut sprite.sheet_animation.paused_frame,
+                    1.0,
+                    0..=u32::MAX,
+                );
+                edit_response.merge(paused_frame_response);
+
+                if ui
+                    .checkbox(&mut sprite.sheet_animation.flip_x, "Flip X")
+                    .changed()
+                {
+                    discrete_changed = true;
+                }
+                if ui
+                    .checkbox(&mut sprite.sheet_animation.flip_y, "Flip Y")
+                    .changed()
+                {
+                    discrete_changed = true;
+                }
+
+                let mut frame_uv_inset = sprite.sheet_animation.frame_uv_inset;
+                let inset_response = edit_vec2f(ui, "Frame UV Inset", &mut frame_uv_inset, 0.001);
+                edit_response.merge(inset_response);
+                if inset_response.changed {
+                    sprite.sheet_animation.frame_uv_inset = [
+                        frame_uv_inset[0].clamp(0.0, 0.49),
+                        frame_uv_inset[1].clamp(0.0, 0.49),
+                    ];
+                }
+            });
 
             let mut pivot = sprite.pivot;
             let pivot_response = edit_vec2f(ui, "Pivot", &mut pivot, 0.01);

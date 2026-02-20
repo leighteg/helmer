@@ -3452,6 +3452,12 @@ fn invoke_api_with_context(
     function_name: &str,
     args: &[JsonValue],
 ) -> Result<JsonValue, String> {
+    let function_name = match function_name {
+        "set_sprite_renderer_sheet_animation" | "set_sprite_renderer_sequence" => {
+            "set_sprite_renderer"
+        }
+        _ => function_name,
+    };
     let lua_guard = context
         .bridge_lua
         .lock()

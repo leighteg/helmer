@@ -90,6 +90,9 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "get_mesh_renderer",
     "get_mesh_renderer_material_path",
     "get_mesh_renderer_source_path",
+    "get_sprite_renderer",
+    "get_sprite_renderer_texture_path",
+    "get_text2d",
     "get_graph_template",
     "get_physics",
     "get_physics_gravity",
@@ -183,6 +186,9 @@ pub const ECS_FUNCTIONS: &[&str] = &[
     "set_mesh_renderer",
     "set_mesh_renderer_material_path",
     "set_mesh_renderer_source_path",
+    "set_sprite_renderer",
+    "set_sprite_renderer_texture_path",
+    "set_text2d",
     "set_persistent_force",
     "set_persistent_torque",
     "set_physics",
@@ -304,6 +310,35 @@ impl Vec3 {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct Vec4 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl Vec4 {
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 0.0,
+    };
+
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+        w: 1.0,
+    };
+
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct Quat {
     pub x: f32,
     pub y: f32,
@@ -396,6 +431,10 @@ pub enum EcsComponentName {
     Mesh,
     #[serde(rename = "mesh_renderer")]
     MeshRenderer,
+    #[serde(rename = "sprite_renderer", alias = "sprite")]
+    SpriteRenderer,
+    #[serde(rename = "text2d", alias = "text", alias = "text_2d")]
+    Text2d,
     #[serde(rename = "spline")]
     Spline,
     #[serde(rename = "spline_follower")]
@@ -684,6 +723,346 @@ impl MeshRendererPatch {
         self.material = Some(material.into());
         self
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteAnimationPlayback {
+    #[serde(rename = "loop")]
+    Loop,
+    #[serde(rename = "once")]
+    Once,
+    #[serde(rename = "pingpong", alias = "ping_pong", alias = "ping-pong")]
+    PingPong,
+}
+
+impl Default for SpriteAnimationPlayback {
+    fn default() -> Self {
+        Self::Loop
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteSpace {
+    #[serde(rename = "world")]
+    World,
+    #[serde(rename = "screen")]
+    Screen,
+}
+
+impl Default for SpriteSpace {
+    fn default() -> Self {
+        Self::World
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpriteBlendMode {
+    #[serde(rename = "alpha")]
+    Alpha,
+    #[serde(rename = "premultiplied", alias = "premul", alias = "premult")]
+    Premultiplied,
+    #[serde(rename = "additive", alias = "add")]
+    Additive,
+}
+
+impl Default for SpriteBlendMode {
+    fn default() -> Self {
+        Self::Alpha
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextFontStyle {
+    #[serde(rename = "normal")]
+    Normal,
+    #[serde(rename = "italic")]
+    Italic,
+    #[serde(rename = "oblique")]
+    Oblique,
+}
+
+impl Default for TextFontStyle {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlignH {
+    #[serde(rename = "left")]
+    Left,
+    #[serde(rename = "center", alias = "centre")]
+    Center,
+    #[serde(rename = "right")]
+    Right,
+}
+
+impl Default for TextAlignH {
+    fn default() -> Self {
+        Self::Left
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlignV {
+    #[serde(rename = "top")]
+    Top,
+    #[serde(rename = "center", alias = "centre")]
+    Center,
+    #[serde(rename = "bottom")]
+    Bottom,
+    #[serde(rename = "baseline")]
+    Baseline,
+}
+
+impl Default for TextAlignV {
+    fn default() -> Self {
+        Self::Baseline
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteSheetAnimationData {
+    pub enabled: bool,
+    pub columns: u32,
+    pub rows: u32,
+    pub start_frame: u32,
+    pub frame_count: u32,
+    pub fps: f32,
+    pub playback: SpriteAnimationPlayback,
+    pub phase: f32,
+    pub paused: bool,
+    pub paused_frame: u32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub frame_uv_inset: Vec2,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteSheetAnimationPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_frame: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<SpriteAnimationPlayback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_frame: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_y: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_uv_inset: Option<Vec2>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteImageSequenceData {
+    pub enabled: bool,
+    #[serde(default)]
+    pub textures: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<String>>,
+    pub start_frame: u32,
+    pub frame_count: u32,
+    pub fps: f32,
+    pub playback: SpriteAnimationPlayback,
+    pub phase: f32,
+    pub paused: bool,
+    pub paused_frame: u32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteImageSequencePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub textures: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_frame: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<SpriteAnimationPlayback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_frame: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_x: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip_y: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteRendererData {
+    pub color: Vec4,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
+    pub uv_min: Vec2,
+    pub uv_max: Vec2,
+    pub sheet_animation: SpriteSheetAnimationData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<SpriteSheetAnimationData>,
+    pub image_sequence: SpriteImageSequenceData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<SpriteImageSequenceData>,
+    pub pivot: Vec2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_rect: Option<Vec4>,
+    pub layer: f32,
+    pub space: SpriteSpace,
+    pub blend_mode: SpriteBlendMode,
+    pub billboard: bool,
+    pub visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpriteRendererPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Vec4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_min: Option<Vec2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_max: Option<Vec2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_animation: Option<SpriteSheetAnimationPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<SpriteSheetAnimationPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sequence: Option<SpriteImageSequencePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<SpriteImageSequencePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pivot: Option<Vec2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_rect: Option<Vec4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<SpriteSpace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_mode: Option<SpriteBlendMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billboard: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Text2dData {
+    pub text: String,
+    pub color: Vec4,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    pub font_size: f32,
+    pub font_weight: f32,
+    pub font_width: f32,
+    pub font_style: TextFontStyle,
+    pub line_height_scale: f32,
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+    pub underline: bool,
+    pub strikethrough: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+    pub align_h: TextAlignH,
+    pub align_v: TextAlignV,
+    pub space: SpriteSpace,
+    pub blend_mode: SpriteBlendMode,
+    pub billboard: bool,
+    pub visible: bool,
+    pub layer: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_rect: Option<Vec4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Text2dPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Vec4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_style: Option<TextFontStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height_scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align_h: Option<TextAlignH>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align_v: Option<TextAlignV>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<SpriteSpace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend_mode: Option<SpriteBlendMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billboard: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip_rect: Option<Vec4>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -2633,6 +3012,68 @@ impl Host {
         path: &str,
     ) -> Result<bool, String> {
         self.ecs_call("set_mesh_renderer_material_path", (entity_id, path))
+    }
+
+    pub fn get_sprite_renderer(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_sprite_renderer", (entity_id,))
+    }
+
+    pub fn get_sprite_renderer_data(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<SpriteRendererData>, String> {
+        self.ecs_call("get_sprite_renderer", (entity_id,))
+    }
+
+    pub fn set_sprite_renderer<S: Serialize>(
+        &self,
+        entity_id: EntityId,
+        patch: S,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_sprite_renderer", (entity_id, patch))
+    }
+
+    pub fn set_sprite_renderer_data(
+        &self,
+        entity_id: EntityId,
+        patch: &SpriteRendererPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_sprite_renderer", (entity_id, patch))
+    }
+
+    pub fn get_sprite_renderer_texture_path(
+        &self,
+        entity_id: EntityId,
+    ) -> Result<Option<String>, String> {
+        self.ecs_call("get_sprite_renderer_texture_path", (entity_id,))
+    }
+
+    pub fn set_sprite_renderer_texture_path(
+        &self,
+        entity_id: EntityId,
+        path: &str,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_sprite_renderer_texture_path", (entity_id, path))
+    }
+
+    pub fn get_text2d(&self, entity_id: EntityId) -> Result<Option<Value>, String> {
+        self.ecs_call("get_text2d", (entity_id,))
+    }
+
+    pub fn get_text2d_data(&self, entity_id: EntityId) -> Result<Option<Text2dData>, String> {
+        self.ecs_call("get_text2d", (entity_id,))
+    }
+
+    pub fn set_text2d<S: Serialize>(&self, entity_id: EntityId, patch: S) -> Result<bool, String> {
+        self.ecs_call("set_text2d", (entity_id, patch))
+    }
+
+    pub fn set_text2d_data(
+        &self,
+        entity_id: EntityId,
+        patch: &Text2dPatch,
+    ) -> Result<bool, String> {
+        self.ecs_call("set_text2d", (entity_id, patch))
     }
 
     pub fn get_scene_asset(&self, entity_id: EntityId) -> Result<Option<String>, String> {

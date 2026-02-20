@@ -21,7 +21,7 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
-use crate::editor::{AssetDragPayload, assets::PrimitiveKind};
+use crate::editor::{AssetDragPayload, EditorProject, assets::PrimitiveKind};
 
 pub const VISUAL_SCRIPT_EXTENSION: &str = "hvs";
 pub const VISUAL_SCRIPT_FUNCTION_EXTENSION: &str = "hvsf";
@@ -65,6 +65,8 @@ pub enum VisualValueType {
     Camera,
     Light,
     MeshRenderer,
+    SpriteRenderer,
+    Text2d,
     AudioEmitter,
     AudioListener,
     Script,
@@ -113,6 +115,8 @@ impl VisualValueType {
             Self::Camera => "Camera",
             Self::Light => "Light",
             Self::MeshRenderer => "Mesh Renderer",
+            Self::SpriteRenderer => "Sprite Renderer",
+            Self::Text2d => "Text 2D",
             Self::AudioEmitter => "Audio Emitter",
             Self::AudioListener => "Audio Listener",
             Self::Script => "Script",
@@ -173,7 +177,7 @@ impl VisualInspectorAssetKind {
     }
 }
 
-const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 40] = [
+const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 42] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -186,6 +190,8 @@ const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 40] = [
     VisualValueType::Camera,
     VisualValueType::Light,
     VisualValueType::MeshRenderer,
+    VisualValueType::SpriteRenderer,
+    VisualValueType::Text2d,
     VisualValueType::AudioEmitter,
     VisualValueType::AudioListener,
     VisualValueType::Script,
@@ -216,7 +222,7 @@ const VISUAL_VALUE_TYPE_CHOICES_NO_ANY: [VisualValueType; 40] = [
     VisualValueType::PhysicsShapeCastHit,
 ];
 
-const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 24] = [
+const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 26] = [
     VisualValueType::Bool,
     VisualValueType::Number,
     VisualValueType::String,
@@ -228,6 +234,8 @@ const VISUAL_ARRAY_ITEM_TYPE_CHOICES: [VisualValueType; 24] = [
     VisualValueType::Camera,
     VisualValueType::Light,
     VisualValueType::MeshRenderer,
+    VisualValueType::SpriteRenderer,
+    VisualValueType::Text2d,
     VisualValueType::AudioEmitter,
     VisualValueType::AudioListener,
     VisualValueType::Script,
@@ -445,6 +453,9 @@ pub enum VisualApiOperation {
     EcsGetMeshRenderer,
     EcsGetMeshRendererSourcePath,
     EcsGetMeshRendererMaterialPath,
+    EcsGetSpriteRenderer,
+    EcsGetSpriteRendererTexturePath,
+    EcsGetText2d,
     EcsGetPhysics,
     EcsGetPhysicsGravity,
     EcsGetPhysicsPointProjectionHit,
@@ -526,6 +537,11 @@ pub enum VisualApiOperation {
     EcsSetMeshRenderer,
     EcsSetMeshRendererSourcePath,
     EcsSetMeshRendererMaterialPath,
+    EcsSetSpriteRenderer,
+    EcsSetSpriteRendererSheetAnimation,
+    EcsSetSpriteRendererSequence,
+    EcsSetSpriteRendererTexturePath,
+    EcsSetText2d,
     EcsSetPersistentForce,
     EcsSetPersistentTorque,
     EcsSetPhysics,
@@ -658,7 +674,7 @@ impl VisualApiOperation {
 }
 
 #[allow(dead_code)]
-const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 234] = [
+const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 242] = [
     VisualApiOperation::EcsAddComponent,
     VisualApiOperation::EcsAddForce,
     VisualApiOperation::EcsAddForceAtPoint,
@@ -733,6 +749,9 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 234] = [
     VisualApiOperation::EcsGetMeshRenderer,
     VisualApiOperation::EcsGetMeshRendererSourcePath,
     VisualApiOperation::EcsGetMeshRendererMaterialPath,
+    VisualApiOperation::EcsGetSpriteRenderer,
+    VisualApiOperation::EcsGetSpriteRendererTexturePath,
+    VisualApiOperation::EcsGetText2d,
     VisualApiOperation::EcsGetPhysics,
     VisualApiOperation::EcsGetPhysicsGravity,
     VisualApiOperation::EcsGetPhysicsPointProjectionHit,
@@ -814,6 +833,11 @@ const VISUAL_API_OPERATION_ALL: [VisualApiOperation; 234] = [
     VisualApiOperation::EcsSetMeshRenderer,
     VisualApiOperation::EcsSetMeshRendererSourcePath,
     VisualApiOperation::EcsSetMeshRendererMaterialPath,
+    VisualApiOperation::EcsSetSpriteRenderer,
+    VisualApiOperation::EcsSetSpriteRendererSheetAnimation,
+    VisualApiOperation::EcsSetSpriteRendererSequence,
+    VisualApiOperation::EcsSetSpriteRendererTexturePath,
+    VisualApiOperation::EcsSetText2d,
     VisualApiOperation::EcsSetPersistentForce,
     VisualApiOperation::EcsSetPersistentTorque,
     VisualApiOperation::EcsSetPhysics,
@@ -1834,8 +1858,48 @@ const API_INPUTS_99: [VisualApiInputSpec; 1] = [VisualApiInputSpec {
     label: "Settings",
     value_type: VisualValueType::WindowSettings,
 }];
+const API_INPUTS_100: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::SpriteRenderer,
+    },
+];
+const API_INPUTS_101: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Data",
+        value_type: VisualValueType::Text2d,
+    },
+];
+const API_INPUTS_102: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Sheet",
+        value_type: VisualValueType::SpriteRenderer,
+    },
+];
+const API_INPUTS_103: [VisualApiInputSpec; 2] = [
+    VisualApiInputSpec {
+        label: "Entity Id",
+        value_type: VisualValueType::Entity,
+    },
+    VisualApiInputSpec {
+        label: "Sequence",
+        value_type: VisualValueType::SpriteRenderer,
+    },
+];
 
-const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 234] = [
+const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 242] = [
     VisualApiOperationSpec {
         operation: VisualApiOperation::EcsAddComponent,
         table: VisualScriptApiTable::Ecs,
@@ -4176,6 +4240,86 @@ const VISUAL_API_OPERATION_SPECS: [VisualApiOperationSpec; 234] = [
         inputs: &API_INPUTS_99,
         output_type: Some(VisualValueType::Bool),
     },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetSpriteRenderer,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_sprite_renderer",
+        title: "Get Sprite Renderer",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::SpriteRenderer),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetSpriteRendererTexturePath,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_sprite_renderer_texture_path",
+        title: "Get Sprite Texture Path",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::String),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetSpriteRenderer,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_sprite_renderer",
+        title: "Set Sprite Renderer",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_100,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetSpriteRendererSheetAnimation,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_sprite_renderer_sheet_animation",
+        title: "Set Sprite Sheet Animation",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_102,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetSpriteRendererSequence,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_sprite_renderer_sequence",
+        title: "Set Sprite Sequence",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_103,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetSpriteRendererTexturePath,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_sprite_renderer_texture_path",
+        title: "Set Sprite Texture Path",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_36,
+        output_type: Some(VisualValueType::Bool),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsGetText2d,
+        table: VisualScriptApiTable::Ecs,
+        function: "get_text2d",
+        title: "Get Text 2D",
+        category: "Get",
+        flow: VisualApiFlow::Pure,
+        inputs: &API_INPUTS_8,
+        output_type: Some(VisualValueType::Text2d),
+    },
+    VisualApiOperationSpec {
+        operation: VisualApiOperation::EcsSetText2d,
+        table: VisualScriptApiTable::Ecs,
+        function: "set_text2d",
+        title: "Set Text 2D",
+        category: "Set",
+        flow: VisualApiFlow::Exec,
+        inputs: &API_INPUTS_101,
+        output_type: Some(VisualValueType::Bool),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -6019,6 +6163,12 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         VisualValueType::MeshRenderer => {
             "{\"source\":\"Cube\",\"casts_shadow\":true,\"visible\":true}"
         }
+        VisualValueType::SpriteRenderer => {
+            "{\"color\":{\"x\":1,\"y\":1,\"z\":1,\"w\":1},\"texture\":null,\"uv_min\":{\"x\":0,\"y\":0},\"uv_max\":{\"x\":1,\"y\":1},\"sheet_animation\":{\"enabled\":false,\"columns\":1,\"rows\":1,\"start_frame\":0,\"frame_count\":0,\"fps\":12.0,\"playback\":\"loop\",\"phase\":0.0,\"paused\":false,\"paused_frame\":0,\"flip_x\":false,\"flip_y\":false,\"frame_uv_inset\":{\"x\":0,\"y\":0}},\"image_sequence\":{\"enabled\":false,\"textures\":[],\"start_frame\":0,\"frame_count\":0,\"fps\":12.0,\"playback\":\"loop\",\"phase\":0.0,\"paused\":false,\"paused_frame\":0,\"flip_x\":false,\"flip_y\":false},\"pivot\":{\"x\":0.5,\"y\":0.5},\"layer\":0.0,\"space\":\"world\",\"blend_mode\":\"alpha\",\"billboard\":false,\"visible\":true}"
+        }
+        VisualValueType::Text2d => {
+            "{\"text\":\"\",\"color\":{\"x\":1,\"y\":1,\"z\":1,\"w\":1},\"font_size\":32.0,\"font_weight\":400.0,\"font_width\":1.0,\"font_style\":\"normal\",\"line_height_scale\":1.0,\"letter_spacing\":0.0,\"word_spacing\":0.0,\"underline\":false,\"strikethrough\":false,\"align_h\":\"left\",\"align_v\":\"baseline\",\"space\":\"world\",\"blend_mode\":\"alpha\",\"billboard\":false,\"visible\":true,\"layer\":0.0}"
+        }
         VisualValueType::AudioEmitter => {
             "{\"path\":null,\"streaming\":false,\"bus\":\"Master\",\"volume\":1.0,\"pitch\":1.0,\"looping\":false,\"spatial\":true,\"min_distance\":1.0,\"max_distance\":30.0,\"rolloff\":1.0,\"spatial_blend\":1.0,\"play_on_spawn\":false,\"playback_state\":\"Stopped\"}"
         }
@@ -6097,7 +6247,15 @@ fn default_literal_for_api_input(
     match (operation, input_index, value_type) {
         (VisualApiOperation::EcsSetRenderConfig, 0, VisualValueType::RenderConfig)
         | (VisualApiOperation::EcsSetShaderConstants, 0, VisualValueType::ShaderConstants)
-        | (VisualApiOperation::EcsSetStreamingTuning, 0, VisualValueType::StreamingTuning) => "{}",
+        | (VisualApiOperation::EcsSetStreamingTuning, 0, VisualValueType::StreamingTuning)
+        | (VisualApiOperation::EcsSetSpriteRenderer, 1, VisualValueType::SpriteRenderer)
+        | (
+            VisualApiOperation::EcsSetSpriteRendererSheetAnimation,
+            1,
+            VisualValueType::SpriteRenderer,
+        )
+        | (VisualApiOperation::EcsSetSpriteRendererSequence, 1, VisualValueType::SpriteRenderer)
+        | (VisualApiOperation::EcsSetText2d, 1, VisualValueType::Text2d) => "{}",
         _ => default_literal_for_type(value_type),
     }
 }
@@ -6125,6 +6283,8 @@ fn literal_string_for_value_type(value: &JsonValue, value_type: VisualValueType)
         | VisualValueType::Camera
         | VisualValueType::Light
         | VisualValueType::MeshRenderer
+        | VisualValueType::SpriteRenderer
+        | VisualValueType::Text2d
         | VisualValueType::AudioEmitter
         | VisualValueType::AudioListener
         | VisualValueType::Script
@@ -6233,6 +6393,38 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 || object.contains_key("material")
                 || object.contains_key("casts_shadow")
                 || object.contains_key("visible");
+            let has_text2d = object.contains_key("text")
+                || object.contains_key("font_path")
+                || object.contains_key("font_family")
+                || object.contains_key("font_size")
+                || object.contains_key("font_weight")
+                || object.contains_key("font_width")
+                || object.contains_key("font_style")
+                || object.contains_key("line_height_scale")
+                || object.contains_key("letter_spacing")
+                || object.contains_key("word_spacing")
+                || object.contains_key("underline")
+                || object.contains_key("strikethrough")
+                || object.contains_key("max_width")
+                || object.contains_key("align_h")
+                || object.contains_key("align_v");
+            let has_sprite_renderer = object.contains_key("texture_id")
+                || object.contains_key("texture")
+                || object.contains_key("uv_min")
+                || object.contains_key("uv_max")
+                || object.contains_key("sheet_animation")
+                || object.contains_key("sheet")
+                || object.contains_key("image_sequence")
+                || object.contains_key("sequence")
+                || object.contains_key("pivot")
+                || ((object.contains_key("color")
+                    || object.contains_key("clip_rect")
+                    || object.contains_key("blend_mode")
+                    || object.contains_key("billboard")
+                    || object.contains_key("space")
+                    || object.contains_key("pick_id"))
+                    && !has_text2d
+                    && !has_mesh_renderer);
             let has_audio_emitter = object.contains_key("path")
                 || object.contains_key("streaming")
                 || object.contains_key("bus")
@@ -6380,6 +6572,10 @@ fn infer_visual_value_type_from_json(value: &JsonValue) -> VisualValueType {
                 VisualValueType::InputModifiers
             } else if has_audio_listener {
                 VisualValueType::AudioListener
+            } else if has_text2d {
+                VisualValueType::Text2d
+            } else if has_sprite_renderer {
+                VisualValueType::SpriteRenderer
             } else if has_mesh_renderer {
                 VisualValueType::MeshRenderer
             } else if has_camera {
@@ -6478,6 +6674,7 @@ enum VisualAssetPathKind {
     Scene,
     Script,
     Model,
+    Texture,
     Material,
     Audio,
 }
@@ -6501,6 +6698,29 @@ fn is_model_asset_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "glb" | "gltf"))
+        .unwrap_or(false)
+}
+
+fn is_texture_asset_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "tga"
+                    | "bmp"
+                    | "gif"
+                    | "webp"
+                    | "ktx"
+                    | "ktx2"
+                    | "dds"
+                    | "hdr"
+                    | "exr"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -6539,6 +6759,7 @@ fn asset_path_matches_kind(path: &Path, kind: VisualAssetPathKind) -> bool {
         VisualAssetPathKind::Scene => is_scene_asset_path(path) || is_model_asset_path(path),
         VisualAssetPathKind::Script => crate::editor::is_script_path(path),
         VisualAssetPathKind::Model => is_model_asset_path(path),
+        VisualAssetPathKind::Texture => is_texture_asset_path(path),
         VisualAssetPathKind::Material => is_material_asset_path(path),
         VisualAssetPathKind::Audio => is_audio_asset_path(path),
     }
@@ -6564,6 +6785,9 @@ fn api_input_asset_path_kind(
         VisualApiOperation::EcsSetMeshRendererSourcePath if input_index == 1 => {
             Some(VisualAssetPathKind::Model)
         }
+        VisualApiOperation::EcsSetSpriteRendererTexturePath if input_index == 1 => {
+            Some(VisualAssetPathKind::Texture)
+        }
         VisualApiOperation::EcsSetMeshRendererMaterialPath if input_index == 1 => {
             Some(VisualAssetPathKind::Material)
         }
@@ -6574,7 +6798,18 @@ fn api_input_asset_path_kind(
     }
 }
 
-fn path_to_visual_literal(path: &Path) -> String {
+fn path_to_visual_literal(path: &Path, project_root: Option<&Path>) -> String {
+    if let Some(root) = project_root {
+        if let Ok(relative) = path.strip_prefix(root) {
+            return relative.to_string_lossy().replace('\\', "/");
+        }
+        if let (Ok(path_canonical), Ok(root_canonical)) = (path.canonicalize(), root.canonicalize())
+        {
+            if let Ok(relative) = path_canonical.strip_prefix(&root_canonical) {
+                return relative.to_string_lossy().replace('\\', "/");
+            }
+        }
+    }
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -6655,6 +6890,10 @@ fn has_structured_api_default_editor(operation: VisualApiOperation, input_index:
         (VisualApiOperation::EcsSetCamera, 1)
             | (VisualApiOperation::EcsSetLight, 1)
             | (VisualApiOperation::EcsSetMeshRenderer, 1)
+            | (VisualApiOperation::EcsSetSpriteRenderer, 1)
+            | (VisualApiOperation::EcsSetSpriteRendererSheetAnimation, 1)
+            | (VisualApiOperation::EcsSetSpriteRendererSequence, 1)
+            | (VisualApiOperation::EcsSetText2d, 1)
             | (VisualApiOperation::EcsSetAudioEmitter, 1)
             | (VisualApiOperation::EcsSetAudioListener, 1)
             | (VisualApiOperation::EcsSetPhysics, 1)
@@ -6683,6 +6922,10 @@ fn api_input_prefers_vertical_default_layout(
         (operation, input_index),
         (VisualApiOperation::EcsSetPhysics, 1)
             | (VisualApiOperation::EcsSetMeshRenderer, 1)
+            | (VisualApiOperation::EcsSetSpriteRenderer, 1)
+            | (VisualApiOperation::EcsSetSpriteRendererSheetAnimation, 1)
+            | (VisualApiOperation::EcsSetSpriteRendererSequence, 1)
+            | (VisualApiOperation::EcsSetText2d, 1)
             | (VisualApiOperation::EcsSetLight, 1)
             | (VisualApiOperation::EcsSetAudioEmitter, 1)
             | (VisualApiOperation::EcsSetSpline, 1)
@@ -6711,6 +6954,8 @@ fn value_type_prefers_vertical_default_layout(value_type: VisualValueType) -> bo
             | VisualValueType::PhysicsVelocity
             | VisualValueType::PhysicsWorldDefaults
             | VisualValueType::MeshRenderer
+            | VisualValueType::SpriteRenderer
+            | VisualValueType::Text2d
             | VisualValueType::AudioEmitter
             | VisualValueType::AudioListener
             | VisualValueType::LookAt
@@ -6866,6 +7111,8 @@ fn api_menu_section(spec: &VisualApiOperationSpec) -> VisualApiMenuSection {
     if function.contains("camera")
         || function.contains("light")
         || function.contains("mesh")
+        || function.contains("sprite_renderer")
+        || function.contains("text2d")
         || function.contains("viewport")
         || function.contains("render")
         || function.contains("graph_template")
@@ -7068,6 +7315,18 @@ fn json_to_u64(value: &JsonValue) -> Option<u64> {
         JsonValue::String(text) => text.trim().parse::<u64>().ok(),
         _ => None,
     }
+}
+
+fn sprite_section_patch_value(value: &JsonValue, primary_key: &str, alias_key: &str) -> JsonValue {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get(primary_key)
+                .cloned()
+                .or_else(|| object.get(alias_key).cloned())
+        })
+        .unwrap_or_else(|| value.clone())
 }
 
 fn next_visual_variable_id(variables: &[VisualVariableDefinition]) -> u64 {
@@ -8214,6 +8473,30 @@ impl<'a, H: VisualScriptHost> VisualRuntimeContext<'a, H> {
                     args[2].clone(),
                     JsonValue::Object(patch),
                 ])
+            }
+            VisualApiOperation::EcsSetSpriteRendererSheetAnimation => {
+                if args.len() < 2 {
+                    return Ok(args);
+                }
+                let section = sprite_section_patch_value(&args[1], "sheet_animation", "sheet");
+                let normalized = coerce_json_to_sprite_sheet_animation_patch(&section)
+                    .map_err(|err| format!("Sheet animation patch is invalid: {}", err))?;
+                let mut patch = JsonMap::new();
+                patch.insert("sheet_animation".to_string(), normalized.clone());
+                patch.insert("sheet".to_string(), normalized);
+                Ok(vec![args.remove(0), JsonValue::Object(patch)])
+            }
+            VisualApiOperation::EcsSetSpriteRendererSequence => {
+                if args.len() < 2 {
+                    return Ok(args);
+                }
+                let section = sprite_section_patch_value(&args[1], "image_sequence", "sequence");
+                let normalized = coerce_json_to_sprite_image_sequence_patch(&section)
+                    .map_err(|err| format!("Image sequence patch is invalid: {}", err))?;
+                let mut patch = JsonMap::new();
+                patch.insert("image_sequence".to_string(), normalized.clone());
+                patch.insert("sequence".to_string(), normalized);
+                Ok(vec![args.remove(0), JsonValue::Object(patch)])
             }
             VisualApiOperation::EcsSetAnimatorBlendNode => {
                 if args.len() >= 5 {
@@ -9953,35 +10236,37 @@ fn visual_value_type_compare_rank(value_type: VisualValueType) -> u8 {
         VisualValueType::Camera => 9,
         VisualValueType::Light => 10,
         VisualValueType::MeshRenderer => 11,
-        VisualValueType::AudioEmitter => 12,
-        VisualValueType::AudioListener => 13,
-        VisualValueType::Script => 14,
-        VisualValueType::LookAt => 15,
-        VisualValueType::EntityFollower => 16,
-        VisualValueType::AnimatorState => 17,
-        VisualValueType::InputModifiers => 18,
-        VisualValueType::AudioStreamingConfig => 19,
-        VisualValueType::RuntimeTuning => 20,
-        VisualValueType::RuntimeConfig => 21,
-        VisualValueType::RenderConfig => 22,
-        VisualValueType::ShaderConstants => 23,
-        VisualValueType::StreamingTuning => 24,
-        VisualValueType::RenderPasses => 25,
-        VisualValueType::GpuBudget => 26,
-        VisualValueType::AssetBudgets => 27,
-        VisualValueType::WindowSettings => 28,
-        VisualValueType::Spline => 29,
-        VisualValueType::Physics => 30,
-        VisualValueType::PhysicsVelocity => 31,
-        VisualValueType::PhysicsWorldDefaults => 32,
-        VisualValueType::CharacterControllerOutput => 33,
-        VisualValueType::DynamicComponentFields => 34,
-        VisualValueType::DynamicFieldValue => 35,
-        VisualValueType::PhysicsRayCastHit => 36,
-        VisualValueType::PhysicsPointProjectionHit => 37,
-        VisualValueType::PhysicsShapeCastHit => 38,
-        VisualValueType::PhysicsQueryFilter => 39,
-        VisualValueType::Any => 40,
+        VisualValueType::SpriteRenderer => 12,
+        VisualValueType::Text2d => 13,
+        VisualValueType::AudioEmitter => 14,
+        VisualValueType::AudioListener => 15,
+        VisualValueType::Script => 16,
+        VisualValueType::LookAt => 17,
+        VisualValueType::EntityFollower => 18,
+        VisualValueType::AnimatorState => 19,
+        VisualValueType::InputModifiers => 20,
+        VisualValueType::AudioStreamingConfig => 21,
+        VisualValueType::RuntimeTuning => 22,
+        VisualValueType::RuntimeConfig => 23,
+        VisualValueType::RenderConfig => 24,
+        VisualValueType::ShaderConstants => 25,
+        VisualValueType::StreamingTuning => 26,
+        VisualValueType::RenderPasses => 27,
+        VisualValueType::GpuBudget => 28,
+        VisualValueType::AssetBudgets => 29,
+        VisualValueType::WindowSettings => 30,
+        VisualValueType::Spline => 31,
+        VisualValueType::Physics => 32,
+        VisualValueType::PhysicsVelocity => 33,
+        VisualValueType::PhysicsWorldDefaults => 34,
+        VisualValueType::CharacterControllerOutput => 35,
+        VisualValueType::DynamicComponentFields => 36,
+        VisualValueType::DynamicFieldValue => 37,
+        VisualValueType::PhysicsRayCastHit => 38,
+        VisualValueType::PhysicsPointProjectionHit => 39,
+        VisualValueType::PhysicsShapeCastHit => 40,
+        VisualValueType::PhysicsQueryFilter => 41,
+        VisualValueType::Any => 42,
     }
 }
 
@@ -10021,6 +10306,15 @@ fn vec2_json(x: f64, y: f64) -> JsonValue {
     let mut object = JsonMap::new();
     object.insert("x".to_string(), json_number(x));
     object.insert("y".to_string(), json_number(y));
+    JsonValue::Object(object)
+}
+
+fn vec4_json(x: f64, y: f64, z: f64, w: f64) -> JsonValue {
+    let mut object = JsonMap::new();
+    object.insert("x".to_string(), json_number(x));
+    object.insert("y".to_string(), json_number(y));
+    object.insert("z".to_string(), json_number(z));
+    object.insert("w".to_string(), json_number(w));
     JsonValue::Object(object)
 }
 
@@ -10143,6 +10437,8 @@ fn coerce_json_to_visual_type(
         VisualValueType::Camera => coerce_json_to_camera(value),
         VisualValueType::Light => coerce_json_to_light(value),
         VisualValueType::MeshRenderer => coerce_json_to_mesh_renderer(value),
+        VisualValueType::SpriteRenderer => coerce_json_to_sprite_renderer(value),
+        VisualValueType::Text2d => coerce_json_to_text2d(value),
         VisualValueType::AudioEmitter => coerce_json_to_audio_emitter(value),
         VisualValueType::AudioListener => coerce_json_to_audio_listener(value),
         VisualValueType::Script => coerce_json_to_script_ref(value),
@@ -10518,6 +10814,734 @@ fn coerce_json_to_mesh_renderer(value: &JsonValue) -> Result<JsonValue, String> 
     }
     out.insert("casts_shadow".to_string(), JsonValue::Bool(casts_shadow));
     out.insert("visible".to_string(), JsonValue::Bool(visible));
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_finite_f64(value: &JsonValue, field_name: &str) -> Result<f64, String> {
+    let number = coerce_json_to_f64(value)?;
+    if !number.is_finite() {
+        return Err(format!("{} must be a finite number", field_name));
+    }
+    Ok(number)
+}
+
+fn coerce_json_to_u32(value: &JsonValue, field_name: &str) -> Result<u32, String> {
+    let number = coerce_json_to_finite_f64(value, field_name)?;
+    if number < 0.0 {
+        return Err(format!("{} must be non-negative", field_name));
+    }
+    Ok(number.round().clamp(0.0, u32::MAX as f64) as u32)
+}
+
+fn coerce_json_mode_index(value: &JsonValue) -> Option<i64> {
+    match value {
+        JsonValue::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| {
+                number.as_f64().and_then(|value| {
+                    if value.is_finite() {
+                        Some(value as i64)
+                    } else {
+                        None
+                    }
+                })
+            }),
+        _ => None,
+    }
+}
+
+fn coerce_sprite_space_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "screen" => Some("screen"),
+            "world" => Some("world"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("screen"),
+            Some(1) => Some("world"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_sprite_blend_mode_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "alpha" => Some("alpha"),
+            "premultiplied" | "premul" | "premult" => Some("premultiplied"),
+            "additive" | "add" => Some("additive"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("alpha"),
+            Some(1) => Some("premultiplied"),
+            Some(2) => Some("additive"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_sprite_playback_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "loop" | "repeat" => Some("loop"),
+            "once" | "one_shot" | "oneshot" => Some("once"),
+            "pingpong" | "ping_pong" | "ping-pong" | "pong" => Some("pingpong"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("loop"),
+            Some(1) => Some("once"),
+            Some(2) => Some("pingpong"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_text_font_style_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some("normal"),
+            "italic" => Some("italic"),
+            "oblique" => Some("oblique"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("normal"),
+            Some(1) => Some("italic"),
+            Some(2) => Some("oblique"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_text_align_h_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "left" => Some("left"),
+            "center" | "centre" => Some("center"),
+            "right" => Some("right"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("left"),
+            Some(1) => Some("center"),
+            Some(2) => Some("right"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_text_align_v_value(value: &JsonValue) -> Option<&'static str> {
+    match value {
+        JsonValue::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "top" => Some("top"),
+            "center" | "centre" => Some("center"),
+            "bottom" => Some("bottom"),
+            "baseline" => Some("baseline"),
+            _ => None,
+        },
+        _ => match coerce_json_mode_index(value) {
+            Some(0) => Some("top"),
+            Some(1) => Some("center"),
+            Some(2) => Some("bottom"),
+            Some(3) => Some("baseline"),
+            _ => None,
+        },
+    }
+}
+
+fn coerce_json_to_sprite_texture_paths(
+    value: &JsonValue,
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    match value {
+        JsonValue::Null => Ok(Vec::new()),
+        JsonValue::String(path) => {
+            let trimmed = path.trim();
+            Ok(vec![trimmed.to_string()])
+        }
+        JsonValue::Array(paths) => {
+            let mut normalized = Vec::with_capacity(paths.len());
+            for (index, path) in paths.iter().enumerate() {
+                match path {
+                    JsonValue::Null => normalized.push(String::new()),
+                    JsonValue::String(text) => {
+                        let trimmed = text.trim();
+                        normalized.push(trimmed.to_string());
+                    }
+                    _ => {
+                        return Err(format!("{}[{}] must be a string", field_name, index));
+                    }
+                }
+            }
+            Ok(normalized)
+        }
+        _ => Err(format!(
+            "{} must be a string, array of strings, or null",
+            field_name
+        )),
+    }
+}
+
+fn coerce_json_to_sprite_sheet_animation_patch(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Sprite Sheet Animation")?;
+    let mut out = JsonMap::new();
+
+    if let Some(enabled) = object.get("enabled") {
+        out.insert("enabled".to_string(), JsonValue::Bool(is_truthy(enabled)));
+    }
+    if let Some(columns) = object.get("columns") {
+        out.insert(
+            "columns".to_string(),
+            JsonValue::Number(JsonNumber::from(
+                coerce_json_to_u32(columns, "Sprite Sheet Animation.columns")?.max(1),
+            )),
+        );
+    }
+    if let Some(rows) = object.get("rows") {
+        out.insert(
+            "rows".to_string(),
+            JsonValue::Number(JsonNumber::from(
+                coerce_json_to_u32(rows, "Sprite Sheet Animation.rows")?.max(1),
+            )),
+        );
+    }
+    if let Some(start_frame) = object.get("start_frame") {
+        out.insert(
+            "start_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                start_frame,
+                "Sprite Sheet Animation.start_frame",
+            )?)),
+        );
+    }
+    if let Some(frame_count) = object.get("frame_count") {
+        out.insert(
+            "frame_count".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                frame_count,
+                "Sprite Sheet Animation.frame_count",
+            )?)),
+        );
+    }
+    if let Some(fps) = object.get("fps") {
+        out.insert(
+            "fps".to_string(),
+            json_number(coerce_json_to_finite_f64(
+                fps,
+                "Sprite Sheet Animation.fps",
+            )?),
+        );
+    }
+    if let Some(playback) = object.get("playback") {
+        let Some(playback) = coerce_sprite_playback_value(playback) else {
+            return Err("Sprite Sheet Animation.playback is invalid".to_string());
+        };
+        out.insert(
+            "playback".to_string(),
+            JsonValue::String(playback.to_string()),
+        );
+    }
+    if let Some(phase) = object.get("phase") {
+        out.insert(
+            "phase".to_string(),
+            json_number(coerce_json_to_finite_f64(
+                phase,
+                "Sprite Sheet Animation.phase",
+            )?),
+        );
+    }
+    if let Some(paused) = object.get("paused") {
+        out.insert("paused".to_string(), JsonValue::Bool(is_truthy(paused)));
+    }
+    if let Some(paused_frame) = object.get("paused_frame") {
+        out.insert(
+            "paused_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                paused_frame,
+                "Sprite Sheet Animation.paused_frame",
+            )?)),
+        );
+    }
+    if let Some(flip_x) = object.get("flip_x") {
+        out.insert("flip_x".to_string(), JsonValue::Bool(is_truthy(flip_x)));
+    }
+    if let Some(flip_y) = object.get("flip_y") {
+        out.insert("flip_y".to_string(), JsonValue::Bool(is_truthy(flip_y)));
+    }
+    if let Some(frame_uv_inset) = object.get("frame_uv_inset") {
+        let (x, y) = coerce_json_to_vec2_components(frame_uv_inset)?;
+        out.insert(
+            "frame_uv_inset".to_string(),
+            vec2_json(x.clamp(0.0, 0.49), y.clamp(0.0, 0.49)),
+        );
+    }
+
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_sprite_image_sequence_patch(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Sprite Image Sequence")?;
+    let mut out = JsonMap::new();
+
+    if let Some(enabled) = object.get("enabled") {
+        out.insert("enabled".to_string(), JsonValue::Bool(is_truthy(enabled)));
+    }
+    if let Some(start_frame) = object.get("start_frame") {
+        out.insert(
+            "start_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                start_frame,
+                "Sprite Image Sequence.start_frame",
+            )?)),
+        );
+    }
+    if let Some(frame_count) = object.get("frame_count") {
+        out.insert(
+            "frame_count".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                frame_count,
+                "Sprite Image Sequence.frame_count",
+            )?)),
+        );
+    }
+    if let Some(fps) = object.get("fps") {
+        out.insert(
+            "fps".to_string(),
+            json_number(coerce_json_to_finite_f64(fps, "Sprite Image Sequence.fps")?),
+        );
+    }
+    if let Some(playback) = object.get("playback") {
+        let Some(playback) = coerce_sprite_playback_value(playback) else {
+            return Err("Sprite Image Sequence.playback is invalid".to_string());
+        };
+        out.insert(
+            "playback".to_string(),
+            JsonValue::String(playback.to_string()),
+        );
+    }
+    if let Some(phase) = object.get("phase") {
+        out.insert(
+            "phase".to_string(),
+            json_number(coerce_json_to_finite_f64(
+                phase,
+                "Sprite Image Sequence.phase",
+            )?),
+        );
+    }
+    if let Some(paused) = object.get("paused") {
+        out.insert("paused".to_string(), JsonValue::Bool(is_truthy(paused)));
+    }
+    if let Some(paused_frame) = object.get("paused_frame") {
+        out.insert(
+            "paused_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(coerce_json_to_u32(
+                paused_frame,
+                "Sprite Image Sequence.paused_frame",
+            )?)),
+        );
+    }
+    if let Some(flip_x) = object.get("flip_x") {
+        out.insert("flip_x".to_string(), JsonValue::Bool(is_truthy(flip_x)));
+    }
+    if let Some(flip_y) = object.get("flip_y") {
+        out.insert("flip_y".to_string(), JsonValue::Bool(is_truthy(flip_y)));
+    }
+
+    let mut textures: Option<Vec<String>> = None;
+    for (key, field) in [
+        ("textures", "Sprite Image Sequence.textures"),
+        ("texture_paths", "Sprite Image Sequence.texture_paths"),
+        ("frames", "Sprite Image Sequence.frames"),
+    ] {
+        if let Some(value) = object.get(key) {
+            textures = Some(coerce_json_to_sprite_texture_paths(value, field)?);
+        }
+    }
+    if let Some(textures) = textures {
+        let values = JsonValue::Array(textures.into_iter().map(JsonValue::String).collect());
+        out.insert("textures".to_string(), values.clone());
+        out.insert("texture_paths".to_string(), values.clone());
+        out.insert("frames".to_string(), values);
+    }
+
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_sprite_renderer(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Sprite Renderer")?;
+    let mut out = JsonMap::new();
+
+    if let Some(color) = object.get("color") {
+        let (x, y, z, w) = coerce_json_to_vec4_components(color)?;
+        out.insert("color".to_string(), vec4_json(x, y, z, w));
+    }
+    if let Some(texture_id) = object.get("texture_id") {
+        if texture_id.is_null() {
+            out.insert("texture_id".to_string(), JsonValue::Null);
+        } else {
+            let id = coerce_json_to_finite_f64(texture_id, "Sprite Renderer.texture_id")?;
+            if id < 0.0 {
+                return Err("Sprite Renderer.texture_id must be non-negative".to_string());
+            }
+            out.insert(
+                "texture_id".to_string(),
+                JsonValue::Number(JsonNumber::from(id.round() as u64)),
+            );
+        }
+    }
+    if let Some(texture) = object.get("texture") {
+        match texture {
+            JsonValue::Null => {
+                out.insert("texture".to_string(), JsonValue::Null);
+            }
+            JsonValue::String(path) => {
+                let trimmed = path.trim();
+                out.insert(
+                    "texture".to_string(),
+                    if trimmed.is_empty() {
+                        JsonValue::Null
+                    } else {
+                        JsonValue::String(trimmed.to_string())
+                    },
+                );
+            }
+            _ => {
+                return Err("Sprite Renderer.texture must be a string or null".to_string());
+            }
+        }
+    }
+    if let Some(uv_min) = object.get("uv_min") {
+        out.insert(
+            "uv_min".to_string(),
+            coerce_json_to_visual_type(uv_min, VisualValueType::Vec2)?,
+        );
+    }
+    if let Some(uv_max) = object.get("uv_max") {
+        out.insert(
+            "uv_max".to_string(),
+            coerce_json_to_visual_type(uv_max, VisualValueType::Vec2)?,
+        );
+    }
+    if let Some(sheet_animation) = object.get("sheet_animation") {
+        out.insert(
+            "sheet_animation".to_string(),
+            if sheet_animation.is_null() {
+                JsonValue::Null
+            } else {
+                coerce_json_to_sprite_sheet_animation_patch(sheet_animation)?
+            },
+        );
+    }
+    if let Some(sheet_animation) = object.get("sheet") {
+        out.insert(
+            "sheet".to_string(),
+            if sheet_animation.is_null() {
+                JsonValue::Null
+            } else {
+                coerce_json_to_sprite_sheet_animation_patch(sheet_animation)?
+            },
+        );
+    }
+    if let Some(image_sequence) = object.get("image_sequence") {
+        out.insert(
+            "image_sequence".to_string(),
+            if image_sequence.is_null() {
+                JsonValue::Null
+            } else {
+                coerce_json_to_sprite_image_sequence_patch(image_sequence)?
+            },
+        );
+    }
+    if let Some(image_sequence) = object.get("sequence") {
+        out.insert(
+            "sequence".to_string(),
+            if image_sequence.is_null() {
+                JsonValue::Null
+            } else {
+                coerce_json_to_sprite_image_sequence_patch(image_sequence)?
+            },
+        );
+    }
+    if let Some(pivot) = object.get("pivot") {
+        out.insert(
+            "pivot".to_string(),
+            coerce_json_to_visual_type(pivot, VisualValueType::Vec2)?,
+        );
+    }
+    if let Some(clip_rect) = object.get("clip_rect") {
+        out.insert(
+            "clip_rect".to_string(),
+            if clip_rect.is_null() {
+                JsonValue::Null
+            } else {
+                let (x, y, z, w) = coerce_json_to_vec4_components(clip_rect)?;
+                vec4_json(x, y, z, w)
+            },
+        );
+    }
+    if let Some(layer) = object.get("layer") {
+        out.insert(
+            "layer".to_string(),
+            json_number(coerce_json_to_finite_f64(layer, "Sprite Renderer.layer")?),
+        );
+    }
+    if let Some(space) = object.get("space") {
+        let Some(space) = coerce_sprite_space_value(space) else {
+            return Err("Sprite Renderer.space is invalid".to_string());
+        };
+        out.insert("space".to_string(), JsonValue::String(space.to_string()));
+    }
+    if let Some(blend_mode) = object.get("blend_mode") {
+        let Some(blend_mode) = coerce_sprite_blend_mode_value(blend_mode) else {
+            return Err("Sprite Renderer.blend_mode is invalid".to_string());
+        };
+        out.insert(
+            "blend_mode".to_string(),
+            JsonValue::String(blend_mode.to_string()),
+        );
+    }
+    if let Some(billboard) = object.get("billboard") {
+        out.insert(
+            "billboard".to_string(),
+            JsonValue::Bool(is_truthy(billboard)),
+        );
+    }
+    if let Some(visible) = object.get("visible") {
+        out.insert("visible".to_string(), JsonValue::Bool(is_truthy(visible)));
+    }
+    if let Some(pick_id) = object.get("pick_id") {
+        if pick_id.is_null() {
+            out.insert("pick_id".to_string(), JsonValue::Null);
+        } else {
+            let id = coerce_json_to_finite_f64(pick_id, "Sprite Renderer.pick_id")?;
+            if id < 0.0 {
+                return Err("Sprite Renderer.pick_id must be non-negative".to_string());
+            }
+            out.insert(
+                "pick_id".to_string(),
+                JsonValue::Number(JsonNumber::from(id.round() as u64)),
+            );
+        }
+    }
+
+    Ok(JsonValue::Object(out))
+}
+
+fn coerce_json_to_text2d(value: &JsonValue) -> Result<JsonValue, String> {
+    let object = coerce_json_to_loose_object(value, "Text 2D")?;
+    let mut out = JsonMap::new();
+
+    if let Some(text) = object.get("text") {
+        match text {
+            JsonValue::String(text) => {
+                out.insert("text".to_string(), JsonValue::String(text.clone()));
+            }
+            _ => return Err("Text 2D.text must be a string".to_string()),
+        }
+    }
+    if let Some(color) = object.get("color") {
+        let (x, y, z, w) = coerce_json_to_vec4_components(color)?;
+        out.insert("color".to_string(), vec4_json(x, y, z, w));
+    }
+    if let Some(font_path) = object.get("font_path") {
+        match font_path {
+            JsonValue::Null => {
+                out.insert("font_path".to_string(), JsonValue::Null);
+            }
+            JsonValue::String(path) => {
+                let trimmed = path.trim();
+                out.insert(
+                    "font_path".to_string(),
+                    if trimmed.is_empty() {
+                        JsonValue::Null
+                    } else {
+                        JsonValue::String(trimmed.to_string())
+                    },
+                );
+            }
+            _ => return Err("Text 2D.font_path must be a string or null".to_string()),
+        }
+    }
+    if let Some(font_family) = object.get("font_family") {
+        match font_family {
+            JsonValue::Null => {
+                out.insert("font_family".to_string(), JsonValue::Null);
+            }
+            JsonValue::String(family) => {
+                let trimmed = family.trim();
+                out.insert(
+                    "font_family".to_string(),
+                    if trimmed.is_empty() {
+                        JsonValue::Null
+                    } else {
+                        JsonValue::String(trimmed.to_string())
+                    },
+                );
+            }
+            _ => return Err("Text 2D.font_family must be a string or null".to_string()),
+        }
+    }
+    if let Some(font_size) = object.get("font_size") {
+        out.insert(
+            "font_size".to_string(),
+            json_number(coerce_json_to_finite_f64(font_size, "Text 2D.font_size")?.max(0.01)),
+        );
+    }
+    if let Some(font_weight) = object.get("font_weight") {
+        out.insert(
+            "font_weight".to_string(),
+            json_number(
+                coerce_json_to_finite_f64(font_weight, "Text 2D.font_weight")?.clamp(1.0, 1000.0),
+            ),
+        );
+    }
+    if let Some(font_width) = object.get("font_width") {
+        out.insert(
+            "font_width".to_string(),
+            json_number(
+                coerce_json_to_finite_f64(font_width, "Text 2D.font_width")?.clamp(0.25, 4.0),
+            ),
+        );
+    }
+    if let Some(font_style) = object.get("font_style") {
+        let Some(font_style) = coerce_text_font_style_value(font_style) else {
+            return Err("Text 2D.font_style is invalid".to_string());
+        };
+        out.insert(
+            "font_style".to_string(),
+            JsonValue::String(font_style.to_string()),
+        );
+    }
+    if let Some(line_height_scale) = object.get("line_height_scale") {
+        out.insert(
+            "line_height_scale".to_string(),
+            json_number(
+                coerce_json_to_finite_f64(line_height_scale, "Text 2D.line_height_scale")?.max(0.1),
+            ),
+        );
+    }
+    if let Some(letter_spacing) = object.get("letter_spacing") {
+        out.insert(
+            "letter_spacing".to_string(),
+            json_number(coerce_json_to_finite_f64(
+                letter_spacing,
+                "Text 2D.letter_spacing",
+            )?),
+        );
+    }
+    if let Some(word_spacing) = object.get("word_spacing") {
+        out.insert(
+            "word_spacing".to_string(),
+            json_number(coerce_json_to_finite_f64(
+                word_spacing,
+                "Text 2D.word_spacing",
+            )?),
+        );
+    }
+    if let Some(underline) = object.get("underline") {
+        out.insert(
+            "underline".to_string(),
+            JsonValue::Bool(is_truthy(underline)),
+        );
+    }
+    if let Some(strikethrough) = object.get("strikethrough") {
+        out.insert(
+            "strikethrough".to_string(),
+            JsonValue::Bool(is_truthy(strikethrough)),
+        );
+    }
+    if let Some(max_width) = object.get("max_width") {
+        out.insert(
+            "max_width".to_string(),
+            if max_width.is_null() {
+                JsonValue::Null
+            } else {
+                let width = coerce_json_to_finite_f64(max_width, "Text 2D.max_width")?;
+                if width <= 0.0 {
+                    return Err("Text 2D.max_width must be positive or null".to_string());
+                }
+                json_number(width)
+            },
+        );
+    }
+    if let Some(align_h) = object.get("align_h") {
+        let Some(align_h) = coerce_text_align_h_value(align_h) else {
+            return Err("Text 2D.align_h is invalid".to_string());
+        };
+        out.insert(
+            "align_h".to_string(),
+            JsonValue::String(align_h.to_string()),
+        );
+    }
+    if let Some(align_v) = object.get("align_v") {
+        let Some(align_v) = coerce_text_align_v_value(align_v) else {
+            return Err("Text 2D.align_v is invalid".to_string());
+        };
+        out.insert(
+            "align_v".to_string(),
+            JsonValue::String(align_v.to_string()),
+        );
+    }
+    if let Some(space) = object.get("space") {
+        let Some(space) = coerce_sprite_space_value(space) else {
+            return Err("Text 2D.space is invalid".to_string());
+        };
+        out.insert("space".to_string(), JsonValue::String(space.to_string()));
+    }
+    if let Some(blend_mode) = object.get("blend_mode") {
+        let Some(blend_mode) = coerce_sprite_blend_mode_value(blend_mode) else {
+            return Err("Text 2D.blend_mode is invalid".to_string());
+        };
+        out.insert(
+            "blend_mode".to_string(),
+            JsonValue::String(blend_mode.to_string()),
+        );
+    }
+    if let Some(billboard) = object.get("billboard") {
+        out.insert(
+            "billboard".to_string(),
+            JsonValue::Bool(is_truthy(billboard)),
+        );
+    }
+    if let Some(visible) = object.get("visible") {
+        out.insert("visible".to_string(), JsonValue::Bool(is_truthy(visible)));
+    }
+    if let Some(layer) = object.get("layer") {
+        out.insert(
+            "layer".to_string(),
+            json_number(coerce_json_to_finite_f64(layer, "Text 2D.layer")?),
+        );
+    }
+    if let Some(clip_rect) = object.get("clip_rect") {
+        out.insert(
+            "clip_rect".to_string(),
+            if clip_rect.is_null() {
+                JsonValue::Null
+            } else {
+                let (x, y, z, w) = coerce_json_to_vec4_components(clip_rect)?;
+                vec4_json(x, y, z, w)
+            },
+        );
+    }
+    if let Some(pick_id) = object.get("pick_id") {
+        if pick_id.is_null() {
+            out.insert("pick_id".to_string(), JsonValue::Null);
+        } else {
+            let id = coerce_json_to_finite_f64(pick_id, "Text 2D.pick_id")?;
+            if id < 0.0 {
+                return Err("Text 2D.pick_id must be non-negative".to_string());
+            }
+            out.insert(
+                "pick_id".to_string(),
+                JsonValue::Number(JsonNumber::from(id.round() as u64)),
+            );
+        }
+    }
+
     Ok(JsonValue::Object(out))
 }
 
@@ -11208,8 +12232,18 @@ fn coerce_json_to_vec2_components(value: &JsonValue) -> Result<(f64, f64), Strin
         JsonValue::Bool(value) => Ok((if *value { 1.0 } else { 0.0 }, 0.0)),
         JsonValue::Number(_) => Ok((coerce_json_to_f64(value)?, 0.0)),
         JsonValue::Object(object) => Ok((
-            coerce_json_to_f64(object.get("x").unwrap_or(&JsonValue::Null))?,
-            coerce_json_to_f64(object.get("y").unwrap_or(&JsonValue::Null))?,
+            coerce_json_to_f64(
+                object
+                    .get("x")
+                    .or_else(|| object.get("u"))
+                    .unwrap_or(&JsonValue::Null),
+            )?,
+            coerce_json_to_f64(
+                object
+                    .get("y")
+                    .or_else(|| object.get("v"))
+                    .unwrap_or(&JsonValue::Null),
+            )?,
         )),
         JsonValue::Array(array) if !array.is_empty() => {
             let x = coerce_json_to_f64(&array[0])?;
@@ -11262,6 +12296,45 @@ fn coerce_json_to_quat_components(value: &JsonValue) -> Result<(f64, f64, f64, f
         )),
         JsonValue::String(text) => coerce_json_to_quat_components(&parse_loose_literal(text)),
         _ => Err("Quat values must be objects, arrays, or literal strings".to_string()),
+    }
+}
+
+fn coerce_json_to_vec4_components(value: &JsonValue) -> Result<(f64, f64, f64, f64), String> {
+    match value {
+        JsonValue::Object(object) => Ok((
+            coerce_json_to_f64(
+                object
+                    .get("x")
+                    .or_else(|| object.get("r"))
+                    .unwrap_or(&JsonValue::Null),
+            )?,
+            coerce_json_to_f64(
+                object
+                    .get("y")
+                    .or_else(|| object.get("g"))
+                    .unwrap_or(&JsonValue::Null),
+            )?,
+            coerce_json_to_f64(
+                object
+                    .get("z")
+                    .or_else(|| object.get("b"))
+                    .unwrap_or(&JsonValue::Null),
+            )?,
+            coerce_json_to_f64(
+                object
+                    .get("w")
+                    .or_else(|| object.get("a"))
+                    .unwrap_or(&JsonValue::Number(JsonNumber::from(1))),
+            )?,
+        )),
+        JsonValue::Array(array) if array.len() >= 4 => Ok((
+            coerce_json_to_f64(&array[0])?,
+            coerce_json_to_f64(&array[1])?,
+            coerce_json_to_f64(&array[2])?,
+            coerce_json_to_f64(&array[3])?,
+        )),
+        JsonValue::String(text) => coerce_json_to_vec4_components(&parse_loose_literal(text)),
+        _ => Err("Vec4 values must be objects, arrays, or literal strings".to_string()),
     }
 }
 
@@ -12144,6 +13217,9 @@ pub fn draw_visual_script_editor_tab(ui: &mut Ui, world: &mut World, path: &Path
 
 pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
     let mut status_message: Option<String> = None;
+    let project_root = world
+        .get_resource::<EditorProject>()
+        .and_then(|project| project.root.clone());
     world.resource_scope::<VisualScriptEditorState, _>(|_world, mut state| {
         if state.active_path.is_none() {
             let mut paths = state.documents.keys().cloned().collect::<Vec<_>>();
@@ -12394,6 +13470,7 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                     &document.variables,
                                     &document.functions,
                                     document.active_graph_function,
+                                    project_root.as_deref(),
                                 );
                                 let min_size = egui::vec2(120.0, 120.0);
                                 let snarl_response =
@@ -12431,7 +13508,10 @@ pub fn draw_visual_script_editor_window(ui: &mut Ui, world: &mut World) {
                                             .unwrap_or_else(|| ui.ctx().content_rect().center());
                                         for (index, path) in payload.paths.iter().enumerate() {
                                             viewer.pending_asset_drop_nodes.push((
-                                                path_to_visual_literal(path),
+                                                path_to_visual_literal(
+                                                    path,
+                                                    viewer.project_root.as_deref(),
+                                                ),
                                                 egui::pos2(
                                                     drop_pos.x + index as f32 * 22.0,
                                                     drop_pos.y + index as f32 * 18.0,
@@ -17164,6 +18244,7 @@ struct VisualScriptViewer {
     changed: bool,
     consumed_asset_drop: bool,
     pending_asset_drop_nodes: Vec<(String, egui::Pos2)>,
+    project_root: Option<PathBuf>,
     variables: Vec<VisualVariableDefinition>,
     functions: Vec<VisualScriptFunctionDefinition>,
     active_function_graph: Option<u64>,
@@ -17175,11 +18256,13 @@ impl VisualScriptViewer {
         variables: &[VisualVariableDefinition],
         functions: &[VisualScriptFunctionDefinition],
         active_function_graph: Option<u64>,
+        project_root: Option<&Path>,
     ) -> Self {
         Self {
             changed: false,
             consumed_asset_drop: false,
             pending_asset_drop_nodes: Vec::new(),
+            project_root: project_root.map(Path::to_path_buf),
             variables: variables.to_vec(),
             functions: functions.to_vec(),
             active_function_graph,
@@ -17730,6 +18813,97 @@ impl VisualScriptViewer {
                 &["ray cast", "ray", "physics query"],
                 AddNodeSearchAction::InsertNode(VisualScriptNodeKind::RayCast),
             );
+            for (label, operation, terms) in [
+                (
+                    "Physics Queries / Ray Cast Hit",
+                    VisualApiOperation::EcsRayCast,
+                    &["ray cast", "ray", "hit", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Ray Cast Has Hit",
+                    VisualApiOperation::EcsRayCastHasHit,
+                    &["ray cast", "ray", "has hit", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Ray Cast Hit Entity",
+                    VisualApiOperation::EcsRayCastHitEntity,
+                    &["ray cast", "ray", "entity", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Ray Cast Point",
+                    VisualApiOperation::EcsRayCastPoint,
+                    &["ray cast", "ray", "point", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Ray Cast Normal",
+                    VisualApiOperation::EcsRayCastNormal,
+                    &["ray cast", "ray", "normal", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Ray Cast TOI",
+                    VisualApiOperation::EcsRayCastToi,
+                    &["ray cast", "ray", "toi", "distance", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast Hit",
+                    VisualApiOperation::EcsSphereCast,
+                    &["sphere cast", "shape cast", "hit", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast Has Hit",
+                    VisualApiOperation::EcsSphereCastHasHit,
+                    &["sphere cast", "shape cast", "has hit", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast Hit Entity",
+                    VisualApiOperation::EcsSphereCastHitEntity,
+                    &["sphere cast", "shape cast", "entity", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast Point",
+                    VisualApiOperation::EcsSphereCastPoint,
+                    &["sphere cast", "shape cast", "point", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast Normal",
+                    VisualApiOperation::EcsSphereCastNormal,
+                    &["sphere cast", "shape cast", "normal", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Sphere Cast TOI",
+                    VisualApiOperation::EcsSphereCastToi,
+                    &["sphere cast", "shape cast", "toi", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Get Physics Ray Cast Hit",
+                    VisualApiOperation::EcsGetPhysicsRayCastHit,
+                    &["get physics ray cast hit", "ray cast hit", "physics query"][..],
+                ),
+                (
+                    "Physics Queries / Get Physics Shape Cast Hit",
+                    VisualApiOperation::EcsGetPhysicsShapeCastHit,
+                    &[
+                        "get physics shape cast hit",
+                        "sphere cast hit",
+                        "physics query",
+                    ][..],
+                ),
+                (
+                    "Physics Queries / Get Physics Point Projection Hit",
+                    VisualApiOperation::EcsGetPhysicsPointProjectionHit,
+                    &[
+                        "get physics point projection hit",
+                        "point projection",
+                        "physics query",
+                    ][..],
+                ),
+            ] {
+                push_search_result(
+                    label.to_string(),
+                    terms,
+                    AddNodeSearchAction::InsertApi(operation),
+                );
+            }
             push_search_result(
                 "Physics Queries / Physics Query Filter".to_string(),
                 &[
@@ -18515,6 +19689,104 @@ impl VisualScriptViewer {
             );
             add_node_button!(
                 ui,
+                "Ray Cast Hit",
+                &["ray cast", "ray", "hit", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCast.spec())
+            );
+            add_node_button!(
+                ui,
+                "Ray Cast Has Hit",
+                &["ray cast", "ray", "has hit", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCastHasHit.spec())
+            );
+            add_node_button!(
+                ui,
+                "Ray Cast Hit Entity",
+                &["ray cast", "ray", "entity", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCastHitEntity.spec())
+            );
+            add_node_button!(
+                ui,
+                "Ray Cast Point",
+                &["ray cast", "ray", "point", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCastPoint.spec())
+            );
+            add_node_button!(
+                ui,
+                "Ray Cast Normal",
+                &["ray cast", "ray", "normal", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCastNormal.spec())
+            );
+            add_node_button!(
+                ui,
+                "Ray Cast TOI",
+                &["ray cast", "ray", "toi", "distance", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsRayCastToi.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast Hit",
+                &["sphere cast", "shape cast", "hit", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCast.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast Has Hit",
+                &["sphere cast", "shape cast", "has hit", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCastHasHit.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast Hit Entity",
+                &["sphere cast", "shape cast", "entity", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCastHitEntity.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast Point",
+                &["sphere cast", "shape cast", "point", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCastPoint.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast Normal",
+                &["sphere cast", "shape cast", "normal", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCastNormal.spec())
+            );
+            add_node_button!(
+                ui,
+                "Sphere Cast TOI",
+                &["sphere cast", "shape cast", "toi", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsSphereCastToi.spec())
+            );
+            add_node_button!(
+                ui,
+                "Get Physics Ray Cast Hit",
+                &["get physics ray cast hit", "ray cast hit", "physics query"],
+                api_node_kind_from_spec(VisualApiOperation::EcsGetPhysicsRayCastHit.spec())
+            );
+            add_node_button!(
+                ui,
+                "Get Physics Shape Cast Hit",
+                &[
+                    "get physics shape cast hit",
+                    "sphere cast hit",
+                    "physics query"
+                ],
+                api_node_kind_from_spec(VisualApiOperation::EcsGetPhysicsShapeCastHit.spec())
+            );
+            add_node_button!(
+                ui,
+                "Get Physics Point Projection Hit",
+                &[
+                    "get physics point projection hit",
+                    "point projection",
+                    "physics query"
+                ],
+                api_node_kind_from_spec(VisualApiOperation::EcsGetPhysicsPointProjectionHit.spec())
+            );
+            add_node_button!(
+                ui,
                 "Physics Query Filter",
                 &[
                     "physics query filter",
@@ -18826,6 +20098,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                 if let Some(operation) = api_operation {
                     if has_structured_api_default_editor(operation, slot.index) {
                         handled_by_structured = true;
+                        let project_root = this.project_root.clone();
                         changed |= draw_api_structured_default_editor(
                             ui,
                             operation,
@@ -18833,6 +20106,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                             default_literal,
                             &mut this.pending_asset_drop_nodes,
                             &mut this.consumed_asset_drop,
+                            project_root.as_deref(),
                         );
                     }
                 }
@@ -18845,6 +20119,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                             changed = true;
                         }
                         if let Some(path_kind) = asset_path_kind {
+                            let project_root = this.project_root.clone();
                             changed |= handle_asset_path_drop(
                                 ui,
                                 &response,
@@ -18852,6 +20127,7 @@ impl SnarlViewer<VisualScriptNodeKind> for VisualScriptViewer {
                                 default_literal,
                                 &mut this.pending_asset_drop_nodes,
                                 &mut this.consumed_asset_drop,
+                                project_root.as_deref(),
                             );
                         }
                     } else if draw_typed_pin_input_editor(ui, input_type, default_literal) {
@@ -20151,6 +21427,26 @@ fn json_object_i64(object: &JsonMap<String, JsonValue>, key: &str, default: i64)
         .unwrap_or(default)
 }
 
+fn json_object_u64(
+    object: &JsonMap<String, JsonValue>,
+    key: &str,
+    default: Option<u64>,
+) -> Option<u64> {
+    json_object_field(object, key)
+        .and_then(json_to_u64)
+        .or(default)
+}
+
+fn json_object_vec2(
+    object: &JsonMap<String, JsonValue>,
+    key: &str,
+    default: (f64, f64),
+) -> (f64, f64) {
+    json_object_field(object, key)
+        .and_then(|value| coerce_json_to_vec2_components(value).ok())
+        .unwrap_or(default)
+}
+
 fn json_object_vec3(
     object: &JsonMap<String, JsonValue>,
     key: &str,
@@ -20158,6 +21454,16 @@ fn json_object_vec3(
 ) -> (f64, f64, f64) {
     json_object_field(object, key)
         .and_then(|value| coerce_json_to_vec3_components(value).ok())
+        .unwrap_or(default)
+}
+
+fn json_object_vec4(
+    object: &JsonMap<String, JsonValue>,
+    key: &str,
+    default: (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    json_object_field(object, key)
+        .and_then(|value| coerce_json_to_vec4_components(value).ok())
         .unwrap_or(default)
 }
 
@@ -20182,6 +21488,28 @@ fn draw_vec3_row(ui: &mut Ui, label: &str, value: &mut (f64, f64, f64), speed: f
     changed
 }
 
+fn draw_vec2_row(ui: &mut Ui, label: &str, value: &mut (f64, f64), speed: f64) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui.add(DragValue::new(&mut value.0).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.1).speed(speed)).changed();
+    });
+    changed
+}
+
+fn draw_vec4_row(ui: &mut Ui, label: &str, value: &mut (f64, f64, f64, f64), speed: f64) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui.add(DragValue::new(&mut value.0).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.1).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.2).speed(speed)).changed();
+        changed |= ui.add(DragValue::new(&mut value.3).speed(speed)).changed();
+    });
+    changed
+}
+
 fn handle_asset_path_drop(
     ui: &Ui,
     response: &egui::Response,
@@ -20189,6 +21517,7 @@ fn handle_asset_path_drop(
     path_literal: &mut String,
     pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
     consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
 ) -> bool {
     let Some(payload) = typed_dnd_release_payload::<AssetDragPayload>(response) else {
         return false;
@@ -20199,7 +21528,7 @@ fn handle_asset_path_drop(
         .iter()
         .find(|path| asset_path_matches_kind(path, kind))
     {
-        *path_literal = path_to_visual_literal(path);
+        *path_literal = path_to_visual_literal(path, project_root);
         *consumed_asset_drop = true;
         return true;
     }
@@ -20210,7 +21539,7 @@ fn handle_asset_path_drop(
         .unwrap_or_else(|| ui.ctx().content_rect().center());
     for (index, path) in payload.paths.iter().enumerate() {
         pending_asset_nodes.push((
-            path_to_visual_literal(path),
+            path_to_visual_literal(path, project_root),
             egui::pos2(
                 drop_pos.x + index as f32 * 22.0,
                 drop_pos.y + index as f32 * 18.0,
@@ -20320,16 +21649,15 @@ fn draw_mesh_renderer_data_editor(
     value: &mut String,
     pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
     consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
 ) -> bool {
     let mut object = parse_json_object_literal(value);
     let mut changed = false;
 
     let mut source = json_object_string(&object, "source", "Cube");
-    if source.is_empty() {
-        source = "Cube".to_string();
-    }
-    let is_primitive = PrimitiveKind::from_source_label(&source).is_some();
-    let mut source_mode_asset = !is_primitive;
+    let source_was_primitive = PrimitiveKind::from_source_label(&source).is_some();
+    let source_mode_asset_initial = !source_was_primitive;
+    let mut source_mode_asset = source_mode_asset_initial;
     let mut material = json_object_string(&object, "material", "");
     let mut casts_shadow = json_object_bool(&object, "casts_shadow", true);
     let mut visible = json_object_bool(&object, "visible", true);
@@ -20344,6 +21672,18 @@ fn draw_mesh_renderer_data_editor(
             .changed();
     });
 
+    if source_mode_asset != source_mode_asset_initial {
+        if source_mode_asset {
+            if source_was_primitive {
+                source.clear();
+                changed = true;
+            }
+        } else if PrimitiveKind::from_source_label(&source).is_none() {
+            source = "Cube".to_string();
+            changed = true;
+        }
+    }
+
     if source_mode_asset {
         ui.horizontal(|ui| {
             ui.label("Mesh Path");
@@ -20356,10 +21696,11 @@ fn draw_mesh_renderer_data_editor(
                 &mut source,
                 pending_asset_nodes,
                 consumed_asset_drop,
+                project_root,
             );
         });
     } else {
-        if !is_primitive {
+        if PrimitiveKind::from_source_label(&source).is_none() {
             source = "Cube".to_string();
             changed = true;
         }
@@ -20388,6 +21729,7 @@ fn draw_mesh_renderer_data_editor(
             &mut material,
             pending_asset_nodes,
             consumed_asset_drop,
+            project_root,
         );
     });
     ui.horizontal(|ui| {
@@ -20410,6 +21752,1074 @@ fn draw_mesh_renderer_data_editor(
     changed
 }
 
+fn draw_sprite_renderer_data_editor(
+    ui: &mut Ui,
+    value: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
+) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut color = json_object_vec4(&object, "color", (1.0, 1.0, 1.0, 1.0));
+    let mut texture = json_object_string(&object, "texture", "");
+    let mut uv_min = json_object_vec2(&object, "uv_min", (0.0, 0.0));
+    let mut uv_max = json_object_vec2(&object, "uv_max", (1.0, 1.0));
+    let mut pivot = json_object_vec2(&object, "pivot", (0.5, 0.5));
+    let mut layer = json_object_f64(&object, "layer", 0.0);
+    let mut space = json_object_string(&object, "space", "world");
+    if !matches!(space.as_str(), "world" | "screen") {
+        space = "world".to_string();
+    }
+    let mut blend_mode = json_object_string(&object, "blend_mode", "alpha");
+    if !matches!(blend_mode.as_str(), "alpha" | "premultiplied" | "additive") {
+        blend_mode = "alpha".to_string();
+    }
+    let mut billboard = json_object_bool(&object, "billboard", false);
+    let mut visible = json_object_bool(&object, "visible", true);
+    let mut pick_id = json_object_u64(&object, "pick_id", None);
+    let mut has_clip_rect = object
+        .get("clip_rect")
+        .is_some_and(|clip_rect| !clip_rect.is_null());
+    let mut clip_rect = json_object_vec4(&object, "clip_rect", (0.0, 0.0, 1.0, 1.0));
+
+    let mut sheet = json_object_nested(&object, "sheet_animation");
+    if sheet.is_empty() {
+        sheet = json_object_nested(&object, "sheet");
+    }
+    let mut sheet_enabled = json_object_bool(&sheet, "enabled", false);
+    let mut sheet_columns = json_object_f64(&sheet, "columns", 1.0).max(1.0);
+    let mut sheet_rows = json_object_f64(&sheet, "rows", 1.0).max(1.0);
+    let mut sheet_start_frame = json_object_f64(&sheet, "start_frame", 0.0).max(0.0);
+    let mut sheet_frame_count = json_object_f64(&sheet, "frame_count", 0.0).max(0.0);
+    let mut sheet_fps = json_object_f64(&sheet, "fps", 12.0).max(0.0);
+    let mut sheet_playback = json_object_string(&sheet, "playback", "loop");
+    if !matches!(sheet_playback.as_str(), "loop" | "once" | "pingpong") {
+        sheet_playback = "loop".to_string();
+    }
+    let mut sheet_phase = json_object_f64(&sheet, "phase", 0.0);
+    let mut sheet_paused = json_object_bool(&sheet, "paused", false);
+    let mut sheet_paused_frame = json_object_f64(&sheet, "paused_frame", 0.0).max(0.0);
+    let mut sheet_flip_x = json_object_bool(&sheet, "flip_x", false);
+    let mut sheet_flip_y = json_object_bool(&sheet, "flip_y", false);
+    let mut sheet_frame_uv_inset = json_object_vec2(&sheet, "frame_uv_inset", (0.0, 0.0));
+
+    let mut sequence = json_object_nested(&object, "image_sequence");
+    if sequence.is_empty() {
+        sequence = json_object_nested(&object, "sequence");
+    }
+    let mut sequence_enabled = json_object_bool(&sequence, "enabled", false);
+    let mut sequence_start_frame = json_object_f64(&sequence, "start_frame", 0.0).max(0.0);
+    let mut sequence_frame_count = json_object_f64(&sequence, "frame_count", 0.0).max(0.0);
+    let mut sequence_fps = json_object_f64(&sequence, "fps", 12.0).max(0.0);
+    let mut sequence_playback = json_object_string(&sequence, "playback", "loop");
+    if !matches!(sequence_playback.as_str(), "loop" | "once" | "pingpong") {
+        sequence_playback = "loop".to_string();
+    }
+    let mut sequence_phase = json_object_f64(&sequence, "phase", 0.0);
+    let mut sequence_paused = json_object_bool(&sequence, "paused", false);
+    let mut sequence_paused_frame = json_object_f64(&sequence, "paused_frame", 0.0).max(0.0);
+    let mut sequence_flip_x = json_object_bool(&sequence, "flip_x", false);
+    let mut sequence_flip_y = json_object_bool(&sequence, "flip_y", false);
+    let mut sequence_textures = Vec::new();
+    for key in ["textures", "texture_paths", "frames"] {
+        if let Some(value) = sequence.get(key) {
+            if let Ok(paths) = coerce_json_to_sprite_texture_paths(value, key) {
+                sequence_textures = paths;
+            }
+        }
+    }
+
+    let initial_color = color;
+    let initial_texture = texture.clone();
+    let initial_uv_min = uv_min;
+    let initial_uv_max = uv_max;
+    let initial_pivot = pivot;
+    let initial_layer = layer;
+    let initial_space = space.clone();
+    let initial_blend_mode = blend_mode.clone();
+    let initial_billboard = billboard;
+    let initial_visible = visible;
+    let initial_pick_id = pick_id;
+    let initial_has_clip_rect = has_clip_rect;
+    let initial_clip_rect = clip_rect;
+    let initial_sheet_enabled = sheet_enabled;
+    let initial_sheet_columns = sheet_columns;
+    let initial_sheet_rows = sheet_rows;
+    let initial_sheet_start_frame = sheet_start_frame;
+    let initial_sheet_frame_count = sheet_frame_count;
+    let initial_sheet_fps = sheet_fps;
+    let initial_sheet_playback = sheet_playback.clone();
+    let initial_sheet_phase = sheet_phase;
+    let initial_sheet_paused = sheet_paused;
+    let initial_sheet_paused_frame = sheet_paused_frame;
+    let initial_sheet_flip_x = sheet_flip_x;
+    let initial_sheet_flip_y = sheet_flip_y;
+    let initial_sheet_frame_uv_inset = sheet_frame_uv_inset;
+    let initial_sequence_enabled = sequence_enabled;
+    let initial_sequence_start_frame = sequence_start_frame;
+    let initial_sequence_frame_count = sequence_frame_count;
+    let initial_sequence_fps = sequence_fps;
+    let initial_sequence_playback = sequence_playback.clone();
+    let initial_sequence_phase = sequence_phase;
+    let initial_sequence_paused = sequence_paused;
+    let initial_sequence_paused_frame = sequence_paused_frame;
+    let initial_sequence_flip_x = sequence_flip_x;
+    let initial_sequence_flip_y = sequence_flip_y;
+    let initial_sequence_textures = sequence_textures.clone();
+
+    changed |= draw_vec4_row(ui, "Color", &mut color, 0.01);
+    ui.horizontal(|ui| {
+        ui.label("Texture");
+        let response = ui.add(TextEdit::singleline(&mut texture).desired_width(180.0));
+        changed |= response.changed();
+        changed |= handle_asset_path_drop(
+            ui,
+            &response,
+            VisualAssetPathKind::Texture,
+            &mut texture,
+            pending_asset_nodes,
+            consumed_asset_drop,
+            project_root,
+        );
+    });
+    changed |= draw_vec2_row(ui, "UV Min", &mut uv_min, 0.01);
+    changed |= draw_vec2_row(ui, "UV Max", &mut uv_max, 0.01);
+    changed |= draw_vec2_row(ui, "Pivot", &mut pivot, 0.01);
+    ui.horizontal(|ui| {
+        ui.label("Layer");
+        changed |= ui.add(DragValue::new(&mut layer).speed(0.1)).changed();
+        changed |= ui.checkbox(&mut billboard, "Billboard").changed();
+        changed |= ui.checkbox(&mut visible, "Visible").changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Space");
+        ComboBox::from_id_salt(("visual_sprite_space_inline", ui.id()))
+            .selected_text(space.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["world", "screen"] {
+                    changed |= ui
+                        .selectable_value(&mut space, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+        ui.label("Blend");
+        ComboBox::from_id_salt(("visual_sprite_blend_mode_inline", ui.id()))
+            .selected_text(blend_mode.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["alpha", "premultiplied", "additive"] {
+                    changed |= ui
+                        .selectable_value(&mut blend_mode, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        let mut has_pick_id = pick_id.is_some();
+        if ui.checkbox(&mut has_pick_id, "Pick Id").changed() {
+            pick_id = if has_pick_id {
+                Some(pick_id.unwrap_or(0))
+            } else {
+                None
+            };
+            changed = true;
+        }
+        if has_pick_id {
+            let mut value = pick_id.unwrap_or(0);
+            if ui
+                .add(DragValue::new(&mut value).speed(1.0).range(0..=u64::MAX))
+                .changed()
+            {
+                pick_id = Some(value);
+                changed = true;
+            }
+            if ui.small_button("Clear").clicked() {
+                pick_id = None;
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut has_clip_rect, "Clip Rect").changed() {
+            changed = true;
+        }
+    });
+    if has_clip_rect {
+        changed |= draw_vec4_row(ui, "Rect", &mut clip_rect, 0.01);
+    }
+
+    ui.group(|ui| {
+        ui.label("Sheet Animation");
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut sheet_enabled, "Enabled").changed();
+            ui.label("Playback");
+            ComboBox::from_id_salt(("visual_sprite_sheet_playback_inline", ui.id()))
+                .selected_text(sheet_playback.clone())
+                .show_ui(ui, |ui| {
+                    for candidate in ["loop", "once", "pingpong"] {
+                        changed |= ui
+                            .selectable_value(&mut sheet_playback, candidate.to_string(), candidate)
+                            .changed();
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Cols");
+            changed |= ui
+                .add(DragValue::new(&mut sheet_columns).speed(1.0))
+                .changed();
+            ui.label("Rows");
+            changed |= ui.add(DragValue::new(&mut sheet_rows).speed(1.0)).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Start");
+            changed |= ui
+                .add(DragValue::new(&mut sheet_start_frame).speed(1.0))
+                .changed();
+            ui.label("Count");
+            changed |= ui
+                .add(DragValue::new(&mut sheet_frame_count).speed(1.0))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("FPS");
+            changed |= ui.add(DragValue::new(&mut sheet_fps).speed(0.1)).changed();
+            ui.label("Phase");
+            changed |= ui
+                .add(DragValue::new(&mut sheet_phase).speed(0.01))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut sheet_paused, "Paused").changed();
+            ui.label("Paused Frame");
+            changed |= ui
+                .add(DragValue::new(&mut sheet_paused_frame).speed(1.0))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut sheet_flip_x, "Flip X").changed();
+            changed |= ui.checkbox(&mut sheet_flip_y, "Flip Y").changed();
+        });
+        changed |= draw_vec2_row(ui, "UV Inset", &mut sheet_frame_uv_inset, 0.005);
+    });
+
+    ui.group(|ui| {
+        ui.label("Image Sequence");
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut sequence_enabled, "Enabled").changed();
+            ui.label("Playback");
+            ComboBox::from_id_salt(("visual_sprite_sequence_playback_inline", ui.id()))
+                .selected_text(sequence_playback.clone())
+                .show_ui(ui, |ui| {
+                    for candidate in ["loop", "once", "pingpong"] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut sequence_playback,
+                                candidate.to_string(),
+                                candidate,
+                            )
+                            .changed();
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.label("Start");
+            changed |= ui
+                .add(DragValue::new(&mut sequence_start_frame).speed(1.0))
+                .changed();
+            ui.label("Count");
+            changed |= ui
+                .add(DragValue::new(&mut sequence_frame_count).speed(1.0))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("FPS");
+            changed |= ui
+                .add(DragValue::new(&mut sequence_fps).speed(0.1))
+                .changed();
+            ui.label("Phase");
+            changed |= ui
+                .add(DragValue::new(&mut sequence_phase).speed(0.01))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut sequence_paused, "Paused").changed();
+            ui.label("Paused Frame");
+            changed |= ui
+                .add(DragValue::new(&mut sequence_paused_frame).speed(1.0))
+                .changed();
+            changed |= ui.checkbox(&mut sequence_flip_x, "Flip X").changed();
+            changed |= ui.checkbox(&mut sequence_flip_y, "Flip Y").changed();
+        });
+        let mut remove_index = None;
+        for (index, path) in sequence_textures.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let response = ui.add(TextEdit::singleline(path).desired_width(180.0));
+                changed |= response.changed();
+                changed |= handle_asset_path_drop(
+                    ui,
+                    &response,
+                    VisualAssetPathKind::Texture,
+                    path,
+                    pending_asset_nodes,
+                    consumed_asset_drop,
+                    project_root,
+                );
+                if ui.small_button("-").clicked() {
+                    remove_index = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove_index {
+            if index < sequence_textures.len() {
+                sequence_textures.remove(index);
+                changed = true;
+            }
+        }
+        if ui.small_button("+ Frame").clicked() {
+            sequence_textures.push(String::new());
+            changed = true;
+        }
+    });
+
+    if changed {
+        let normalized_texture = texture.trim().to_string();
+        let initial_normalized_texture = initial_texture.trim().to_string();
+        let base_changed = color != initial_color
+            || normalized_texture != initial_normalized_texture
+            || uv_min != initial_uv_min
+            || uv_max != initial_uv_max
+            || pivot != initial_pivot
+            || layer != initial_layer
+            || space != initial_space
+            || blend_mode != initial_blend_mode
+            || billboard != initial_billboard
+            || visible != initial_visible
+            || pick_id != initial_pick_id
+            || has_clip_rect != initial_has_clip_rect
+            || (has_clip_rect && clip_rect != initial_clip_rect);
+        let sheet_changed = sheet_enabled != initial_sheet_enabled
+            || sheet_columns != initial_sheet_columns
+            || sheet_rows != initial_sheet_rows
+            || sheet_start_frame != initial_sheet_start_frame
+            || sheet_frame_count != initial_sheet_frame_count
+            || sheet_fps != initial_sheet_fps
+            || sheet_playback != initial_sheet_playback
+            || sheet_phase != initial_sheet_phase
+            || sheet_paused != initial_sheet_paused
+            || sheet_paused_frame != initial_sheet_paused_frame
+            || sheet_flip_x != initial_sheet_flip_x
+            || sheet_flip_y != initial_sheet_flip_y
+            || sheet_frame_uv_inset != initial_sheet_frame_uv_inset;
+        let normalized_sequence_paths = sequence_textures
+            .iter()
+            .map(|path| path.trim().to_string())
+            .collect::<Vec<_>>();
+        let initial_normalized_sequence_paths = initial_sequence_textures
+            .iter()
+            .map(|path| path.trim().to_string())
+            .collect::<Vec<_>>();
+        let sequence_changed = sequence_enabled != initial_sequence_enabled
+            || sequence_start_frame != initial_sequence_start_frame
+            || sequence_frame_count != initial_sequence_frame_count
+            || sequence_fps != initial_sequence_fps
+            || sequence_playback != initial_sequence_playback
+            || sequence_phase != initial_sequence_phase
+            || sequence_paused != initial_sequence_paused
+            || sequence_paused_frame != initial_sequence_paused_frame
+            || sequence_flip_x != initial_sequence_flip_x
+            || sequence_flip_y != initial_sequence_flip_y
+            || normalized_sequence_paths != initial_normalized_sequence_paths;
+
+        if base_changed {
+            object.insert(
+                "color".to_string(),
+                vec4_json(color.0, color.1, color.2, color.3),
+            );
+            object.insert(
+                "texture".to_string(),
+                if normalized_texture.is_empty() {
+                    JsonValue::Null
+                } else {
+                    JsonValue::String(normalized_texture)
+                },
+            );
+            object.insert("uv_min".to_string(), vec2_json(uv_min.0, uv_min.1));
+            object.insert("uv_max".to_string(), vec2_json(uv_max.0, uv_max.1));
+            object.insert("pivot".to_string(), vec2_json(pivot.0, pivot.1));
+            object.insert("layer".to_string(), json_number(layer));
+            object.insert("space".to_string(), JsonValue::String(space));
+            object.insert("blend_mode".to_string(), JsonValue::String(blend_mode));
+            object.insert("billboard".to_string(), JsonValue::Bool(billboard));
+            object.insert("visible".to_string(), JsonValue::Bool(visible));
+            object.insert(
+                "pick_id".to_string(),
+                pick_id
+                    .map(|value| JsonValue::Number(JsonNumber::from(value)))
+                    .unwrap_or(JsonValue::Null),
+            );
+            object.insert(
+                "clip_rect".to_string(),
+                if has_clip_rect {
+                    vec4_json(clip_rect.0, clip_rect.1, clip_rect.2, clip_rect.3)
+                } else {
+                    JsonValue::Null
+                },
+            );
+        }
+
+        if sheet_changed {
+            let mut sheet_object = JsonMap::new();
+            sheet_object.insert("enabled".to_string(), JsonValue::Bool(sheet_enabled));
+            sheet_object.insert(
+                "columns".to_string(),
+                JsonValue::Number(JsonNumber::from(sheet_columns.max(1.0).round() as u64)),
+            );
+            sheet_object.insert(
+                "rows".to_string(),
+                JsonValue::Number(JsonNumber::from(sheet_rows.max(1.0).round() as u64)),
+            );
+            sheet_object.insert(
+                "start_frame".to_string(),
+                JsonValue::Number(JsonNumber::from(sheet_start_frame.max(0.0).round() as u64)),
+            );
+            sheet_object.insert(
+                "frame_count".to_string(),
+                JsonValue::Number(JsonNumber::from(sheet_frame_count.max(0.0).round() as u64)),
+            );
+            sheet_object.insert("fps".to_string(), json_number(sheet_fps.max(0.0)));
+            sheet_object.insert(
+                "playback".to_string(),
+                JsonValue::String(sheet_playback.clone()),
+            );
+            sheet_object.insert("phase".to_string(), json_number(sheet_phase));
+            sheet_object.insert("paused".to_string(), JsonValue::Bool(sheet_paused));
+            sheet_object.insert(
+                "paused_frame".to_string(),
+                JsonValue::Number(JsonNumber::from(sheet_paused_frame.max(0.0).round() as u64)),
+            );
+            sheet_object.insert("flip_x".to_string(), JsonValue::Bool(sheet_flip_x));
+            sheet_object.insert("flip_y".to_string(), JsonValue::Bool(sheet_flip_y));
+            sheet_object.insert(
+                "frame_uv_inset".to_string(),
+                vec2_json(
+                    sheet_frame_uv_inset.0.clamp(0.0, 0.49),
+                    sheet_frame_uv_inset.1.clamp(0.0, 0.49),
+                ),
+            );
+            let sheet_value = JsonValue::Object(sheet_object);
+            object.insert("sheet_animation".to_string(), sheet_value.clone());
+            object.insert("sheet".to_string(), sheet_value);
+        }
+
+        if sequence_changed {
+            let sequence_paths = normalized_sequence_paths
+                .iter()
+                .map(|path| JsonValue::String(path.to_string()))
+                .collect::<Vec<_>>();
+            let mut sequence_object = JsonMap::new();
+            sequence_object.insert("enabled".to_string(), JsonValue::Bool(sequence_enabled));
+            sequence_object.insert(
+                "start_frame".to_string(),
+                JsonValue::Number(JsonNumber::from(
+                    sequence_start_frame.max(0.0).round() as u64
+                )),
+            );
+            sequence_object.insert(
+                "frame_count".to_string(),
+                JsonValue::Number(JsonNumber::from(
+                    sequence_frame_count.max(0.0).round() as u64
+                )),
+            );
+            sequence_object.insert("fps".to_string(), json_number(sequence_fps.max(0.0)));
+            sequence_object.insert(
+                "playback".to_string(),
+                JsonValue::String(sequence_playback.clone()),
+            );
+            sequence_object.insert("phase".to_string(), json_number(sequence_phase));
+            sequence_object.insert("paused".to_string(), JsonValue::Bool(sequence_paused));
+            sequence_object.insert(
+                "paused_frame".to_string(),
+                JsonValue::Number(JsonNumber::from(
+                    sequence_paused_frame.max(0.0).round() as u64
+                )),
+            );
+            sequence_object.insert("flip_x".to_string(), JsonValue::Bool(sequence_flip_x));
+            sequence_object.insert("flip_y".to_string(), JsonValue::Bool(sequence_flip_y));
+            sequence_object.insert(
+                "textures".to_string(),
+                JsonValue::Array(sequence_paths.clone()),
+            );
+            sequence_object.insert(
+                "texture_paths".to_string(),
+                JsonValue::Array(sequence_paths.clone()),
+            );
+            sequence_object.insert("frames".to_string(), JsonValue::Array(sequence_paths));
+            let sequence_value = JsonValue::Object(sequence_object);
+            object.insert("image_sequence".to_string(), sequence_value.clone());
+            object.insert("sequence".to_string(), sequence_value);
+        }
+
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
+fn draw_sprite_sheet_animation_patch_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut sheet = json_object_nested(&object, "sheet_animation");
+    if sheet.is_empty() {
+        sheet = json_object_nested(&object, "sheet");
+    }
+    if sheet.is_empty() {
+        sheet = object;
+    }
+
+    let mut enabled = json_object_bool(&sheet, "enabled", false);
+    let mut columns = json_object_f64(&sheet, "columns", 1.0).max(1.0);
+    let mut rows = json_object_f64(&sheet, "rows", 1.0).max(1.0);
+    let mut start_frame = json_object_f64(&sheet, "start_frame", 0.0).max(0.0);
+    let mut frame_count = json_object_f64(&sheet, "frame_count", 0.0).max(0.0);
+    let mut fps = json_object_f64(&sheet, "fps", 12.0).max(0.0);
+    let mut playback = json_object_string(&sheet, "playback", "loop");
+    if !matches!(playback.as_str(), "loop" | "once" | "pingpong") {
+        playback = "loop".to_string();
+    }
+    let mut phase = json_object_f64(&sheet, "phase", 0.0);
+    let mut paused = json_object_bool(&sheet, "paused", false);
+    let mut paused_frame = json_object_f64(&sheet, "paused_frame", 0.0).max(0.0);
+    let mut flip_x = json_object_bool(&sheet, "flip_x", false);
+    let mut flip_y = json_object_bool(&sheet, "flip_y", false);
+    let mut frame_uv_inset = json_object_vec2(&sheet, "frame_uv_inset", (0.0, 0.0));
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut enabled, "Enabled").changed();
+        ui.label("Playback");
+        ComboBox::from_id_salt(("visual_sprite_sheet_patch_playback_inline", ui.id()))
+            .selected_text(playback.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["loop", "once", "pingpong"] {
+                    changed |= ui
+                        .selectable_value(&mut playback, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Cols");
+        changed |= ui.add(DragValue::new(&mut columns).speed(1.0)).changed();
+        ui.label("Rows");
+        changed |= ui.add(DragValue::new(&mut rows).speed(1.0)).changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Start");
+        changed |= ui
+            .add(DragValue::new(&mut start_frame).speed(1.0))
+            .changed();
+        ui.label("Count");
+        changed |= ui
+            .add(DragValue::new(&mut frame_count).speed(1.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("FPS");
+        changed |= ui.add(DragValue::new(&mut fps).speed(0.1)).changed();
+        ui.label("Phase");
+        changed |= ui.add(DragValue::new(&mut phase).speed(0.01)).changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut paused, "Paused").changed();
+        ui.label("Paused Frame");
+        changed |= ui
+            .add(DragValue::new(&mut paused_frame).speed(1.0))
+            .changed();
+        changed |= ui.checkbox(&mut flip_x, "Flip X").changed();
+        changed |= ui.checkbox(&mut flip_y, "Flip Y").changed();
+    });
+    changed |= draw_vec2_row(ui, "UV Inset", &mut frame_uv_inset, 0.005);
+
+    if changed {
+        let mut sheet_object = JsonMap::new();
+        sheet_object.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        sheet_object.insert(
+            "columns".to_string(),
+            JsonValue::Number(JsonNumber::from(columns.max(1.0).round() as u64)),
+        );
+        sheet_object.insert(
+            "rows".to_string(),
+            JsonValue::Number(JsonNumber::from(rows.max(1.0).round() as u64)),
+        );
+        sheet_object.insert(
+            "start_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(start_frame.max(0.0).round() as u64)),
+        );
+        sheet_object.insert(
+            "frame_count".to_string(),
+            JsonValue::Number(JsonNumber::from(frame_count.max(0.0).round() as u64)),
+        );
+        sheet_object.insert("fps".to_string(), json_number(fps.max(0.0)));
+        sheet_object.insert("playback".to_string(), JsonValue::String(playback));
+        sheet_object.insert("phase".to_string(), json_number(phase));
+        sheet_object.insert("paused".to_string(), JsonValue::Bool(paused));
+        sheet_object.insert(
+            "paused_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(paused_frame.max(0.0).round() as u64)),
+        );
+        sheet_object.insert("flip_x".to_string(), JsonValue::Bool(flip_x));
+        sheet_object.insert("flip_y".to_string(), JsonValue::Bool(flip_y));
+        sheet_object.insert(
+            "frame_uv_inset".to_string(),
+            vec2_json(
+                frame_uv_inset.0.clamp(0.0, 0.49),
+                frame_uv_inset.1.clamp(0.0, 0.49),
+            ),
+        );
+        let sheet_value = JsonValue::Object(sheet_object);
+        let mut out = JsonMap::new();
+        out.insert("sheet_animation".to_string(), sheet_value.clone());
+        out.insert("sheet".to_string(), sheet_value);
+        *value = compact_json_string(&JsonValue::Object(out));
+    }
+
+    changed
+}
+
+fn draw_sprite_image_sequence_patch_data_editor(
+    ui: &mut Ui,
+    value: &mut String,
+    pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
+    consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
+) -> bool {
+    let object = parse_json_object_literal(value);
+    let mut changed = false;
+    let mut sequence = json_object_nested(&object, "image_sequence");
+    if sequence.is_empty() {
+        sequence = json_object_nested(&object, "sequence");
+    }
+    if sequence.is_empty() {
+        sequence = object;
+    }
+
+    let mut enabled = json_object_bool(&sequence, "enabled", false);
+    let mut start_frame = json_object_f64(&sequence, "start_frame", 0.0).max(0.0);
+    let mut frame_count = json_object_f64(&sequence, "frame_count", 0.0).max(0.0);
+    let mut fps = json_object_f64(&sequence, "fps", 12.0).max(0.0);
+    let mut playback = json_object_string(&sequence, "playback", "loop");
+    if !matches!(playback.as_str(), "loop" | "once" | "pingpong") {
+        playback = "loop".to_string();
+    }
+    let mut phase = json_object_f64(&sequence, "phase", 0.0);
+    let mut paused = json_object_bool(&sequence, "paused", false);
+    let mut paused_frame = json_object_f64(&sequence, "paused_frame", 0.0).max(0.0);
+    let mut flip_x = json_object_bool(&sequence, "flip_x", false);
+    let mut flip_y = json_object_bool(&sequence, "flip_y", false);
+    let mut textures = Vec::new();
+    for key in ["textures", "texture_paths", "frames"] {
+        if let Some(value) = sequence.get(key) {
+            if let Ok(paths) = coerce_json_to_sprite_texture_paths(value, key) {
+                textures = paths;
+            }
+        }
+    }
+
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut enabled, "Enabled").changed();
+        ui.label("Playback");
+        ComboBox::from_id_salt(("visual_sprite_sequence_patch_playback_inline", ui.id()))
+            .selected_text(playback.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["loop", "once", "pingpong"] {
+                    changed |= ui
+                        .selectable_value(&mut playback, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Start");
+        changed |= ui
+            .add(DragValue::new(&mut start_frame).speed(1.0))
+            .changed();
+        ui.label("Count");
+        changed |= ui
+            .add(DragValue::new(&mut frame_count).speed(1.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("FPS");
+        changed |= ui.add(DragValue::new(&mut fps).speed(0.1)).changed();
+        ui.label("Phase");
+        changed |= ui.add(DragValue::new(&mut phase).speed(0.01)).changed();
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut paused, "Paused").changed();
+        ui.label("Paused Frame");
+        changed |= ui
+            .add(DragValue::new(&mut paused_frame).speed(1.0))
+            .changed();
+        changed |= ui.checkbox(&mut flip_x, "Flip X").changed();
+        changed |= ui.checkbox(&mut flip_y, "Flip Y").changed();
+    });
+    let mut remove_index = None;
+    for (index, path) in textures.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            let response = ui.add(TextEdit::singleline(path).desired_width(180.0));
+            changed |= response.changed();
+            changed |= handle_asset_path_drop(
+                ui,
+                &response,
+                VisualAssetPathKind::Texture,
+                path,
+                pending_asset_nodes,
+                consumed_asset_drop,
+                project_root,
+            );
+            if ui.small_button("-").clicked() {
+                remove_index = Some(index);
+            }
+        });
+    }
+    if let Some(index) = remove_index {
+        if index < textures.len() {
+            textures.remove(index);
+            changed = true;
+        }
+    }
+    if ui.small_button("+ Frame").clicked() {
+        textures.push(String::new());
+        changed = true;
+    }
+
+    if changed {
+        let texture_values = JsonValue::Array(
+            textures
+                .iter()
+                .map(|path| JsonValue::String(path.trim().to_string()))
+                .collect(),
+        );
+        let mut sequence_object = JsonMap::new();
+        sequence_object.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        sequence_object.insert(
+            "start_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(start_frame.max(0.0).round() as u64)),
+        );
+        sequence_object.insert(
+            "frame_count".to_string(),
+            JsonValue::Number(JsonNumber::from(frame_count.max(0.0).round() as u64)),
+        );
+        sequence_object.insert("fps".to_string(), json_number(fps.max(0.0)));
+        sequence_object.insert("playback".to_string(), JsonValue::String(playback));
+        sequence_object.insert("phase".to_string(), json_number(phase));
+        sequence_object.insert("paused".to_string(), JsonValue::Bool(paused));
+        sequence_object.insert(
+            "paused_frame".to_string(),
+            JsonValue::Number(JsonNumber::from(paused_frame.max(0.0).round() as u64)),
+        );
+        sequence_object.insert("flip_x".to_string(), JsonValue::Bool(flip_x));
+        sequence_object.insert("flip_y".to_string(), JsonValue::Bool(flip_y));
+        sequence_object.insert("textures".to_string(), texture_values.clone());
+        sequence_object.insert("texture_paths".to_string(), texture_values.clone());
+        sequence_object.insert("frames".to_string(), texture_values);
+        let sequence_value = JsonValue::Object(sequence_object);
+        let mut out = JsonMap::new();
+        out.insert("image_sequence".to_string(), sequence_value.clone());
+        out.insert("sequence".to_string(), sequence_value);
+        *value = compact_json_string(&JsonValue::Object(out));
+    }
+
+    changed
+}
+
+fn draw_text2d_data_editor(ui: &mut Ui, value: &mut String) -> bool {
+    let mut object = parse_json_object_literal(value);
+    let mut changed = false;
+
+    let mut text = json_object_string(&object, "text", "");
+    let mut color = json_object_vec4(&object, "color", (1.0, 1.0, 1.0, 1.0));
+    let mut font_path = json_object_string(&object, "font_path", "");
+    let mut font_family = json_object_string(&object, "font_family", "");
+    let mut font_size = json_object_f64(&object, "font_size", 32.0).max(0.01);
+    let mut font_weight = json_object_f64(&object, "font_weight", 400.0).clamp(1.0, 1000.0);
+    let mut font_width = json_object_f64(&object, "font_width", 1.0).clamp(0.25, 4.0);
+    let mut font_style = json_object_string(&object, "font_style", "normal");
+    if !matches!(font_style.as_str(), "normal" | "italic" | "oblique") {
+        font_style = "normal".to_string();
+    }
+    let mut line_height_scale = json_object_f64(&object, "line_height_scale", 1.0).max(0.1);
+    let mut letter_spacing = json_object_f64(&object, "letter_spacing", 0.0);
+    let mut word_spacing = json_object_f64(&object, "word_spacing", 0.0);
+    let mut underline = json_object_bool(&object, "underline", false);
+    let mut strikethrough = json_object_bool(&object, "strikethrough", false);
+    let mut max_width = json_object_field(&object, "max_width")
+        .and_then(|value| {
+            if value.is_null() {
+                None
+            } else {
+                coerce_json_to_f64(value).ok().filter(|value| *value > 0.0)
+            }
+        })
+        .or(None);
+    let mut align_h = json_object_string(&object, "align_h", "left");
+    if !matches!(align_h.as_str(), "left" | "center" | "right") {
+        align_h = "left".to_string();
+    }
+    let mut align_v = json_object_string(&object, "align_v", "baseline");
+    if !matches!(align_v.as_str(), "top" | "center" | "bottom" | "baseline") {
+        align_v = "baseline".to_string();
+    }
+    let mut space = json_object_string(&object, "space", "world");
+    if !matches!(space.as_str(), "world" | "screen") {
+        space = "world".to_string();
+    }
+    let mut blend_mode = json_object_string(&object, "blend_mode", "alpha");
+    if !matches!(blend_mode.as_str(), "alpha" | "premultiplied" | "additive") {
+        blend_mode = "alpha".to_string();
+    }
+    let mut billboard = json_object_bool(&object, "billboard", false);
+    let mut visible = json_object_bool(&object, "visible", true);
+    let mut layer = json_object_f64(&object, "layer", 0.0);
+    let mut has_clip_rect = object
+        .get("clip_rect")
+        .is_some_and(|clip_rect| !clip_rect.is_null());
+    let mut clip_rect = json_object_vec4(&object, "clip_rect", (0.0, 0.0, 1.0, 1.0));
+    let mut pick_id = json_object_u64(&object, "pick_id", None);
+
+    ui.horizontal(|ui| {
+        ui.label("Text");
+        changed |= ui
+            .add(TextEdit::singleline(&mut text).desired_width(220.0))
+            .changed();
+    });
+    changed |= draw_vec4_row(ui, "Color", &mut color, 0.01);
+    ui.horizontal(|ui| {
+        ui.label("Font Path");
+        changed |= ui
+            .add(TextEdit::singleline(&mut font_path).desired_width(180.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Font Family");
+        changed |= ui
+            .add(TextEdit::singleline(&mut font_family).desired_width(140.0))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        changed |= ui.add(DragValue::new(&mut font_size).speed(0.1)).changed();
+        ui.label("Weight");
+        changed |= ui
+            .add(DragValue::new(&mut font_weight).speed(1.0))
+            .changed();
+        ui.label("Width");
+        changed |= ui
+            .add(DragValue::new(&mut font_width).speed(0.01))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Style");
+        ComboBox::from_id_salt(("visual_text2d_font_style_inline", ui.id()))
+            .selected_text(font_style.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["normal", "italic", "oblique"] {
+                    changed |= ui
+                        .selectable_value(&mut font_style, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+        ui.label("Line Height");
+        changed |= ui
+            .add(DragValue::new(&mut line_height_scale).speed(0.01))
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("Letter");
+        changed |= ui
+            .add(DragValue::new(&mut letter_spacing).speed(0.01))
+            .changed();
+        ui.label("Word");
+        changed |= ui
+            .add(DragValue::new(&mut word_spacing).speed(0.01))
+            .changed();
+        changed |= ui.checkbox(&mut underline, "Underline").changed();
+        changed |= ui.checkbox(&mut strikethrough, "Strike").changed();
+    });
+    ui.horizontal(|ui| {
+        let mut has_max_width = max_width.is_some();
+        if ui.checkbox(&mut has_max_width, "Max Width").changed() {
+            max_width = if has_max_width {
+                Some(max_width.unwrap_or(512.0))
+            } else {
+                None
+            };
+            changed = true;
+        }
+        if has_max_width {
+            let mut width = max_width.unwrap_or(512.0);
+            if ui.add(DragValue::new(&mut width).speed(1.0)).changed() {
+                max_width = Some(width.max(0.01));
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Align H");
+        ComboBox::from_id_salt(("visual_text2d_align_h_inline", ui.id()))
+            .selected_text(align_h.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["left", "center", "right"] {
+                    changed |= ui
+                        .selectable_value(&mut align_h, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+        ui.label("Align V");
+        ComboBox::from_id_salt(("visual_text2d_align_v_inline", ui.id()))
+            .selected_text(align_v.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["top", "center", "bottom", "baseline"] {
+                    changed |= ui
+                        .selectable_value(&mut align_v, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("Space");
+        ComboBox::from_id_salt(("visual_text2d_space_inline", ui.id()))
+            .selected_text(space.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["world", "screen"] {
+                    changed |= ui
+                        .selectable_value(&mut space, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+        ui.label("Blend");
+        ComboBox::from_id_salt(("visual_text2d_blend_inline", ui.id()))
+            .selected_text(blend_mode.clone())
+            .show_ui(ui, |ui| {
+                for candidate in ["alpha", "premultiplied", "additive"] {
+                    changed |= ui
+                        .selectable_value(&mut blend_mode, candidate.to_string(), candidate)
+                        .changed();
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut billboard, "Billboard").changed();
+        changed |= ui.checkbox(&mut visible, "Visible").changed();
+        ui.label("Layer");
+        changed |= ui.add(DragValue::new(&mut layer).speed(0.1)).changed();
+    });
+    ui.horizontal(|ui| {
+        let mut has_pick_id = pick_id.is_some();
+        if ui.checkbox(&mut has_pick_id, "Pick Id").changed() {
+            pick_id = if has_pick_id {
+                Some(pick_id.unwrap_or(0))
+            } else {
+                None
+            };
+            changed = true;
+        }
+        if has_pick_id {
+            let mut value = pick_id.unwrap_or(0);
+            if ui
+                .add(DragValue::new(&mut value).speed(1.0).range(0..=u64::MAX))
+                .changed()
+            {
+                pick_id = Some(value);
+                changed = true;
+            }
+            if ui.small_button("Clear").clicked() {
+                pick_id = None;
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut has_clip_rect, "Clip Rect").changed() {
+            changed = true;
+        }
+    });
+    if has_clip_rect {
+        changed |= draw_vec4_row(ui, "Rect", &mut clip_rect, 0.01);
+    }
+
+    if changed {
+        object.insert("text".to_string(), JsonValue::String(text));
+        object.insert(
+            "color".to_string(),
+            vec4_json(color.0, color.1, color.2, color.3),
+        );
+        object.insert(
+            "font_path".to_string(),
+            if font_path.trim().is_empty() {
+                JsonValue::Null
+            } else {
+                JsonValue::String(font_path.trim().to_string())
+            },
+        );
+        object.insert(
+            "font_family".to_string(),
+            if font_family.trim().is_empty() {
+                JsonValue::Null
+            } else {
+                JsonValue::String(font_family.trim().to_string())
+            },
+        );
+        object.insert("font_size".to_string(), json_number(font_size.max(0.01)));
+        object.insert(
+            "font_weight".to_string(),
+            json_number(font_weight.clamp(1.0, 1000.0)),
+        );
+        object.insert(
+            "font_width".to_string(),
+            json_number(font_width.clamp(0.25, 4.0)),
+        );
+        object.insert("font_style".to_string(), JsonValue::String(font_style));
+        object.insert(
+            "line_height_scale".to_string(),
+            json_number(line_height_scale.max(0.1)),
+        );
+        object.insert("letter_spacing".to_string(), json_number(letter_spacing));
+        object.insert("word_spacing".to_string(), json_number(word_spacing));
+        object.insert("underline".to_string(), JsonValue::Bool(underline));
+        object.insert("strikethrough".to_string(), JsonValue::Bool(strikethrough));
+        object.insert(
+            "max_width".to_string(),
+            max_width.map(json_number).unwrap_or(JsonValue::Null),
+        );
+        object.insert("align_h".to_string(), JsonValue::String(align_h));
+        object.insert("align_v".to_string(), JsonValue::String(align_v));
+        object.insert("space".to_string(), JsonValue::String(space));
+        object.insert("blend_mode".to_string(), JsonValue::String(blend_mode));
+        object.insert("billboard".to_string(), JsonValue::Bool(billboard));
+        object.insert("visible".to_string(), JsonValue::Bool(visible));
+        object.insert("layer".to_string(), json_number(layer));
+        object.insert(
+            "clip_rect".to_string(),
+            if has_clip_rect {
+                vec4_json(clip_rect.0, clip_rect.1, clip_rect.2, clip_rect.3)
+            } else {
+                JsonValue::Null
+            },
+        );
+        object.insert(
+            "pick_id".to_string(),
+            pick_id
+                .map(|value| JsonValue::Number(JsonNumber::from(value)))
+                .unwrap_or(JsonValue::Null),
+        );
+        *value = compact_json_string(&JsonValue::Object(object));
+    }
+
+    changed
+}
+
 fn draw_audio_listener_data_editor(ui: &mut Ui, value: &mut String) -> bool {
     let mut object = parse_json_object_literal(value);
     let mut enabled = json_object_bool(&object, "enabled", true);
@@ -20426,6 +22836,7 @@ fn draw_audio_emitter_data_editor(
     value: &mut String,
     pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
     consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
 ) -> bool {
     let mut object = parse_json_object_literal(value);
     let mut changed = false;
@@ -20458,6 +22869,7 @@ fn draw_audio_emitter_data_editor(
             &mut path,
             pending_asset_nodes,
             consumed_asset_drop,
+            project_root,
         );
     });
     ui.horizontal(|ui| {
@@ -21146,6 +23558,7 @@ fn draw_api_structured_default_editor(
     default_literal: &mut String,
     pending_asset_nodes: &mut Vec<(String, egui::Pos2)>,
     consumed_asset_drop: &mut bool,
+    project_root: Option<&Path>,
 ) -> bool {
     match operation {
         VisualApiOperation::EcsSetCamera if input_index == 1 => {
@@ -21160,7 +23573,32 @@ fn draw_api_structured_default_editor(
                 default_literal,
                 pending_asset_nodes,
                 consumed_asset_drop,
+                project_root,
             )
+        }
+        VisualApiOperation::EcsSetSpriteRenderer if input_index == 1 => {
+            draw_sprite_renderer_data_editor(
+                ui,
+                default_literal,
+                pending_asset_nodes,
+                consumed_asset_drop,
+                project_root,
+            )
+        }
+        VisualApiOperation::EcsSetSpriteRendererSheetAnimation if input_index == 1 => {
+            draw_sprite_sheet_animation_patch_data_editor(ui, default_literal)
+        }
+        VisualApiOperation::EcsSetSpriteRendererSequence if input_index == 1 => {
+            draw_sprite_image_sequence_patch_data_editor(
+                ui,
+                default_literal,
+                pending_asset_nodes,
+                consumed_asset_drop,
+                project_root,
+            )
+        }
+        VisualApiOperation::EcsSetText2d if input_index == 1 => {
+            draw_text2d_data_editor(ui, default_literal)
         }
         VisualApiOperation::EcsSetAudioEmitter if input_index == 1 => {
             draw_audio_emitter_data_editor(
@@ -21168,6 +23606,7 @@ fn draw_api_structured_default_editor(
                 default_literal,
                 pending_asset_nodes,
                 consumed_asset_drop,
+                project_root,
             )
         }
         VisualApiOperation::EcsSetAudioListener if input_index == 1 => {
@@ -21228,13 +23667,23 @@ fn draw_api_structured_default_editor(
 fn draw_mesh_renderer_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
     let mut pending = Vec::new();
     let mut consumed = false;
-    draw_mesh_renderer_data_editor(ui, value, &mut pending, &mut consumed)
+    draw_mesh_renderer_data_editor(ui, value, &mut pending, &mut consumed, None)
+}
+
+fn draw_sprite_renderer_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
+    let mut pending = Vec::new();
+    let mut consumed = false;
+    draw_sprite_renderer_data_editor(ui, value, &mut pending, &mut consumed, None)
+}
+
+fn draw_text2d_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
+    draw_text2d_data_editor(ui, value)
 }
 
 fn draw_audio_emitter_data_editor_plain(ui: &mut Ui, value: &mut String) -> bool {
     let mut pending = Vec::new();
     let mut consumed = false;
-    draw_audio_emitter_data_editor(ui, value, &mut pending, &mut consumed)
+    draw_audio_emitter_data_editor(ui, value, &mut pending, &mut consumed, None)
 }
 
 fn draw_script_data_editor(ui: &mut Ui, value: &mut String) -> bool {
@@ -23267,6 +25716,8 @@ fn draw_typed_editor_with_width(
         VisualValueType::Camera => draw_camera_data_editor(ui, value),
         VisualValueType::Light => draw_light_data_editor(ui, value),
         VisualValueType::MeshRenderer => draw_mesh_renderer_data_editor_plain(ui, value),
+        VisualValueType::SpriteRenderer => draw_sprite_renderer_data_editor_plain(ui, value),
+        VisualValueType::Text2d => draw_text2d_data_editor_plain(ui, value),
         VisualValueType::AudioEmitter => draw_audio_emitter_data_editor_plain(ui, value),
         VisualValueType::AudioListener => draw_audio_listener_data_editor(ui, value),
         VisualValueType::Script => draw_script_data_editor(ui, value),

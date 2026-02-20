@@ -300,6 +300,8 @@ type SpriteImageSequenceTextureValue = { string } | string
 type SpriteImageSequenceData = {
     enabled: boolean,
     textures: { string },
+    texture_paths: { string }?,
+    frames: { string }?,
     start_frame: number,
     frame_count: number,
     fps: number,
@@ -334,6 +336,7 @@ type SpriteRendererData = {
     uv_min: Vec2,
     uv_max: Vec2,
     sheet_animation: SpriteSheetAnimationData,
+    sheet: SpriteSheetAnimationData,
     image_sequence: SpriteImageSequenceData,
     sequence: SpriteImageSequenceData,
     pivot: Vec2,
@@ -363,6 +366,58 @@ type SpriteRendererPatch = {
     blend_mode: string?,
     billboard: boolean?,
     visible: boolean?,
+    pick_id: number?,
+}
+
+type Text2dData = {
+    text: string,
+    color: { number },
+    font_path: string?,
+    font_family: string?,
+    font_size: number,
+    font_weight: number,
+    font_width: number,
+    font_style: string,
+    line_height_scale: number,
+    letter_spacing: number,
+    word_spacing: number,
+    underline: boolean,
+    strikethrough: boolean,
+    max_width: number?,
+    align_h: string,
+    align_v: string,
+    space: string,
+    blend_mode: string,
+    billboard: boolean,
+    visible: boolean,
+    layer: number,
+    clip_rect: { number }?,
+    pick_id: number?,
+}
+
+type Text2dPatch = {
+    text: string?,
+    color: { number }?,
+    font_path: string?,
+    font_family: string?,
+    font_size: number?,
+    font_weight: number?,
+    font_width: number?,
+    font_style: string?,
+    line_height_scale: number?,
+    letter_spacing: number?,
+    word_spacing: number?,
+    underline: boolean?,
+    strikethrough: boolean?,
+    max_width: number?,
+    align_h: string?,
+    align_v: string?,
+    space: string?,
+    blend_mode: string?,
+    billboard: boolean?,
+    visible: boolean?,
+    layer: number?,
+    clip_rect: { number }?,
     pick_id: number?,
 }
 
@@ -1808,6 +1863,8 @@ type HelmerEcs = {
     get_sprite_renderer_texture_path: (id: EntityId) -> string?,
     set_sprite_renderer: (id: EntityId, data: SpriteRendererPatch) -> boolean,
     set_sprite_renderer_texture_path: (id: EntityId, path: string) -> boolean,
+    get_text2d: (id: EntityId) -> Text2dData?,
+    set_text2d: (id: EntityId, data: Text2dPatch) -> boolean,
 
     get_scene_asset: (id: EntityId) -> string?,
     set_scene_asset: (id: EntityId, path: string) -> boolean,
@@ -2144,11 +2201,13 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.set_mesh_renderer_material_path(id, path) -> bool
 --   ecs.get_sprite_renderer(id) -> table|nil
 --     sprite.sheet_animation: {enabled, columns, rows, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y, frame_uv_inset={x,y}}
---     sprite.image_sequence: {enabled, textures={path,...}, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y}
+--     sprite.sheet: alias of sprite.sheet_animation
+--     sprite.image_sequence: {enabled, textures={path,...}, texture_paths={path,...}?, frames={path,...}?, start_frame, frame_count, fps, playback("loop"|"once"|"pingpong"), phase, paused, paused_frame, flip_x, flip_y}
+--     sprite.sequence: alias of sprite.image_sequence
 --   ecs.get_sprite_renderer_texture_path(id) -> path|nil
 --   ecs.set_sprite_renderer(id, patch) -> bool
 --   ecs.set_sprite_renderer_texture_path(id, path) -> bool
---   ecs.get_text2d(id) -> table|nil
+--   ecs.get_text2d(id) -> {text,color,font_path?,font_family?,font_size,font_weight,font_width,font_style,line_height_scale,letter_spacing,word_spacing,underline,strikethrough,max_width?,align_h,align_v,space,blend_mode,billboard,visible,layer,clip_rect?,pick_id?}|nil
 --   ecs.set_text2d(id, patch) -> bool
 --   ecs.get_scene_asset(id) -> path|nil
 --   ecs.set_scene_asset(id, path) -> bool

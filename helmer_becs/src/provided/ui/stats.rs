@@ -5,7 +5,7 @@ use std::{
 };
 
 use bevy_ecs::prelude::{Entity, World};
-use egui::{Align2, Color32, ComboBox, DragValue, Stroke, StrokeKind, TextStyle, pos2, vec2};
+use egui::{Align2, Color32, ComboBox, Stroke, StrokeKind, TextStyle, pos2, vec2};
 use hashbrown::HashSet;
 use helmer::{
     graphics::{
@@ -35,6 +35,7 @@ use crate::{
     egui_integration::{EguiResource, EguiWindowSpec},
     physics::physics_resource::PhysicsResource,
     systems::render_system::{RenderGraphResource, RenderObjectCount},
+    ui_integration::UiPerfStats,
 };
 
 fn draw_history_plot(
@@ -167,6 +168,12 @@ fn clear_profiling_history(history: &mut ProfilingHistory) {
     history.render_acquire_ms.clear();
     history.render_submit_ms.clear();
     history.render_present_ms.clear();
+    history.ui_system_ms.clear();
+    history.ui_run_frame_ms.clear();
+    history.ui_interaction_ms.clear();
+    history.ui_scroll_metrics_ms.clear();
+    history.ui_render_data_convert_ms.clear();
+    history.render_ui_build_ms.clear();
     history.render_pass_ms.clear();
     history.render_pass_last_ms.clear();
     history.render_pass_order.clear();
@@ -180,25 +187,8 @@ fn micros_to_ms(value: u64) -> f64 {
     value as f64 / 1000.0
 }
 
-fn compact_label(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    if max_chars <= 3 {
-        return "...".to_string();
-    }
-    let side = (max_chars - 3) / 2;
-    let head = value.chars().take(side).collect::<String>();
-    let tail = value
-        .chars()
-        .rev()
-        .take(side)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{}...{}", head, tail)
+fn micros_f64_to_ms(value: f64) -> f64 {
+    value / 1000.0
 }
 
 fn pass_color(name: &str) -> Color32 {
@@ -249,575 +239,12 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
     let renderer_stats = world
         .get_resource::<BevyRendererStats>()
         .map(|stats| stats.0.clone());
+    let ui_perf_stats = world.get_resource::<UiPerfStats>().cloned();
     let audio_stats = world
         .get_resource::<AudioBackendResource>()
         .map(|audio| audio.0.stats());
 
-    egui::ScrollArea::both()
-        .id_salt("runtime_profiling_panel")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.heading("profiling");
-            ui.separator();
-
-            let mut profiling_enabled = runtime_profiling
-                .as_ref()
-                .map(|profiling| profiling.enabled.load(Ordering::Relaxed))
-                .unwrap_or(false);
-            let mut history_samples = runtime_profiling
-                .as_ref()
-                .map(|profiling| profiling.history_samples.load(Ordering::Relaxed))
-                .unwrap_or(0);
-            let mut render_pass_plot_limit = runtime_profiling
-                .as_ref()
-                .map(|profiling| profiling.render_pass_plot_limit.load(Ordering::Relaxed))
-                .unwrap_or(0);
-
-            let enabled_changed = ui.checkbox(&mut profiling_enabled, "enabled").changed();
-            let history_changed = ui
-                .add(
-                    DragValue::new(&mut history_samples)
-                        .speed(1.0)
-                        .prefix("history samples: "),
-                )
-                .changed();
-            let plot_limit_changed = ui
-                .add(
-                    DragValue::new(&mut render_pass_plot_limit)
-                        .speed(1.0)
-                        .prefix("render pass plot limit: "),
-                )
-                .changed();
-            let clear_clicked = ui.button("clear history").clicked();
-
-            if let Some(profiling) = runtime_profiling.as_ref() {
-                if enabled_changed {
-                    profiling
-                        .enabled
-                        .store(profiling_enabled, Ordering::Relaxed);
-                }
-                if history_changed {
-                    profiling
-                        .history_samples
-                        .store(history_samples, Ordering::Relaxed);
-                }
-                if plot_limit_changed {
-                    profiling
-                        .render_pass_plot_limit
-                        .store(render_pass_plot_limit, Ordering::Relaxed);
-                }
-            }
-
-            if let Some(stats) = renderer_stats.as_ref() {
-                stats
-                    .profiling_enabled
-                    .store(profiling_enabled, Ordering::Relaxed);
-            }
-
-            let history_limit = history_samples as usize;
-            let mut history = world
-                .get_resource_mut::<ProfilingHistory>()
-                .expect("ProfilingHistory resource not found");
-            if clear_clicked {
-                clear_profiling_history(&mut history);
-            }
-
-            if profiling_enabled && history_limit > 0 {
-                if let Some(profiling) = runtime_profiling.as_ref() {
-                    push_history(
-                        &mut history.main_event_ms,
-                        micros_to_ms(profiling.main_event_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.main_update_ms,
-                        micros_to_ms(profiling.main_update_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.logic_tick_ms,
-                        micros_to_ms(profiling.logic_tick_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.logic_schedule_ms,
-                        micros_to_ms(profiling.logic_schedule_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_thread_frame_ms,
-                        micros_to_ms(profiling.render_thread_frame_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_thread_render_ms,
-                        micros_to_ms(profiling.render_thread_render_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                }
-
-                if let Some(stats) = renderer_stats.as_ref() {
-                    push_history(
-                        &mut history.render_prepare_globals_ms,
-                        micros_to_ms(stats.render_prepare_globals_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_streaming_plan_ms,
-                        micros_to_ms(stats.render_streaming_plan_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_occlusion_ms,
-                        micros_to_ms(stats.render_occlusion_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_graph_ms,
-                        micros_to_ms(stats.render_graph_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_graph_pass_ms,
-                        micros_to_ms(stats.render_graph_pass_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_graph_encoder_create_ms,
-                        micros_to_ms(stats.render_graph_encoder_create_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_graph_encoder_finish_ms,
-                        micros_to_ms(stats.render_graph_encoder_finish_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_graph_overhead_ms,
-                        micros_to_ms(stats.render_graph_overhead_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_resource_mgmt_ms,
-                        micros_to_ms(stats.render_resource_mgmt_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_acquire_ms,
-                        micros_to_ms(stats.render_acquire_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_submit_ms,
-                        micros_to_ms(stats.render_submit_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.render_present_ms,
-                        micros_to_ms(stats.render_present_us.load(Ordering::Relaxed)),
-                        history_limit,
-                    );
-
-                    let pass_timings = stats.pass_timings.read();
-                    if !pass_timings.is_empty() {
-                        let mut seen = HashSet::new();
-                        history.render_pass_order = pass_timings
-                            .iter()
-                            .map(|timing| timing.name.clone())
-                            .collect();
-                        for timing in pass_timings.iter() {
-                            let ms = micros_to_ms(timing.duration_us);
-                            let entry = history
-                                .render_pass_ms
-                                .entry(timing.name.clone())
-                                .or_insert_with(VecDeque::new);
-                            push_history(entry, ms, history_limit);
-                            history.render_pass_last_ms.insert(timing.name.clone(), ms);
-                            seen.insert(timing.name.clone());
-                        }
-                        history.render_pass_ms.retain(|name, _| seen.contains(name));
-                        history
-                            .render_pass_last_ms
-                            .retain(|name, _| seen.contains(name));
-                    }
-                }
-
-                if let Some(audio) = audio_stats {
-                    push_history(
-                        &mut history.audio_mix_ms,
-                        audio.mix_time_us as f64 / 1000.0,
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.audio_callback_ms,
-                        audio.callback_time_us as f64 / 1000.0,
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.audio_emitters,
-                        audio.active_emitters as f64,
-                        history_limit,
-                    );
-                    push_history(
-                        &mut history.audio_streaming_emitters,
-                        audio.streaming_emitters as f64,
-                        history_limit,
-                    );
-                }
-            }
-
-            ui.separator();
-            ui.collapsing("threads", |ui| {
-                ui.label(format!(
-                    "main update: {:.3} ms",
-                    history.main_update_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "logic tick: {:.3} ms",
-                    history.logic_tick_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "render frame: {:.3} ms",
-                    history
-                        .render_thread_frame_ms
-                        .back()
-                        .copied()
-                        .unwrap_or(0.0)
-                ));
-                draw_history_plot(
-                    ui,
-                    140.0,
-                    &[
-                        (
-                            "main update",
-                            &history.main_update_ms,
-                            Color32::from_rgb(90, 160, 240),
-                        ),
-                        (
-                            "logic tick",
-                            &history.logic_tick_ms,
-                            Color32::from_rgb(120, 210, 140),
-                        ),
-                        (
-                            "render frame",
-                            &history.render_thread_frame_ms,
-                            Color32::from_rgb(220, 150, 90),
-                        ),
-                    ],
-                );
-            });
-
-            ui.separator();
-            ui.collapsing("renderer internals", |ui| {
-                ui.label(format!(
-                    "prepare globals: {:.3} ms",
-                    history
-                        .render_prepare_globals_ms
-                        .back()
-                        .copied()
-                        .unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "streaming plan: {:.3} ms",
-                    history
-                        .render_streaming_plan_ms
-                        .back()
-                        .copied()
-                        .unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "occlusion: {:.3} ms",
-                    history.render_occlusion_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "render graph: {:.3} ms",
-                    history.render_graph_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "resource mgmt: {:.3} ms",
-                    history
-                        .render_resource_mgmt_ms
-                        .back()
-                        .copied()
-                        .unwrap_or(0.0)
-                ));
-                draw_history_plot(
-                    ui,
-                    170.0,
-                    &[
-                        (
-                            "prepare globals",
-                            &history.render_prepare_globals_ms,
-                            Color32::from_rgb(120, 210, 120),
-                        ),
-                        (
-                            "streaming plan",
-                            &history.render_streaming_plan_ms,
-                            Color32::from_rgb(90, 170, 255),
-                        ),
-                        (
-                            "occlusion",
-                            &history.render_occlusion_ms,
-                            Color32::from_rgb(240, 120, 120),
-                        ),
-                        (
-                            "render graph",
-                            &history.render_graph_ms,
-                            Color32::from_rgb(200, 180, 80),
-                        ),
-                    ],
-                );
-
-                ui.separator();
-                ui.label(format!(
-                    "acquire: {:.3} ms",
-                    history.render_acquire_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "submit: {:.3} ms",
-                    history.render_submit_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "present: {:.3} ms",
-                    history.render_present_ms.back().copied().unwrap_or(0.0)
-                ));
-            });
-
-            ui.separator();
-            ui.collapsing("render graph internals", |ui| {
-                let mut entries: Vec<(String, f64)> = history
-                    .render_pass_last_ms
-                    .iter()
-                    .map(|(name, ms)| (name.clone(), *ms))
-                    .collect();
-                entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal));
-
-                let total_ms: f64 = entries.iter().map(|(_, ms)| *ms).sum();
-                ui.label(format!("total (sum of passes): {:.3} ms", total_ms));
-
-                let plot_limit = render_pass_plot_limit as usize;
-                if plot_limit > 0 {
-                    let mut names = Vec::new();
-                    for (name, _) in entries.iter().take(plot_limit) {
-                        names.push(name.clone());
-                    }
-                    let mut series = Vec::new();
-                    for name in names.iter() {
-                        if let Some(history_series) = history.render_pass_ms.get(name) {
-                            series.push((name.as_str(), history_series, pass_color(name)));
-                        }
-                    }
-                    if !series.is_empty() {
-                        draw_history_plot(ui, 170.0, &series);
-                    }
-                }
-
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        egui::Grid::new("profiling_pass_table")
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.label("pass");
-                                ui.label("last ms");
-                                ui.label("%");
-                                ui.end_row();
-                                for (name, ms) in entries.iter() {
-                                    ui.label(compact_label(name, 72)).on_hover_text(name);
-                                    ui.label(format!("{:.3}", ms));
-                                    if total_ms > 0.0 {
-                                        ui.label(format!("{:.1}%", (ms / total_ms) * 100.0));
-                                    } else {
-                                        ui.label("-");
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
-            });
-
-            ui.separator();
-            ui.collapsing("audio", |ui| {
-                ui.label(format!(
-                    "mix: {:.3} ms",
-                    history.audio_mix_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "callback: {:.3} ms",
-                    history.audio_callback_ms.back().copied().unwrap_or(0.0)
-                ));
-                ui.label(format!(
-                    "emitters: {:.0} (streaming {:.0})",
-                    history.audio_emitters.back().copied().unwrap_or(0.0),
-                    history
-                        .audio_streaming_emitters
-                        .back()
-                        .copied()
-                        .unwrap_or(0.0),
-                ));
-                if let Some(audio) = audio_stats {
-                    ui.label(format!(
-                        "output: {} Hz, {} ch, buffer {}",
-                        audio.sample_rate, audio.channels, audio.buffer_frames
-                    ));
-                }
-            });
-        });
-}
-
-pub struct StatsUI {}
-
-impl StatsUI {
-    pub fn add_windows(egui_res: &mut EguiResource) {
-        egui_res.windows.push((
-            Box::new(move |ui, world, _input_arc| {
-                let (fps, tps) = {
-                    let pm = &world
-                        .get_resource::<BevyPerformanceMetrics>()
-                        .expect("PerformanceMetrics resource not found")
-                        .0;
-                    (
-                        pm.fps.load(Ordering::Relaxed),
-                        pm.tps.load(Ordering::Relaxed),
-                    )
-                };
-
-                let render_object_count = world
-                    .get_resource::<RenderObjectCount>()
-                    .map(|count| count.0);
-
-                let (vram_used_mb, vram_soft_mb, vram_hard_mb) = world
-                    .get_resource::<BevyRendererStats>()
-                    .map(|stats| {
-                        let mb = 1024.0 * 1024.0;
-                        let used = stats.0.vram_used_bytes.load(Ordering::Relaxed) as f64 / mb;
-                        let soft =
-                            stats.0.vram_soft_limit_bytes.load(Ordering::Relaxed) as f64 / mb;
-                        let hard =
-                            stats.0.vram_hard_limit_bytes.load(Ordering::Relaxed) as f64 / mb;
-                        (used, soft, hard)
-                    })
-                    .unwrap_or((0.0, 0.0, 0.0));
-
-                let (mesh_bytes, tex_bytes, mat_bytes, audio_bytes) = {
-                    #[cfg(target_arch = "wasm32")]
-                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let asset_server = world.get_resource::<BevyAssetServer>();
-                    asset_server
-                        .map(|srv| {
-                            let srv = srv.0.lock();
-                            let (mesh, tex, mat) = srv.cache_usage_bytes();
-                            let audio = srv.audio_cache_usage_bytes();
-                            (mesh, tex, mat, audio)
-                        })
-                        .unwrap_or((0, 0, 0, 0))
-                };
-
-                let history_samples = world
-                    .get_resource::<BevyRuntimeProfiling>()
-                    .map(|profiling| profiling.0.history_samples.load(Ordering::Relaxed) as usize)
-                    .unwrap_or(0);
-
-                let mut history = world
-                    .get_resource_mut::<DebugGraphHistory>()
-                    .expect("DebugGraphHistory resource not found");
-
-                let mb_div = 1024.0 * 1024.0;
-                push_history(&mut history.fps, fps as f64, history_samples);
-                push_history(&mut history.vram_bytes, vram_used_mb, history_samples);
-                push_history(
-                    &mut history.mesh_bytes,
-                    mesh_bytes as f64 / mb_div,
-                    history_samples,
-                );
-                push_history(
-                    &mut history.texture_bytes,
-                    tex_bytes as f64 / mb_div,
-                    history_samples,
-                );
-                push_history(
-                    &mut history.material_bytes,
-                    mat_bytes as f64 / mb_div,
-                    history_samples,
-                );
-                push_history(
-                    &mut history.audio_bytes,
-                    audio_bytes as f64 / mb_div,
-                    history_samples,
-                );
-
-                ui.label(format!("FPS: {}  | TPS: {}", fps, tps));
-                if let Some(render_object_count) = render_object_count {
-                    ui.label(format!("render objects: {}", render_object_count));
-                }
-                ui.label(format!(
-                    "VRAM: {:.1} MiB (soft {:.0} / hard {:.0})",
-                    vram_used_mb, vram_soft_mb, vram_hard_mb
-                ));
-                ui.label(format!(
-                    "Asset cache (MiB): meshes {:.1}  textures {:.1}  materials {:.1}  audio {:.1}",
-                    mesh_bytes as f64 / mb_div,
-                    tex_bytes as f64 / mb_div,
-                    mat_bytes as f64 / mb_div,
-                    audio_bytes as f64 / mb_div
-                ));
-
-                draw_history_plot(
-                    ui,
-                    120.0,
-                    &[("FPS", &history.fps, Color32::from_rgb(90, 210, 120))],
-                );
-
-                draw_history_plot(
-                    ui,
-                    140.0,
-                    &[
-                        (
-                            "VRAM MiB",
-                            &history.vram_bytes,
-                            Color32::from_rgb(70, 150, 255),
-                        ),
-                        (
-                            "mesh cache MiB",
-                            &history.mesh_bytes,
-                            Color32::from_rgb(230, 180, 80),
-                        ),
-                        (
-                            "texture cache MiB",
-                            &history.texture_bytes,
-                            Color32::from_rgb(220, 90, 160),
-                        ),
-                        (
-                            "material cache MiB",
-                            &history.material_bytes,
-                            Color32::from_rgb(150, 210, 220),
-                        ),
-                        (
-                            "audio cache MiB",
-                            &history.audio_bytes,
-                            Color32::from_rgb(160, 200, 120),
-                        ),
-                    ],
-                );
-            }),
-            window_spec("helmer metrics"),
-        ));
-
-        egui_res.windows.push((
-            Box::new(move |ui, world, _input_arc| {
-                let runtime_profiling = world
-                    .get_resource::<BevyRuntimeProfiling>()
-                    .map(|profiling| profiling.0.clone());
-                let renderer_stats = world
-                    .get_resource::<BevyRendererStats>()
-                    .map(|stats| stats.0.clone());
-                let audio_stats = world
-                    .get_resource::<AudioBackendResource>()
-                    .map(|audio| audio.0.stats());
-
-                egui::ScrollArea::vertical()
+    egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.heading("profiling");
@@ -1102,6 +529,11 @@ impl StatsUI {
                                     render_present_ms,
                                     history_limit,
                                 );
+                                push_history(
+                                    &mut history.render_ui_build_ms,
+                                    micros_to_ms(stats.render_ui_build_us.load(Ordering::Relaxed)),
+                                    history_limit,
+                                );
                             }
 
                             if let Some(stats) = renderer_stats.as_ref() {
@@ -1128,6 +560,34 @@ impl StatsUI {
                                         .retain(|name, _| seen.contains(name));
                                 }
                             }
+                            if let Some(ui_perf) = ui_perf_stats.as_ref() {
+                                push_history(
+                                    &mut history.ui_system_ms,
+                                    micros_to_ms(ui_perf.frame_us),
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.ui_run_frame_ms,
+                                    micros_to_ms(ui_perf.run_frame_us),
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.ui_interaction_ms,
+                                    micros_to_ms(ui_perf.interaction_us),
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.ui_scroll_metrics_ms,
+                                    micros_to_ms(ui_perf.scroll_metrics_us),
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.ui_render_data_convert_ms,
+                                    micros_to_ms(ui_perf.render_data_convert_us),
+                                    history_limit,
+                                );
+                            }
+
 
                             if let Some(audio) = audio_stats {
                                 let mix_ms = audio.mix_time_us as f64 / 1000.0;
@@ -1459,6 +919,86 @@ impl StatsUI {
                             );
                         });
 
+            ui.separator();
+            ui.collapsing("ui internals", |ui| {
+                if !profiling_enabled {
+                    ui.label("runtime profiling is disabled; UI timings are not sampled.");
+                }
+                if let Some(ui_perf) = ui_perf_stats.as_ref() {
+                    ui.label(format!(
+                        "ui_system: {:.3} ms (avg {:.3} / peak {:.3})",
+                                    micros_to_ms(ui_perf.frame_us),
+                                    micros_f64_to_ms(ui_perf.frame_ema_us),
+                                    micros_to_ms(ui_perf.frame_peak_us),
+                                ));
+                                ui.label(format!(
+                                    "run_frame: {:.3} ms (avg {:.3} / peak {:.3})",
+                                    micros_to_ms(ui_perf.run_frame_us),
+                                    micros_f64_to_ms(ui_perf.run_frame_ema_us),
+                                    micros_to_ms(ui_perf.run_frame_peak_us),
+                                ));
+                                ui.label(format!(
+                                    "interaction: {:.3} ms | scroll metrics: {:.3} ms | convert: {:.3} ms",
+                                    micros_to_ms(ui_perf.interaction_us),
+                                    micros_to_ms(ui_perf.scroll_metrics_us),
+                                    micros_to_ms(ui_perf.render_data_convert_us),
+                                ));
+                                ui.label(format!(
+                                    "windows: {} visible / {} total | built cmds: {} | active cmds: {} | converted: {} | layout rects: {} | ui revision: {}",
+                                    ui_perf.windows_visible,
+                                    ui_perf.windows_total,
+                                    ui_perf.built_draw_commands,
+                                    ui_perf.draw_commands,
+                                    if ui_perf.converted_this_frame {
+                                        "yes"
+                                    } else {
+                                        "no"
+                                    },
+                                    ui_perf.layout_rects,
+                                    ui_perf.ui_revision,
+                                ));
+                            } else {
+                                ui.label("ui system metrics unavailable");
+                            }
+
+                            if let Some(stats) = renderer_stats.as_ref() {
+                                ui.separator();
+                                ui.label(format!(
+                                    "build_ui_draw_data: {:.3} ms (rebuilt this frame: {})",
+                                    micros_to_ms(stats.render_ui_build_us.load(Ordering::Relaxed)),
+                                    stats.render_ui_rebuilt.load(Ordering::Relaxed) != 0,
+                                ));
+                                ui.label(format!(
+                                    "render UI payload: commands {} | instances {} | batches {} | textures {}",
+                                    stats.render_ui_command_count.load(Ordering::Relaxed),
+                                    stats.render_ui_instance_count.load(Ordering::Relaxed),
+                                    stats.render_ui_batch_count.load(Ordering::Relaxed),
+                                    stats.render_ui_texture_count.load(Ordering::Relaxed),
+                                ));
+                            }
+
+                            draw_history_plot(
+                                ui,
+                                170.0,
+                                &[
+                                    (
+                                        "ui_system",
+                                        &history.ui_system_ms,
+                                        Color32::from_rgb(120, 200, 255),
+                                    ),
+                                    (
+                                        "ui_run_frame",
+                                        &history.ui_run_frame_ms,
+                                        Color32::from_rgb(120, 255, 170),
+                                    ),
+                                    (
+                                        "renderer_ui_build",
+                                        &history.render_ui_build_ms,
+                                        Color32::from_rgb(255, 190, 120),
+                                    ),
+                                ],
+                            );
+                        });
                         ui.separator();
                         ui.collapsing("render graph execution breakdown", |ui| {
                             let pass_ms =
@@ -1577,6 +1117,149 @@ impl StatsUI {
                                 });
                         });
                     });
+}
+
+pub struct StatsUI {}
+
+impl StatsUI {
+    pub fn add_windows(egui_res: &mut EguiResource) {
+        egui_res.windows.push((
+            Box::new(move |ui, world, _input_arc| {
+                let (fps, tps) = {
+                    let pm = &world
+                        .get_resource::<BevyPerformanceMetrics>()
+                        .expect("PerformanceMetrics resource not found")
+                        .0;
+                    (
+                        pm.fps.load(Ordering::Relaxed),
+                        pm.tps.load(Ordering::Relaxed),
+                    )
+                };
+
+                let render_object_count = world
+                    .get_resource::<RenderObjectCount>()
+                    .map(|count| count.0);
+
+                let (vram_used_mb, vram_soft_mb, vram_hard_mb) = world
+                    .get_resource::<BevyRendererStats>()
+                    .map(|stats| {
+                        let mb = 1024.0 * 1024.0;
+                        let used = stats.0.vram_used_bytes.load(Ordering::Relaxed) as f64 / mb;
+                        let soft =
+                            stats.0.vram_soft_limit_bytes.load(Ordering::Relaxed) as f64 / mb;
+                        let hard =
+                            stats.0.vram_hard_limit_bytes.load(Ordering::Relaxed) as f64 / mb;
+                        (used, soft, hard)
+                    })
+                    .unwrap_or((0.0, 0.0, 0.0));
+
+                let (mesh_bytes, tex_bytes, mat_bytes, audio_bytes) = {
+                    #[cfg(target_arch = "wasm32")]
+                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let asset_server = world.get_resource::<BevyAssetServer>();
+                    asset_server
+                        .map(|srv| {
+                            let srv = srv.0.lock();
+                            let (mesh, tex, mat) = srv.cache_usage_bytes();
+                            let audio = srv.audio_cache_usage_bytes();
+                            (mesh, tex, mat, audio)
+                        })
+                        .unwrap_or((0, 0, 0, 0))
+                };
+
+                let history_samples = world
+                    .get_resource::<BevyRuntimeProfiling>()
+                    .map(|profiling| profiling.0.history_samples.load(Ordering::Relaxed) as usize)
+                    .unwrap_or(0);
+
+                let mut history = world
+                    .get_resource_mut::<DebugGraphHistory>()
+                    .expect("DebugGraphHistory resource not found");
+
+                let mb_div = 1024.0 * 1024.0;
+                push_history(&mut history.fps, fps as f64, history_samples);
+                push_history(&mut history.vram_bytes, vram_used_mb, history_samples);
+                push_history(
+                    &mut history.mesh_bytes,
+                    mesh_bytes as f64 / mb_div,
+                    history_samples,
+                );
+                push_history(
+                    &mut history.texture_bytes,
+                    tex_bytes as f64 / mb_div,
+                    history_samples,
+                );
+                push_history(
+                    &mut history.material_bytes,
+                    mat_bytes as f64 / mb_div,
+                    history_samples,
+                );
+                push_history(
+                    &mut history.audio_bytes,
+                    audio_bytes as f64 / mb_div,
+                    history_samples,
+                );
+
+                ui.label(format!("FPS: {}  | TPS: {}", fps, tps));
+                if let Some(render_object_count) = render_object_count {
+                    ui.label(format!("render objects: {}", render_object_count));
+                }
+                ui.label(format!(
+                    "VRAM: {:.1} MiB (soft {:.0} / hard {:.0})",
+                    vram_used_mb, vram_soft_mb, vram_hard_mb
+                ));
+                ui.label(format!(
+                    "Asset cache (MiB): meshes {:.1}  textures {:.1}  materials {:.1}  audio {:.1}",
+                    mesh_bytes as f64 / mb_div,
+                    tex_bytes as f64 / mb_div,
+                    mat_bytes as f64 / mb_div,
+                    audio_bytes as f64 / mb_div
+                ));
+
+                draw_history_plot(
+                    ui,
+                    120.0,
+                    &[("FPS", &history.fps, Color32::from_rgb(90, 210, 120))],
+                );
+
+                draw_history_plot(
+                    ui,
+                    140.0,
+                    &[
+                        (
+                            "VRAM MiB",
+                            &history.vram_bytes,
+                            Color32::from_rgb(70, 150, 255),
+                        ),
+                        (
+                            "mesh cache MiB",
+                            &history.mesh_bytes,
+                            Color32::from_rgb(230, 180, 80),
+                        ),
+                        (
+                            "texture cache MiB",
+                            &history.texture_bytes,
+                            Color32::from_rgb(220, 90, 160),
+                        ),
+                        (
+                            "material cache MiB",
+                            &history.material_bytes,
+                            Color32::from_rgb(150, 210, 220),
+                        ),
+                        (
+                            "audio cache MiB",
+                            &history.audio_bytes,
+                            Color32::from_rgb(160, 200, 120),
+                        ),
+                    ],
+                );
+            }),
+            window_spec("helmer metrics"),
+        ));
+        egui_res.windows.push((
+            Box::new(move |ui, world, _input_arc| {
+                draw_runtime_profiling_panel(ui, world);
             }),
             window_spec("profiling"),
         ));

@@ -8,9 +8,9 @@ bevy_ecs = "0.17.2"
 glam = "0.30.9"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
+helmer_ui = { path = "../helmer_ui" }
 becs_bench = { path = "../becs_bench" }
 winit = "0.30.12"
-egui = "0.33.3"
 parking_lot = "0.12.5"
 rand = "0.9.2"
 rfd = "0.17.2"

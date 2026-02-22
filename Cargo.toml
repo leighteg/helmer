@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "helmer",
+    "helmer_ui",
     "helmer_editor",
     "helmer_editor_runtime",
     "helmer_build_runtime",

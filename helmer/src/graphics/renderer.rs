@@ -62,8 +62,8 @@ use crate::graphics::{
             RenderLightDelta, RenderMessage, RenderObject, RenderObjectDelta, RenderPassTiming,
             RenderText2d, RenderViewportGizmoOptions, RenderViewportRequest, RendererStats,
             ShaderConstants, ShadowUniforms, SkyUniforms, SpriteAnimationPlayback, SpriteBlendMode,
-            SpriteSheetAnimation, SpriteSpace, StreamingTuning, Vertex, apply_egui_delta,
-            build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            SpriteSheetAnimation, SpriteSpace, StreamingTuning, UiRenderCommand, Vertex,
+            apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
         },
     },
     graph::{
@@ -84,7 +84,7 @@ use crate::graphics::{
         BundleMode, ForwardBlendMode, FrameGlobals, GBufferBundleKey, GizmoIconParams,
         GizmoLineParams, GizmoParams, IndirectDrawBatch, MaterialTextureSet, RayTracingFrameInput,
         RayTracingTextureArrays, ShadowBundleKey, SpriteDrawBatch, SpriteInstanceRaw,
-        SwapchainFrameInput, TransparentDrawBatch,
+        SwapchainFrameInput, TransparentDrawBatch, UiDrawBatch, UiInstanceRaw,
     },
     render_graphs::{default_graph_spec, template_for_graph},
 };
@@ -97,6 +97,8 @@ const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
 const SPRITE_FLAG_CLIP_ENABLED: u32 = 1u32;
 const SPRITE_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
+const UI_FLAG_CLIP_ENABLED: u32 = 1u32;
+const UI_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
 const SPRITE_SHEET_MAX_UV_INSET: f32 = 0.49;
 const SWASH_GLYPH_SOURCES: [SwashSource; 1] = [SwashSource::Outline];
 
@@ -1348,10 +1350,57 @@ struct GlyphAtlasState {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    generation: u64,
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
     entries: HashMap<GlyphRasterKey, GlyphAtlasEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct UiTextLayoutCacheKey {
+    text_hash: u64,
+    text_len: u32,
+    font_size_bits: u32,
+    align_h: u32,
+    align_v: u32,
+    wrap: bool,
+    max_width_bits: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct UiTextGlyphLayout {
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    offset: Vec2,
+    size: Vec2,
+}
+
+#[derive(Clone, Debug)]
+struct UiTextDecorationLayout {
+    offset: Vec2,
+    size: Vec2,
+}
+
+#[derive(Clone, Debug)]
+struct UiTextCaretEdge {
+    byte_index: usize,
+    x: f32,
+}
+
+#[derive(Clone, Debug)]
+struct UiTextLayoutCacheValue {
+    align_offset: Vec2,
+    glyphs: Vec<UiTextGlyphLayout>,
+    decorations: Vec<UiTextDecorationLayout>,
+    caret_edges: Vec<UiTextCaretEdge>,
+}
+
+#[derive(Clone, Debug)]
+struct UiTextLayoutCacheEntry {
+    source_text: String,
+    value: UiTextLayoutCacheValue,
+    last_used_frame: u32,
 }
 
 struct BufferCache {
@@ -1375,6 +1424,7 @@ struct BufferCache {
     transparent_instances: ReusableBuffer,
     shadow_instances: ReusableBuffer,
     sprite_instances: ReusableBuffer,
+    ui_instances: ReusableBuffer,
 }
 
 #[repr(C)]
@@ -1431,6 +1481,7 @@ impl BufferCache {
                 "GraphRenderer/SpriteInstances",
                 frames_in_flight,
             ),
+            ui_instances: ReusableBuffer::new("GraphRenderer/UiInstances", frames_in_flight),
         }
     }
 
@@ -1454,6 +1505,7 @@ impl BufferCache {
         self.transparent_instances.resize_slots(frames_in_flight);
         self.shadow_instances.resize_slots(frames_in_flight);
         self.sprite_instances.resize_slots(frames_in_flight);
+        self.ui_instances.resize_slots(frames_in_flight);
     }
 }
 
@@ -2058,6 +2110,7 @@ pub struct GraphRenderer {
     sprite_scale_ctx: SwashScaleContext,
     sprite_fonts: HashMap<FontFaceKey, CachedFontFace>,
     sprite_registered_font_paths: HashMap<String, String>,
+    sprite_default_font_family: Option<String>,
     sprite_glyph_atlas: GlyphAtlasState,
     sprite_animation_epoch: Instant,
     prev_idle_frames_before_evict: Option<u32>,
@@ -2092,6 +2145,13 @@ pub struct GraphRenderer {
     cached_gbuffer_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
     cached_shadow_instances: Option<crate::graphics::passes::InstanceBuffer>,
     cached_shadow_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    cached_ui_instances: Option<crate::graphics::passes::InstanceBuffer>,
+    cached_ui_batches: Arc<Vec<crate::graphics::passes::UiDrawBatch>>,
+    cached_ui_textures: Arc<Vec<wgpu::TextureView>>,
+    ui_draw_data_dirty: bool,
+    ui_text_layout_cache: HashMap<UiTextLayoutCacheKey, UiTextLayoutCacheEntry>,
+    ui_text_layout_cache_atlas_generation: u64,
+    ui_text_layout_cache_limit: usize,
     cached_shadow_uniforms_buffer: Option<wgpu::Buffer>,
     cached_shadow_matrices_buffer: Option<wgpu::Buffer>,
     last_instance_pressure: MemoryPressure,
@@ -2549,17 +2609,22 @@ impl GraphRenderer {
             view: sprite_glyph_view,
             width: glyph_atlas_size,
             height: glyph_atlas_size,
+            generation: 0,
             cursor_x: 1,
             cursor_y: 1,
             row_height: 0,
             entries: HashMap::new(),
         };
+        let sprite_glyph_atlas_generation = sprite_glyph_atlas.generation;
         let mut sprite_font_ctx = ParleyFontContext::new();
         let sprite_layout_ctx = ParleyLayoutContext::new();
         let sprite_scale_ctx = SwashScaleContext::new();
         let mut sprite_font_db = fontdb::Database::new();
         sprite_font_db.load_system_fonts();
         let mut sprite_registered_sources = HashSet::new();
+        let mut sprite_default_font_family: Option<String> = None;
+        let mut sprite_first_font_family: Option<String> = None;
+        let mut sprite_available_families: HashSet<String> = HashSet::new();
         for face in sprite_font_db.faces() {
             let Some(bytes) = sprite_font_db.with_face_data(face.id, |data, _| data.to_vec())
             else {
@@ -2571,9 +2636,82 @@ impl GraphRenderer {
             if !sprite_registered_sources.insert(source_hash) {
                 continue;
             }
-            let _ = sprite_font_ctx
+            let registered = sprite_font_ctx
                 .collection
                 .register_fonts(FontBlob::from(bytes), None);
+            if registered.is_empty() {
+                continue;
+            }
+            for (family, _lang) in face.families.iter() {
+                let family = family.trim();
+                if family.is_empty() {
+                    continue;
+                }
+                sprite_available_families.insert(family.to_string());
+                if sprite_first_font_family.is_none() {
+                    sprite_first_font_family = Some(family.to_string());
+                }
+            }
+        }
+        if sprite_default_font_family.is_none() {
+            for preferred_family in [
+                "Inter",
+                "Roboto",
+                "Segoe UI",
+                "Helvetica Neue",
+                "Helvetica",
+                "Arial",
+                "DejaVu Sans",
+                "Liberation Sans",
+                "Noto Sans",
+                "Ubuntu",
+                "Cantarell",
+            ] {
+                if sprite_available_families.contains(preferred_family) {
+                    sprite_default_font_family = Some(preferred_family.to_string());
+                    break;
+                }
+            }
+        }
+        if sprite_default_font_family.is_none() {
+            sprite_default_font_family = sprite_first_font_family;
+        }
+        if sprite_default_font_family.is_none() {
+            for family in sprite_available_families.iter() {
+                if !family.trim().is_empty() {
+                    sprite_default_font_family = Some(family.to_string());
+                    break;
+                }
+            }
+        }
+        if sprite_default_font_family.is_none() {
+            for fallback_path in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+                "C:\\Windows\\Fonts\\arial.ttf",
+            ] {
+                let Ok(bytes) = std::fs::read(fallback_path) else {
+                    continue;
+                };
+                let family_name =
+                    format!("helmer-fallback-font-{:016x}", hash_str64(fallback_path));
+                let override_info = FontInfoOverride {
+                    family_name: Some(family_name.as_str()),
+                    ..Default::default()
+                };
+                if sprite_font_ctx
+                    .collection
+                    .register_fonts(FontBlob::from(bytes), Some(override_info))
+                    .is_empty()
+                {
+                    continue;
+                }
+                sprite_default_font_family = Some(family_name);
+                break;
+            }
         }
 
         // Deterministic blue noise texture for stochastic passes (SSGI, etc.).
@@ -3055,7 +3193,7 @@ impl GraphRenderer {
             surface_size: size,
             prev_view_proj: Mat4::IDENTITY,
             fallback_view,
-            fallback_albedo_view,
+            fallback_albedo_view: fallback_albedo_view.clone(),
             fallback_normal_view,
             fallback_mra_view,
             fallback_emission_view,
@@ -3160,6 +3298,7 @@ impl GraphRenderer {
             sprite_scale_ctx,
             sprite_fonts: HashMap::new(),
             sprite_registered_font_paths: HashMap::new(),
+            sprite_default_font_family,
             sprite_glyph_atlas,
             sprite_animation_epoch: Instant::now(),
             prev_idle_frames_before_evict: None,
@@ -3194,6 +3333,13 @@ impl GraphRenderer {
             cached_gbuffer_batches: Arc::new(Vec::new()),
             cached_shadow_instances: None,
             cached_shadow_batches: Arc::new(Vec::new()),
+            cached_ui_instances: None,
+            cached_ui_batches: Arc::new(Vec::new()),
+            cached_ui_textures: Arc::new(vec![fallback_albedo_view.clone()]),
+            ui_draw_data_dirty: true,
+            ui_text_layout_cache: HashMap::new(),
+            ui_text_layout_cache_atlas_generation: sprite_glyph_atlas_generation,
+            ui_text_layout_cache_limit: 4096,
             cached_shadow_uniforms_buffer: None,
             cached_shadow_matrices_buffer: None,
             last_instance_pressure: MemoryPressure::None,
@@ -3406,7 +3552,7 @@ impl GraphRenderer {
             // Each viewport camera needs fresh shadow uniforms; shared caches are global.
             self.shadow_uniforms_dirty = true;
 
-            if let Some(globals) = self.prepare_frame_globals(&scene) {
+            if let Some(globals) = self.prepare_frame_globals(&scene, false) {
                 if globals.render_config.gpu_driven {
                     self.run_gpu_culling(&globals);
                 } else {
@@ -3520,7 +3666,7 @@ impl GraphRenderer {
         } else {
             None
         };
-        let globals = if let Some(globals) = self.prepare_frame_globals(&scene) {
+        let globals = if let Some(globals) = self.prepare_frame_globals(&scene, true) {
             globals
         } else {
             scene.data.render_config = main_saved_render_config;
@@ -4052,6 +4198,7 @@ impl GraphRenderer {
             lights_remove,
             sprites,
             text_2d,
+            ui,
             camera,
             render_main_scene_to_swapchain,
             viewports,
@@ -4063,12 +4210,14 @@ impl GraphRenderer {
         } = delta;
         let mut objects_changed = full;
         let mut lights_changed = full;
+        let mut ui_changed = full;
         let camera_changed = camera.is_some();
         let config_changed = render_config.is_some();
         let mut materials_needed = false;
         let material_version = self.material_version;
         let sprites_value = sprites.clone().unwrap_or_default();
         let text_value = text_2d.clone().unwrap_or_default();
+        let ui_value = ui.clone().unwrap_or_default();
         let gizmo_value = gizmo.clone().unwrap_or_default();
         let palette_value = skin_palette.clone().unwrap_or_default();
 
@@ -4084,6 +4233,7 @@ impl GraphRenderer {
                 lights: Vec::new(),
                 sprites: sprites_value.clone(),
                 text_2d: text_value.clone(),
+                ui: ui_value.clone(),
                 previous_camera_transform: camera_transform,
                 current_camera_transform: camera_transform,
                 camera_component,
@@ -4110,6 +4260,7 @@ impl GraphRenderer {
             state.clear_lights();
             state.data.sprites = sprites_value;
             state.data.text_2d = text_value;
+            state.data.ui = ui_value;
             state.data.skin_palette = palette_value;
             self.gpu_instance_updates.clear();
             self.gpu_instances_dirty = true;
@@ -4140,6 +4291,7 @@ impl GraphRenderer {
 
         if let Some(config) = render_config {
             state.data.render_config = config;
+            ui_changed = true;
         }
         if let Some(graph) = render_graph {
             state.data.render_graph = graph;
@@ -4150,6 +4302,10 @@ impl GraphRenderer {
         if let Some(text_2d) = text_2d {
             state.data.text_2d = text_2d;
         }
+        if let Some(ui) = ui {
+            state.data.ui = ui;
+            ui_changed = true;
+        }
         if let Some(gizmo) = gizmo {
             state.data.gizmo = gizmo;
         }
@@ -4158,6 +4314,13 @@ impl GraphRenderer {
         }
         let gpu_driven =
             state.data.render_config.gpu_driven && self.supports_indirect_first_instance;
+
+        if prev_config != state.data.render_config {
+            ui_changed = true;
+        }
+        if ui_changed {
+            self.ui_draw_data_dirty = true;
+        }
 
         for id in objects_remove {
             if let Some((removed, moved_idx)) = state.remove_object(id) {
@@ -4531,6 +4694,15 @@ impl GraphRenderer {
         self.cached_gbuffer_batches = Arc::new(Vec::new());
         self.cached_shadow_instances = None;
         self.cached_shadow_batches = Arc::new(Vec::new());
+        self.cached_ui_instances = None;
+        self.cached_ui_batches = Arc::new(Vec::new());
+        self.cached_ui_textures = Arc::new(vec![
+            self.fallback_albedo_view.clone(),
+            self.sprite_glyph_atlas.view.clone(),
+        ]);
+        self.ui_draw_data_dirty = true;
+        self.ui_text_layout_cache.clear();
+        self.ui_text_layout_cache_atlas_generation = self.sprite_glyph_atlas.generation;
         self.cached_shadow_uniforms_buffer = None;
         self.cached_shadow_matrices_buffer = None;
 
@@ -5245,6 +5417,7 @@ impl GraphRenderer {
         config.rt_reflection_shadows = false;
         config.rt_reflection_accumulation = false;
         config.use_dont_care_load_ops = false;
+        config.ui_pass = true;
         config.egui_pass = true;
         config
     }
@@ -7904,12 +8077,27 @@ impl GraphRenderer {
             }
         }
 
-        text.font_family
+        if let Some(family) = text
+            .font_family
             .as_deref()
             .map(str::trim)
             .filter(|family| !family.is_empty())
             .map(str::to_string)
-            .or_else(|| Some("sans-serif".to_string()))
+        {
+            return Some(family);
+        }
+
+        if let Some(default_family) = self
+            .sprite_default_font_family
+            .as_deref()
+            .map(str::trim)
+            .filter(|family| !family.is_empty())
+        {
+            let escaped = default_family.replace('"', "");
+            return Some(format!("\"{}\", sans-serif", escaped));
+        }
+
+        Some("sans-serif".to_string())
     }
 
     fn resolve_parley_font_face(&mut self, font_data: &parley::FontData) -> Option<CachedFontFace> {
@@ -8063,9 +8251,13 @@ impl GraphRenderer {
     fn reset_sprite_glyph_atlas(&mut self) {
         let atlas = &mut self.sprite_glyph_atlas;
         atlas.entries.clear();
+        atlas.generation = atlas.generation.wrapping_add(1);
         atlas.cursor_x = 1;
         atlas.cursor_y = 1;
         atlas.row_height = 0;
+        self.ui_draw_data_dirty = true;
+        self.ui_text_layout_cache.clear();
+        self.ui_text_layout_cache_atlas_generation = atlas.generation;
 
         let clear = vec![0u8; (atlas.width * atlas.height) as usize];
         self.queue.write_texture(
@@ -8135,17 +8327,12 @@ impl GraphRenderer {
             return Some(*entry);
         }
 
-        let logical_image = self.rasterize_swash_glyph(font_face, glyph_id, logical_px)?;
-        let logical_left = logical_image.placement.left as f32;
-        let logical_top = -(logical_image.placement.top as f32);
-        let logical_width = logical_image.placement.width as f32;
-        let logical_height = logical_image.placement.height as f32;
-
-        let raster_image = if (scale - logical_px).abs() <= (1.0 / 64.0) {
-            logical_image
-        } else {
-            self.rasterize_swash_glyph(font_face, glyph_id, scale)?
-        };
+        let raster_image = self.rasterize_swash_glyph(font_face, glyph_id, scale)?;
+        let metrics_scale = (scale / logical_px).max(f32::EPSILON);
+        let logical_left = raster_image.placement.left as f32 / metrics_scale;
+        let logical_top = -(raster_image.placement.top as f32) / metrics_scale;
+        let logical_width = raster_image.placement.width as f32 / metrics_scale;
+        let logical_height = raster_image.placement.height as f32 / metrics_scale;
         let glyph_width = raster_image.placement.width;
         let glyph_height = raster_image.placement.height;
         let pixels = raster_image.data;
@@ -8788,8 +8975,801 @@ impl GraphRenderer {
         )
     }
 
-    fn prepare_frame_globals(&mut self, scene: &RenderSceneState) -> Option<FrameGlobals> {
+    fn build_ui_draw_data(
+        &mut self,
+        render_data: &RenderData,
+    ) -> (
+        Option<crate::graphics::passes::InstanceBuffer>,
+        Arc<Vec<UiDrawBatch>>,
+        Arc<Vec<wgpu::TextureView>>,
+    ) {
+        let mut ui_instances: Vec<UiInstanceRaw> = Vec::new();
+        let mut ui_textures: Vec<wgpu::TextureView> = vec![
+            self.fallback_albedo_view.clone(),
+            self.sprite_glyph_atlas.view.clone(),
+        ];
+        let mut texture_slots: HashMap<usize, u32> = HashMap::new();
+        let mut missing_requests: HashMap<usize, AssetStreamingRequest> = HashMap::new();
+        let force_low_res_on_miss = matches!(self.current_pressure(), MemoryPressure::Hard)
+            && self.streaming_tuning.force_low_res_hard;
+        let glyph_texture_slot: u32 = 1;
+        if self.ui_text_layout_cache_atlas_generation != self.sprite_glyph_atlas.generation {
+            self.ui_text_layout_cache.clear();
+            self.ui_text_layout_cache_atlas_generation = self.sprite_glyph_atlas.generation;
+        }
+
+        let rect_visible_in_clip = |x: f32, y: f32, w: f32, h: f32, clip: [f32; 4]| -> bool {
+            let width = w.max(0.0);
+            let height = h.max(0.0);
+            if width <= 0.0 || height <= 0.0 {
+                return false;
+            }
+            let right = x + width;
+            let bottom = y + height;
+            right > clip[0] && x < clip[2] && bottom > clip[1] && y < clip[3]
+        };
+
+        for command in &render_data.ui.commands {
+            match command {
+                UiRenderCommand::Rect(rect) => {
+                    let width = rect.rect[2].max(0.0);
+                    let height = rect.rect[3].max(0.0);
+                    if width <= 0.0 || height <= 0.0 || rect.color[3] <= 0.0 {
+                        continue;
+                    }
+                    if let Some(clip) = rect.clip_rect
+                        && !rect_visible_in_clip(rect.rect[0], rect.rect[1], width, height, clip)
+                    {
+                        continue;
+                    }
+                    let mut flags = 0u32;
+                    let clip_rect = if let Some(clip) = rect.clip_rect {
+                        flags |= UI_FLAG_CLIP_ENABLED;
+                        clip
+                    } else {
+                        [0.0, 0.0, 0.0, 0.0]
+                    };
+                    ui_instances.push(UiInstanceRaw {
+                        rect: [rect.rect[0], rect.rect[1], width, height],
+                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                        color: rect.color,
+                        clip_rect,
+                        layer_flags: [rect.layer, flags as f32, 0.0, 0.0],
+                    });
+                }
+                UiRenderCommand::Image(image) => {
+                    let width = image.rect[2].max(0.0);
+                    let height = image.rect[3].max(0.0);
+                    if width <= 0.0 || height <= 0.0 || image.tint[3] <= 0.0 {
+                        continue;
+                    }
+                    if let Some(clip) = image.clip_rect
+                        && !rect_visible_in_clip(image.rect[0], image.rect[1], width, height, clip)
+                    {
+                        continue;
+                    }
+                    let mut flags = 0u32;
+                    let clip_rect = if let Some(clip) = image.clip_rect {
+                        flags |= UI_FLAG_CLIP_ENABLED;
+                        clip
+                    } else {
+                        [0.0, 0.0, 0.0, 0.0]
+                    };
+                    let texture_slot = if let Some(texture_id) = image.texture_id {
+                        if let Some(slot) = texture_slots.get(&texture_id).copied() {
+                            slot
+                        } else {
+                            let request_priority = self.streaming_tuning.priority_near.max(1.0);
+                            let rid = self
+                                .pool
+                                .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+                            let view = if let Some(view) = self.pool.texture_view(rid).cloned() {
+                                view
+                            } else {
+                                missing_requests
+                                    .entry(texture_id)
+                                    .and_modify(|req| {
+                                        req.priority = req.priority.max(request_priority)
+                                    })
+                                    .or_insert(AssetStreamingRequest {
+                                        id: texture_id,
+                                        kind: AssetStreamKind::Texture,
+                                        priority: request_priority,
+                                        max_lod: None,
+                                        force_low_res: force_low_res_on_miss,
+                                    });
+                                self.fallback_albedo_view.clone()
+                            };
+                            self.pool.mark_used(rid, self.frame_index);
+                            let slot = ui_textures.len() as u32;
+                            ui_textures.push(view);
+                            texture_slots.insert(texture_id, slot);
+                            slot
+                        }
+                    } else {
+                        0
+                    };
+                    ui_instances.push(UiInstanceRaw {
+                        rect: [image.rect[0], image.rect[1], width, height],
+                        uv_rect: [
+                            image.uv_min[0],
+                            image.uv_min[1],
+                            image.uv_max[0],
+                            image.uv_max[1],
+                        ],
+                        color: image.tint,
+                        clip_rect,
+                        layer_flags: [image.layer, flags as f32, texture_slot as f32, 0.0],
+                    });
+                }
+                UiRenderCommand::Text(text) => {
+                    if text.text.is_empty() && !text.show_caret && text.selection.is_none() {
+                        continue;
+                    }
+                    if let Some(clip) = text.clip_rect
+                        && !rect_visible_in_clip(
+                            text.rect[0],
+                            text.rect[1],
+                            text.rect[2],
+                            text.rect[3],
+                            clip,
+                        )
+                    {
+                        continue;
+                    }
+
+                    let anchor_x = match text.align_h {
+                        crate::graphics::common::renderer::TextAlignH::Left => text.rect[0],
+                        crate::graphics::common::renderer::TextAlignH::Center => {
+                            text.rect[0] + text.rect[2] * 0.5
+                        }
+                        crate::graphics::common::renderer::TextAlignH::Right => {
+                            text.rect[0] + text.rect[2]
+                        }
+                    };
+                    let anchor_y = match text.align_v {
+                        crate::graphics::common::renderer::TextAlignV::Top => text.rect[1],
+                        crate::graphics::common::renderer::TextAlignV::Center => {
+                            text.rect[1] + text.rect[3] * 0.5
+                        }
+                        crate::graphics::common::renderer::TextAlignV::Bottom => {
+                            text.rect[1] + text.rect[3]
+                        }
+                        crate::graphics::common::renderer::TextAlignV::Baseline => {
+                            text.rect[1] + text.font_size
+                        }
+                    };
+
+                    let mut text_for_layout = RenderText2d::default();
+                    text_for_layout.id = text.id;
+                    text_for_layout.text = text.text.clone();
+                    text_for_layout.position = Vec3::new(anchor_x, anchor_y, 0.0);
+                    text_for_layout.scale = Vec2::ONE;
+                    text_for_layout.color = text.color;
+                    text_for_layout.font_size = text.font_size;
+                    text_for_layout.max_width = if text.wrap {
+                        Some(text.rect[2].max(1.0))
+                    } else {
+                        None
+                    };
+                    text_for_layout.align_h = text.align_h;
+                    text_for_layout.align_v = text.align_v;
+                    text_for_layout.space = SpriteSpace::Screen;
+                    text_for_layout.layer = text.layer;
+                    text_for_layout.clip_rect = text.clip_rect;
+                    let Some(text_layout) =
+                        self.resolve_ui_text_layout(render_data, &text_for_layout)
+                    else {
+                        continue;
+                    };
+
+                    let mut text_flags = UI_FLAG_TEXT_ALPHA;
+                    let clip_rect = if let Some(rect) = text_for_layout.clip_rect {
+                        text_flags |= UI_FLAG_CLIP_ENABLED;
+                        rect
+                    } else {
+                        [0.0, 0.0, 0.0, 0.0]
+                    };
+                    let snapped_base_x =
+                        (text_for_layout.position.x + text_layout.align_offset.x).round();
+                    let snapped_base_y =
+                        (text_for_layout.position.y + text_layout.align_offset.y).round();
+                    let decoration_flags = text_flags & !UI_FLAG_TEXT_ALPHA;
+                    let text_char_count = text.text.chars().count();
+                    let mut text_visual_top = f32::INFINITY;
+                    let mut text_visual_bottom = f32::NEG_INFINITY;
+                    for glyph in &text_layout.glyphs {
+                        if glyph.size.y <= 0.0 {
+                            continue;
+                        }
+                        text_visual_top = text_visual_top.min(snapped_base_y + glyph.offset.y);
+                        text_visual_bottom =
+                            text_visual_bottom.max(snapped_base_y + glyph.offset.y + glyph.size.y);
+                    }
+                    if !text_visual_top.is_finite()
+                        || !text_visual_bottom.is_finite()
+                        || text_visual_bottom <= text_visual_top
+                    {
+                        text_visual_top = text.rect[1] + 2.0;
+                        text_visual_bottom =
+                            (text.rect[1] + text.rect[3] - 2.0).max(text_visual_top + 1.0);
+                    }
+                    let clip_bottom_limit = text.rect[1] + text.rect[3].max(1.0);
+                    text_visual_top = text_visual_top.clamp(text.rect[1], clip_bottom_limit);
+                    if text_visual_top >= clip_bottom_limit {
+                        text_visual_top = clip_bottom_limit - 1.0;
+                    }
+                    text_visual_bottom =
+                        text_visual_bottom.clamp(text_visual_top + 1.0, clip_bottom_limit);
+                    let selection_top = text_visual_top.floor();
+                    let selection_height = (text_visual_bottom - text_visual_top).max(1.0);
+
+                    if let (Some([start, end]), Some(selection_color)) =
+                        (text.selection, text.selection_color)
+                    {
+                        let start = start.min(text_char_count);
+                        let end = end.min(text_char_count);
+                        if end > start {
+                            let start_x = snapped_base_x
+                                + Self::ui_caret_x_for_char_index(&text.text, &text_layout, start);
+                            let end_x = snapped_base_x
+                                + Self::ui_caret_x_for_char_index(&text.text, &text_layout, end);
+                            let text_left = text.rect[0];
+                            let text_right = text.rect[0] + text.rect[2];
+                            let sel_left = start_x.min(end_x).clamp(text_left, text_right);
+                            let sel_right = start_x.max(end_x).clamp(text_left, text_right);
+                            if sel_right > sel_left {
+                                let selection_visible =
+                                    if let Some(clip) = text_for_layout.clip_rect {
+                                        rect_visible_in_clip(
+                                            sel_left,
+                                            selection_top,
+                                            (sel_right - sel_left).max(1.0),
+                                            selection_height,
+                                            clip,
+                                        )
+                                    } else {
+                                        true
+                                    };
+                                if selection_visible {
+                                    ui_instances.push(UiInstanceRaw {
+                                        rect: [
+                                            sel_left,
+                                            selection_top,
+                                            (sel_right - sel_left).max(1.0),
+                                            selection_height,
+                                        ],
+                                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                        color: selection_color,
+                                        clip_rect,
+                                        layer_flags: [
+                                            text_for_layout.layer,
+                                            decoration_flags as f32,
+                                            0.0,
+                                            0.0,
+                                        ],
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    for glyph in &text_layout.glyphs {
+                        if glyph.size.x <= 0.0 || glyph.size.y <= 0.0 {
+                            continue;
+                        }
+                        let x = snapped_base_x + glyph.offset.x;
+                        let y = snapped_base_y + glyph.offset.y;
+                        if let Some(clip) = text_for_layout.clip_rect
+                            && !rect_visible_in_clip(x, y, glyph.size.x, glyph.size.y, clip)
+                        {
+                            continue;
+                        }
+                        ui_instances.push(UiInstanceRaw {
+                            rect: [x, y, glyph.size.x, glyph.size.y],
+                            uv_rect: [
+                                glyph.uv_min[0],
+                                glyph.uv_min[1],
+                                glyph.uv_max[0],
+                                glyph.uv_max[1],
+                            ],
+                            color: text_for_layout.color,
+                            clip_rect,
+                            layer_flags: [
+                                text_for_layout.layer,
+                                text_flags as f32,
+                                glyph_texture_slot as f32,
+                                0.0,
+                            ],
+                        });
+                    }
+
+                    for decoration in &text_layout.decorations {
+                        if decoration.size.x <= 0.0 || decoration.size.y <= 0.0 {
+                            continue;
+                        }
+                        let x = snapped_base_x + decoration.offset.x;
+                        let y = snapped_base_y + decoration.offset.y;
+                        if let Some(clip) = text_for_layout.clip_rect
+                            && !rect_visible_in_clip(
+                                x,
+                                y,
+                                decoration.size.x,
+                                decoration.size.y,
+                                clip,
+                            )
+                        {
+                            continue;
+                        }
+                        ui_instances.push(UiInstanceRaw {
+                            rect: [x, y, decoration.size.x, decoration.size.y],
+                            uv_rect: [0.0, 0.0, 1.0, 1.0],
+                            color: text_for_layout.color,
+                            clip_rect,
+                            layer_flags: [text_for_layout.layer, decoration_flags as f32, 0.0, 0.0],
+                        });
+                    }
+
+                    if text.show_caret {
+                        let cursor = text.cursor.unwrap_or(text_char_count).min(text_char_count);
+                        let caret_x = snapped_base_x
+                            + Self::ui_caret_x_for_char_index(&text.text, &text_layout, cursor);
+                        let caret_visible = if let Some(clip) = text_for_layout.clip_rect {
+                            rect_visible_in_clip(
+                                caret_x.round(),
+                                selection_top,
+                                1.0,
+                                selection_height,
+                                clip,
+                            )
+                        } else {
+                            true
+                        };
+                        if caret_visible {
+                            ui_instances.push(UiInstanceRaw {
+                                rect: [caret_x.round(), selection_top, 1.0, selection_height],
+                                uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                color: text.caret_color.unwrap_or(text.color),
+                                clip_rect,
+                                layer_flags: [
+                                    text_for_layout.layer,
+                                    decoration_flags as f32,
+                                    0.0,
+                                    0.0,
+                                ],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if !missing_requests.is_empty() {
+            let requests = self.streaming_requests.get_or_insert_with(Vec::new);
+            for request in missing_requests.into_values() {
+                if let Some(existing) = requests
+                    .iter_mut()
+                    .find(|existing| existing.kind == request.kind && existing.id == request.id)
+                {
+                    existing.priority = existing.priority.max(request.priority);
+                    existing.max_lod = match (existing.max_lod, request.max_lod) {
+                        (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+                        (None, rhs) => rhs,
+                        (lhs, None) => lhs,
+                    };
+                    existing.force_low_res &= request.force_low_res;
+                } else {
+                    requests.push(request);
+                }
+            }
+            self.streaming_dirty = true;
+            // keep rebuilding until requested UI textures are resident
+            self.ui_draw_data_dirty = true;
+        }
+
+        let ui_batches = if ui_instances.is_empty() {
+            Vec::new()
+        } else {
+            let mut batches = Vec::new();
+            let mut start = 0usize;
+            while start < ui_instances.len() {
+                let texture_slot = ui_instances[start].layer_flags[2] as u32;
+                let mut end = start + 1;
+                while end < ui_instances.len()
+                    && (ui_instances[end].layer_flags[2] as u32) == texture_slot
+                {
+                    end += 1;
+                }
+                batches.push(UiDrawBatch {
+                    texture_slot,
+                    instance_range: start as u32..end as u32,
+                });
+                start = end;
+            }
+            batches
+        };
+
+        let ui_instance_buffer = if ui_instances.is_empty() {
+            None
+        } else {
+            let bytes = bytemuck::cast_slice(&ui_instances);
+            let buffer = self.buffer_cache.ui_instances.ensure(
+                &self.device,
+                bytes.len() as u64,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buffer, 0, bytes);
+            Some(crate::graphics::passes::InstanceBuffer {
+                buffer: buffer.clone(),
+                count: ui_instances.len() as u32,
+                stride: std::mem::size_of::<UiInstanceRaw>() as u64,
+            })
+        };
+
+        (
+            ui_instance_buffer,
+            Arc::new(ui_batches),
+            Arc::new(ui_textures),
+        )
+    }
+
+    fn resolve_ui_text_layout(
+        &mut self,
+        render_data: &RenderData,
+        text: &RenderText2d,
+    ) -> Option<UiTextLayoutCacheValue> {
+        let min_font_px = render_data.render_config.text_min_font_px.max(f32::EPSILON);
+        let font_size = text.font_size.max(min_font_px);
+        let max_width = text.max_width.filter(|w| w.is_finite() && *w > 0.0);
+        let key = UiTextLayoutCacheKey {
+            text_hash: hash_str64(text.text.as_str()),
+            text_len: text.text.len().min(u32::MAX as usize) as u32,
+            font_size_bits: font_size.to_bits(),
+            align_h: text.align_h as u32,
+            align_v: text.align_v as u32,
+            wrap: max_width.is_some(),
+            max_width_bits: max_width.map(f32::to_bits),
+        };
+
+        if let Some(entry) = self.ui_text_layout_cache.get_mut(&key) {
+            if entry.source_text == text.text {
+                entry.last_used_frame = self.frame_index;
+                return Some(entry.value.clone());
+            }
+        }
+
+        let value = self.build_ui_text_layout_uncached(render_data, text, max_width)?;
+        self.ui_text_layout_cache.insert(
+            key,
+            UiTextLayoutCacheEntry {
+                source_text: text.text.clone(),
+                value: value.clone(),
+                last_used_frame: self.frame_index,
+            },
+        );
+        self.prune_ui_text_layout_cache();
+        Some(value)
+    }
+
+    fn build_ui_text_layout_uncached(
+        &mut self,
+        render_data: &RenderData,
+        text: &RenderText2d,
+        max_width: Option<f32>,
+    ) -> Option<UiTextLayoutCacheValue> {
+        let min_font_px = render_data.render_config.text_min_font_px.max(f32::EPSILON);
+        let font_size = text.font_size.max(min_font_px);
+        let ui_text_raster_scale = 1.0;
+        let layout_scale = render_data
+            .render_config
+            .text_layout_scale
+            .max(f32::EPSILON);
+        let layout_quantize = render_data.render_config.text_screen_layout_quantize;
+        let font_stack = self.resolve_text_font_stack(text);
+        let mut builder = self.sprite_layout_ctx.ranged_builder(
+            &mut self.sprite_font_ctx,
+            text.text.as_str(),
+            layout_scale,
+            layout_quantize,
+        );
+        builder.push_default(ParleyStyleProperty::FontSize(font_size));
+        builder.push_default(ParleyStyleProperty::FontWeight(ParleyFontWeight::new(
+            text.font_weight.clamp(1.0, 1000.0),
+        )));
+        builder.push_default(ParleyStyleProperty::FontWidth(ParleyFontWidth::from_ratio(
+            text.font_width.clamp(0.25, 4.0),
+        )));
+        builder.push_default(ParleyStyleProperty::FontStyle(Self::parley_font_style(
+            text.font_style,
+        )));
+        builder.push_default(ParleyStyleProperty::LineHeight(
+            ParleyLineHeight::FontSizeRelative(text.line_height_scale.max(0.05)),
+        ));
+        builder.push_default(ParleyStyleProperty::LetterSpacing(text.letter_spacing));
+        builder.push_default(ParleyStyleProperty::WordSpacing(text.word_spacing));
+        builder.push_default(ParleyStyleProperty::Underline(text.underline));
+        builder.push_default(ParleyStyleProperty::Strikethrough(text.strikethrough));
+        if let Some(font_stack) = font_stack {
+            builder.push_default(ParleyStyleProperty::FontStack(ParleyFontStack::Source(
+                Cow::Owned(font_stack),
+            )));
+        }
+
+        let mut layout: ParleyLayout<[u8; 4]> = builder.build(text.text.as_str());
+        layout.break_all_lines(max_width);
+        layout.align(
+            max_width,
+            Self::parley_alignment(text.align_h),
+            ParleyAlignmentOptions {
+                align_when_overflowing: false,
+            },
+        );
+
+        let mut glyphs: Vec<UiTextGlyphLayout> = Vec::new();
+        let mut decorations: Vec<UiTextDecorationLayout> = Vec::new();
+        let mut caret_edge_map: HashMap<usize, f32> = HashMap::new();
+        caret_edge_map.insert(0, 0.0);
+        let mut glyph_bounds_min = Vec2::splat(f32::INFINITY);
+        let mut glyph_bounds_max = Vec2::splat(f32::NEG_INFINITY);
+        let mut layout_bounds_min = Vec2::splat(f32::INFINITY);
+        let mut layout_bounds_max = Vec2::splat(f32::NEG_INFINITY);
+
+        for line in layout.lines() {
+            let line_metrics = line.metrics();
+            layout_bounds_min.y = layout_bounds_min.y.min(line_metrics.min_coord);
+            layout_bounds_max.y = layout_bounds_max.y.max(line_metrics.max_coord);
+            for item in line.items() {
+                let ParleyPositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                let run = glyph_run.run();
+                let run_x_start = glyph_run.offset();
+                let run_y = glyph_run.baseline();
+                let run_advance = glyph_run.advance().max(0.0);
+                let run_metrics = run.metrics();
+                let style = glyph_run.style();
+                if run_advance > 0.0 {
+                    layout_bounds_min.x = layout_bounds_min.x.min(run_x_start);
+                    layout_bounds_max.x = layout_bounds_max.x.max(run_x_start + run_advance);
+                }
+                let mut run_cursor_x = run_x_start;
+                for cluster in run.visual_clusters() {
+                    let text_range = cluster.text_range();
+                    let advance = cluster.advance().max(0.0);
+                    let cluster_start_x = run_cursor_x;
+                    let cluster_end_x = run_cursor_x + advance;
+                    run_cursor_x += advance;
+                    if text_range.end < text_range.start {
+                        continue;
+                    }
+                    let (left_edge, right_edge) = if cluster.is_rtl() {
+                        (cluster_end_x, cluster_start_x)
+                    } else {
+                        (cluster_start_x, cluster_end_x)
+                    };
+                    caret_edge_map.insert(text_range.start, left_edge);
+                    caret_edge_map.insert(text_range.end, right_edge);
+                    let byte_len = text_range.end.saturating_sub(text_range.start);
+                    if byte_len > 1 {
+                        for byte_index in (text_range.start + 1)..text_range.end {
+                            let t = (byte_index - text_range.start) as f32 / byte_len as f32;
+                            caret_edge_map
+                                .insert(byte_index, left_edge + (right_edge - left_edge) * t);
+                        }
+                    }
+                }
+
+                if let Some(underline) = &style.underline {
+                    let thickness = underline
+                        .size
+                        .unwrap_or(run_metrics.underline_size)
+                        .max(0.0);
+                    if run_advance > 0.0 && thickness > 0.0 {
+                        let y = run_y - underline.offset.unwrap_or(run_metrics.underline_offset);
+                        let min = Vec2::new(run_x_start, y);
+                        let max = min + Vec2::new(run_advance, thickness);
+                        glyph_bounds_min = glyph_bounds_min.min(min);
+                        glyph_bounds_max = glyph_bounds_max.max(max);
+                        decorations.push(UiTextDecorationLayout {
+                            offset: Vec2::new(run_x_start, y),
+                            size: Vec2::new(run_advance, thickness),
+                        });
+                    }
+                }
+
+                if let Some(strikethrough) = &style.strikethrough {
+                    let thickness = strikethrough
+                        .size
+                        .unwrap_or(run_metrics.strikethrough_size)
+                        .max(0.0);
+                    if run_advance > 0.0 && thickness > 0.0 {
+                        let y = run_y
+                            - strikethrough
+                                .offset
+                                .unwrap_or(run_metrics.strikethrough_offset);
+                        let min = Vec2::new(run_x_start, y);
+                        let max = min + Vec2::new(run_advance, thickness);
+                        glyph_bounds_min = glyph_bounds_min.min(min);
+                        glyph_bounds_max = glyph_bounds_max.max(max);
+                        decorations.push(UiTextDecorationLayout {
+                            offset: Vec2::new(run_x_start, y),
+                            size: Vec2::new(run_advance, thickness),
+                        });
+                    }
+                }
+
+                let Some(font_face) = self.resolve_parley_font_face(run.font()) else {
+                    continue;
+                };
+                let mut run_x = run_x_start;
+                let run_font_px = run.font_size().max(min_font_px);
+                for glyph in glyph_run.glyphs() {
+                    let advance = glyph.advance;
+                    let Ok(glyph_id) = u16::try_from(glyph.id) else {
+                        run_x += advance;
+                        continue;
+                    };
+                    let Some(entry) = self.ensure_sprite_glyph(
+                        &render_data.render_config,
+                        &font_face,
+                        glyph_id,
+                        run_font_px,
+                        ui_text_raster_scale,
+                    ) else {
+                        run_x += advance;
+                        continue;
+                    };
+                    let gx = run_x + glyph.x;
+                    let gy = run_y - glyph.y;
+                    run_x += advance;
+                    let offset = Vec2::new(gx + entry.left, gy + entry.top);
+                    let size = Vec2::new(entry.width, entry.height);
+                    let min = offset;
+                    let max = offset + size;
+                    glyph_bounds_min = glyph_bounds_min.min(min);
+                    glyph_bounds_max = glyph_bounds_max.max(max);
+                    glyphs.push(UiTextGlyphLayout {
+                        uv_min: entry.uv_min,
+                        uv_max: entry.uv_max,
+                        offset,
+                        size,
+                    });
+                }
+            }
+        }
+
+        if !layout_bounds_min.is_finite() || !layout_bounds_max.is_finite() {
+            layout_bounds_min = Vec2::ZERO;
+            layout_bounds_max = Vec2::ZERO;
+        }
+        if !glyph_bounds_min.is_finite() || !glyph_bounds_max.is_finite() {
+            glyph_bounds_min = layout_bounds_min;
+            glyph_bounds_max = layout_bounds_max;
+        }
+
+        let (align_bounds_min, align_bounds_max) =
+            if layout_bounds_min.is_finite() && layout_bounds_max.is_finite() {
+                (layout_bounds_min, layout_bounds_max)
+            } else {
+                (glyph_bounds_min, glyph_bounds_max)
+            };
+        let align_x = match text.align_h {
+            crate::graphics::common::renderer::TextAlignH::Left => -align_bounds_min.x,
+            crate::graphics::common::renderer::TextAlignH::Center => {
+                -0.5 * (align_bounds_min.x + align_bounds_max.x)
+            }
+            crate::graphics::common::renderer::TextAlignH::Right => -align_bounds_max.x,
+        };
+        let align_y = match text.align_v {
+            crate::graphics::common::renderer::TextAlignV::Top => -align_bounds_min.y,
+            crate::graphics::common::renderer::TextAlignV::Center => {
+                -0.5 * (align_bounds_min.y + align_bounds_max.y)
+            }
+            crate::graphics::common::renderer::TextAlignV::Bottom => -align_bounds_max.y,
+            crate::graphics::common::renderer::TextAlignV::Baseline => 0.0,
+        };
+        let text_len = text.text.len();
+        if !caret_edge_map.contains_key(&text_len) {
+            caret_edge_map.insert(
+                text_len,
+                layout_bounds_max.x.max(glyph_bounds_max.x).max(0.0),
+            );
+        }
+        let mut caret_edges = caret_edge_map
+            .into_iter()
+            .map(|(byte_index, x)| UiTextCaretEdge { byte_index, x })
+            .collect::<Vec<_>>();
+        caret_edges.sort_by_key(|edge| edge.byte_index);
+
+        Some(UiTextLayoutCacheValue {
+            align_offset: Vec2::new(align_x, align_y),
+            glyphs,
+            decorations,
+            caret_edges,
+        })
+    }
+
+    fn ui_caret_x_for_char_index(
+        text: &str,
+        layout: &UiTextLayoutCacheValue,
+        char_index: usize,
+    ) -> f32 {
+        let byte_index = Self::byte_index_for_char_index(text, char_index);
+        Self::ui_caret_x_for_byte_index(layout, byte_index)
+    }
+
+    fn ui_caret_x_for_byte_index(layout: &UiTextLayoutCacheValue, byte_index: usize) -> f32 {
+        if layout.caret_edges.is_empty() {
+            return 0.0;
+        }
+        match layout
+            .caret_edges
+            .binary_search_by_key(&byte_index, |edge| edge.byte_index)
+        {
+            Ok(index) => layout.caret_edges[index].x,
+            Err(0) => layout.caret_edges[0].x,
+            Err(index) if index >= layout.caret_edges.len() => {
+                layout.caret_edges.last().map(|edge| edge.x).unwrap_or(0.0)
+            }
+            Err(index) => {
+                let left = &layout.caret_edges[index - 1];
+                let right = &layout.caret_edges[index];
+                let span = right.byte_index.saturating_sub(left.byte_index);
+                if span == 0 {
+                    return right.x;
+                }
+                let t = (byte_index.saturating_sub(left.byte_index)) as f32 / span as f32;
+                left.x + (right.x - left.x) * t.clamp(0.0, 1.0)
+            }
+        }
+    }
+
+    fn byte_index_for_char_index(text: &str, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        text.char_indices()
+            .nth(char_index)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len())
+    }
+
+    fn prune_ui_text_layout_cache(&mut self) {
+        let cache_limit = self.ui_text_layout_cache_limit.max(128);
+        if self.ui_text_layout_cache.len() <= cache_limit {
+            return;
+        }
+
+        let stale_frame = self.frame_index.saturating_sub(120);
+        self.ui_text_layout_cache
+            .retain(|_, entry| entry.last_used_frame >= stale_frame);
+        if self.ui_text_layout_cache.len() <= cache_limit {
+            return;
+        }
+
+        let mut keys_by_age = self
+            .ui_text_layout_cache
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.last_used_frame))
+            .collect::<Vec<_>>();
+        keys_by_age.sort_by_key(|(_, frame)| *frame);
+        let remove_count = self.ui_text_layout_cache.len().saturating_sub(cache_limit);
+        for (key, _) in keys_by_age.into_iter().take(remove_count) {
+            self.ui_text_layout_cache.remove(&key);
+        }
+    }
+
+    fn prepare_frame_globals(
+        &mut self,
+        scene: &RenderSceneState,
+        include_ui: bool,
+    ) -> Option<FrameGlobals> {
         let render_data = &scene.data;
+        let profiling_enabled = self
+            .shared_stats
+            .profiling_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         let alpha = 1.0;
         let prev_view_proj = self.prev_view_proj;
         let mut frame_render_config = render_data.render_config;
@@ -9684,6 +10664,85 @@ impl GraphRenderer {
 
         let (sprite_instances, sprite_batches, sprite_textures) =
             self.build_sprite_draw_data(render_data);
+        let (ui_instances, ui_batches, ui_textures) = if include_ui && frame_render_config.ui_pass {
+            let mut ui_rebuilt = 0u32;
+            let mut ui_build_us = 0u64;
+            if self.ui_draw_data_dirty {
+                self.ui_draw_data_dirty = false;
+                let ui_build_start = if profiling_enabled {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let (instances, batches, textures) = self.build_ui_draw_data(render_data);
+                if let Some(start) = ui_build_start {
+                    ui_build_us = start.elapsed().as_micros() as u64;
+                }
+                ui_rebuilt = 1;
+                let needs_retry = self.ui_draw_data_dirty;
+                self.cached_ui_instances = instances.clone();
+                self.cached_ui_batches = batches.clone();
+                self.cached_ui_textures = textures.clone();
+                self.ui_draw_data_dirty = needs_retry;
+            }
+            self.shared_stats
+                .render_ui_build_us
+                .store(ui_build_us, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_rebuilt
+                .store(ui_rebuilt, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats.render_ui_command_count.store(
+                render_data.ui.commands.len() as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.shared_stats.render_ui_instance_count.store(
+                self.cached_ui_instances
+                    .as_ref()
+                    .map(|b| b.count)
+                    .unwrap_or(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.shared_stats.render_ui_batch_count.store(
+                self.cached_ui_batches.len() as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.shared_stats.render_ui_texture_count.store(
+                self.cached_ui_textures.len() as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            (
+                self.cached_ui_instances.clone(),
+                self.cached_ui_batches.clone(),
+                self.cached_ui_textures.clone(),
+            )
+        } else {
+            self.shared_stats
+                .render_ui_build_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_rebuilt
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_command_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_instance_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_batch_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_ui_texture_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            (
+                None,
+                Arc::new(Vec::new()),
+                Arc::new(vec![
+                    self.fallback_albedo_view.clone(),
+                    self.sprite_glyph_atlas.view.clone(),
+                ]),
+            )
+        };
 
         let occlusion_camera_stable = {
             let prev_pos = render_data.previous_camera_transform.position;
@@ -9776,6 +10835,9 @@ impl GraphRenderer {
             sprite_instances,
             sprite_batches,
             sprite_textures,
+            ui_instances,
+            ui_batches,
+            ui_textures,
             alpha,
             camera_view_proj: view_proj,
             prev_view_proj,

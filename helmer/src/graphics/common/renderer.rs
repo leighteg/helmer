@@ -787,6 +787,7 @@ pub struct RenderData {
     pub lights: Vec<RenderLight>,
     pub sprites: Vec<RenderSprite>,
     pub text_2d: Vec<RenderText2d>,
+    pub ui: UiRenderData,
     pub previous_camera_transform: Transform,
     pub current_camera_transform: Transform,
     pub camera_component: Camera,
@@ -797,6 +798,58 @@ pub struct RenderData {
     pub render_graph: RenderGraphSpec,
     pub gizmo: GizmoData,
     pub skin_palette: Vec<Mat4>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiRenderRect {
+    pub id: u64,
+    pub rect: [f32; 4],
+    pub color: [f32; 4],
+    pub clip_rect: Option<[f32; 4]>,
+    pub layer: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiRenderImage {
+    pub id: u64,
+    pub rect: [f32; 4],
+    pub texture_id: Option<usize>,
+    pub tint: [f32; 4],
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub clip_rect: Option<[f32; 4]>,
+    pub layer: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiRenderText {
+    pub id: u64,
+    pub rect: [f32; 4],
+    pub text: String,
+    pub color: [f32; 4],
+    pub font_size: f32,
+    pub align_h: TextAlignH,
+    pub align_v: TextAlignV,
+    pub wrap: bool,
+    pub cursor: Option<usize>,
+    pub show_caret: bool,
+    pub caret_color: Option<[f32; 4]>,
+    pub selection: Option<[usize; 2]>,
+    pub selection_color: Option<[f32; 4]>,
+    pub clip_rect: Option<[f32; 4]>,
+    pub layer: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiRenderCommand {
+    Rect(UiRenderRect),
+    Image(UiRenderImage),
+    Text(UiRenderText),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiRenderData {
+    pub commands: Vec<UiRenderCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -1114,6 +1167,7 @@ pub struct RenderDelta {
     pub lights_remove: Vec<usize>,
     pub sprites: Option<Vec<RenderSprite>>,
     pub text_2d: Option<Vec<RenderText2d>>,
+    pub ui: Option<UiRenderData>,
     pub camera: Option<RenderCameraDelta>,
     pub render_main_scene_to_swapchain: Option<bool>,
     pub viewports: Option<Vec<RenderViewportRequest>>,
@@ -1133,6 +1187,7 @@ impl RenderDelta {
             && self.lights_remove.is_empty()
             && self.sprites.is_none()
             && self.text_2d.is_none()
+            && self.ui.is_none()
             && self.camera.is_none()
             && self.render_main_scene_to_swapchain.is_none()
             && self.viewports.is_none()
@@ -1191,6 +1246,9 @@ impl RenderDelta {
         if other.text_2d.is_some() {
             self.text_2d = other.text_2d;
         }
+        if other.ui.is_some() {
+            self.ui = other.ui;
+        }
         if other.render_main_scene_to_swapchain.is_some() {
             self.render_main_scene_to_swapchain = other.render_main_scene_to_swapchain;
         }
@@ -1245,6 +1303,9 @@ impl RenderDelta {
         }
         if delta.text_2d.is_some() {
             self.text_2d = delta.text_2d.clone();
+        }
+        if delta.ui.is_some() {
+            self.ui = delta.ui.clone();
         }
         if delta.render_main_scene_to_swapchain.is_some() {
             self.render_main_scene_to_swapchain = delta.render_main_scene_to_swapchain;
@@ -1871,6 +1932,12 @@ pub struct RendererStats {
     pub render_graph_encoder_finish_us: AtomicU64,
     pub render_graph_overhead_us: AtomicU64,
     pub render_resource_mgmt_us: AtomicU64,
+    pub render_ui_build_us: AtomicU64,
+    pub render_ui_rebuilt: AtomicU32,
+    pub render_ui_command_count: AtomicU32,
+    pub render_ui_instance_count: AtomicU32,
+    pub render_ui_batch_count: AtomicU32,
+    pub render_ui_texture_count: AtomicU32,
     pub render_acquire_us: AtomicU64,
     pub render_submit_us: AtomicU64,
     pub render_present_us: AtomicU64,
@@ -2069,6 +2136,12 @@ impl Default for RendererStats {
             render_graph_encoder_finish_us: AtomicU64::new(0),
             render_graph_overhead_us: AtomicU64::new(0),
             render_resource_mgmt_us: AtomicU64::new(0),
+            render_ui_build_us: AtomicU64::new(0),
+            render_ui_rebuilt: AtomicU32::new(0),
+            render_ui_command_count: AtomicU32::new(0),
+            render_ui_instance_count: AtomicU32::new(0),
+            render_ui_batch_count: AtomicU32::new(0),
+            render_ui_texture_count: AtomicU32::new(0),
             render_acquire_us: AtomicU64::new(0),
             render_submit_us: AtomicU64::new(0),
             render_present_us: AtomicU64::new(0),

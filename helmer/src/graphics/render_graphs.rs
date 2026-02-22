@@ -44,6 +44,7 @@ use crate::graphics::{
         ssgi_denoise::{SsgiDenoiseOutputs, SsgiDenoisePass},
         ssgi_upsample::{SsgiUpsampleOutputs, SsgiUpsamplePass},
         ssr::{SsrOutputs, SsrPass},
+        ui::{UiOutputs, UiPass},
     },
 };
 
@@ -58,6 +59,7 @@ pub enum RenderPassToggleFlag {
     Ssr,
     Ddgi,
     Sprite,
+    Ui,
     Egui,
     Gizmo,
     Occlusion,
@@ -76,6 +78,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssr => config.ssr_pass,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass,
             RenderPassToggleFlag::Sprite => config.sprite_pass,
+            RenderPassToggleFlag::Ui => config.ui_pass,
             RenderPassToggleFlag::Egui => config.egui_pass,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling,
@@ -94,6 +97,7 @@ impl RenderPassToggleFlag {
             RenderPassToggleFlag::Ssr => config.ssr_pass = value,
             RenderPassToggleFlag::Ddgi => config.ddgi_pass = value,
             RenderPassToggleFlag::Sprite => config.sprite_pass = value,
+            RenderPassToggleFlag::Ui => config.ui_pass = value,
             RenderPassToggleFlag::Egui => config.egui_pass = value,
             RenderPassToggleFlag::Gizmo => config.gizmo_pass = value,
             RenderPassToggleFlag::Occlusion => config.occlusion_culling = value,
@@ -161,6 +165,10 @@ const DEFAULT_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Sprite,
     },
     RenderPassToggle {
+        label: "UI",
+        toggle: RenderPassToggleFlag::Ui,
+    },
+    RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
     },
@@ -202,6 +210,10 @@ const HYBRID_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "Sprite + Text",
         toggle: RenderPassToggleFlag::Sprite,
+    },
+    RenderPassToggle {
+        label: "UI",
+        toggle: RenderPassToggleFlag::Ui,
     },
     RenderPassToggle {
         label: "Egui",
@@ -255,6 +267,10 @@ const DEBUG_GRAPH_PASSES: &[RenderPassToggle] = &[
         toggle: RenderPassToggleFlag::Sprite,
     },
     RenderPassToggle {
+        label: "UI",
+        toggle: RenderPassToggleFlag::Ui,
+    },
+    RenderPassToggle {
         label: "Egui",
         toggle: RenderPassToggleFlag::Egui,
     },
@@ -299,6 +315,10 @@ const TRACED_GRAPH_PASSES: &[RenderPassToggle] = &[
     RenderPassToggle {
         label: "Sprite + Text",
         toggle: RenderPassToggleFlag::Sprite,
+    },
+    RenderPassToggle {
+        label: "UI",
+        toggle: RenderPassToggleFlag::Ui,
     },
     RenderPassToggle {
         label: "Egui",
@@ -534,6 +554,12 @@ impl PassResourceOutput for SpriteOutputs {
 }
 
 impl PassResourceOutput for GizmoOutputs {
+    fn resource_ids(&self) -> Vec<ResourceId> {
+        vec![self.swapchain]
+    }
+}
+
+impl PassResourceOutput for UiOutputs {
     fn resource_ids(&self) -> Vec<ResourceId> {
         vec![self.swapchain]
     }
@@ -918,6 +944,14 @@ fn build_default_graph(
         });
     }
 
+    if toggles.ui_pass {
+        builder.add::<UiPass, UiOutputs, _>(|_pool, _store| {
+            let pass = UiPass::new(swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
             let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
@@ -1279,6 +1313,14 @@ fn build_hybrid_graph(
         });
     }
 
+    if toggles.ui_pass {
+        builder.add::<UiPass, UiOutputs, _>(|_pool, _store| {
+            let pass = UiPass::new(swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
             let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
@@ -1620,6 +1662,14 @@ fn build_debug_graph(
         });
     }
 
+    if toggles.ui_pass {
+        builder.add::<UiPass, UiOutputs, _>(|_pool, _store| {
+            let pass = UiPass::new(swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
     if toggles.egui_pass {
         builder.add::<EguiPass, EguiOutputs, _>(|pool, _store| {
             let pass = EguiPass::new(pool, swapchain_id, params.surface_format);
@@ -1690,6 +1740,14 @@ fn build_traced_graph(
     if toggles.gizmo_pass {
         builder.add::<GizmoPass, GizmoOutputs, _>(|pool, _store| {
             let pass = GizmoPass::new(pool, swapchain_id, params.surface_format);
+            let outputs = pass.outputs();
+            (pass, outputs)
+        });
+    }
+
+    if toggles.ui_pass {
+        builder.add::<UiPass, UiOutputs, _>(|_pool, _store| {
+            let pass = UiPass::new(swapchain_id, params.surface_format);
             let outputs = pass.outputs();
             (pass, outputs)
         });

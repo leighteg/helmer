@@ -39,7 +39,7 @@ use crate::{
     BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
     BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
     BevySpriteImageSequence, BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler,
-    BevyText2d, BevyTransform,
+    BevyText2d, BevyTransform, ui_integration::UiRenderState,
 };
 
 //================================================================================
@@ -576,6 +576,7 @@ pub struct RenderWorkerState {
     last_worker_tuning: Option<RenderWorkerTuning>,
     last_main_scene_to_swapchain: Option<bool>,
     last_gizmo: Option<GizmoData>,
+    last_ui_revision: u64,
 }
 
 #[derive(SystemParam)]
@@ -584,6 +585,7 @@ pub struct RenderSystemResources<'w> {
     runtime_config: Option<Res<'w, BevyRuntimeConfig>>,
     render_graph: Option<Res<'w, RenderGraphResource>>,
     gizmo_state: Option<Res<'w, RenderGizmoState>>,
+    ui: Option<Res<'w, UiRenderState>>,
     viewport_requests: Option<Res<'w, RenderViewportRequests>>,
     main_scene_to_swapchain: Option<Res<'w, RenderMainSceneToSwapchain>>,
     streaming_tuning: Option<Res<'w, BevyStreamingTuning>>,
@@ -1926,6 +1928,7 @@ impl RenderWorkerCore {
             lights_remove,
             sprites: None,
             text_2d: None,
+            ui: None,
             camera: None,
             render_main_scene_to_swapchain: None,
             viewports: None,
@@ -2374,6 +2377,7 @@ pub fn render_data_system(
         worker_state.last_streaming_tuning = None;
         worker_state.last_lod_tuning = None;
         worker_state.last_worker_tuning = None;
+        worker_state.last_ui_revision = 0;
     }
 
     let mut worker = match worker_state.worker.take() {
@@ -2495,6 +2499,16 @@ pub fn render_data_system(
         // Always emit this toggle so renderer state cannot drift after worker/full-sync churn
         direct_delta.render_main_scene_to_swapchain = Some(desired);
         worker_state.last_main_scene_to_swapchain = Some(desired);
+    }
+
+    let (ui_revision, ui_data) = resources
+        .ui
+        .as_ref()
+        .map(|ui| (ui.revision, ui.data.clone()))
+        .unwrap_or((0, Default::default()));
+    if worker_state.needs_full_sync || worker_state.last_ui_revision != ui_revision {
+        direct_delta.ui = Some(ui_data);
+        worker_state.last_ui_revision = ui_revision;
     }
 
     let viewport_camera = resources

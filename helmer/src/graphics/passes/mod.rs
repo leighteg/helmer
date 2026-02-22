@@ -21,6 +21,7 @@ pub mod ssgi;
 pub mod ssgi_denoise;
 pub mod ssgi_upsample;
 pub mod ssr;
+pub mod ui;
 
 use std::{ops::Range, sync::Arc};
 
@@ -128,6 +129,9 @@ pub struct FrameGlobals {
     pub sprite_instances: Option<InstanceBuffer>,
     pub sprite_batches: Arc<Vec<SpriteDrawBatch>>,
     pub sprite_textures: Arc<Vec<wgpu::TextureView>>,
+    pub ui_instances: Option<InstanceBuffer>,
+    pub ui_batches: Arc<Vec<UiDrawBatch>>,
+    pub ui_textures: Arc<Vec<wgpu::TextureView>>,
     pub alpha: f32,
     pub camera_view_proj: Mat4,
     pub prev_view_proj: Mat4,
@@ -293,6 +297,22 @@ pub struct SpriteInstanceRaw {
     pub pivot_clip_min: [f32; 4],
     pub clip_max_layer: [f32; 4],
     pub meta: [u32; 4],
+}
+
+#[derive(Clone)]
+pub struct UiDrawBatch {
+    pub texture_slot: u32,
+    pub instance_range: Range<u32>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct UiInstanceRaw {
+    pub rect: [f32; 4],
+    pub uv_rect: [f32; 4],
+    pub color: [f32; 4],
+    pub clip_rect: [f32; 4],
+    pub layer_flags: [f32; 4],
 }
 
 #[derive(Clone)]

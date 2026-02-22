@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 helmer = { path = "../helmer" }
+helmer_ui = { path = "../helmer_ui" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
 glam = "0.30.9"
 hashbrown = "0.16.1"

@@ -90,6 +90,8 @@ pub struct InputManager {
     pub active_mouse_buttons: HashSet<MouseButton>,
     pub mouse_wheel: Vec2,
     mouse_wheel_accumulator: Vec2,
+    pub mouse_wheel_unfiltered: Vec2,
+    mouse_wheel_unfiltered_accumulator: Vec2,
     pub mouse_motion: DVec2,
     pub cursor_position: DVec2,
     pub window_size: UVec2,
@@ -111,6 +113,9 @@ pub struct InputManager {
     pub egui_last_pointer_down_middle: Mutex<bool>,
     pub egui_wants_pointer: bool,
     pub egui_wants_key: bool,
+
+    // ui
+    pub ui_wants_pointer: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -151,6 +156,8 @@ impl InputManager {
             active_mouse_buttons: HashSet::new(),
             mouse_wheel: Vec2::ZERO,
             mouse_wheel_accumulator: Vec2::ZERO,
+            mouse_wheel_unfiltered: Vec2::ZERO,
+            mouse_wheel_unfiltered_accumulator: Vec2::ZERO,
             mouse_motion: DVec2::ZERO,
             cursor_position: DVec2::ZERO,
             window_size: UVec2::ZERO,
@@ -168,6 +175,7 @@ impl InputManager {
             egui_last_pointer_down_middle: Mutex::new(false),
             egui_wants_pointer: false,
             egui_wants_key: false,
+            ui_wants_pointer: false,
         }
     }
 
@@ -259,7 +267,7 @@ impl InputManager {
         for event in events {
             match event {
                 InputEvent::Keyboard { key, pressed } => {
-                    if self.egui_wants_key {
+                    if self.wants_keyboard_input() {
                         continue;
                     }
 
@@ -273,18 +281,12 @@ impl InputManager {
                     }
                 }
                 InputEvent::CursorMoved(pos) => {
-                    if !self.egui_wants_pointer {
-                        self.cursor_position = pos;
-                    }
+                    self.cursor_position = pos;
                 }
                 InputEvent::MouseMotion(delta) => {
                     self.mouse_motion += delta;
                 }
                 InputEvent::MouseButton { button, pressed } => {
-                    if self.egui_wants_pointer {
-                        continue;
-                    }
-
                     if pressed {
                         self.active_mouse_buttons.insert(button);
                     } else {
@@ -292,7 +294,8 @@ impl InputManager {
                     }
                 }
                 InputEvent::MouseWheel(delta) => {
-                    if self.egui_wants_pointer {
+                    self.add_scroll_unfiltered(delta);
+                    if self.wants_pointer_input() {
                         continue;
                     }
 
@@ -311,7 +314,13 @@ impl InputManager {
         self.just_pressed.contains(&key)
     }
     pub fn is_mouse_button_active(&self, button: MouseButton) -> bool {
-        self.active_mouse_buttons.contains(&button)
+        !self.wants_pointer_input() && self.active_mouse_buttons.contains(&button)
+    }
+    pub fn wants_pointer_input(&self) -> bool {
+        self.egui_wants_pointer || self.ui_wants_pointer
+    }
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.egui_wants_key
     }
     pub fn is_controller_button_active(&self, gamepad_id: GamepadId, button: Button) -> bool {
         self.controller_states
@@ -350,9 +359,14 @@ impl InputManager {
     pub fn add_scroll(&mut self, delta: glam::Vec2) {
         self.mouse_wheel_accumulator += delta;
     }
+    pub fn add_scroll_unfiltered(&mut self, delta: glam::Vec2) {
+        self.mouse_wheel_unfiltered_accumulator += delta;
+    }
     pub fn prepare_for_next_frame(&mut self) {
         self.mouse_wheel = self.mouse_wheel_accumulator;
         self.mouse_wheel_accumulator = Vec2::ZERO;
+        self.mouse_wheel_unfiltered = self.mouse_wheel_unfiltered_accumulator;
+        self.mouse_wheel_unfiltered_accumulator = Vec2::ZERO;
     }
     pub fn clear_just_pressed(&mut self) {
         self.just_pressed.clear();
@@ -566,6 +580,10 @@ impl InputManager {
         self.active_keys.clear();
         self.active_mouse_buttons.clear();
         self.just_pressed.clear();
+        self.mouse_wheel = Vec2::ZERO;
+        self.mouse_wheel_accumulator = Vec2::ZERO;
+        self.mouse_wheel_unfiltered = Vec2::ZERO;
+        self.mouse_wheel_unfiltered_accumulator = Vec2::ZERO;
         self.mouse_motion = DVec2::ZERO;
     }
 

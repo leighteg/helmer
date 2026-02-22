@@ -64,8 +64,8 @@ fn run() {
 
             // systems init
             schedule.add_systems(config_toggle_system);
-            schedule.add_systems(freecam_system);
             schedule.add_systems(scene_loader_system);
+            schedule.add_systems(freecam_system);
         },
         |runtime| {
             #[cfg(target_arch = "wasm32")]

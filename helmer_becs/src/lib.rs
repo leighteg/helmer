@@ -63,6 +63,9 @@ use crate::{
             scene_spawning_system, update_scene_child_transforms,
         },
     },
+    ui_integration::{
+        UiClipboard, UiPerfStats, UiRenderFrameOutput, UiRenderState, UiResource, ui_system,
+    },
 };
 
 /// A generic wrapper to turn existing data structures into Bevy Components or Resources.
@@ -209,6 +212,12 @@ pub struct ProfilingHistory {
     pub render_acquire_ms: VecDeque<f64>,
     pub render_submit_ms: VecDeque<f64>,
     pub render_present_ms: VecDeque<f64>,
+    pub ui_system_ms: VecDeque<f64>,
+    pub ui_run_frame_ms: VecDeque<f64>,
+    pub ui_interaction_ms: VecDeque<f64>,
+    pub ui_scroll_metrics_ms: VecDeque<f64>,
+    pub ui_render_data_convert_ms: VecDeque<f64>,
+    pub render_ui_build_ms: VecDeque<f64>,
     pub render_pass_ms: HashMap<String, VecDeque<f64>>,
     pub render_pass_last_ms: HashMap<String, f64>,
     pub render_pass_order: Vec<String>,
@@ -231,6 +240,7 @@ pub mod physics;
 pub mod profiling;
 pub mod provided;
 pub mod systems;
+pub mod ui_integration;
 
 fn helmer_becs_init_impl<F>(
     init_callback: fn(&mut World, &mut Schedule, &AssetServer),
@@ -314,6 +324,7 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<BevySceneTuning>(BevySceneTuning::default());
             world.insert_resource::<DebugGraphHistory>(DebugGraphHistory::default());
             world.insert_resource::<ProfilingHistory>(ProfilingHistory::default());
+            world.insert_resource::<UiPerfStats>(UiPerfStats::default());
             world.insert_resource::<DeltaTime>(DeltaTime(1.0));
             world.insert_resource::<SkinningResource>(SkinningResource::default());
             world.insert_resource::<RenderPacket>(RenderPacket::default());
@@ -329,6 +340,13 @@ fn helmer_becs_init_impl<F>(
             world.insert_resource::<EguiResource>(EguiResource::default());
             world.insert_resource::<EguiClipboard>(EguiClipboard::default());
             world.insert_resource::<EguiInputPassthrough>(EguiInputPassthrough::default());
+            world.insert_resource::<UiResource>(UiResource::default());
+            world.insert_resource::<UiRenderState>(UiRenderState::default());
+            world.insert_resource::<UiRenderFrameOutput>(UiRenderFrameOutput::default());
+            world.insert_resource::<ui_integration::UiRuntimeState>(
+                ui_integration::UiRuntimeState::default(),
+            );
+            world.insert_resource::<UiClipboard>(UiClipboard::default());
             world.insert_resource::<PhysicsResource>(PhysicsResource::default());
             world.insert_resource::<AudioBackendResource>(AudioBackendResource(Arc::new(
                 AudioBackend::new(),
@@ -359,6 +377,7 @@ fn helmer_becs_init_impl<F>(
                     "helmer_becs::physics::physics_step_system",
                     "helmer_becs::physics::sync_physics_to_entities_system",
                     "helmer_becs::physics::physics_scene_query_system",
+                    "helmer_becs::ui_integration::ui_system",
                     "helmer_becs::egui_integration::egui_system",
                 ]);
             }
@@ -387,7 +406,7 @@ fn helmer_becs_init_impl<F>(
                 )
                     .chain(),
             );
-            schedule.add_systems(egui_system);
+            schedule.add_systems((egui_system, ui_system));
 
             // physics systems
             schedule.add_systems(
@@ -418,6 +437,10 @@ fn helmer_becs_init_impl<F>(
             // egui input interception
             world.resource_scope::<BevyInputManager, _>(|world, input_manager| {
                 let mut input_manager = input_manager.0.write();
+                input_manager.ui_wants_pointer = world
+                    .get_resource::<UiRenderState>()
+                    .map(|state| state.wants_pointer_input)
+                    .unwrap_or(false);
                 world.resource_scope::<BevyRuntimeConfig, _>(|ecs_core, runtime_config| {
                     let runtime_config = runtime_config.0;
                     ecs_core.resource_scope::<EguiResource, _>(|ecs, egui_resource| {
@@ -426,10 +449,8 @@ fn helmer_becs_init_impl<F>(
                             .copied()
                             .unwrap_or_default();
                         if runtime_config.egui {
-                            if input_manager.active_mouse_buttons.len() == 0 {
-                                input_manager.egui_wants_pointer =
-                                    egui_resource.ctx.wants_pointer_input() && !passthrough.pointer;
-                            }
+                            input_manager.egui_wants_pointer =
+                                egui_resource.ctx.wants_pointer_input() && !passthrough.pointer;
                             input_manager.egui_wants_key =
                                 egui_resource.ctx.wants_keyboard_input() && !passthrough.keyboard;
                         } else if egui_resource.accepting_input {
@@ -454,6 +475,7 @@ fn helmer_becs_init_impl<F>(
                 None
             };
             schedule.run(world);
+            ui_integration::publish_ui_render_state(world);
             if let (Some(start), Some(profiling)) = (schedule_start, profiling.as_ref()) {
                 profiling.logic_schedule_us.store(
                     start.elapsed().as_micros() as u64,

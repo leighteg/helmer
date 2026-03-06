@@ -6,6 +6,8 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 
 ![city corner screenshot (legacy deferred renderer)](assets/screenshots/city_corner.png)
 
+💬 **[Stoat server](https://stt.gg/43zc35Aw)**
+
 ## features
 - multiplatform
 - large scale hardware/driver support

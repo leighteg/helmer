@@ -46,6 +46,7 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 ## ways to use helmer
 
 ### `helmer_editor_egui`
+![helmer_editor_egui screenshot](assets/screenshots/editor.png)
 - `cargo run -p helmer_editor_egui --release`
 - see **[building](/building.md)** to build a project
 

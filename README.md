@@ -52,9 +52,9 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 
 |        integration       | desc                                                                                                                                   | ease  |
 |:------------------------:|----------------------------------------------------------------------------------------------------------------------------------------|-------|
-|     **`helmer_ecs`**     | the og! simple and surprisingly scalable (O(N) entity overhead!! 😭). basic scheduler                                                   | ****  |
+|     **`helmer_ecs`**     | the og! simple and surprisingly scalable (O(N) entity overhead!! 😭). basic scheduler                                                  | ****  |
 |     **`helmer_becs`**    | a robust integration for the expeditious yet powerful [bevy_ecs](https://github.com/bevyengine/bevy/tree/main/crates/bevy_ecs) library | ***   |
-| **`helmer_editor_core`** | a robust runtime over `helmer_becs`, used by the editors/player, providing robust luau/rust/visual scripting integrations              | ***** |
+| **`helmer_editor_egui`** | a featured, robust editor, exposing rich luau/rust/visual scripting integrations                                                       | ***** |
 |  **custom integration**  | manually implement a app/game logic paradigm over `helmer`                                                                             | *     |
 
 #### helmer_becs examples

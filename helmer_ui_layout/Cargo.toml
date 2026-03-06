@@ -1,0 +1,9 @@
+[package]
+name = "helmer_ui_layout"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = "0.30.9"
+hashbrown = "0.16.1"
+helmer_ui = { path = "../helmer_ui" }

@@ -3,9 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy_ecs::prelude::{Resource, World};
+use bevy_ecs::prelude::World;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::{BevySkinnedMeshRenderer, BevySystemProfiler};
+use helmer_editor_runtime::undo::EditorUndoState as RuntimeUndoState;
 
 use crate::editor::{
     EditorProject,
@@ -55,7 +56,7 @@ impl UndoEntry {
 }
 
 #[derive(Debug, Clone)]
-enum PendingUndoGroup {
+pub enum PendingUndoGroup {
     Scene {
         label: String,
     },
@@ -66,56 +67,7 @@ enum PendingUndoGroup {
     },
 }
 
-#[derive(Resource, Debug, Clone)]
-pub struct EditorUndoState {
-    pub entries: Vec<UndoEntry>,
-    pub cursor: usize,
-    pub max_entries: usize,
-    pending_group: Option<PendingUndoGroup>,
-    pub pending_commit: bool,
-}
-
-impl Default for EditorUndoState {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            cursor: 0,
-            max_entries: 128,
-            pending_group: None,
-            pending_commit: false,
-        }
-    }
-}
-
-impl EditorUndoState {
-    pub fn can_undo(&self) -> bool {
-        !self.entries.is_empty() && self.cursor > 0
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.entries.is_empty() && self.cursor + 1 < self.entries.len()
-    }
-
-    pub fn undo_label(&self) -> Option<&str> {
-        if self.can_undo() {
-            self.entries
-                .get(self.cursor)
-                .and_then(|entry| entry.label())
-        } else {
-            None
-        }
-    }
-
-    pub fn redo_label(&self) -> Option<&str> {
-        if self.can_redo() {
-            self.entries
-                .get(self.cursor + 1)
-                .and_then(|entry| entry.label())
-        } else {
-            None
-        }
-    }
-}
+pub type EditorUndoState = RuntimeUndoState<UndoEntry, PendingUndoGroup>;
 
 pub fn request_begin_undo_group(state: &mut EditorUndoState, label: &str) {
     if state.pending_group.is_none() {
@@ -276,9 +228,11 @@ pub fn undo_action(world: &mut World) -> Option<String> {
 
     flush_pending_group(world);
 
-    let label = world
-        .get_resource::<EditorUndoState>()
-        .and_then(|state| state.undo_label().map(|label| label.to_string()))?;
+    let label = world.get_resource::<EditorUndoState>().and_then(|state| {
+        state
+            .undo_label(UndoEntry::label)
+            .map(|label| label.to_string())
+    })?;
 
     let entry = {
         let mut state = world.get_resource_mut::<EditorUndoState>()?;
@@ -313,9 +267,11 @@ pub fn redo_action(world: &mut World) -> Option<String> {
 
     flush_pending_group(world);
 
-    let label = world
-        .get_resource::<EditorUndoState>()
-        .and_then(|state| state.redo_label().map(|label| label.to_string()))?;
+    let label = world.get_resource::<EditorUndoState>().and_then(|state| {
+        state
+            .redo_label(UndoEntry::label)
+            .map(|label| label.to_string())
+    })?;
 
     let entry = {
         let mut state = world.get_resource_mut::<EditorUndoState>()?;
@@ -343,7 +299,7 @@ pub fn editor_undo_request_system(world: &mut World) {
         .and_then(|profiler| {
             profiler
                 .0
-                .begin_scope("helmer_editor::editor::editor_undo_request_system")
+                .begin_scope("helmer_editor_egui::editor::editor_undo_request_system")
         });
 
     process_undo_requests(world);
@@ -475,7 +431,7 @@ fn push_entry(world: &mut World, entry: UndoEntry) {
     state.entries.push(entry);
     state.cursor = state.entries.len().saturating_sub(1);
 
-    trim_entries(&mut state);
+    state.enforce_cap();
 }
 
 fn entries_equivalent(current: &UndoEntry, candidate: &UndoEntry) -> bool {
@@ -506,17 +462,8 @@ fn find_previous_scene_snapshot(
     }
 }
 
-fn trim_entries(state: &mut EditorUndoState) {
-    let cap = state.max_entries.max(1);
-    if state.entries.len() > cap {
-        let remove_count = state.entries.len() - cap;
-        state.entries.drain(0..remove_count);
-        state.cursor = state.cursor.saturating_sub(remove_count);
-    }
-}
-
 pub fn enforce_undo_cap(state: &mut EditorUndoState) {
-    trim_entries(state);
+    state.enforce_cap();
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -31,17 +31,19 @@ use helmer_becs::{
     BevyPoseOverride, BevyRuntimeCursorState, BevySkinnedMeshRenderer, BevySpline,
     BevySplineFollower, BevySystemProfiler, BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
 };
+use helmer_editor_runtime::scene_state::scene_display_name;
+use helmer_editor_runtime::script_registry::update_script_registry_with_loader;
 use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::editor::{
     EditorCursorControlState, EditorLayout, EditorLayoutState, EditorPaneViewportState,
-    EditorPlayCamera, EditorTimelineState, EditorViewportCamera, EditorViewportRuntime,
-    EditorViewportState, FREECAM_BOOST_MULTIPLIER_DEFAULT, FREECAM_BOOST_MULTIPLIER_MAX,
-    FREECAM_BOOST_MULTIPLIER_MIN, FREECAM_MOVE_ACCEL_DEFAULT, FREECAM_MOVE_ACCEL_MAX,
-    FREECAM_MOVE_ACCEL_MIN, FREECAM_MOVE_DECEL_DEFAULT, FREECAM_MOVE_DECEL_MAX,
-    FREECAM_MOVE_DECEL_MIN, FREECAM_ORBIT_DISTANCE_DEFAULT, FREECAM_ORBIT_DISTANCE_MAX,
-    FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
+    EditorPaneWorkspaceState, EditorPlayCamera, EditorTimelineState, EditorViewportCamera,
+    EditorViewportRuntime, EditorViewportState, FREECAM_BOOST_MULTIPLIER_DEFAULT,
+    FREECAM_BOOST_MULTIPLIER_MAX, FREECAM_BOOST_MULTIPLIER_MIN, FREECAM_MOVE_ACCEL_DEFAULT,
+    FREECAM_MOVE_ACCEL_MAX, FREECAM_MOVE_ACCEL_MIN, FREECAM_MOVE_DECEL_DEFAULT,
+    FREECAM_MOVE_DECEL_MAX, FREECAM_MOVE_DECEL_MIN, FREECAM_ORBIT_DISTANCE_DEFAULT,
+    FREECAM_ORBIT_DISTANCE_MAX, FREECAM_ORBIT_DISTANCE_MIN, FREECAM_ORBIT_PAN_SENSITIVITY_MAX,
     FREECAM_ORBIT_PAN_SENSITIVITY_MIN, FREECAM_PAN_SENSITIVITY_MAX, FREECAM_PAN_SENSITIVITY_MIN,
     FREECAM_SENSITIVITY_DEFAULT, FREECAM_SENSITIVITY_MAX, FREECAM_SENSITIVITY_MIN,
     FREECAM_SMOOTHING_DEFAULT, FREECAM_SMOOTHING_MAX, FREECAM_SMOOTHING_MIN,
@@ -78,17 +80,14 @@ use crate::editor::{
         reset_editor_scene, restore_scene_transforms_from_document, serialize_scene,
         spawn_default_camera, spawn_default_light, spawn_scene_from_document, write_scene_document,
     },
-    scripting::{
-        ScriptComponent, ScriptRegistry, ScriptRuntime, load_script_asset,
-        script_registry_key_for_path,
-    },
+    scripting::{ScriptComponent, ScriptRegistry, ScriptRuntime, load_script_asset},
     set_play_camera, set_viewport_audio_listener_enabled,
     ui::{
-        AssetDragState, EditorPaneManagerState, EditorPaneWorkspaceState, EditorUiState,
-        EntityDragState, InspectorPinnedEntityResource, MiddleDragUiState,
-        apply_pane_workspace_layout, capture_pane_workspace_layout, close_pane_workspace_window,
-        draw_pane_manager_window, draw_pane_workspace_window, draw_project_window,
-        ensure_default_pane_workspace, spawn_play_viewport_pane,
+        AssetDragState, EditorPaneManagerState, EditorUiState, EntityDragState,
+        InspectorPinnedEntityResource, MiddleDragUiState, apply_pane_workspace_layout,
+        capture_pane_workspace_layout, close_pane_workspace_window, draw_pane_manager_window,
+        draw_pane_workspace_window, draw_project_window, ensure_default_pane_workspace,
+        spawn_play_viewport_pane,
     },
     undo_action,
     visual_scripting::{
@@ -110,7 +109,7 @@ fn begin_system_scope(
 }
 
 pub fn editor_ui_system(world: &mut World) {
-    let _system_scope = begin_system_scope(world, "helmer_editor::editor::editor_ui_system");
+    let _system_scope = begin_system_scope(world, "helmer_editor_egui::editor::editor_ui_system");
 
     if let Some(mut viewport_runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
         viewport_runtime.begin_frame();
@@ -243,8 +242,10 @@ pub fn editor_ui_system(world: &mut World) {
 }
 
 pub fn editor_layout_apply_system(world: &mut World) {
-    let _system_scope =
-        begin_system_scope(world, "helmer_editor::editor::editor_layout_apply_system");
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor_egui::editor::editor_layout_apply_system",
+    );
 
     ensure_default_pane_workspace(world);
 
@@ -479,8 +480,10 @@ pub fn editor_layout_apply_system(world: &mut World) {
 }
 
 pub fn editor_layout_save_system(world: &mut World) {
-    let _system_scope =
-        begin_system_scope(world, "helmer_editor::editor::editor_layout_save_system");
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor_egui::editor::editor_layout_save_system",
+    );
 
     let (request, active_name) = match world.get_resource_mut::<EditorLayoutState>() {
         Some(mut state) => (state.save_request.take(), state.active.clone()),
@@ -555,8 +558,10 @@ pub fn editor_layout_save_system(world: &mut World) {
 }
 
 pub fn editor_layout_update_system(world: &mut World) {
-    let _system_scope =
-        begin_system_scope(world, "helmer_editor::editor::editor_layout_update_system");
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor_egui::editor::editor_layout_update_system",
+    );
 
     let project_open = world
         .get_resource::<crate::editor::EditorProject>()
@@ -1433,7 +1438,7 @@ pub fn editor_physics_state_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::editor_physics_state_system")
+            .begin_scope("helmer_editor_egui::editor::editor_physics_state_system")
     });
 
     let should_run = scene_state.world_state == WorldState::Play;
@@ -1443,7 +1448,8 @@ pub fn editor_physics_state_system(
 }
 
 pub fn editor_command_system(world: &mut World) {
-    let _system_scope = begin_system_scope(world, "helmer_editor::editor::editor_command_system");
+    let _system_scope =
+        begin_system_scope(world, "helmer_editor_egui::editor::editor_command_system");
 
     let commands = {
         let Some(mut queue) = world.get_resource_mut::<EditorCommandQueue>() else {
@@ -1602,7 +1608,7 @@ pub fn asset_scan_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::asset_scan_system")
+            .begin_scope("helmer_editor_egui::editor::asset_scan_system")
     });
 
     let root = match state.root.as_deref() {
@@ -1637,7 +1643,7 @@ pub fn drag_drop_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::drag_drop_system")
+            .begin_scope("helmer_editor_egui::editor::drag_drop_system")
     });
 
     if let Some(path) = dragged.0.take() {
@@ -1666,7 +1672,7 @@ pub fn editor_shortcut_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::editor_shortcut_system")
+            .begin_scope("helmer_editor_egui::editor::editor_shortcut_system")
     });
 
     let input_manager = input_manager.0.read();
@@ -1708,7 +1714,7 @@ pub fn pane_manager_toggle_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::pane_manager_toggle_system")
+            .begin_scope("helmer_editor_egui::editor::pane_manager_toggle_system")
     });
 
     let toggle = egui_res
@@ -1775,7 +1781,7 @@ pub fn scene_dirty_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::scene_dirty_system")
+            .begin_scope("helmer_editor_egui::editor::scene_dirty_system")
     });
 
     if scene_state.world_state == WorldState::Play {
@@ -1805,7 +1811,7 @@ pub fn apply_scene_child_animations_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::apply_scene_child_animations_system")
+            .begin_scope("helmer_editor_egui::editor::apply_scene_child_animations_system")
     });
 
     if pending.entries.is_empty() {
@@ -1883,7 +1889,7 @@ pub fn apply_scene_child_pose_overrides_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::apply_scene_child_pose_overrides_system")
+            .begin_scope("helmer_editor_egui::editor::apply_scene_child_pose_overrides_system")
     });
 
     if pending.entries.is_empty() {
@@ -1945,7 +1951,7 @@ pub fn apply_scene_child_pose_overrides_system(
 pub fn pending_scene_child_renderer_system(world: &mut World) {
     let _system_scope = begin_system_scope(
         world,
-        "helmer_editor::editor::pending_scene_child_renderer_system",
+        "helmer_editor_egui::editor::pending_scene_child_renderer_system",
     );
 
     let world_state = world
@@ -2085,8 +2091,10 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
 }
 
 pub fn pending_skinned_mesh_system(world: &mut World) {
-    let _system_scope =
-        begin_system_scope(world, "helmer_editor::editor::pending_skinned_mesh_system");
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor_egui::editor::pending_skinned_mesh_system",
+    );
 
     let world_state = world
         .get_resource::<EditorSceneState>()
@@ -2202,8 +2210,10 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
 }
 
 pub fn editor_render_refresh_system(world: &mut World) {
-    let _system_scope =
-        begin_system_scope(world, "helmer_editor::editor::editor_render_refresh_system");
+    let _system_scope = begin_system_scope(
+        world,
+        "helmer_editor_egui::editor::editor_render_refresh_system",
+    );
 
     let pending = world
         .get_resource::<EditorRenderRefresh>()
@@ -2237,194 +2247,19 @@ pub fn script_registry_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::script_registry_system")
+            .begin_scope("helmer_editor_egui::editor::script_registry_system")
     });
 
     let Some(root) = project.root.as_ref() else {
         return;
     };
-    let scripts_root = project.config.as_ref().map(|cfg| cfg.scripts_root(root));
 
-    let dirty_paths = registry.take_dirty_paths();
-    if !dirty_paths.is_empty() {
-        let mut dirty_keys = HashSet::<PathBuf>::new();
-        for path in dirty_paths {
-            if let Some(script_key) = script_registry_key_for_path(&path) {
-                dirty_keys.insert(script_key);
-            }
-        }
-
-        let mut updated = 0;
-        let mut removed = 0;
-        for script_key in dirty_keys {
-            if script_key.exists() {
-                let should_reload = match registry.scripts.get(&script_key) {
-                    Some(existing) if existing.language != "rust" => fs::metadata(&script_key)
-                        .and_then(|meta| meta.modified())
-                        .map(|modified| modified > existing.modified)
-                        .unwrap_or(true),
-                    _ => true,
-                };
-                if !should_reload {
-                    continue;
-                }
-
-                registry
-                    .scripts
-                    .insert(script_key.clone(), load_script_asset(&script_key));
-                updated += 1;
-            } else if registry.scripts.remove(&script_key).is_some() {
-                removed += 1;
-            }
-        }
-
-        if updated > 0 || removed > 0 {
-            registry.status = Some(format!(
-                "Reloaded {} script(s), removed {}",
-                updated, removed
-            ));
-        }
-        return;
-    }
-
-    let now = Instant::now();
-    if now.duration_since(registry.last_scan) < registry.scan_interval {
-        return;
-    }
-
-    registry.last_scan = now;
-
-    let Some(scripts_root) = scripts_root else {
-        return;
-    };
-
-    if !scripts_root.exists() {
-        let stale = registry
-            .scripts
-            .keys()
-            .filter(|path| path.starts_with(&scripts_root))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !stale.is_empty() {
-            for path in stale {
-                registry.scripts.remove(&path);
-            }
-            registry.status = Some("Removed stale script cache entries".to_string());
-        }
-        return;
-    }
-
-    let mut discovered = HashSet::new();
-    let mut updated = 0;
-    let mut removed = 0;
-
-    for entry in WalkDir::new(&scripts_root)
-        .into_iter()
-        .filter_entry(should_visit_script_walk_entry)
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-    {
-        if !should_consider_script_scan_path(entry.path()) {
-            continue;
-        }
-
-        let Some(script_key) = script_registry_key_for_path(entry.path()) else {
-            continue;
-        };
-        if !discovered.insert(script_key.clone()) {
-            continue;
-        }
-
-        let should_attempt_reload = match registry.scripts.get(&script_key) {
-            Some(existing) => fs::metadata(&script_key)
-                .and_then(|meta| meta.modified())
-                .map(|modified| modified > existing.modified)
-                .unwrap_or(true),
-            None => true,
-        };
-
-        if !should_attempt_reload {
-            continue;
-        }
-
-        let next_asset = load_script_asset(&script_key);
-        let reload = match registry.scripts.get(&script_key) {
-            Some(existing) => {
-                next_asset.modified > existing.modified
-                    || next_asset.error != existing.error
-                    || next_asset.language != existing.language
-            }
-            None => true,
-        };
-
-        if reload {
-            registry.scripts.insert(script_key.clone(), next_asset);
-            updated += 1;
-        }
-    }
-
-    let stale = registry
-        .scripts
-        .keys()
-        .filter(|path| path.starts_with(&scripts_root) && !discovered.contains(*path))
-        .cloned()
-        .collect::<Vec<_>>();
-    for path in stale {
-        if registry.scripts.remove(&path).is_some() {
-            removed += 1;
-        }
-    }
-
-    if updated > 0 || removed > 0 {
-        registry.status = Some(format!(
-            "Updated {} script(s), removed {}",
-            updated, removed
-        ));
-    }
-}
-
-fn should_visit_script_walk_entry(entry: &walkdir::DirEntry) -> bool {
-    if entry.depth() == 0 {
-        return true;
-    }
-
-    let Some(name) = entry.file_name().to_str() else {
-        return true;
-    };
-
-    if name.starts_with('.') {
-        return false;
-    }
-
-    if entry.file_type().is_dir() {
-        return !is_ignored_script_dir_name(name);
-    }
-
-    true
-}
-
-fn should_consider_script_scan_path(path: &Path) -> bool {
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("cargo.toml"))
-    {
-        return true;
-    }
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| {
-            ext.eq_ignore_ascii_case("lua")
-                || ext.eq_ignore_ascii_case("luau")
-                || ext.eq_ignore_ascii_case("hvs")
-        })
-}
-
-fn is_ignored_script_dir_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("target")
-        || name.eq_ignore_ascii_case("node_modules")
-        || name.eq_ignore_ascii_case(".git")
-        || name.eq_ignore_ascii_case(".helmer")
+    update_script_registry_with_loader(
+        &mut registry,
+        root,
+        project.config.as_ref(),
+        load_script_asset,
+    );
 }
 
 fn handle_create_project(world: &mut World, name: &str, path: &Path) {
@@ -3017,11 +2852,16 @@ fn viewport_request_for_entity(
     if aspect_ratio.is_finite() && aspect_ratio > 0.0 {
         camera.aspect_ratio = aspect_ratio;
     }
+    let (texture_handle, texture_is_managed) = match texture_id {
+        egui::TextureId::Managed(managed) => (managed as u64, true),
+        egui::TextureId::User(user) => (user, false),
+    };
     Some(RenderViewportRequest {
         id,
         camera_transform: transform,
         camera_component: camera,
-        egui_texture_id: texture_id,
+        texture_handle,
+        texture_is_managed,
         target_size,
         temporal_history,
         immediate_resize,
@@ -3033,7 +2873,7 @@ fn viewport_request_for_entity(
 pub fn editor_viewport_camera_mode_system(world: &mut World) {
     let _system_scope = begin_system_scope(
         world,
-        "helmer_editor::editor::editor_viewport_camera_mode_system",
+        "helmer_editor_egui::editor::editor_viewport_camera_mode_system",
     );
 
     let world_state = world
@@ -3107,7 +2947,7 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
 pub fn editor_viewport_render_requests_system(world: &mut World) {
     let _system_scope = begin_system_scope(
         world,
-        "helmer_editor::editor::editor_viewport_render_requests_system",
+        "helmer_editor_egui::editor::editor_viewport_render_requests_system",
     );
 
     let runtime = world
@@ -3649,20 +3489,6 @@ fn unique_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn scene_display_name(path: &Path) -> String {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Scene");
-    if let Some(stripped) = file_name.strip_suffix(".hscene.ron") {
-        return stripped.to_string();
-    }
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("Scene")
-        .to_string()
-}
-
 fn set_status(world: &mut World, message: String) {
     if let Some(mut state) = world.get_resource_mut::<EditorUiState>() {
         state.status = Some(message.clone());
@@ -3815,7 +3641,7 @@ pub fn freecam_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::freecam_system")
+            .begin_scope("helmer_editor_egui::editor::freecam_system")
     });
 
     if state.speed == 0.0 {

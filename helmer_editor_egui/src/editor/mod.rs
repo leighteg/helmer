@@ -15,6 +15,8 @@ pub mod viewport;
 pub mod visual_scripting;
 pub mod watch;
 
+pub use crate::pane_workspace::*;
+
 pub use assets::*;
 pub use commands::*;
 pub use console::*;

@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bevy_ecs = "0.17.2"
+helmer = { path = "../helmer" }
+notify = "8.2.0"
 ron = "0.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
+walkdir = "2.5.0"

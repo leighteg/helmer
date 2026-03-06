@@ -549,7 +549,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::gizmo_system")
+            .begin_scope("helmer_editor_egui::editor::gizmo_system")
     });
 
     state.suppress_selection = false;
@@ -1701,7 +1701,7 @@ pub fn selection_system(params: SelectionSystemParams) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::selection_system")
+            .begin_scope("helmer_editor_egui::editor::selection_system")
     });
 
     let input_manager = input.0.read();

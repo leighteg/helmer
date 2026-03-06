@@ -1,0 +1,27 @@
+pub mod audio_mixer;
+pub mod console;
+pub mod content_browser;
+pub mod hierarchy;
+pub mod history;
+pub mod inspector;
+pub mod material_editor;
+pub mod profiler;
+pub mod project;
+pub mod timeline;
+pub mod toolbar;
+pub mod viewport;
+pub mod visual_scripting;
+
+pub use audio_mixer::*;
+pub use console::*;
+pub use content_browser::*;
+pub use hierarchy::*;
+pub use history::*;
+pub use inspector::*;
+pub use material_editor::*;
+pub use profiler::*;
+pub use project::*;
+pub use timeline::*;
+pub use toolbar::*;
+pub use viewport::*;
+pub use visual_scripting::*;

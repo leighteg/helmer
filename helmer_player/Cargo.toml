@@ -8,7 +8,7 @@ bevy_ecs = "0.17.2"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 helmer_build_runtime = { path = "../helmer_build_runtime" }
-helmer_editor = { path = "../helmer_editor" }
+helmer_editor_egui = { path = "../helmer_editor_egui" }
 helmer_editor_runtime = { path = "../helmer_editor_runtime" }
 rayon = "1.11.0"
 ron = "0.12.0"

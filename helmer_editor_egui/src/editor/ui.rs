@@ -59,8 +59,10 @@ use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use walkdir::WalkDir;
 
 use crate::editor::{
-    EditorLayoutState, EditorPlayCamera, EditorSplineState, EditorTimelineState, EditorUndoState,
-    EditorViewportCamera, EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
+    EditorLayoutState, EditorPaneArea, EditorPaneAreaRect, EditorPaneKind, EditorPaneTab,
+    EditorPaneTabDrag, EditorPaneWindow, EditorPaneWorkspaceState, EditorPlayCamera,
+    EditorSplineState, EditorTimelineState, EditorUndoState, EditorViewportCamera,
+    EditorViewportRuntime, EditorViewportState, EditorViewportTextures,
     FREECAM_BOOST_MULTIPLIER_DEFAULT, FREECAM_BOOST_MULTIPLIER_MAX, FREECAM_BOOST_MULTIPLIER_MIN,
     FREECAM_MOVE_ACCEL_DEFAULT, FREECAM_MOVE_ACCEL_MAX, FREECAM_MOVE_ACCEL_MIN,
     FREECAM_MOVE_DECEL_DEFAULT, FREECAM_MOVE_DECEL_MAX, FREECAM_MOVE_DECEL_MIN,
@@ -233,147 +235,6 @@ impl Default for EditorPaneAutoState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EditorPaneKind {
-    Toolbar,
-    Viewport,
-    PlayViewport,
-    Project,
-    Hierarchy,
-    Inspector,
-    History,
-    Timeline,
-    ContentBrowser,
-    Console,
-    AudioMixer,
-    Profiler,
-    MaterialEditor,
-    VisualScriptEditor,
-}
-
-impl EditorPaneKind {
-    pub const ALL: [Self; 12] = [
-        Self::Toolbar,
-        Self::Viewport,
-        Self::PlayViewport,
-        Self::Project,
-        Self::Hierarchy,
-        Self::Inspector,
-        Self::History,
-        Self::Timeline,
-        Self::ContentBrowser,
-        Self::Console,
-        Self::AudioMixer,
-        Self::Profiler,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Toolbar => "Toolbar",
-            Self::Viewport => "Viewport",
-            Self::PlayViewport => "Play Viewport",
-            Self::Project => "Project",
-            Self::Hierarchy => "Hierarchy",
-            Self::Inspector => "Inspector",
-            Self::History => "History",
-            Self::Timeline => "Timeline",
-            Self::ContentBrowser => "Content Browser",
-            Self::Console => "Console",
-            Self::AudioMixer => "Audio Mixer",
-            Self::Profiler => "Profiler",
-            Self::MaterialEditor => "Material",
-            Self::VisualScriptEditor => "Visual Script",
-        }
-    }
-
-    pub fn default_layout_window_id(self) -> Option<&'static str> {
-        match self {
-            Self::Toolbar => Some("Toolbar"),
-            Self::Viewport => Some("Viewport"),
-            Self::PlayViewport => Some("Viewport"),
-            Self::Project => Some("Project"),
-            Self::Hierarchy => Some("Hierarchy"),
-            Self::Inspector => Some("Inspector"),
-            Self::History => Some("History"),
-            Self::ContentBrowser => Some("Content Browser"),
-            Self::Console => Some("Content Browser"),
-            Self::Timeline
-            | Self::AudioMixer
-            | Self::Profiler
-            | Self::MaterialEditor
-            | Self::VisualScriptEditor => None,
-        }
-    }
-
-    fn persistence_key(self) -> &'static str {
-        match self {
-            Self::Toolbar => "toolbar",
-            Self::Viewport => "viewport",
-            Self::PlayViewport => "play_viewport",
-            Self::Project => "project",
-            Self::Hierarchy => "hierarchy",
-            Self::Inspector => "inspector",
-            Self::History => "history",
-            Self::Timeline => "timeline",
-            Self::ContentBrowser => "content_browser",
-            Self::Console => "console",
-            Self::AudioMixer => "audio_mixer",
-            Self::Profiler => "profiler",
-            Self::MaterialEditor => "material_editor",
-            Self::VisualScriptEditor => "visual_script_editor",
-        }
-    }
-
-    fn from_persistence_key(key: &str) -> Option<Self> {
-        match key {
-            "toolbar" => Some(Self::Toolbar),
-            "viewport" => Some(Self::Viewport),
-            "play_viewport" => Some(Self::PlayViewport),
-            "project" => Some(Self::Project),
-            "hierarchy" => Some(Self::Hierarchy),
-            "inspector" => Some(Self::Inspector),
-            "history" => Some(Self::History),
-            "timeline" => Some(Self::Timeline),
-            "content_browser" => Some(Self::ContentBrowser),
-            "console" => Some(Self::Console),
-            "audio_mixer" => Some(Self::AudioMixer),
-            "profiler" => Some(Self::Profiler),
-            "material_editor" => Some(Self::MaterialEditor),
-            "visual_script_editor" => Some(Self::VisualScriptEditor),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Resource)]
-pub struct EditorPaneWorkspaceState {
-    pub initialized: bool,
-    pub next_window_id: u64,
-    pub next_tab_id: u64,
-    pub next_area_id: u64,
-    pub windows: Vec<EditorPaneWindow>,
-    pub last_focused_window: Option<String>,
-    pub last_focused_area: Option<u64>,
-    pub dragging: Option<EditorPaneTabDrag>,
-    pub drop_handled: bool,
-}
-
-impl Default for EditorPaneWorkspaceState {
-    fn default() -> Self {
-        Self {
-            initialized: false,
-            next_window_id: 1,
-            next_tab_id: 1,
-            next_area_id: 1,
-            windows: Vec::new(),
-            last_focused_window: None,
-            last_focused_area: None,
-            dragging: None,
-            drop_handled: false,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorPaneViewportSettings {
     pub graph_template: String,
@@ -433,50 +294,6 @@ pub struct EditorPaneViewportState {
     pub settings: HashMap<u64, EditorPaneViewportSettings>,
 }
 
-#[derive(Debug, Clone)]
-pub struct EditorPaneWindow {
-    pub id: String,
-    pub title: String,
-    pub areas: Vec<EditorPaneArea>,
-    pub layout_managed: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct EditorPaneArea {
-    pub id: u64,
-    pub rect: EditorPaneAreaRect,
-    pub tabs: Vec<EditorPaneTab>,
-    pub active: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct EditorPaneAreaRect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl EditorPaneAreaRect {
-    pub fn full() -> Self {
-        Self {
-            x: 0.0,
-            y: 0.0,
-            w: 1.0,
-            h: 1.0,
-        }
-    }
-
-    pub fn to_rect(self, host: Rect) -> Rect {
-        let width = host.width().max(1.0);
-        let height = host.height().max(1.0);
-        Rect::from_min_size(
-            Pos2::new(host.min.x + self.x * width, host.min.y + self.y * height),
-            Vec2::new(self.w * width, self.h * height),
-        )
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SplitAxis {
     Horizontal,
@@ -499,42 +316,6 @@ impl PaneDropZone {
             SplitAxis::Horizontal => Self::Bottom,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct EditorPaneTab {
-    pub id: u64,
-    pub title: String,
-    pub kind: EditorPaneKind,
-    pub asset_path: Option<PathBuf>,
-}
-
-impl EditorPaneTab {
-    fn from_builtin(workspace: &mut EditorPaneWorkspaceState, kind: EditorPaneKind) -> Self {
-        let tab = Self {
-            id: workspace.next_tab_id,
-            title: kind.label().to_string(),
-            kind,
-            asset_path: None,
-        };
-        workspace.next_tab_id += 1;
-        tab
-    }
-
-    fn duplicate_with_new_id(&self, workspace: &mut EditorPaneWorkspaceState) -> Self {
-        let mut tab = self.clone();
-        tab.id = workspace.next_tab_id;
-        workspace.next_tab_id += 1;
-        tab
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EditorPaneTabDrag {
-    pub tab: EditorPaneTab,
-    pub source_window_id: String,
-    pub source_area_id: u64,
-    pub source_was_single_tab: bool,
 }
 
 #[derive(Debug, Clone, Resource)]
@@ -815,9 +596,19 @@ pub fn draw_toolbar(ui: &mut Ui, world: &mut World) {
         .map(|state| {
             (
                 state.can_undo(),
-                state.undo_label().map(|label| label.to_string()),
+                state
+                    .undo_label(|entry| match entry {
+                        UndoEntry::Scene(snapshot) => snapshot.label.as_deref(),
+                        UndoEntry::Material(snapshot) => snapshot.label.as_deref(),
+                    })
+                    .map(|label| label.to_string()),
                 state.can_redo(),
-                state.redo_label().map(|label| label.to_string()),
+                state
+                    .redo_label(|entry| match entry {
+                        UndoEntry::Scene(snapshot) => snapshot.label.as_deref(),
+                        UndoEntry::Material(snapshot) => snapshot.label.as_deref(),
+                    })
+                    .map(|label| label.to_string()),
             )
         })
         .unwrap_or((false, None, false, None));
@@ -1904,7 +1695,7 @@ fn draw_script_profiler_section(
         if let Some(snapshot) = system_profiler
             .snapshots()
             .into_iter()
-            .find(|snapshot| snapshot.name == "helmer_editor::editor::script_execution_system")
+            .find(|snapshot| snapshot.name == "helmer_editor_egui::editor::script_execution_system")
         {
             ui.label(format!(
                 "script execution: last {:.3} ms  avg {:.3} ms  max {:.3} ms",
@@ -6554,6 +6345,20 @@ fn pane_area_rect_from_layout_rect(rect: &NormalizedRect) -> EditorPaneAreaRect 
     }
 }
 
+fn pane_area_rect_to_egui_rect(rect: EditorPaneAreaRect, host: Rect) -> Rect {
+    let (x, y, w, h) = rect.to_host_rect(host.min.x, host.min.y, host.width(), host.height());
+    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h))
+}
+
+fn normalized_rect_to_egui_rect(rect: &NormalizedRect, host: Rect) -> Rect {
+    let width = host.width().max(1.0);
+    let height = host.height().max(1.0);
+    Rect::from_min_size(
+        Pos2::new(host.min.x + rect.x * width, host.min.y + rect.y * height),
+        Vec2::new(rect.w * width, rect.h * height),
+    )
+}
+
 fn pane_window_index_from_id(window_id: &str) -> Option<u64> {
     window_id
         .strip_prefix("pane_window_")
@@ -6651,7 +6456,7 @@ pub fn apply_pane_workspace_layout(
             if let Some(rect) = saved_window.rect.as_ref() {
                 detached_window_rects.push((
                     saved_window.id.clone(),
-                    rect.to_rect(screen_rect),
+                    normalized_rect_to_egui_rect(rect, screen_rect),
                     saved_window.collapsed,
                 ));
             }
@@ -7266,7 +7071,7 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
     }
 
     for area in areas_snapshot.iter().cloned() {
-        let area_rect = area.rect.to_rect(host_rect);
+        let area_rect = pane_area_rect_to_egui_rect(area.rect, host_rect);
         if area_rect.width() < 24.0 || area_rect.height() < 24.0 {
             continue;
         }
@@ -7350,7 +7155,7 @@ fn draw_pane_workspace_window_contents(ui: &mut Ui, world: &mut World, window_id
                 areas_snapshot
                     .iter()
                     .filter_map(|area| {
-                        let area_rect = area.rect.to_rect(host_rect);
+                        let area_rect = pane_area_rect_to_egui_rect(area.rect, host_rect);
                         if area_rect.width() <= 0.0 || area_rect.height() <= 0.0 {
                             return None;
                         }

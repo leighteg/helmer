@@ -2,7 +2,11 @@
 members = [
     "helmer",
     "helmer_ui",
+    "helmer_ui_layout",
+    "helmer_ui_docking",
+    "helmer_ui_graph",
     "helmer_editor",
+    "helmer_editor_egui",
     "helmer_editor_runtime",
     "helmer_build_runtime",
     "helmer_build",

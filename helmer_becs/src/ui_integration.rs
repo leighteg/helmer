@@ -11,6 +11,7 @@ use helmer::{
         UiRenderText,
     },
     runtime::input_manager::InputManager,
+    runtime::runtime::RuntimeCursorGrabMode,
 };
 use helmer_ui::{
     UiContext, UiDragInputSnapshot, UiDrawCommand, UiId, UiInputSnapshot, UiKeyInput, UiTextAlign,
@@ -19,7 +20,10 @@ use helmer_ui::{
 use parking_lot::RwLock;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-use crate::{BevyInputManager, BevyRuntimeProfiling, egui_integration::EguiInputPassthrough};
+use crate::{
+    BevyInputManager, BevyRuntimeCursorState, BevyRuntimeProfiling,
+    egui_integration::EguiInputPassthrough,
+};
 
 pub struct UiWindowSpec {
     pub id: String,
@@ -195,6 +199,36 @@ pub struct UiRuntimeState {
     secondary_pointer_down_previous: bool,
     close_requests: Vec<usize>,
     window_content_markers: Vec<WindowContentMarker>,
+    last_stable_viewport: Vec2,
+}
+
+impl UiRuntimeState {
+    pub fn runtime(&self) -> &helmer_ui::UiRuntime {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut helmer_ui::UiRuntime {
+        &mut self.runtime
+    }
+
+    fn resolve_viewport_size(&mut self, raw_size: Vec2) -> Vec2 {
+        const MIN_VIEWPORT_AXIS: f32 = 64.0;
+        const DEFAULT_VIEWPORT: Vec2 = Vec2::new(1280.0, 720.0);
+
+        if raw_size.x >= MIN_VIEWPORT_AXIS && raw_size.y >= MIN_VIEWPORT_AXIS {
+            self.last_stable_viewport = raw_size;
+            return raw_size;
+        }
+
+        if self.last_stable_viewport.x >= MIN_VIEWPORT_AXIS
+            && self.last_stable_viewport.y >= MIN_VIEWPORT_AXIS
+        {
+            return self.last_stable_viewport;
+        }
+
+        self.last_stable_viewport = DEFAULT_VIEWPORT;
+        DEFAULT_VIEWPORT
+    }
 }
 
 #[derive(Resource, Clone, Default)]
@@ -343,11 +377,13 @@ fn collect_drag_input(
     input_arc: &Arc<RwLock<InputManager>>,
     egui_pointer_passthrough: bool,
     egui_keyboard_passthrough: bool,
+    force_pointer_blocked: bool,
     pointer_down_previous: bool,
     clipboard: Option<&mut UiClipboard>,
 ) -> UiDragInputSnapshot {
     let input = input_arc.read();
-    let egui_blocks_pointer = input.egui_wants_pointer && !egui_pointer_passthrough;
+    let egui_blocks_pointer =
+        (input.egui_wants_pointer && !egui_pointer_passthrough) || force_pointer_blocked;
     let egui_blocks_keyboard = input.egui_wants_key && !egui_keyboard_passthrough;
     let pointer_down =
         !egui_blocks_pointer && input.active_mouse_buttons.contains(&MouseButton::Left);
@@ -441,6 +477,7 @@ fn collect_drag_input(
 
 pub fn ui_system(
     input: Option<Res<BevyInputManager>>,
+    runtime_cursor_state: Option<Res<BevyRuntimeCursorState>>,
     egui_passthrough: Option<Res<EguiInputPassthrough>>,
     mut ui_runtime_state: ResMut<UiRuntimeState>,
     ui_res: Res<UiResource>,
@@ -472,40 +509,56 @@ pub fn ui_system(
     };
 
     let passthrough = egui_passthrough.as_deref().copied().unwrap_or_default();
+    let runtime_cursor_blocks_pointer =
+        runtime_cursor_state.as_deref().is_some_and(|cursor_state| {
+            let snapshot = cursor_state.0.snapshot();
+            snapshot.grab_mode != RuntimeCursorGrabMode::None || !snapshot.visible
+        });
 
-    let (snapshot, secondary_pointer_down, egui_blocks_pointer) = {
+    let (
+        raw_viewport_size,
+        pointer_position,
+        pointer_down,
+        scroll_delta,
+        secondary_pointer_down,
+        pointer_blocked,
+    ) = {
         let input = input_arc.read();
-        let egui_blocks_pointer = input.egui_wants_pointer && !passthrough.pointer;
+        let pointer_blocked =
+            (input.egui_wants_pointer && !passthrough.pointer) || runtime_cursor_blocks_pointer;
         (
-            UiInputSnapshot {
-                viewport_size: Vec2::new(
-                    input.window_size.x.max(1) as f32,
-                    input.window_size.y.max(1) as f32,
-                ),
-                pointer_position: if egui_blocks_pointer {
-                    None
-                } else {
-                    Some(Vec2::new(
-                        input.cursor_position.x as f32,
-                        input.cursor_position.y as f32,
-                    ))
-                },
-                pointer_down: !egui_blocks_pointer
-                    && input.active_mouse_buttons.contains(&MouseButton::Left),
-                scroll_delta: if egui_blocks_pointer {
-                    Vec2::ZERO
-                } else {
-                    Vec2::new(
-                        input.mouse_wheel_unfiltered.x,
-                        input.mouse_wheel_unfiltered.y,
-                    )
-                },
+            Vec2::new(
+                input.window_size.x.max(1) as f32,
+                input.window_size.y.max(1) as f32,
+            ),
+            if pointer_blocked {
+                None
+            } else {
+                Some(Vec2::new(
+                    input.cursor_position.x as f32,
+                    input.cursor_position.y as f32,
+                ))
             },
-            !egui_blocks_pointer
+            !pointer_blocked && input.active_mouse_buttons.contains(&MouseButton::Left),
+            if pointer_blocked {
+                Vec2::ZERO
+            } else {
+                Vec2::new(
+                    input.mouse_wheel_unfiltered.x,
+                    input.mouse_wheel_unfiltered.y,
+                )
+            },
+            !pointer_blocked
                 && (input.active_mouse_buttons.contains(&MouseButton::Right)
                     || input.active_mouse_buttons.contains(&MouseButton::Middle)),
-            egui_blocks_pointer,
+            pointer_blocked,
         )
+    };
+    let snapshot = UiInputSnapshot {
+        viewport_size: ui_runtime_state.resolve_viewport_size(raw_viewport_size),
+        pointer_position,
+        pointer_down,
+        scroll_delta,
     };
 
     let mut runtime = std::mem::take(&mut ui_runtime_state.runtime);
@@ -551,6 +604,7 @@ pub fn ui_system(
         &input_arc,
         passthrough.pointer,
         passthrough.keyboard,
+        runtime_cursor_blocks_pointer,
         pointer_down_previous,
         clipboard.as_deref_mut(),
     );
@@ -817,8 +871,8 @@ pub fn ui_system(
         }
     }
 
-    if egui_blocks_pointer {
-        // keep interaction capture stable while egui is actively capturing this frame
+    if pointer_blocked {
+        // keep interaction capture stable while pointer capture is active this frame
         active_window_interaction = None;
     }
 

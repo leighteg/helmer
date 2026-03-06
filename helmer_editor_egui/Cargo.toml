@@ -1,19 +1,16 @@
 [package]
-name = "helmer_editor"
+name = "helmer_editor_egui"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+egui = "0.33.3"
 gilrs = "0.11.1"
 glam = "0.30.9"
 helmer = { path = "../helmer" }
 helmer_becs = { path = "../helmer_becs" }
 helmer_editor_runtime = { path = "../helmer_editor_runtime" }
 helmer_script_sdk = { path = "../helmer_script_sdk" }
-helmer_ui = { path = "../helmer_ui" }
-helmer_ui_layout = { path = "../helmer_ui_layout" }
-helmer_ui_docking = { path = "../helmer_ui_docking" }
-helmer_ui_graph = { path = "../helmer_ui_graph" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
 libloading = "0.8.9"
 mlua = { version = "0.11.5", features = ["luau", "vendored", "send"] }
@@ -25,4 +22,5 @@ serde_json = "1.0.145"
 tracing = "0.1.44"
 walkdir = "2.5.0"
 winit = "0.30.12"
+egui-snarl = "0.9.0"
 fontdb = "0.23.0"

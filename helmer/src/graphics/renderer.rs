@@ -3600,8 +3600,13 @@ impl GraphRenderer {
                 if !cmds.is_empty() {
                     self.queue.submit(cmds);
                 }
+                let viewport_texture_id = if viewport.texture_is_managed {
+                    egui::TextureId::Managed(viewport.texture_handle)
+                } else {
+                    egui::TextureId::User(viewport.texture_handle)
+                };
                 native_texture_bindings.push(EguiNativeTextureBinding {
-                    texture_id: viewport.egui_texture_id,
+                    texture_id: viewport_texture_id,
                     texture_view: target_view,
                     texture_filter: wgpu::FilterMode::Linear,
                 });
@@ -9058,6 +9063,15 @@ impl GraphRenderer {
                     let texture_slot = if let Some(texture_id) = image.texture_id {
                         if let Some(slot) = texture_slots.get(&texture_id).copied() {
                             slot
+                        } else if let Some(target) =
+                            self.offscreen_viewports.get(&(texture_id as u64))
+                        {
+                            let slot = ui_textures.len() as u32;
+                            ui_textures.push(target.view.clone());
+                            texture_slots.insert(texture_id, slot);
+                            slot
+                        } else if texture_id > u32::MAX as usize {
+                            0
                         } else {
                             let request_priority = self.streaming_tuning.priority_near.max(1.0);
                             let rid = self

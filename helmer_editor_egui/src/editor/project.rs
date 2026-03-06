@@ -4,7 +4,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use bevy_ecs::prelude::Resource;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
@@ -13,13 +12,7 @@ const LUAURC_FILE_NAME: &str = ".luaurc";
 const LUAURC_GENERATED_MARKER: &str = "\"__generated_by_helmer__\": true";
 const HELMER_LUAU_API_FILE_NAME: &str = "helmer_api.d.luau";
 
-pub use helmer_editor_runtime::project::ProjectConfig;
-
-#[derive(Resource, Default, Clone)]
-pub struct EditorProject {
-    pub root: Option<PathBuf>,
-    pub config: Option<ProjectConfig>,
-}
+pub use helmer_editor_runtime::project::{EditorProject, ProjectConfig};
 
 pub fn create_project(root: &Path, name: &str) -> Result<ProjectConfig, String> {
     fs::create_dir_all(root).map_err(|err| err.to_string())?;

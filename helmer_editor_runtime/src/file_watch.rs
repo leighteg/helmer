@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -6,14 +7,12 @@ use std::{
     },
 };
 
-use bevy_ecs::prelude::{Res, ResMut, Resource};
-use helmer_becs::BevySystemProfiler;
-use helmer_editor_runtime::project::ProjectConfig;
+use bevy_ecs::prelude::Resource;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::editor::{assets::AssetBrowserState, project::EditorProject, scripting::ScriptRegistry};
+use crate::project::ProjectConfig;
 
-const MAX_WATCH_EVENTS_PER_TICK: usize = 512;
+pub const MAX_WATCH_EVENTS_PER_TICK: usize = 512;
 
 #[derive(Resource, Default)]
 pub struct FileWatchState {
@@ -21,6 +20,13 @@ pub struct FileWatchState {
     pub watcher: Option<Mutex<RecommendedWatcher>>,
     pub receiver: Option<Mutex<Receiver<notify::Result<Event>>>>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct FileWatchPollOutput {
+    pub assets_changed: bool,
+    pub script_paths: HashSet<PathBuf>,
+    pub status_update: Option<String>,
 }
 
 pub fn configure_file_watcher(
@@ -100,118 +106,79 @@ pub fn configure_file_watcher(
     }
 }
 
-pub fn file_watch_system(
-    mut state: ResMut<FileWatchState>,
-    mut assets: ResMut<AssetBrowserState>,
-    mut scripts: ResMut<ScriptRegistry>,
-    project: Res<EditorProject>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
-) {
-    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
-        profiler
-            .0
-            .begin_scope("helmer_editor::editor::file_watch_system")
-    });
-
-    let Some(project_root) = project.root.as_ref() else {
-        return;
+pub fn poll_file_watcher(
+    state: &mut FileWatchState,
+    assets_root: &Path,
+    scripts_root: &Path,
+    config_path: &Path,
+) -> FileWatchPollOutput {
+    let Some(receiver) = state.receiver.as_ref() else {
+        return FileWatchPollOutput::default();
     };
-    let assets_root = project
-        .config
-        .as_ref()
-        .map(|cfg| cfg.assets_root(project_root))
-        .unwrap_or_else(|| project_root.join("assets"));
-    let scripts_root = project
-        .config
-        .as_ref()
-        .map(|cfg| cfg.scripts_root(project_root))
-        .unwrap_or_else(|| assets_root.join("scripts"));
-    let config_path = ProjectConfig::config_path(project_root);
+    let Ok(receiver) = receiver.lock() else {
+        return FileWatchPollOutput::default();
+    };
 
-    let (assets_changed, script_paths, status_update, watcher_disconnected) = {
-        let Some(receiver) = state.receiver.as_ref() else {
-            return;
-        };
-        let Ok(receiver) = receiver.lock() else {
-            return;
-        };
+    let mut output = FileWatchPollOutput::default();
+    let mut watcher_disconnected = false;
+    let mut events_processed = 0usize;
 
-        let mut events_processed = 0usize;
-        let mut assets_changed = false;
-        let mut script_paths = std::collections::HashSet::<PathBuf>::new();
-        let mut status_update = None::<String>;
-        let mut watcher_disconnected = false;
-
-        loop {
-            if events_processed >= MAX_WATCH_EVENTS_PER_TICK {
-                status_update =
-                    Some("File watcher backlog detected; draining incrementally".to_string());
-                break;
-            }
-
-            let event = match receiver.try_recv() {
-                Ok(event) => event,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    status_update = Some("Watcher disconnected".to_string());
-                    watcher_disconnected = true;
-                    break;
-                }
-            };
-            events_processed += 1;
-
-            match event {
-                Ok(event) => {
-                    for path in event.paths {
-                        if path_has_ignored_component(&path) {
-                            continue;
-                        }
-                        if path == config_path {
-                            assets_changed = true;
-                            continue;
-                        }
-                        let in_assets_root = path.starts_with(&assets_root);
-                        let in_scripts_root = path.starts_with(&scripts_root);
-                        if in_assets_root || in_scripts_root {
-                            assets_changed = true;
-                        }
-                        if in_scripts_root && path_might_affect_script_registry(&path) {
-                            script_paths.insert(path);
-                        }
-                    }
-                }
-                Err(err) => {
-                    status_update = Some(format!("Watcher error: {}", err));
-                }
-            }
+    loop {
+        if events_processed >= MAX_WATCH_EVENTS_PER_TICK {
+            output.status_update =
+                Some("File watcher backlog detected; draining incrementally".to_string());
+            break;
         }
 
-        (
-            assets_changed,
-            script_paths,
-            status_update,
-            watcher_disconnected,
-        )
-    };
+        let event = match receiver.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                output.status_update = Some("Watcher disconnected".to_string());
+                watcher_disconnected = true;
+                break;
+            }
+        };
+        events_processed += 1;
 
-    if let Some(status) = status_update {
-        state.status = Some(status);
+        match event {
+            Ok(event) => {
+                for path in event.paths {
+                    if path_has_ignored_component(&path) {
+                        continue;
+                    }
+                    if path == config_path {
+                        output.assets_changed = true;
+                        continue;
+                    }
+                    let in_assets_root = path.starts_with(assets_root);
+                    let in_scripts_root = path.starts_with(scripts_root);
+                    if in_assets_root || in_scripts_root {
+                        output.assets_changed = true;
+                    }
+                    if in_scripts_root && path_might_affect_script_registry(&path) {
+                        output.script_paths.insert(path);
+                    }
+                }
+            }
+            Err(err) => {
+                output.status_update = Some(format!("Watcher error: {}", err));
+            }
+        }
     }
+
+    drop(receiver);
+
     if watcher_disconnected {
         state.watcher = None;
         state.receiver = None;
     }
 
-    if !assets_changed && script_paths.is_empty() {
-        return;
+    if let Some(status) = output.status_update.as_ref() {
+        state.status = Some(status.clone());
     }
 
-    if assets_changed {
-        assets.refresh_requested = true;
-    }
-    if !script_paths.is_empty() {
-        scripts.mark_dirty_paths_owned(script_paths);
-    }
+    output
 }
 
 fn path_has_ignored_component(path: &Path) -> bool {

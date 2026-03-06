@@ -27,7 +27,7 @@ use helmer_becs::{
     },
 };
 use helmer_build_runtime::PackSetReader;
-use helmer_editor::editor::{
+use helmer_editor_egui::editor::{
     EditorAssetCache, EditorCommand, EditorCommandQueue, EditorConsoleState,
     EditorCursorControlState, EditorEntity, EditorGizmoState, EditorProject, EditorRenderRefresh,
     EditorSceneState, EditorTimelineState, EditorUndoState, EditorViewportCamera,
@@ -209,7 +209,7 @@ fn player_viewport_runtime_system(world: &mut World) {
     let active_camera = ensure_play_camera(world).or_else(|| {
         world
             .query_filtered::<Entity, (
-                With<helmer_editor::editor::EditorPlayCamera>,
+                With<helmer_editor_egui::editor::EditorPlayCamera>,
                 Without<EditorViewportCamera>,
             )>()
             .iter(world)
@@ -321,7 +321,7 @@ fn ensure_runtime_scene_defaults(world: &mut World) {
     let has_scene_camera = world
         .query_filtered::<Entity, (
             With<BevyCamera>,
-            Without<helmer_editor::editor::EditorViewportCamera>,
+            Without<helmer_editor_egui::editor::EditorViewportCamera>,
         )>()
         .iter(world)
         .next()

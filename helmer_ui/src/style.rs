@@ -329,6 +329,67 @@ impl Default for UiAlignItems {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiJustifyContent {
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+impl Default for UiJustifyContent {
+    fn default() -> Self {
+        Self::Start
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiAlignContent {
+    Start,
+    Center,
+    End,
+    Stretch,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+impl Default for UiAlignContent {
+    fn default() -> Self {
+        Self::Stretch
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiAlignSelf {
+    Auto,
+    Start,
+    Center,
+    End,
+    Stretch,
+}
+
+impl Default for UiAlignSelf {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiOverflow {
+    Visible,
+    Hidden,
+    Scroll,
+}
+
+impl Default for UiOverflow {
+    fn default() -> Self {
+        Self::Visible
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiLayoutStyle {
     pub display: UiDisplay,
@@ -336,15 +397,26 @@ pub struct UiLayoutStyle {
     pub flex_wrap: UiFlexWrap,
     pub position_type: UiPositionType,
     pub align_items: UiAlignItems,
+    pub justify_content: UiJustifyContent,
+    pub align_content: UiAlignContent,
+    pub align_self: UiAlignSelf,
     pub left: UiDimension,
     pub right: UiDimension,
     pub top: UiDimension,
     pub bottom: UiDimension,
     pub width: UiDimension,
     pub height: UiDimension,
+    pub min_width: UiDimension,
+    pub min_height: UiDimension,
+    pub max_width: UiDimension,
+    pub max_height: UiDimension,
     pub padding: UiInsets,
     pub margin: UiInsets,
     pub gap: Vec2,
+    pub column_gap: Option<f32>,
+    pub row_gap: Option<f32>,
+    pub overflow_x: UiOverflow,
+    pub overflow_y: UiOverflow,
     pub flex_grow: f32,
     pub flex_shrink: f32,
 }
@@ -357,15 +429,26 @@ impl Default for UiLayoutStyle {
             flex_wrap: UiFlexWrap::NoWrap,
             position_type: UiPositionType::Relative,
             align_items: UiAlignItems::Stretch,
+            justify_content: UiJustifyContent::Start,
+            align_content: UiAlignContent::Stretch,
+            align_self: UiAlignSelf::Auto,
             left: UiDimension::Auto,
             right: UiDimension::Auto,
             top: UiDimension::Auto,
             bottom: UiDimension::Auto,
             width: UiDimension::Auto,
             height: UiDimension::Auto,
+            min_width: UiDimension::Auto,
+            min_height: UiDimension::Auto,
+            max_width: UiDimension::Auto,
+            max_height: UiDimension::Auto,
             padding: UiInsets::ZERO,
             margin: UiInsets::ZERO,
             gap: Vec2::ZERO,
+            column_gap: None,
+            row_gap: None,
+            overflow_x: UiOverflow::Visible,
+            overflow_y: UiOverflow::Visible,
             flex_grow: 0.0,
             flex_shrink: 1.0,
         }
@@ -465,6 +548,7 @@ pub enum UiWidget {
     Disclosure(UiDisclosure),
     TextField(UiTextField),
     Image(UiImage),
+    HitBox,
     Spacer,
 }
 
@@ -627,6 +711,21 @@ impl UiLayoutBuilder {
         self
     }
 
+    pub fn justify_content(mut self, justify: UiJustifyContent) -> Self {
+        self.layout.justify_content = justify;
+        self
+    }
+
+    pub fn align_content(mut self, align: UiAlignContent) -> Self {
+        self.layout.align_content = align;
+        self
+    }
+
+    pub fn align_self(mut self, align: UiAlignSelf) -> Self {
+        self.layout.align_self = align;
+        self
+    }
+
     pub fn width(mut self, width: UiDimension) -> Self {
         self.layout.width = width;
         self
@@ -659,6 +758,74 @@ impl UiLayoutBuilder {
 
     pub fn height_auto(self) -> Self {
         self.height(UiDimension::Auto)
+    }
+
+    pub fn min_width(mut self, width: UiDimension) -> Self {
+        self.layout.min_width = width;
+        self
+    }
+
+    pub fn min_width_px(self, width: f32) -> Self {
+        self.min_width(UiDimension::points(width))
+    }
+
+    pub fn min_width_percent(self, width: f32) -> Self {
+        self.min_width(UiDimension::percent(width))
+    }
+
+    pub fn min_width_auto(self) -> Self {
+        self.min_width(UiDimension::Auto)
+    }
+
+    pub fn min_height(mut self, height: UiDimension) -> Self {
+        self.layout.min_height = height;
+        self
+    }
+
+    pub fn min_height_px(self, height: f32) -> Self {
+        self.min_height(UiDimension::points(height))
+    }
+
+    pub fn min_height_percent(self, height: f32) -> Self {
+        self.min_height(UiDimension::percent(height))
+    }
+
+    pub fn min_height_auto(self) -> Self {
+        self.min_height(UiDimension::Auto)
+    }
+
+    pub fn max_width(mut self, width: UiDimension) -> Self {
+        self.layout.max_width = width;
+        self
+    }
+
+    pub fn max_width_px(self, width: f32) -> Self {
+        self.max_width(UiDimension::points(width))
+    }
+
+    pub fn max_width_percent(self, width: f32) -> Self {
+        self.max_width(UiDimension::percent(width))
+    }
+
+    pub fn max_width_auto(self) -> Self {
+        self.max_width(UiDimension::Auto)
+    }
+
+    pub fn max_height(mut self, height: UiDimension) -> Self {
+        self.layout.max_height = height;
+        self
+    }
+
+    pub fn max_height_px(self, height: f32) -> Self {
+        self.max_height(UiDimension::points(height))
+    }
+
+    pub fn max_height_percent(self, height: f32) -> Self {
+        self.max_height(UiDimension::percent(height))
+    }
+
+    pub fn max_height_auto(self) -> Self {
+        self.max_height(UiDimension::Auto)
     }
 
     pub fn left(mut self, left: UiDimension) -> Self {
@@ -785,6 +952,8 @@ impl UiLayoutBuilder {
 
     pub fn gap(mut self, gap: Vec2) -> Self {
         self.layout.gap = gap;
+        self.layout.column_gap = None;
+        self.layout.row_gap = None;
         self
     }
 
@@ -794,11 +963,39 @@ impl UiLayoutBuilder {
 
     pub fn gap_x(mut self, x: f32) -> Self {
         self.layout.gap.x = x;
+        self.layout.column_gap = None;
         self
     }
 
     pub fn gap_y(mut self, y: f32) -> Self {
         self.layout.gap.y = y;
+        self.layout.row_gap = None;
+        self
+    }
+
+    pub fn column_gap(mut self, gap: f32) -> Self {
+        self.layout.column_gap = Some(gap.max(0.0));
+        self
+    }
+
+    pub fn row_gap(mut self, gap: f32) -> Self {
+        self.layout.row_gap = Some(gap.max(0.0));
+        self
+    }
+
+    pub fn overflow_x(mut self, overflow: UiOverflow) -> Self {
+        self.layout.overflow_x = overflow;
+        self
+    }
+
+    pub fn overflow_y(mut self, overflow: UiOverflow) -> Self {
+        self.layout.overflow_y = overflow;
+        self
+    }
+
+    pub fn overflow(mut self, overflow: UiOverflow) -> Self {
+        self.layout.overflow_x = overflow;
+        self.layout.overflow_y = overflow;
         self
     }
 

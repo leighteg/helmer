@@ -602,48 +602,7 @@ pub struct ScriptSpawned {
     pub script_index: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct ScriptAsset {
-    pub language: String,
-    pub source: String,
-    pub modified: SystemTime,
-    pub error: Option<String>,
-}
-
-#[derive(Resource)]
-pub struct ScriptRegistry {
-    pub scripts: HashMap<PathBuf, ScriptAsset>,
-    pub dirty_paths: HashSet<PathBuf>,
-    pub last_scan: Instant,
-    pub scan_interval: Duration,
-    pub status: Option<String>,
-}
-
-impl Default for ScriptRegistry {
-    fn default() -> Self {
-        Self {
-            scripts: HashMap::new(),
-            dirty_paths: HashSet::new(),
-            last_scan: Instant::now(),
-            scan_interval: Duration::from_secs(2),
-            status: None,
-        }
-    }
-}
-
-impl ScriptRegistry {
-    pub fn mark_dirty_paths(&mut self, paths: &HashSet<PathBuf>) {
-        self.dirty_paths.extend(paths.iter().cloned());
-    }
-
-    pub fn mark_dirty_paths_owned(&mut self, paths: HashSet<PathBuf>) {
-        self.dirty_paths.extend(paths);
-    }
-
-    pub fn take_dirty_paths(&mut self) -> HashSet<PathBuf> {
-        std::mem::take(&mut self.dirty_paths)
-    }
-}
+pub use helmer_editor_runtime::script_registry::{ScriptAsset, ScriptRegistry};
 
 pub fn is_script_path(path: &Path) -> bool {
     runtime_scripting::is_script_path(path)
@@ -1531,7 +1490,7 @@ pub fn script_execution_system(world: &mut World) {
         .and_then(|profiler| {
             profiler
                 .0
-                .begin_scope("helmer_editor::editor::script_execution_system")
+                .begin_scope("helmer_editor_egui::editor::script_execution_system")
         });
 
     let current_state = world

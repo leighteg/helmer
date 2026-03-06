@@ -5,17 +5,18 @@ use hashbrown::HashMap;
 use taffy::{
     Overflow, TaffyTree,
     prelude::{
-        AlignItems, AvailableSpace, Dimension, Display, FlexDirection, FlexWrap, LengthPercentage,
-        LengthPercentageAuto, Position, Rect as TaffyRect, Size, Style, length,
+        AlignContent, AlignItems, AlignSelf, AvailableSpace, Dimension, Display, FlexDirection,
+        FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto, Position,
+        Rect as TaffyRect, Size, Style, length,
     },
 };
 
 use crate::{
-    RetainedUi, UiAlignItems, UiButtonVariant, UiColor, UiContext, UiDimension, UiDisplay,
-    UiDragInputSnapshot, UiDragValueState, UiDrawCommand, UiFlexDirection, UiFlexWrap,
-    UiFrameOutput, UiId, UiImageCommand, UiInteractionState, UiLayoutStyle, UiNode, UiPositionType,
-    UiRect, UiRectCommand, UiTextAlign, UiTextCommand, UiTextValue, UiTheme, UiWidget,
-    estimate_char_advance, estimate_text_width,
+    RetainedUi, UiAlignContent, UiAlignItems, UiAlignSelf, UiButtonVariant, UiColor, UiContext,
+    UiDimension, UiDisplay, UiDragInputSnapshot, UiDragValueState, UiDrawCommand, UiFlexDirection,
+    UiFlexWrap, UiFrameOutput, UiId, UiImageCommand, UiInteractionState, UiJustifyContent,
+    UiLayoutStyle, UiNode, UiOverflow, UiPositionType, UiRect, UiRectCommand, UiTextAlign,
+    UiTextCommand, UiTextValue, UiTheme, UiWidget, estimate_char_advance, estimate_text_width,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -580,6 +581,7 @@ impl UiRuntime {
                 | UiWidget::Disclosure(_)
                 | UiWidget::TextField(_)
                 | UiWidget::Image(_)
+                | UiWidget::HitBox
         );
         if is_interactive {
             let hit_rect = match clip_rect {
@@ -662,7 +664,7 @@ impl UiRuntime {
                     fill = Self::mix(fill, self.theme.button_pressed_overlay);
                     border_color = self.theme.button_text.with_alpha(0.92);
                     border_width = border_width.max(self.theme.border_width + 1.0);
-                } else if self.interaction.is_hovered(id) {
+                } else if self.interaction.is_hovered(id) && !self.suppress_hover_feedback(id) {
                     fill = Self::mix(fill, self.theme.button_hover_overlay);
                     border_color = self.theme.button_text.with_alpha(0.68);
                     border_width = border_width.max(self.theme.border_width + 0.4);
@@ -709,7 +711,7 @@ impl UiRuntime {
                     fill = Self::mix(fill, self.theme.button_pressed_overlay);
                     border_color = self.theme.button_text.with_alpha(0.90);
                     border_width = border_width.max(self.theme.border_width + 1.0);
-                } else if self.interaction.is_hovered(id) {
+                } else if self.interaction.is_hovered(id) && !self.suppress_hover_feedback(id) {
                     fill = Self::mix(fill, self.theme.button_hover_overlay);
                     border_color = self.theme.button_text.with_alpha(0.65);
                     border_width = border_width.max(self.theme.border_width + 0.4);
@@ -801,7 +803,7 @@ impl UiRuntime {
                     fill = Self::mix(fill, self.theme.button_pressed_overlay);
                     border_color = self.theme.button_text.with_alpha(0.95);
                     border_width = border_width.max(self.theme.border_width + 0.9);
-                } else if self.interaction.is_hovered(id) {
+                } else if self.interaction.is_hovered(id) && !self.suppress_hover_feedback(id) {
                     fill = Self::mix(fill, self.theme.button_hover_overlay);
                     border_color = self.theme.button_text.with_alpha(0.72);
                     border_width = border_width.max(self.theme.border_width + 0.35);
@@ -898,6 +900,20 @@ impl UiRuntime {
             }
             UiWidget::Image(image) => {
                 self.frame_paint_order.push(id);
+                let hit_overlay = if image.tint.a <= 0.001 {
+                    if self.interaction.is_active(id) {
+                        Some(self.theme.button_pressed_overlay.with_alpha(0.46))
+                    } else if self.interaction.is_hovered(id) && !self.suppress_hover_feedback(id) {
+                        Some(self.theme.button_hover_overlay.with_alpha(0.34))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(overlay) = hit_overlay {
+                    self.push_rect(id, rect, overlay, clip_rect);
+                }
                 self.push_image(
                     id,
                     rect,
@@ -907,6 +923,18 @@ impl UiRuntime {
                     image.uv_max,
                     clip_rect,
                 );
+                let mut visual = style.visual;
+                if hit_overlay.is_some() && visual.border_color.is_none() {
+                    visual.border_color = Some(self.theme.button_text.with_alpha(0.72));
+                    visual.border_width = visual.border_width.max(self.theme.border_width.max(1.0));
+                }
+                self.push_border(id, rect, visual, clip_rect);
+            }
+            UiWidget::HitBox => {
+                self.frame_paint_order.push(id);
+                if let Some(background) = style.visual.background {
+                    self.push_rect(id, rect, background, clip_rect);
+                }
                 self.push_border(id, rect, style.visual, clip_rect);
             }
             UiWidget::Spacer => {}
@@ -1062,6 +1090,10 @@ impl UiRuntime {
         )
     }
 
+    fn suppress_hover_feedback(&self, id: UiId) -> bool {
+        self.interaction.active.is_some() && self.interaction.active != Some(id)
+    }
+
     fn hash_draw_command(&mut self, command: &UiDrawCommand) {
         if !self.hash_draw_commands_enabled {
             return;
@@ -1169,6 +1201,30 @@ fn to_taffy_style(layout: &UiLayoutStyle) -> Style {
         UiAlignItems::End => AlignItems::FlexEnd,
         UiAlignItems::Stretch => AlignItems::Stretch,
     });
+    style.justify_content = Some(match layout.justify_content {
+        UiJustifyContent::Start => JustifyContent::FlexStart,
+        UiJustifyContent::Center => JustifyContent::Center,
+        UiJustifyContent::End => JustifyContent::FlexEnd,
+        UiJustifyContent::SpaceBetween => JustifyContent::SpaceBetween,
+        UiJustifyContent::SpaceAround => JustifyContent::SpaceAround,
+        UiJustifyContent::SpaceEvenly => JustifyContent::SpaceEvenly,
+    });
+    style.align_content = Some(match layout.align_content {
+        UiAlignContent::Start => AlignContent::FlexStart,
+        UiAlignContent::Center => AlignContent::Center,
+        UiAlignContent::End => AlignContent::FlexEnd,
+        UiAlignContent::Stretch => AlignContent::Stretch,
+        UiAlignContent::SpaceBetween => AlignContent::SpaceBetween,
+        UiAlignContent::SpaceAround => AlignContent::SpaceAround,
+        UiAlignContent::SpaceEvenly => AlignContent::SpaceEvenly,
+    });
+    style.align_self = match layout.align_self {
+        UiAlignSelf::Auto => None,
+        UiAlignSelf::Start => Some(AlignSelf::FlexStart),
+        UiAlignSelf::Center => Some(AlignSelf::Center),
+        UiAlignSelf::End => Some(AlignSelf::FlexEnd),
+        UiAlignSelf::Stretch => Some(AlignSelf::Stretch),
+    };
     style.inset = TaffyRect {
         left: to_length_auto(layout.left),
         right: to_length_auto(layout.right),
@@ -1178,6 +1234,14 @@ fn to_taffy_style(layout: &UiLayoutStyle) -> Style {
     style.size = Size {
         width: to_dimension(layout.width),
         height: to_dimension(layout.height),
+    };
+    style.min_size = Size {
+        width: to_dimension(layout.min_width),
+        height: to_dimension(layout.min_height),
+    };
+    style.max_size = Size {
+        width: to_dimension(layout.max_width),
+        height: to_dimension(layout.max_height),
     };
     style.padding = TaffyRect {
         left: LengthPercentage::length(layout.padding.left.max(0.0)),
@@ -1192,14 +1256,14 @@ fn to_taffy_style(layout: &UiLayoutStyle) -> Style {
         bottom: LengthPercentageAuto::length(layout.margin.bottom.max(0.0)),
     };
     style.gap = Size {
-        width: length(layout.gap.x.max(0.0)),
-        height: length(layout.gap.y.max(0.0)),
+        width: length(layout.column_gap.unwrap_or(layout.gap.x).max(0.0)),
+        height: length(layout.row_gap.unwrap_or(layout.gap.y).max(0.0)),
     };
     style.flex_grow = layout.flex_grow.max(0.0);
     style.flex_shrink = layout.flex_shrink.max(0.0);
     style.overflow = taffy::geometry::Point {
-        x: Overflow::Visible,
-        y: Overflow::Visible,
+        x: to_overflow(layout.overflow_x),
+        y: to_overflow(layout.overflow_y),
     };
     style
 }
@@ -1221,6 +1285,14 @@ fn to_length_auto(dimension: UiDimension) -> LengthPercentageAuto {
         UiDimension::Auto => LengthPercentageAuto::auto(),
         UiDimension::Points(value) => LengthPercentageAuto::length(value),
         UiDimension::Percent(value) => LengthPercentageAuto::percent(value),
+    }
+}
+
+fn to_overflow(overflow: UiOverflow) -> Overflow {
+    match overflow {
+        UiOverflow::Visible => Overflow::Visible,
+        UiOverflow::Hidden => Overflow::Hidden,
+        UiOverflow::Scroll => Overflow::Scroll,
     }
 }
 

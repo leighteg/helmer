@@ -58,47 +58,13 @@ use crate::editor::{
     },
 };
 
-#[derive(Component, Debug, Clone, Copy, Default)]
-pub struct EditorEntity;
+pub use helmer_editor_runtime::scene_state::{EditorEntity, EditorRenderRefresh, WorldState};
+pub type EditorSceneState = helmer_editor_runtime::scene_state::EditorSceneState<SceneDocument>;
 
 #[derive(Component, Debug, Clone)]
 pub struct PendingSkinnedMeshAsset {
     pub scene_handle: Handle<Scene>,
     pub node_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorldState {
-    Edit,
-    Play,
-}
-
-#[derive(Resource, Debug, Clone)]
-pub struct EditorSceneState {
-    pub path: Option<PathBuf>,
-    pub name: String,
-    pub dirty: bool,
-    pub world_state: WorldState,
-    pub play_backup: Option<SceneDocument>,
-    pub play_selected_index: Option<usize>,
-}
-
-impl Default for EditorSceneState {
-    fn default() -> Self {
-        Self {
-            path: None,
-            name: "Untitled".to_string(),
-            dirty: false,
-            world_state: WorldState::Edit,
-            play_backup: None,
-            play_selected_index: None,
-        }
-    }
-}
-
-#[derive(Resource, Debug, Default, Clone)]
-pub struct EditorRenderRefresh {
-    pub pending: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

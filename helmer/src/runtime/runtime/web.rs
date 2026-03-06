@@ -49,7 +49,7 @@ use crate::{
     },
 };
 
-const DEFAULT_RUNTIME_LOG_FILTER: &str = "info,helmer=trace,helmer_becs=trace,helmer_editor=trace,script=trace,audio=trace,\
+const DEFAULT_RUNTIME_LOG_FILTER: &str = "info,helmer=trace,helmer_becs=trace,helmer_editor=trace,helmer_editor_egui=trace,script=trace,audio=trace,\
      wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,notify=info,mio=info,polling=info";
 
 struct RenderInit {

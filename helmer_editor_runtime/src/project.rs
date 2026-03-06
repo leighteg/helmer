@@ -1,11 +1,21 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
+use bevy_ecs::prelude::Resource;
+use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 pub const PROJECT_FILE_NAME: &str = "helmer_project.ron";
+const DEFAULT_MATERIAL_FILE: &str = "default.ron";
+const MAX_RECENT_PROJECTS: usize = 8;
+
+#[derive(Resource, Default, Clone)]
+pub struct EditorProject {
+    pub root: Option<PathBuf>,
+    pub config: Option<ProjectConfig>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -140,6 +150,147 @@ pub fn load_project_config(root: &Path) -> Result<ProjectConfig, String> {
 
 pub fn normalize_asset_relative_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+pub fn create_project(root: &Path, name: &str) -> Result<ProjectConfig, String> {
+    fs::create_dir_all(root).map_err(|err| err.to_string())?;
+
+    let config = ProjectConfig::new(name.to_string());
+    ensure_project_layout(root, &config)?;
+    write_project_config(root, &config)?;
+    write_default_material(root, &config)?;
+    Ok(config)
+}
+
+pub fn load_project(root: &Path) -> Result<ProjectConfig, String> {
+    let config_path = ProjectConfig::config_path(root);
+    let config = if config_path.exists() {
+        let data = fs::read_to_string(&config_path).map_err(|err| err.to_string())?;
+        ron::de::from_str::<ProjectConfig>(&data).map_err(|err| err.to_string())?
+    } else {
+        if !root.exists() {
+            return Err(format!("Project path does not exist: {}", root.display()));
+        }
+        let name = root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("helmer Project")
+            .to_string();
+        let config = ProjectConfig::new(name);
+        write_project_config(root, &config)?;
+        config
+    };
+
+    ensure_project_layout(root, &config)?;
+    write_default_material(root, &config)?;
+    Ok(config)
+}
+
+pub fn save_project_config(root: &Path, config: &ProjectConfig) -> Result<(), String> {
+    ensure_project_layout(root, config)?;
+    write_project_config(root, config)?;
+    write_default_material(root, config)?;
+    Ok(())
+}
+
+fn write_project_config(root: &Path, config: &ProjectConfig) -> Result<(), String> {
+    let config_path = ProjectConfig::config_path(root);
+    let pretty = PrettyConfig::new()
+        .compact_arrays(false)
+        .depth_limit(4)
+        .enumerate_arrays(true);
+    let data = ron::ser::to_string_pretty(config, pretty).map_err(|err| err.to_string())?;
+    fs::write(config_path, data).map_err(|err| err.to_string())
+}
+
+fn ensure_project_layout(root: &Path, config: &ProjectConfig) -> Result<(), String> {
+    fs::create_dir_all(config.assets_root(root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(config.models_root(root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(config.textures_root(root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(config.materials_root(root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(config.scenes_root(root)).map_err(|err| err.to_string())?;
+    fs::create_dir_all(config.scripts_root(root)).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn write_default_material(root: &Path, config: &ProjectConfig) -> Result<(), String> {
+    let materials_root = config.materials_root(root);
+    let default_path = materials_root.join(DEFAULT_MATERIAL_FILE);
+    if default_path.exists() {
+        return Ok(());
+    }
+    fs::write(default_path, default_material_template()).map_err(|err| err.to_string())
+}
+
+fn default_material_template() -> &'static str {
+    "(\n    base_color: (1.0, 1.0, 1.0, 1.0),\n    metallic: 0.0,\n    roughness: 0.8,\n)\n"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RecentProjectsFile {
+    paths: Vec<String>,
+}
+
+pub fn load_recent_projects() -> Vec<PathBuf> {
+    let Some(path) = recent_projects_path() else {
+        return Vec::new();
+    };
+
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(),
+    };
+
+    let parsed = ron::de::from_str::<RecentProjectsFile>(&data).unwrap_or_default();
+    parsed
+        .paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .collect()
+}
+
+pub fn save_recent_projects(paths: &[PathBuf]) -> Result<(), String> {
+    let Some(path) = recent_projects_path() else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+
+    let payload = RecentProjectsFile {
+        paths: paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+    };
+
+    let pretty = PrettyConfig::new()
+        .compact_arrays(false)
+        .depth_limit(4)
+        .enumerate_arrays(true);
+    let data = ron::ser::to_string_pretty(&payload, pretty).map_err(|err| err.to_string())?;
+    fs::write(path, data).map_err(|err| err.to_string())
+}
+
+pub fn push_recent_project(paths: &mut Vec<PathBuf>, path: &Path) -> Result<(), String> {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    paths.retain(|entry| entry != &normalized);
+    paths.insert(0, normalized);
+    if paths.len() > MAX_RECENT_PROJECTS {
+        paths.truncate(MAX_RECENT_PROJECTS);
+    }
+    save_recent_projects(paths)
+}
+
+fn recent_projects_path() -> Option<PathBuf> {
+    let home = env::var("HOME").or_else(|_| env::var("USERPROFILE")).ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".helmer_editor")
+            .join("recent_projects.ron"),
+    )
 }
 
 fn default_project_name() -> String {

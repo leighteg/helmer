@@ -372,7 +372,7 @@ pub fn timeline_playback_system(
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
             .0
-            .begin_scope("helmer_editor::editor::timeline_playback_system")
+            .begin_scope("helmer_editor_egui::editor::timeline_playback_system")
     });
 
     let dt = time.0;

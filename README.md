@@ -52,12 +52,12 @@ massively scalable runtime/collection of tooling masquerading as a game engine
   - `cargo run -p helmer_editor_egui --release`
   - see **[building](/building.md)** to build a project
 
-  |        integration       | desc                                                                                                                                   | ease  |
-  |:------------------------:|----------------------------------------------------------------------------------------------------------------------------------------|-------|
-  |     **`helmer_ecs`**     | the og! simple and surprisingly scalable (O(N) entity overhead!! 😭). basic scheduler                                                  | ****  |
-  |     **`helmer_becs`**    | a robust integration for the expeditious yet powerful [bevy_ecs](https://github.com/bevyengine/bevy/tree/main/crates/bevy_ecs) library | ***   |
-  | **`helmer_editor_egui`** | a featured, robust editor, exposing rich luau/rust/visual scripting integrations                                                       | ***** |
-  |  **custom integration**  | manually implement a app/game logic paradigm over `helmer`                                                                             | *     |
+|        integration       | desc                                                                                                                                   | ease  |
+|:------------------------:|----------------------------------------------------------------------------------------------------------------------------------------|-------|
+|     **`helmer_ecs`**     | the og! simple and surprisingly scalable (O(N) entity overhead!! 😭). basic scheduler                                                  | ****  |
+|     **`helmer_becs`**    | a robust integration for the expeditious yet powerful [bevy_ecs](https://github.com/bevyengine/bevy/tree/main/crates/bevy_ecs) library | ***   |
+| **`helmer_editor_egui`** | a featured, robust editor, exposing rich luau/rust/visual scripting integrations                                                       | ***** |
+|  **custom integration**  | manually implement a app/game logic paradigm over `helmer`                                                                             | *     |
 
 #### helmer_becs examples
 - **[becs_bench](/becs_bench)**: same-ish scene as `test_game`, with entity spawner system used to stress test earlier on
@@ -67,7 +67,7 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 - **[test_game](/test_game)**: was the sandbox for spearheading features early on. bevy's ecs is objectively better in every possible way and for that reason i have been using `helmer_becs` for everything since implementing it (which condescends my more recent decisions like the introduction of the graph, audio engine, etc.. so i really do wonder if there is any point in putting actual effort into a proper helmer ecs but the same question can be asked for helmers entire existance. why not i guess)
 
 ## troubleshooting
-- #### **assets popping in/out, flickering**: the default vram budgets are incredibly low - combined with the aggressive nature of the default streaming tuning this results in the churning of render/vram resources. hit `ctrl+g` to bring up the `render graph` window and increase the gpu budgets, then hit `evict gpu only`. **helmer currently lacks the ability to agnostically probe avail/total vram**
+- **assets popping in/out, flickering**: the default vram budgets are incredibly low - combined with the aggressive nature of the default streaming tuning this results in the churning of render/vram resources. hit `ctrl+g` to bring up the `render graph` window and increase the gpu budgets, then hit `evict gpu only`. **helmer currently lacks the ability to agnostically probe avail/total vram**
 
 ## left to do
 - #### taskable work pool [`helmer`]

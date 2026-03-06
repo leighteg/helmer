@@ -1,8 +1,8 @@
 # [helmer](http://helmer.leighteg.dev) &nbsp; ![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
 
-### this todo really needs a rewrite - the entire repo needs proper docs - but i dont feel like it/cant. this readme sucks
-
 a performant, flexible, extensible, scalable foundation for creation - featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
+
+massively scalable runtime/collection of tooling masquerading as a game engine
 
 ![city corner screenshot (legacy deferred renderer)](assets/screenshots/city_corner.png)
 
@@ -10,56 +10,68 @@ a performant, flexible, extensible, scalable foundation for creation - featuring
 - multiplatform
 - large scale hardware/driver support
 - performant multithreading
-- "bring your own logic" approach providing callbacks to implement a custom logic system or ecs
-- custom (naive but flexible) ecs implementation/integration, bevy_ecs integration
+- powerful ECS integrations [bevy_ecs, custom, etc..]
+- "bring your own logic" approach providing callbacks to implement a custom logic paradigm
 - rapier3D physics integration
-- basic pbr (full pbr todo)
+- beautiful provided graph templates/passes
+  - default/raster graph
+    - SSGI
+    - SSR
+    - physically based sky [LUT based]
+    - cascaded EVSM shadows [PCF]
+    - etc..
+  - hybrid graph
+    - DDGIR
+  - traced graph
+    - monte-carlo path tracer
+    - robust, scalable optimizations to accomidate real time performance
 - right handed +Y-up coordinate system
 - highly capable, scalable, robust render graph
 - legacy monolithic renderers: deferred bindless renderer, forward per-material uniforms renderer, forward texture array renderer
-- sharp cascaded EVSM shadows
-- SSGI, SSR, physically based sky
+- robust, low-overhead, massively scalable asset streaming to accomidate worlds of any scale/complexity
 - frustum+occlusion culling
-- LOD/mip generation
+- LOD/cpu&gpu mip/meshlet/BLAS/TLAS generation
+- non-blocking, highly threaded, deferred asset loading/processing/derivative generation
+- anti-blocking, massively scalable architecture
+- robust editor/build system, including powerful luau/rust/visual scripting integrations
 
-## web builds
-- install wasm-bindgen-cli: `cargo install wasm-bindgen-cli`
-- build helmer_view dist: `cargo run -p xtask -- web -p helmer_view --bin helmer_view --assets test_game/assets`
-- output: `dist/helmer_view` (serve with `python3 -m http.server --directory dist/helmer_view`)
+---
 
-## todo 😡
-- [x] web/WASM support
-- [ ] promote statelessness of GraphRenderer
-- [ ] ditch monolithic ShaderConstants for modularized uniforms
-- [x] provide custom runtime hooks?
-- [x] ~~provide custom renderer hooks~~ [render graph]
-- [x] provide custom logic thread hooks
-- [x] "bring your own logic" option (through logic thread hooks)
-- [ ] provide integrations to multiple popular and custom logic architectures
-- [ ] helmer_ecs revamp ❓
-- [ ] custom types to relieve project reliance on engine dependencies (InputMan)
-- [x] ui implementation or integration
-- [x] editor & ~~project cli tools~~ [partial]
-- [ ] taskable worker pool system/api for ecs (resource based? - asynchronously taskable by systems?)
-- [x] asset streaming
-- [x] AssetServer improved worker pool usage (scene parsing)
-- [x] skinned mesh & animation system/support
-- [x] precomputed atmospheric scattering
-- [x] fix sky light contribution (generally fixed)
-- [x] account for atmosphere ground (we sorta do)
-- [ ] modular cubemap generics
-- [ ] SSR cubemap fallback
-- [ ] more light types
-- [x] occlusion culling [broken?]
-- [x] soft shadows (PCSS?) [basic pcf for now]
-- [ ] point light shadows
-- [x] full gi (SDFGI, DDGI?)
-- [ ] full pbr/modern brdf
-- [ ] ~~implement supported advanced features to forward renderers~~
-- [ ] ~~replace forward renderer(s) shadow pipeline with a simpler implementation~~ [implement alternate shadow pipeline]
-- [ ] ~~add indirect lighting to forward renderer(s)? (Simplified Light Propagation Volumes?)~~
-- [ ] ~~cubemap-based reflections in forward renderers~~
-- [ ] ~~gpu compute based culling?~~
-- [ ] hardware RT path/pipeline or acceleration?
-- [ ] touch support
-- [x] physically based audio engine
+- ### [`helmer`](/helmer) - the core (runtime/render graph/audio engine/etc) [to be modularized!!]
+- ### [`helmer_ui`](/helmer_ui) - ui 'runtime'. robust retained APIs, rich `egui`-like immediate APIs
+- ### [`helmer_editor_runtime`](/helmer_editor_runtime) - a robust runtime over `helmer_becs`, serving as the foundation for the editors/player
+- ### [`helmer_editor_egui`](/helmer_editor_egui) - a featured, robust yet ergonomic editor over `helmer_becs`' egui integration, providing rich luau/rust/visual scripting integrations
+- ### [`helmer_player`](/helmer_player) - runtime to be shipped alongside the resulting asset packs of editor projects
+
+## ways to use helmer
+
+### `helmer_editor_egui`
+- `cargo run -p helmer_editor_egui --release`
+
+|        integration       | desc                                                                                                                                   | ease  |
+|:------------------------:|----------------------------------------------------------------------------------------------------------------------------------------|-------|
+|     **`helmer_ecs`**     | the og! simple and surprisingly scalable (O(N) entity overhead!! 😭). basic scheduler                                                   | ****  |
+|     **`helmer_becs`**    | a robust integration for the expeditious yet powerful [bevy_ecs](https://github.com/bevyengine/bevy/tree/main/crates/bevy_ecs) library | ***   |
+| **`helmer_editor_core`** | a robust runtime over `helmer_becs`, used by the editors/player, providing robust luau/rust/visual scripting integrations              | ***** |
+|  **custom integration**  | manually implement a app/game logic paradigm over `helmer`                                                                             | *     |
+
+#### helmer_becs examples
+- **[becs_bench](/becs_bench)**: same-ish scene as `test_game`, with entity spawner system used to stress test earlier on
+- **[helmer_view](/helmer_view)**: a simple GLTF scene viewer tool, using `helmer_ui`'s immediate APIs
+
+#### helmer_ecs examples
+- **[test_game](/test_game)**: was the sandbox for spearheading features early on. bevy's ecs is objectively better in every possible way and for that reason i have been using `helmer_becs` for everything since implementing it (which condescends my more recent decisions like the introduction of the graph, audio engine, etc.. so i really do wonder if there is any point in putting actual effort into a proper helmer ecs but the same question can be asked for helmers entire existance. why not i guess)
+
+## left to do
+- ### taskable work pool [`helmer`]
+- ### promote statelessness of GraphRenderer
+- ### WASM audio (and likely more im forgetting)
+- ### proper editor
+  - `helmer_editor_egui`'s immediate nature is not scaling with the scope of the project 
+  - `helmer_editor` served as a loose port of `helmer_editor_egui` as to ensure & spearhead features of `helmer_ui`'s retained APIs, meaning it inherited naughty/monolithic & immediate-motivated architectural decisions of `helmer_editor_egui`
+- ### enforce proper, clean code structure (break up monoliths like AssetServer, audio, GraphRenderer, helmer_editor_egui/scripting, etc..)
+
+## why you did that
+- `basis-universal-sys` was vendorized for WASM compatibility
+- `egui-snarl` was vendorized because it handled rclick content menu input in a way that didnt allow elements like a search bar to be interacted with without the menu closing (closed on any click instead of clicks of proper intent)
+- `egui-wgpu` vendorized for wgpu28 compatibility

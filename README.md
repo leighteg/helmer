@@ -47,6 +47,7 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 
 ### `helmer_editor_egui`
 - `cargo run -p helmer_editor_egui --release`
+- see **[building](/building.md)** to build a project
 
 |        integration       | desc                                                                                                                                   | ease  |
 |:------------------------:|----------------------------------------------------------------------------------------------------------------------------------------|-------|

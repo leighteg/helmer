@@ -16,8 +16,8 @@ use helmer::{
 };
 use parking_lot::Mutex;
 use proc::Component as ComponentDerive;
+use std::any::TypeId;
 use std::sync::Arc;
-use std::{any::TypeId, sync::Arc};
 use tracing::info;
 
 /// Add to an entity to request a scene to be loaded and spawned.

@@ -9,11 +9,10 @@ use hashbrown::HashMap;
 use std::sync::Arc;
 
 // --- Core Transform Component ---
-// This is fundamental for any spatial entity.
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vec3,
-    pub rotation: Quat, // Using Quat for rotations
+    pub rotation: Quat,
     pub scale: Vec3,
 }
 
@@ -37,15 +36,15 @@ impl Transform {
     }
 
     pub fn forward(&self) -> Vec3 {
-        self.rotation * Vec3::Z // Assuming Z is forward in local space
+        self.rotation * Vec3::Z
     }
 
     pub fn right(&self) -> Vec3 {
-        self.rotation * Vec3::X // Assuming X is right in local space
+        self.rotation * Vec3::X
     }
 
     pub fn up(&self) -> Vec3 {
-        self.rotation * Vec3::Y // Assuming Y is up in local space
+        self.rotation * Vec3::Y
     }
 
     pub fn from_matrix(matrix: Mat4) -> Self {
@@ -71,13 +70,10 @@ impl Transform {
 }
 
 // --- Mesh Rendering Component ---
-// This component links an entity to a specific mesh asset.
-// The `u32` ID would refer to an ID managed by your asset system,
-// which the renderer then uses to look up the `mev::Buffer`s.
 #[derive(Debug, Clone, Copy)]
 pub struct MeshRenderer {
     pub mesh_id: usize,
-    pub material_id: usize, // The ID of the material to use for this mesh instance
+    pub material_id: usize,
     pub casts_shadow: bool,
     pub visible: bool,
 }
@@ -223,7 +219,6 @@ impl Default for Text2d {
 }
 
 // --- Skinned Mesh Rendering Component ---
-// Uses a skin/skeleton to deform vertices.
 #[derive(Debug, Clone)]
 pub struct SkinnedMeshRenderer {
     pub mesh_id: usize,
@@ -252,7 +247,7 @@ impl SkinnedMeshRenderer {
 }
 
 // --- Pose Override Component ---
-// Editor/runtime override for manual posing or timeline playback.
+// override for manual posing or timeline playback
 #[derive(Debug, Clone)]
 pub struct PoseOverride {
     pub enabled: bool,
@@ -282,21 +277,19 @@ impl Default for PoseOverride {
 }
 
 // --- Light Components ---
-// Different types of lights will have different properties.
-// We'll define a base `Light` component and then specific data components.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LightType {
     Directional,
     Point,
-    Spot { angle: f32 }, // Spot lights might have a cone angle
+    Spot { angle: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Light {
     pub light_type: LightType,
-    pub color: Vec3,    // RGB color of the light
-    pub intensity: f32, // Brightness of the light
+    pub color: Vec3,
+    pub intensity: f32,
 }
 
 impl Light {
@@ -326,15 +319,12 @@ impl Light {
 }
 
 // --- Camera Component ---
-// Defines a camera in your world. The ECS system would select one active camera
-// to provide data for the renderer's camera uniforms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
-    pub fov_y_rad: f32,    // Vertical field of view in radians
-    pub aspect_ratio: f32, // Width / Height
+    pub fov_y_rad: f32,
+    pub aspect_ratio: f32,
     pub near_plane: f32,
     pub far_plane: f32,
-    // Add other camera properties if needed, e.g., orthographic projection settings
 }
 
 impl Camera {
@@ -406,21 +396,18 @@ impl Default for AudioEmitter {
 }
 
 // --- Material Asset Component ---
-// This component acts as a descriptor for a material that can be loaded and used by the renderer.
-// It doesn't reside on an entity directly but rather describes a material asset.
 #[derive(Debug, Clone)]
 pub struct MaterialAsset {
     pub name: String,
-    pub albedo: Vec3, // Base color
+    pub albedo: Vec3,
     pub metallic: f32,
     pub roughness: f32,
-    pub ao: f32, // Ambient occlusion
+    pub ao: f32,
     pub albedo_texture_path: Option<String>,
     pub normal_texture_path: Option<String>,
     pub metallic_roughness_texture_path: Option<String>,
     pub alpha_mode: AlphaMode,
     pub alpha_cutoff: Option<f32>,
-    // Add other texture paths (e.g., emissive, height) as needed
 }
 
 impl MaterialAsset {
@@ -450,15 +437,11 @@ impl MaterialAsset {
 }
 
 // --- Mesh Asset Component ---
-// Similar to MaterialAsset, this describes a mesh asset.
-// In your ECS components or asset definition file (where MeshAsset is defined)
-
-// In your `provided::components` module or wherever MeshAsset is defined
 
 #[derive(Debug, Clone)]
 pub struct MeshAsset {
     pub name: String,
-    pub vertices: Option<Vec<Vertex>>, // Store Vec<Vertex> directly
+    pub vertices: Option<Vec<Vertex>>,
     pub indices: Vec<u32>,
     pub mesh_file_path: Option<String>,
 }
@@ -1314,74 +1297,3 @@ impl MeshAsset {
         Self::new_raw(name, vertices, indices)
     }
 }
-
-// --- Asset ID Mapping Component ---
-// This component would be used if you have a separate asset loading/management system
-// that maps asset paths/names to generated runtime IDs (u32).
-// Entities would have these components to refer to loaded assets.
-#[derive(Debug, Clone, Copy)]
-pub struct MeshAssetId(pub u32);
-
-#[derive(Debug, Clone, Copy)]
-pub struct MaterialAssetId(pub u32);
-
-#[derive(Debug, Clone, Copy)]
-pub struct TextureAssetId(pub u32);
-
-// --- Example ECS System to Collect Render Data ---
-// This is a conceptual system that would run every frame to query your ECS
-// and build the `RenderData` structure for the renderer.
-
-/*
-use arcana::edict::World; // Or whatever your ECS world type is
-
-pub fn collect_render_data_system(
-    world: &mut World, // Or immutable reference if you use queries
-) {
-    let mut render_objects: Vec<RenderObject> = Vec::new();
-    let mut render_lights: Vec<RenderLight> = Vec::new();
-    let mut camera_transform: Option<Transform> = None; // Assuming one main camera
-
-    // Query for renderable entities
-    // Example: Query all entities with Transform and MeshRenderer
-    for (entity_id, (transform, mesh_renderer)) in world.query::<(Transform, MeshRenderer)>().iter() {
-        render_objects.push(RenderObject {
-            transform: *transform,
-            mesh_id: mesh_renderer.mesh_id,
-            material_id: mesh_renderer.material_id,
-        });
-    }
-
-    // Query for lights
-    // Example: Query all entities with Transform and Light
-    for (entity_id, (transform, light)) in world.query::<(Transform, Light)>().iter() {
-        render_lights.push(RenderLight {
-            transform: *transform,
-            color: light.color.into(), // Convert glam::Vec3 to [f32; 3]
-            intensity: light.intensity,
-            light_type: light.light_type,
-        });
-    }
-
-    // Query for the main camera
-    // Example: Find the first entity with Camera and Transform (or tag a main camera)
-    if let Some((_, (transform, camera))) = world.query::<(Transform, Camera)>().iter().next() {
-        // You might need to adjust the camera transform to be relative to the world
-        // if your camera component stores local transform.
-        camera_transform = Some(*transform);
-    }
-
-
-    // Now, update your renderer's data:
-    if let Some(cam_transform) = camera_transform {
-        let renderer = world.get_resource_mut::<crate::renderer::Renderer>().unwrap(); // Assuming Renderer is a resource
-        renderer.update_render_data(crate::renderer::RenderData {
-            objects: render_objects,
-            lights: render_lights,
-            camera_transform: cam_transform,
-        });
-    } else {
-        tracing::warn!("No active camera found in ECS for rendering.");
-    }
-}
-*/

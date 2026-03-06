@@ -19,7 +19,7 @@ impl System for SplineFollowSystem {
             },
         );
         ecs.component_pool
-            .query_for_each::<(Spline,), _>(|entity, (spline,)| {
+            .query_for_each::<(Spline, Transform), _>(|entity, (spline, _)| {
                 spline_map
                     .entry(entity)
                     .or_insert_with(|| (spline.clone(), Transform::default()));

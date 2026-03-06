@@ -169,24 +169,37 @@ impl SkinningState {
         joint_count: usize,
         pose: Pose,
     ) -> &mut SkinningEntry {
-        let entry = self.entries.entry(entity).or_insert_with(|| {
+        if !self.entries.contains_key(&entity) {
             let offset = self.allocate_range(joint_count);
-            SkinningEntry {
-                offset,
-                count: joint_count,
-                pose,
-                globals: vec![Mat4::IDENTITY; joint_count],
-            }
-        });
-        if entry.count != joint_count {
-            self.free_range(entry.offset, entry.count);
-            entry.offset = self.allocate_range(joint_count);
+            self.entries.insert(
+                entity,
+                SkinningEntry {
+                    offset,
+                    count: joint_count,
+                    pose,
+                    globals: vec![Mat4::IDENTITY; joint_count],
+                },
+            );
+            return self.entries.get_mut(&entity).unwrap();
+        }
+
+        let needs_resize = self.entries.get(&entity).unwrap().count != joint_count;
+        if needs_resize {
+            let (old_offset, old_count) = {
+                let e = self.entries.get(&entity).unwrap();
+                (e.offset, e.count)
+            };
+            self.free_range(old_offset, old_count);
+            let new_offset = self.allocate_range(joint_count);
+            let entry = self.entries.get_mut(&entity).unwrap();
+            entry.offset = new_offset;
             entry.count = joint_count;
             entry.pose = pose;
             entry.globals.resize(joint_count, Mat4::IDENTITY);
             self.full_sync_requested = true;
         }
-        entry
+
+        self.entries.get_mut(&entity).unwrap()
     }
 
     fn ensure_palette_capacity(&mut self, required: usize, growth: f32) {
@@ -386,7 +399,7 @@ impl System for RenderDataSystem {
     }
 
     fn run(&mut self, dt: f32, ecs: &mut ECSCore, _input_manager: &InputManager) {
-        let mut streaming_hints: Vec<AssetStreamingRequest> = Vec::new();
+        let streaming_hints: Vec<AssetStreamingRequest>;
         let runtime_config = match ecs.get_resource::<RuntimeConfig>() {
             Some(config) => config.clone(),
             None => {
@@ -410,55 +423,87 @@ impl System for RenderDataSystem {
                 if joint_count == 0 {
                     return;
                 }
-                let entry =
-                    self.skinning
-                        .ensure_entry(entity, joint_count, Pose::from_skeleton(skeleton));
+
+                let (offset, count) = {
+                    let entry = self.skinning.ensure_entry(
+                        entity,
+                        joint_count,
+                        Pose::from_skeleton(skeleton),
+                    );
+                    (entry.offset, entry.count)
+                };
+
                 self.skinning
-                    .ensure_palette_capacity(entry.offset + entry.count, growth);
-                anim.evaluate(skeleton, dt, &mut entry.pose);
-                let palette_slice =
-                    &mut self.skinning.palette[entry.offset..(entry.offset + entry.count)];
-                write_skin_palette(
-                    skeleton,
-                    &entry.pose.locals,
-                    &mut entry.globals,
-                    palette_slice,
-                );
-                self.skinning.palette_dirty = true;
+                    .ensure_palette_capacity(offset + count, growth);
+
+                {
+                    let SkinningState {
+                        entries,
+                        palette,
+                        palette_dirty,
+                        ..
+                    } = &mut self.skinning;
+                    let entry = entries.get_mut(&entity).unwrap();
+                    anim.evaluate(skeleton, dt, &mut entry.pose);
+                    let palette_slice = &mut palette[offset..(offset + count)];
+                    write_skin_palette(
+                        skeleton,
+                        &entry.pose.locals,
+                        &mut entry.globals,
+                        palette_slice,
+                    );
+                    *palette_dirty = true;
+                }
 
                 if matches!(self.skinning.mode, SkinningMode::Cpu) {
                     let Some(asset_server) = asset_server.as_ref() else {
                         return;
                     };
                     let base_mesh_id = skinned.mesh_id;
-                    let cpu_entry = self.skinning.cpu_meshes.entry(entity).or_insert_with(|| {
+
+                    if !self.skinning.cpu_meshes.contains_key(&entity) {
                         self.skinning.full_sync_requested = true;
+                        let palette_slice = &self.skinning.palette[offset..(offset + count)];
                         let mesh = asset_server.lock().get_mesh(base_mesh_id);
-                        if let Some(mesh) = mesh {
+                        let new_entry = if let Some(mesh) = mesh {
                             if let Some(lod) = mesh.lods.read().first() {
                                 let skinned_vertices =
                                     skin_vertices_cpu(&lod.vertices, palette_slice);
                                 let handle = asset_server
                                     .lock()
                                     .add_mesh(skinned_vertices, lod.indices.to_vec());
-                                return CpuSkinnedMesh {
+                                CpuSkinnedMesh {
                                     mesh_id: handle.id,
                                     base_mesh_id,
-                                };
+                                }
+                            } else {
+                                CpuSkinnedMesh {
+                                    mesh_id: base_mesh_id,
+                                    base_mesh_id,
+                                }
                             }
-                        }
-                        CpuSkinnedMesh {
-                            mesh_id: base_mesh_id,
-                            base_mesh_id,
-                        }
-                    });
+                        } else {
+                            CpuSkinnedMesh {
+                                mesh_id: base_mesh_id,
+                                base_mesh_id,
+                            }
+                        };
+                        self.skinning.cpu_meshes.insert(entity, new_entry);
+                    }
 
-                    if cpu_entry.base_mesh_id != base_mesh_id {
-                        cpu_entry.base_mesh_id = base_mesh_id;
+                    let (current_cpu_mesh_id, base_changed) = {
+                        let cpu_entry = self.skinning.cpu_meshes.get_mut(&entity).unwrap();
+                        let changed = cpu_entry.base_mesh_id != base_mesh_id;
+                        if changed {
+                            cpu_entry.base_mesh_id = base_mesh_id;
+                        }
+                        (cpu_entry.mesh_id, changed)
+                    };
+                    if base_changed {
                         self.skinning.full_sync_requested = true;
                     }
 
-                    if cpu_entry.mesh_id == base_mesh_id {
+                    if current_cpu_mesh_id == base_mesh_id {
                         return;
                     }
                     let mesh = asset_server.lock().get_mesh(base_mesh_id);
@@ -476,9 +521,10 @@ impl System for RenderDataSystem {
                         }
                         vertex_budget = vertex_budget.saturating_sub(vertex_count);
                     }
+                    let palette_slice = &self.skinning.palette[offset..(offset + count)];
                     let skinned_vertices = skin_vertices_cpu(&lod.vertices, palette_slice);
                     asset_server.lock().update_mesh(
-                        cpu_entry.mesh_id,
+                        current_cpu_mesh_id,
                         skinned_vertices,
                         lod.indices.to_vec(),
                     );
@@ -486,7 +532,7 @@ impl System for RenderDataSystem {
             });
 
         ecs.component_pool
-            .query_for_each::<(SkinnedMeshRenderer,), _>(|entity, (skinned,)| {
+            .query_for_each::<(SkinnedMeshRenderer, Transform), _>(|entity, (skinned, _)| {
                 if seen.contains(&entity) {
                     return;
                 }
@@ -496,55 +542,87 @@ impl System for RenderDataSystem {
                 if joint_count == 0 {
                     return;
                 }
-                let entry =
-                    self.skinning
-                        .ensure_entry(entity, joint_count, Pose::from_skeleton(skeleton));
+
+                let (offset, count) = {
+                    let entry = self.skinning.ensure_entry(
+                        entity,
+                        joint_count,
+                        Pose::from_skeleton(skeleton),
+                    );
+                    (entry.offset, entry.count)
+                };
+
                 self.skinning
-                    .ensure_palette_capacity(entry.offset + entry.count, growth);
-                entry.pose.reset_to_bind(skeleton);
-                let palette_slice =
-                    &mut self.skinning.palette[entry.offset..(entry.offset + entry.count)];
-                write_skin_palette(
-                    skeleton,
-                    &entry.pose.locals,
-                    &mut entry.globals,
-                    palette_slice,
-                );
-                self.skinning.palette_dirty = true;
+                    .ensure_palette_capacity(offset + count, growth);
+
+                {
+                    let SkinningState {
+                        entries,
+                        palette,
+                        palette_dirty,
+                        ..
+                    } = &mut self.skinning;
+                    let entry = entries.get_mut(&entity).unwrap();
+                    entry.pose.reset_to_bind(skeleton);
+                    let palette_slice = &mut palette[offset..(offset + count)];
+                    write_skin_palette(
+                        skeleton,
+                        &entry.pose.locals,
+                        &mut entry.globals,
+                        palette_slice,
+                    );
+                    *palette_dirty = true;
+                }
 
                 if matches!(self.skinning.mode, SkinningMode::Cpu) {
                     let Some(asset_server) = asset_server.as_ref() else {
                         return;
                     };
                     let base_mesh_id = skinned.mesh_id;
-                    let cpu_entry = self.skinning.cpu_meshes.entry(entity).or_insert_with(|| {
+
+                    if !self.skinning.cpu_meshes.contains_key(&entity) {
                         self.skinning.full_sync_requested = true;
+                        let palette_slice = &self.skinning.palette[offset..(offset + count)];
                         let mesh = asset_server.lock().get_mesh(base_mesh_id);
-                        if let Some(mesh) = mesh {
+                        let new_entry = if let Some(mesh) = mesh {
                             if let Some(lod) = mesh.lods.read().first() {
                                 let skinned_vertices =
                                     skin_vertices_cpu(&lod.vertices, palette_slice);
                                 let handle = asset_server
                                     .lock()
                                     .add_mesh(skinned_vertices, lod.indices.to_vec());
-                                return CpuSkinnedMesh {
+                                CpuSkinnedMesh {
                                     mesh_id: handle.id,
                                     base_mesh_id,
-                                };
+                                }
+                            } else {
+                                CpuSkinnedMesh {
+                                    mesh_id: base_mesh_id,
+                                    base_mesh_id,
+                                }
                             }
-                        }
-                        CpuSkinnedMesh {
-                            mesh_id: base_mesh_id,
-                            base_mesh_id,
-                        }
-                    });
+                        } else {
+                            CpuSkinnedMesh {
+                                mesh_id: base_mesh_id,
+                                base_mesh_id,
+                            }
+                        };
+                        self.skinning.cpu_meshes.insert(entity, new_entry);
+                    }
 
-                    if cpu_entry.base_mesh_id != base_mesh_id {
-                        cpu_entry.base_mesh_id = base_mesh_id;
+                    let (current_cpu_mesh_id, base_changed) = {
+                        let cpu_entry = self.skinning.cpu_meshes.get_mut(&entity).unwrap();
+                        let changed = cpu_entry.base_mesh_id != base_mesh_id;
+                        if changed {
+                            cpu_entry.base_mesh_id = base_mesh_id;
+                        }
+                        (cpu_entry.mesh_id, changed)
+                    };
+                    if base_changed {
                         self.skinning.full_sync_requested = true;
                     }
 
-                    if cpu_entry.mesh_id == base_mesh_id {
+                    if current_cpu_mesh_id == base_mesh_id {
                         return;
                     }
                     let mesh = asset_server.lock().get_mesh(base_mesh_id);
@@ -562,9 +640,10 @@ impl System for RenderDataSystem {
                         }
                         vertex_budget = vertex_budget.saturating_sub(vertex_count);
                     }
+                    let palette_slice = &self.skinning.palette[offset..(offset + count)];
                     let skinned_vertices = skin_vertices_cpu(&lod.vertices, palette_slice);
                     asset_server.lock().update_mesh(
-                        cpu_entry.mesh_id,
+                        current_cpu_mesh_id,
                         skinned_vertices,
                         lod.indices.to_vec(),
                     );
@@ -645,27 +724,17 @@ impl System for RenderDataSystem {
                             }
 
                             // --- LOD SELECTION ---
-                            // This method calculates the distance to the closest point on the object's bounding box.
                             let lod_index: usize = if runtime_config.render_config.lod {
-                                // 1. Get the matrix to transform from world space to the object's local space.
                                 let model_matrix = Mat4::from_scale_rotation_translation(
                                     transform.scale,
                                     transform.rotation,
                                     transform.position,
                                 );
                                 let inverse_model = model_matrix.inverse();
-
-                                // 2. Move the camera's position into the object's local space.
                                 let camera_pos_local =
                                     inverse_model.transform_point3(camera_transform.position);
-
-                                // 3. Find the closest point on the axis-aligned bounding box to the camera's local position.
-                                //    The `clamp` function is perfect for this. If the camera is inside the box, this will be the camera's own position.
                                 let closest_point_local =
                                     camera_pos_local.clamp(aabb.min, aabb.max);
-
-                                // 4. The squared distance is now between the camera (in local space) and the closest point on the box (in local space).
-                                //    If the camera is inside the box, this distance is 0, correctly selecting LOD 0.
                                 let distance_sq =
                                     camera_pos_local.distance_squared(closest_point_local);
 
@@ -972,6 +1041,7 @@ impl System for RenderDataSystem {
             lights_remove,
             sprites: None,
             text_2d: None,
+            ui: None,
             camera: None,
             render_main_scene_to_swapchain: None,
             viewports: None,

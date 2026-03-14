@@ -1,23 +1,22 @@
-use bevy_ecs::prelude::{DetectChanges, Entity, Query, Ref, Res, ResMut, Resource, With};
-use bevy_ecs::query::Or;
-use bevy_ecs::system::{ParamSet, SystemParam};
 use glam::{Mat4, Quat, Vec3};
+use helmer_becs::ecs::prelude::{DetectChanges, Entity, Query, Ref, Res, ResMut, Resource, With};
+use helmer_becs::ecs::query::Or;
+use helmer_becs::ecs::system::{ParamSet, SystemParam};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
-use helmer::animation::compute_global_matrices;
-use helmer::graphics::common::renderer::{
-    Aabb, GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoLine, GizmoMode, GizmoStyle,
-    MeshLodPayload,
-};
-use helmer::provided::components::{Camera, LightType, Spline, Transform};
+use helmer_animation::compute_global_matrices;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::RenderGizmoState;
 use helmer_becs::systems::scene_system::SceneChild;
 use helmer_becs::{
-    BevyActiveCamera, BevyAssetServer, BevyAudioEmitter, BevyCamera, BevyInputManager, BevyLight,
-    BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler,
-    BevyTransform,
+    ActiveCamera, AudioEmitter, BecsAssetServer, BecsInputManager, BecsSystemProfiler, Camera,
+    Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, Transform,
+    components::LightType,
+};
+use helmer_render::graphics::common::renderer::{
+    Aabb, GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoLine, GizmoMode, GizmoStyle,
+    MeshLodPayload,
 };
 
 use crate::editor::scene::{EditorEntity, EditorSceneState, WorldState};
@@ -471,51 +470,47 @@ pub struct GizmoSystemParams<'w, 's> {
     selection: Res<'w, InspectorSelectedEntityResource>,
     scene_state: Res<'w, EditorSceneState>,
     undo_state: ResMut<'w, EditorUndoState>,
-    input: Res<'w, BevyInputManager>,
-    asset_server: Res<'w, BevyAssetServer>,
-    mesh_query: Query<'w, 's, &'static BevyMeshRenderer>,
-    skinned_query: Query<'w, 's, &'static BevySkinnedMeshRenderer>,
-    pose_override_query: Query<'w, 's, &'static mut BevyPoseOverride>,
+    input: Res<'w, BecsInputManager>,
+    asset_server: Res<'w, BecsAssetServer>,
+    mesh_query: Query<'w, 's, &'static MeshRenderer>,
+    skinned_query: Query<'w, 's, &'static SkinnedMeshRenderer>,
+    pose_override_query: Query<'w, 's, &'static mut PoseOverride>,
     spatial_queries: ParamSet<
         'w,
         's,
         (
-            Query<'w, 's, &'static mut BevyTransform>,
-            Query<'w, 's, &'static BevyTransform>,
-            Query<'w, 's, &'static mut BevySpline>,
+            Query<'w, 's, &'static mut Transform>,
+            Query<'w, 's, &'static Transform>,
+            Query<'w, 's, &'static mut Spline>,
             Query<
                 'w,
                 's,
-                (Entity, &'static BevySpline, Option<&'static BevyTransform>),
+                (Entity, &'static Spline, Option<&'static Transform>),
                 With<EditorEntity>,
             >,
         ),
     >,
-    active_camera_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>), With<BevyActiveCamera>>,
-    camera_component_query: Query<'w, 's, (Entity, Ref<'static, BevyCamera>)>,
+    active_camera_query: Query<'w, 's, (Entity, Ref<'static, Camera>), With<ActiveCamera>>,
+    camera_component_query: Query<'w, 's, (Entity, Ref<'static, Camera>)>,
     camera_icon_query: Query<
         'w,
         's,
         (
             Entity,
-            Ref<'static, BevyCamera>,
+            Ref<'static, Camera>,
             Option<Ref<'static, EditorPlayCamera>>,
         ),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    light_icon_query: Query<
-        'w,
-        's,
-        (Entity, Ref<'static, BevyLight>),
-        Or<(With<EditorEntity>, With<SceneChild>)>,
-    >,
+    light_icon_query:
+        Query<'w, 's, (Entity, Ref<'static, Light>), Or<(With<EditorEntity>, With<SceneChild>)>>,
     audio_icon_query: Query<
         'w,
         's,
-        (Entity, Ref<'static, BevyAudioEmitter>),
+        (Entity, Ref<'static, AudioEmitter>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    system_profiler: Option<Res<'w, BevySystemProfiler>>,
+    system_profiler: Option<Res<'w, BecsSystemProfiler>>,
 }
 
 pub fn gizmo_system(params: GizmoSystemParams) {
@@ -546,14 +541,12 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         system_profiler,
     } = params;
 
-    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
-        profiler
-            .0
-            .begin_scope("helmer_editor_egui::editor::gizmo_system")
-    });
+    let _system_scope = system_profiler
+        .as_ref()
+        .and_then(|profiler| profiler.begin_scope("helmer_editor_egui::editor::gizmo_system"));
 
     state.suppress_selection = false;
-    let input_manager = input.0.read();
+    let input_manager = input.read();
     let interaction_locked =
         state.is_drag_active() || spline_state.dragging || spline_state.key_dragging;
     let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
@@ -586,8 +579,8 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             if spline_state.enabled && selected_entity == Some(entity) {
                 continue;
             }
-            let transform = spline_transform.map(|t| t.0).unwrap_or_default();
-            let lines = build_spline_path_lines(&spline.0, &transform, samples);
+            let transform = spline_transform.copied().unwrap_or_default();
+            let lines = build_spline_path_lines(&spline, &transform, samples);
             if !lines.is_empty() {
                 global_spline_lines.extend(lines);
             }
@@ -618,7 +611,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             }
         };
         let camera_transform_changed = camera_transform.is_changed();
-        let camera_transform = camera_transform.0;
+        let camera_transform = *camera_transform;
 
         let mut icons_dirty =
             settings.is_changed() || viewport_state_changed || camera_transform_changed;
@@ -670,7 +663,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let mut target_transform = {
         let mut transforms = spatial_queries.p0();
         match transforms.get_mut(entity) {
-            Ok(transform) => transform.0,
+            Ok(transform) => *transform,
             Err(_) => {
                 if state.drag.is_some() && allow_undo {
                     request_end_undo_group(&mut undo_state);
@@ -697,16 +690,16 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let mut selected_parent_world: Option<Transform> = None;
     if pose_state.edit_mode && pose_state.active_entity == Some(entity.to_bits()) {
         if let Ok(skinned) = skinned_query.get(entity) {
-            let skeleton = &skinned.0.skin.skeleton;
+            let skeleton = &skinned.skin.skeleton;
             if let Ok(mut pose_override) = pose_override_query.get_mut(entity) {
-                if pose_override.0.pose.locals.len() != skeleton.joint_count() {
-                    pose_override.0.pose.reset_to_bind(skeleton);
+                if pose_override.pose.locals.len() != skeleton.joint_count() {
+                    pose_override.pose.reset_to_bind(skeleton);
                 }
-                if !pose_override.0.enabled {
-                    pose_override.0.enabled = true;
+                if !pose_override.enabled {
+                    pose_override.enabled = true;
                 }
                 let mut globals = vec![Mat4::IDENTITY; skeleton.joint_count()];
-                compute_global_matrices(skeleton, &pose_override.0.pose.locals, &mut globals);
+                compute_global_matrices(skeleton, &pose_override.pose.locals, &mut globals);
                 let entity_matrix = target_transform.to_matrix();
                 pose_world_transforms.reserve(globals.len());
                 for global in globals.iter() {
@@ -747,7 +740,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
         spline_state.active_point = None;
         spline_state.hover_point = None;
     } else if let Some(spline_ref) = spline.as_ref() {
-        normalize_spline_selection(&mut spline_state, spline_ref.0.points.len());
+        normalize_spline_selection(&mut spline_state, spline_ref.points.len());
     }
 
     let pointer_in_viewport = viewport_rect
@@ -771,7 +764,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     let left_released = !left_down && state.last_mouse_down;
     state.last_mouse_down = left_down;
 
-    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform, viewport_rect);
+    let inv_view_proj = camera_inv_view_proj(&camera, &camera_transform, viewport_rect);
     let allow_ui_raycast = pointer_over_active_viewport
         || (!wants_pointer && pointer_in_viewport)
         || state.drag.is_some()
@@ -809,7 +802,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     request_begin_undo_group(&mut undo_state, "Spline");
                 }
                 if let Some((new_index, plane_origin, plane_normal)) = extrude_spline_point(
-                    &mut spline_mut.0,
+                    spline_mut,
                     active_index,
                     &target_transform,
                     &camera_transform,
@@ -821,7 +814,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     spline_state.selected_points.push(new_index);
                     spline_state.hover_point = Some(new_index);
                     spline_state.point_drag = build_spline_point_drag_from_indices(
-                        &spline_mut.0,
+                        spline_mut,
                         &[new_index],
                         &target_transform,
                         plane_origin,
@@ -841,7 +834,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 (spline_state.active_point, spline.as_mut())
             {
                 if let Some((new_index, plane_origin, plane_normal)) = insert_spline_midpoint(
-                    &mut spline_mut.0,
+                    spline_mut,
                     active_index,
                     &target_transform,
                     &camera_transform,
@@ -855,7 +848,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     spline_state.selected_points.push(new_index);
                     spline_state.hover_point = Some(new_index);
                     spline_state.point_drag = build_spline_point_drag_from_indices(
-                        &spline_mut.0,
+                        spline_mut,
                         &[new_index],
                         &target_transform,
                         plane_origin,
@@ -905,10 +898,10 @@ pub fn gizmo_system(params: GizmoSystemParams) {
 
     let spline_point_world = if spline_selected {
         match (spline_state.active_point, spline.as_ref()) {
-            (Some(index), Some(spline_ref)) if index < spline_ref.0.points.len() => Some(
+            (Some(index), Some(spline_ref)) if index < spline_ref.points.len() => Some(
                 target_transform
                     .to_matrix()
-                    .transform_point3(spline_ref.0.points[index]),
+                    .transform_point3(spline_ref.points[index]),
             ),
             _ => None,
         }
@@ -1047,9 +1040,9 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                     if point_gizmo_active {
                         if let Some(spline_ref) = spline.as_ref() {
                             let selected =
-                                spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                                spline_selected_indices(&spline_state, spline_ref.points.len());
                             spline_state.point_drag = build_spline_point_drag_from_indices(
-                                &spline_ref.0,
+                                spline_ref,
                                 &selected,
                                 &target_transform,
                                 point_world,
@@ -1106,9 +1099,9 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 if point_gizmo_active {
                     if let Some(spline_ref) = spline.as_ref() {
                         let selected =
-                            spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                            spline_selected_indices(&spline_state, spline_ref.points.len());
                         spline_state.point_drag = build_spline_point_drag_from_indices(
-                            &spline_ref.0,
+                            spline_ref,
                             &selected,
                             &target_transform,
                             point_world,
@@ -1169,8 +1162,8 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                                 GizmoMode::None => point.start_world,
                             };
                             let local_hit = inv_spline_matrix.transform_point3(new_world);
-                            if point.index < spline_mut.0.points.len() {
-                                spline_mut.0.points[point.index] = local_hit;
+                            if point.index < spline_mut.points.len() {
+                                spline_mut.points[point.index] = local_hit;
                             }
                         }
                     }
@@ -1190,10 +1183,13 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         );
                         let parent_matrix = parent_world.to_matrix();
                         let local_matrix = parent_matrix.inverse() * drag_transform.to_matrix();
-                        let local = Transform::from_matrix(local_matrix);
+                        let local =
+                            helmer_render::graphics::common::renderer::Transform::from_matrix(
+                                local_matrix,
+                            );
                         if let Ok(mut pose_override) = pose_override_query.get_mut(entity) {
-                            if index < pose_override.0.pose.locals.len() {
-                                pose_override.0.pose.locals[index] = local;
+                            if index < pose_override.pose.locals.len() {
+                                pose_override.pose.locals[index] = local;
                             }
                         }
                         did_apply = true;
@@ -1285,7 +1281,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             let hover_point = if let Some(spline_ref) = spline.as_ref() {
                 let mut closest = None;
                 let mut closest_dist = f32::MAX;
-                for (index, point) in spline_ref.0.points.iter().enumerate() {
+                for (index, point) in spline_ref.points.iter().enumerate() {
                     let world_point = spline_matrix.transform_point3(*point);
                     let dist = ray_point_distance(ray_origin, ray_dir, world_point);
                     if dist <= pick_radius && dist < closest_dist {
@@ -1309,7 +1305,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                 if let Some(index) = hover_point {
                     let point_count = spline
                         .as_ref()
-                        .map(|spline| spline.0.points.len())
+                        .map(|spline| spline.points.len())
                         .unwrap_or(0);
                     apply_spline_point_click_selection(
                         &mut spline_state,
@@ -1323,12 +1319,11 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         spline_state.drag_plane_normal = plane_normal;
                         if let Some(spline_ref) = spline.as_ref() {
                             let selected =
-                                spline_selected_indices(&spline_state, spline_ref.0.points.len());
+                                spline_selected_indices(&spline_state, spline_ref.points.len());
                             let anchor_world = spline_state
                                 .active_point
                                 .and_then(|active_index| {
                                     spline_ref
-                                        .0
                                         .points
                                         .get(active_index)
                                         .copied()
@@ -1337,7 +1332,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                                 .unwrap_or_else(|| spline_matrix.transform_point3(Vec3::ZERO));
                             spline_state.drag_plane_origin = anchor_world;
                             spline_state.point_drag = build_spline_point_drag_from_indices(
-                                &spline_ref.0,
+                                spline_ref,
                                 &selected,
                                 &target_transform,
                                 anchor_world,
@@ -1367,14 +1362,14 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                                 None
                             };
                             if let Some(index) = insert_index {
-                                let index = index.min(spline_mut.0.points.len());
-                                spline_mut.0.points.insert(index, local_hit);
+                                let index = index.min(spline_mut.points.len());
+                                spline_mut.points.insert(index, local_hit);
                                 spline_state.active_point = Some(index);
                                 spline_state.selected_points.clear();
                                 spline_state.selected_points.push(index);
                             } else {
-                                spline_mut.0.points.push(local_hit);
-                                let index = spline_mut.0.points.len() - 1;
+                                spline_mut.points.push(local_hit);
+                                let index = spline_mut.points.len() - 1;
                                 spline_state.active_point = Some(index);
                                 spline_state.selected_points.clear();
                                 spline_state.selected_points.push(index);
@@ -1399,7 +1394,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
 
             if (spline_state.dragging || spline_state.key_dragging) && allow_plane_drag {
                 let apply_plane_drag =
-                    |spline_state: &EditorSplineState, spline_mut: &mut BevySpline, hit: Vec3| {
+                    |spline_state: &EditorSplineState, spline_mut: &mut Spline, hit: Vec3| {
                         let Some(point_drag) = spline_state.point_drag.as_ref() else {
                             return;
                         };
@@ -1407,8 +1402,8 @@ pub fn gizmo_system(params: GizmoSystemParams) {
                         for point in point_drag.points.iter() {
                             let new_world = point.start_world + delta;
                             let local_hit = inv_spline_matrix.transform_point3(new_world);
-                            if point.index < spline_mut.0.points.len() {
-                                spline_mut.0.points[point.index] = local_hit;
+                            if point.index < spline_mut.points.len() {
+                                spline_mut.points[point.index] = local_hit;
                             }
                         }
                     };
@@ -1504,7 +1499,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     if show_spline_paths && spline_selected && spline_state.enabled {
         if let Some(spline_ref) = spline.as_ref() {
             let samples = spline_state.samples.max(2);
-            let path_lines = build_spline_path_lines(&spline_ref.0, &target_transform, samples);
+            let path_lines = build_spline_path_lines(&spline_ref, &target_transform, samples);
             if !path_lines.is_empty() {
                 combined_lines.extend(path_lines);
             }
@@ -1515,7 +1510,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
             let handle_size =
                 (distance * spline_state.handle_size_scale).max(spline_state.handle_size_min);
             let handle_lines =
-                build_spline_handle_lines(&spline_ref.0, &target_transform, handle_size);
+                build_spline_handle_lines(&spline_ref, &target_transform, handle_size);
             if !handle_lines.is_empty() {
                 combined_lines.extend(handle_lines);
             }
@@ -1583,7 +1578,7 @@ pub fn gizmo_system(params: GizmoSystemParams) {
     if !edit_gizmo_active {
         let mut transforms = spatial_queries.p0();
         if let Ok(mut transform) = transforms.get_mut(entity) {
-            transform.0 = target_transform;
+            *transform = target_transform;
         }
     }
 
@@ -1621,57 +1616,37 @@ pub struct SelectionSystemParams<'w, 's> {
     viewport_state: Res<'w, EditorViewportState>,
     viewport_runtime: Res<'w, EditorViewportRuntime>,
     scene_state: Res<'w, EditorSceneState>,
-    input: Res<'w, BevyInputManager>,
-    asset_server: Res<'w, BevyAssetServer>,
+    input: Res<'w, BecsInputManager>,
+    asset_server: Res<'w, BecsAssetServer>,
     mesh_query: Query<
         'w,
         's,
-        (Entity, &'static BevyMeshRenderer, &'static BevyTransform),
+        (Entity, &'static MeshRenderer, &'static Transform),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
     skinned_query: Query<
         'w,
         's,
-        (
-            Entity,
-            &'static BevySkinnedMeshRenderer,
-            &'static BevyTransform,
-        ),
+        (Entity, &'static SkinnedMeshRenderer, &'static Transform),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    spline_query: Query<
-        'w,
-        's,
-        (Entity, &'static BevySpline, Option<&'static BevyTransform>),
-        With<EditorEntity>,
-    >,
-    transform_query: Query<'w, 's, &'static BevyTransform>,
+    spline_query:
+        Query<'w, 's, (Entity, &'static Spline, Option<&'static Transform>), With<EditorEntity>>,
+    transform_query: Query<'w, 's, &'static Transform>,
     camera_icon_query: Query<
         'w,
         's,
-        (
-            Entity,
-            &'static BevyCamera,
-            Option<&'static EditorPlayCamera>,
-        ),
+        (Entity, &'static Camera, Option<&'static EditorPlayCamera>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
     light_icon_query:
-        Query<'w, 's, (Entity, &'static BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
-    audio_icon_query: Query<
-        'w,
-        's,
-        (Entity, &'static BevyAudioEmitter),
-        Or<(With<EditorEntity>, With<SceneChild>)>,
-    >,
-    active_camera_query: Query<
-        'w,
-        's,
-        (Entity, &'static BevyCamera, &'static BevyTransform),
-        With<BevyActiveCamera>,
-    >,
-    camera_query: Query<'w, 's, (Entity, &'static BevyCamera, &'static BevyTransform)>,
-    system_profiler: Option<Res<'w, BevySystemProfiler>>,
+        Query<'w, 's, (Entity, &'static Light), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_icon_query:
+        Query<'w, 's, (Entity, &'static AudioEmitter), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    active_camera_query:
+        Query<'w, 's, (Entity, &'static Camera, &'static Transform), With<ActiveCamera>>,
+    camera_query: Query<'w, 's, (Entity, &'static Camera, &'static Transform)>,
+    system_profiler: Option<Res<'w, BecsSystemProfiler>>,
 }
 
 pub fn selection_system(params: SelectionSystemParams) {
@@ -1698,13 +1673,11 @@ pub fn selection_system(params: SelectionSystemParams) {
         camera_query,
         system_profiler,
     } = params;
-    let _system_scope = system_profiler.as_ref().and_then(|profiler| {
-        profiler
-            .0
-            .begin_scope("helmer_editor_egui::editor::selection_system")
-    });
+    let _system_scope = system_profiler
+        .as_ref()
+        .and_then(|profiler| profiler.begin_scope("helmer_editor_egui::editor::selection_system"));
 
-    let input_manager = input.0.read();
+    let input_manager = input.read();
     let (viewport_rect, runtime_camera_entity, interaction_pane_id) =
         pick_viewport_interaction_target(input_manager.cursor_position, &viewport_runtime, false);
     let viewport_state =
@@ -1767,28 +1740,27 @@ pub fn selection_system(params: SelectionSystemParams) {
         return;
     };
 
-    let inv_view_proj = camera_inv_view_proj(&camera.0, &camera_transform.0, viewport_rect);
+    let inv_view_proj = camera_inv_view_proj(&camera, &camera_transform, viewport_rect);
     let Some((ray_origin, ray_dir)) = screen_ray(
         input_manager.cursor_position,
         viewport_rect,
         input_manager.window_size,
         inv_view_proj,
-        camera_transform.0.position,
+        camera_transform.position,
         false,
     ) else {
         return;
     };
 
-    let asset_server = asset_server.0.lock();
+    let asset_server = asset_server.lock();
     let mesh_aabb_map = asset_server.mesh_aabb_map.read();
 
     let mut best: Option<(Entity, f32)> = None;
     for (entity, renderer, transform) in mesh_query.iter() {
-        let Some(bounds) = mesh_aabb_map.0.get(&renderer.0.mesh_id) else {
+        let Some(bounds) = mesh_aabb_map.0.get(&renderer.mesh_id) else {
             continue;
         };
-        let Some(distance) = ray_aabb_intersection(ray_origin, ray_dir, &transform.0, bounds)
-        else {
+        let Some(distance) = ray_aabb_intersection(ray_origin, ray_dir, transform, bounds) else {
             continue;
         };
         if best.map_or(true, |(_, best_distance)| distance < best_distance) {
@@ -1796,11 +1768,10 @@ pub fn selection_system(params: SelectionSystemParams) {
         }
     }
     for (entity, renderer, transform) in skinned_query.iter() {
-        let Some(bounds) = mesh_aabb_map.0.get(&renderer.0.mesh_id) else {
+        let Some(bounds) = mesh_aabb_map.0.get(&renderer.mesh_id) else {
             continue;
         };
-        let Some(distance) = ray_aabb_intersection(ray_origin, ray_dir, &transform.0, bounds)
-        else {
+        let Some(distance) = ray_aabb_intersection(ray_origin, ray_dir, transform, bounds) else {
             continue;
         };
         if best.map_or(true, |(_, best_distance)| distance < best_distance) {
@@ -1811,7 +1782,7 @@ pub fn selection_system(params: SelectionSystemParams) {
     if let Some((entity, distance)) = pick_icon_entity(
         &viewport_state,
         &settings,
-        &camera_transform.0,
+        camera_transform,
         ray_origin,
         ray_dir,
         &transform_query,
@@ -1828,11 +1799,11 @@ pub fn selection_system(params: SelectionSystemParams) {
         let samples = spline_state.samples.max(2);
         let mut best_spline: Option<(Entity, f32)> = None;
         for (entity, spline, spline_transform) in spline_query.iter() {
-            let transform = spline_transform.map(|t| t.0).unwrap_or_default();
-            let lines = build_spline_path_lines(&spline.0, &transform, samples);
+            let transform = spline_transform.copied().unwrap_or_default();
+            let lines = build_spline_path_lines(&spline, &transform, samples);
             for line in lines {
                 let mid = (line.start + line.end) * 0.5;
-                let distance_scale = camera_transform.0.position.distance(mid).max(0.001);
+                let distance_scale = camera_transform.position.distance(mid).max(0.001);
                 let pick_radius = (distance_scale * spline_state.pick_radius_scale)
                     .max(spline_state.pick_radius_min)
                     .max(1.0e-4);
@@ -1886,8 +1857,8 @@ fn clear_gizmo(
 }
 
 fn collect_mesh_outline_lines(
-    asset_server: &BevyAssetServer,
-    mesh_query: &Query<&BevyMeshRenderer>,
+    asset_server: &BecsAssetServer,
+    mesh_query: &Query<&MeshRenderer>,
     settings: &EditorGizmoSettings,
     outline_cache: &mut EditorMeshOutlineCache,
     entity: Entity,
@@ -1903,14 +1874,14 @@ fn collect_mesh_outline_lines(
         return std::sync::Arc::from(Vec::new());
     }
 
-    let mesh_id = renderer.0.mesh_id;
+    let mesh_id = renderer.mesh_id;
     let needs_rebuild = outline_cache
         .entries
         .get(&mesh_id)
         .map_or(true, |entry| entry.max_lines != max_lines);
     if needs_rebuild {
         let mesh = {
-            let asset_server = asset_server.0.lock();
+            let asset_server = asset_server.lock();
             asset_server.get_mesh(mesh_id)
         };
         let mesh = match mesh {
@@ -1939,7 +1910,7 @@ fn collect_mesh_outline_lines(
 }
 
 fn select_outline_lod(
-    mesh: &helmer::runtime::asset_server::Mesh,
+    mesh: &helmer_asset::runtime::asset_server::Mesh,
     max_lines: usize,
 ) -> Option<MeshLodPayload> {
     let lods = mesh.lods.read();
@@ -1998,16 +1969,13 @@ fn collect_icon_gizmos(
     viewport_state: &EditorViewportState,
     settings: &EditorGizmoSettings,
     camera_transform: &Transform,
-    transforms: &mut Query<&mut BevyTransform>,
+    transforms: &mut Query<&mut Transform>,
     camera_query: &Query<
-        (Entity, Ref<BevyCamera>, Option<Ref<EditorPlayCamera>>),
+        (Entity, Ref<Camera>, Option<Ref<EditorPlayCamera>>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    light_query: &Query<(Entity, Ref<BevyLight>), Or<(With<EditorEntity>, With<SceneChild>)>>,
-    audio_query: &Query<
-        (Entity, Ref<BevyAudioEmitter>),
-        Or<(With<EditorEntity>, With<SceneChild>)>,
-    >,
+    light_query: &Query<(Entity, Ref<Light>), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_query: &Query<(Entity, Ref<AudioEmitter>), Or<(With<EditorEntity>, With<SceneChild>)>>,
     icons_dirty: &mut bool,
 ) -> Vec<GizmoIcon> {
     let mut icons = Vec::new();
@@ -2038,12 +2006,12 @@ fn collect_icon_gizmos(
             }
             let distance = camera_transform
                 .position
-                .distance(transform.0.position)
+                .distance(transform.position)
                 .max(0.001);
             let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
 
-            let near = camera.0.near_plane.max(0.001);
-            let far = camera.0.far_plane.max(near + 0.001);
+            let near = camera.near_plane.max(0.001);
+            let far = camera.far_plane.max(near + 0.001);
             let mut near_ratio = near / far;
             if !near_ratio.is_finite() {
                 near_ratio = 0.1;
@@ -2057,13 +2025,13 @@ fn collect_icon_gizmos(
             };
 
             let icon = GizmoIcon {
-                position: transform.0.position,
-                rotation: transform.0.rotation,
+                position: transform.position,
+                rotation: transform.rotation,
                 size,
                 color,
                 alpha: camera_alpha,
                 kind: GizmoIconKind::Camera,
-                params: [camera.0.fov_y_rad, camera.0.aspect_ratio, near_ratio, 0.0],
+                params: [camera.fov_y_rad, camera.aspect_ratio, near_ratio, 0.0],
             };
             icons.push(icon);
         }
@@ -2081,7 +2049,7 @@ fn collect_icon_gizmos(
                 *icons_dirty = true;
             }
 
-            let (kind, params, allowed) = match light.0.light_type {
+            let (kind, params, allowed) = match light.light_type {
                 LightType::Directional => (
                     GizmoIconKind::LightDirectional,
                     [0.0; 4],
@@ -2104,14 +2072,14 @@ fn collect_icon_gizmos(
 
             let distance = camera_transform
                 .position
-                .distance(transform.0.position)
+                .distance(transform.position)
                 .max(0.001);
             let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
-            let color = sanitize_light_color(light.0.color);
+            let color = sanitize_light_color(light.color);
 
             let icon = GizmoIcon {
-                position: transform.0.position,
-                rotation: transform.0.rotation,
+                position: transform.position,
+                rotation: transform.rotation,
                 size,
                 color,
                 alpha: light_alpha,
@@ -2132,13 +2100,13 @@ fn collect_icon_gizmos(
 
         let distance = camera_transform
             .position
-            .distance(transform.0.position)
+            .distance(transform.position)
             .max(0.001);
         let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
 
         let icon = GizmoIcon {
-            position: transform.0.position,
-            rotation: transform.0.rotation,
+            position: transform.position,
+            rotation: transform.rotation,
             size,
             color: Vec3::new(1.0, 0.72, 0.28),
             alpha: light_alpha,
@@ -2157,13 +2125,13 @@ fn pick_icon_entity(
     camera_transform: &Transform,
     ray_origin: Vec3,
     ray_dir: Vec3,
-    transforms: &Query<&BevyTransform>,
+    transforms: &Query<&Transform>,
     camera_query: &Query<
-        (Entity, &BevyCamera, Option<&EditorPlayCamera>),
+        (Entity, &Camera, Option<&EditorPlayCamera>),
         Or<(With<EditorEntity>, With<SceneChild>)>,
     >,
-    light_query: &Query<(Entity, &BevyLight), Or<(With<EditorEntity>, With<SceneChild>)>>,
-    audio_query: &Query<(Entity, &BevyAudioEmitter), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    light_query: &Query<(Entity, &Light), Or<(With<EditorEntity>, With<SceneChild>)>>,
+    audio_query: &Query<(Entity, &AudioEmitter), Or<(With<EditorEntity>, With<SceneChild>)>>,
 ) -> Option<(Entity, f32)> {
     let icon_scale = settings.icon_size_scale.max(0.0);
     if icon_scale <= 0.0 {
@@ -2191,12 +2159,12 @@ fn pick_icon_entity(
             };
             let distance = camera_transform
                 .position
-                .distance(transform.0.position)
+                .distance(transform.position)
                 .max(0.001);
             let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
             let radius = (size * pick_scale).max(pick_min);
             if let Some(hit) =
-                ray_sphere_intersection(ray_origin, ray_dir, transform.0.position, radius)
+                ray_sphere_intersection(ray_origin, ray_dir, transform.position, radius)
             {
                 if best.map_or(true, |(_, best_distance)| hit < best_distance) {
                     best = Some((entity, hit));
@@ -2210,7 +2178,7 @@ fn pick_icon_entity(
         || viewport_state.show_spot_light_gizmos
     {
         for (entity, light) in light_query.iter() {
-            let allowed = match light.0.light_type {
+            let allowed = match light.light_type {
                 LightType::Directional => viewport_state.show_directional_light_gizmos,
                 LightType::Point => viewport_state.show_point_light_gizmos,
                 LightType::Spot { .. } => viewport_state.show_spot_light_gizmos,
@@ -2223,12 +2191,12 @@ fn pick_icon_entity(
             };
             let distance = camera_transform
                 .position
-                .distance(transform.0.position)
+                .distance(transform.position)
                 .max(0.001);
             let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
             let radius = (size * pick_scale).max(pick_min);
             if let Some(hit) =
-                ray_sphere_intersection(ray_origin, ray_dir, transform.0.position, radius)
+                ray_sphere_intersection(ray_origin, ray_dir, transform.position, radius)
             {
                 if best.map_or(true, |(_, best_distance)| hit < best_distance) {
                     best = Some((entity, hit));
@@ -2243,12 +2211,11 @@ fn pick_icon_entity(
         };
         let distance = camera_transform
             .position
-            .distance(transform.0.position)
+            .distance(transform.position)
             .max(0.001);
         let size = (distance * settings.size_scale * icon_scale).clamp(icon_min, icon_max);
         let radius = (size * pick_scale).max(pick_min);
-        if let Some(hit) =
-            ray_sphere_intersection(ray_origin, ray_dir, transform.0.position, radius)
+        if let Some(hit) = ray_sphere_intersection(ray_origin, ray_dir, transform.position, radius)
         {
             if best.map_or(true, |(_, best_distance)| hit < best_distance) {
                 best = Some((entity, hit));
@@ -2288,14 +2255,14 @@ fn undo_label_for_mode(mode: GizmoMode) -> &'static str {
 }
 
 fn selection_bounds(
-    asset_server: &BevyAssetServer,
-    mesh_query: &Query<&BevyMeshRenderer>,
+    asset_server: &BecsAssetServer,
+    mesh_query: &Query<&MeshRenderer>,
     entity: Entity,
 ) -> Option<Aabb> {
     let renderer = mesh_query.get(entity).ok()?;
-    let asset_server = asset_server.0.lock();
+    let asset_server = asset_server.lock();
     let mesh_aabb_map = asset_server.mesh_aabb_map.read();
-    mesh_aabb_map.0.get(&renderer.0.mesh_id).copied()
+    mesh_aabb_map.0.get(&renderer.mesh_id).copied()
 }
 
 fn pick_viewport_interaction_target(

@@ -1,4 +1,4 @@
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 
 #[derive(Resource, Debug, Clone)]
 pub struct EditorUndoState<E, G> {

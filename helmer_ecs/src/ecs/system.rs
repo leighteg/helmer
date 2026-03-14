@@ -1,4 +1,4 @@
-use helmer::runtime::input_manager::InputManager;
+use helmer_window::runtime::input_manager::InputManager;
 
 use super::ecs_core::ECSCore;
 

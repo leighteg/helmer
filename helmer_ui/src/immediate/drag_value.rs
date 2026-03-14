@@ -1,7 +1,8 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use glam::Vec2;
 use hashbrown::HashMap;
+use web_time::Instant;
 
 use crate::{
     IntoUiId, UiId, UiRect, UiTextAlign, UiTextStyle, UiTextValue, estimate_text_prefix_width,

@@ -1,3 +1,7 @@
+use crate::components::{
+    Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteImageSequence, SpriteRenderer, Text2d,
+    Transform,
+};
 use bevy_ecs::{
     prelude::{
         Added, Changed, DetectChanges, Entity, Or, Query, Ref, RemovedComponents, Res, ResMut,
@@ -8,25 +12,20 @@ use bevy_ecs::{
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use glam::{Mat4, Quat, Vec2, Vec3};
 use hashbrown::{HashMap, HashSet, hash_map::Entry};
-use helmer::{
-    graphics::{
-        common::{
-            config::{RenderConfig, SkinningMode},
-            graph::RenderGraphSpec,
-            renderer::{
-                Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
-                RenderDelta, RenderLightDelta, RenderObjectDelta, RenderSprite,
-                RenderSpriteImageSequence, RenderText2d, RenderViewportRequest, StreamingTuning,
-            },
+use helmer_asset::runtime::asset_server::MeshAabbMap;
+use helmer_render::graphics::{
+    common::{
+        config::{RenderConfig, SkinningMode},
+        graph::RenderGraphSpec,
+        renderer::{
+            Aabb, AssetStreamKind, AssetStreamingRequest, GizmoData, RenderCameraDelta,
+            RenderDelta, RenderLightDelta, RenderObjectDelta, RenderSprite,
+            RenderSpriteImageSequence, RenderText2d, RenderViewportRequest, StreamingTuning,
         },
-        render_graphs::default_graph_spec,
     },
-    provided::components::{
-        Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteImageSequence, SpriteRenderer,
-        Text2d, Transform,
-    },
-    runtime::{asset_server::MeshAabbMap, runtime::RuntimeProfiling},
+    render_graphs::default_graph_spec,
 };
+use helmer_render::runtime::RuntimeProfiling;
 use parking_lot::RwLock;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
@@ -36,14 +35,12 @@ use web_time::Instant;
 
 use crate::systems::animation_system::SkinningResource;
 use crate::{
-    BevyActiveCamera, BevyAssetServerParam, BevyCamera, BevyLight, BevyLodTuning, BevyMeshRenderer,
-    BevyRenderWorkerTuning, BevyRuntimeConfig, BevyRuntimeProfiling, BevySkinnedMeshRenderer,
-    BevySpriteImageSequence, BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler,
-    BevyText2d, BevyTransform, ui_integration::UiRenderState,
+    ActiveCamera, BecsAssetServerParam, BecsLodTuning, BecsRenderWorkerTuning, BecsRuntimeConfig,
+    BecsRuntimeProfiling, BecsStreamingTuning, BecsSystemProfiler, ui_integration::UiRenderState,
 };
 
 //================================================================================
-// Bevy Wrapper & Type Aliases
+// ECS Wrappers & Type Aliases
 //================================================================================
 
 // Resource Wrappers
@@ -581,17 +578,17 @@ pub struct RenderWorkerState {
 
 #[derive(SystemParam)]
 pub struct RenderSystemResources<'w> {
-    asset_server: Option<BevyAssetServerParam<'w>>,
-    runtime_config: Option<Res<'w, BevyRuntimeConfig>>,
+    asset_server: Option<BecsAssetServerParam<'w>>,
+    runtime_config: Option<Res<'w, BecsRuntimeConfig>>,
     render_graph: Option<Res<'w, RenderGraphResource>>,
     gizmo_state: Option<Res<'w, RenderGizmoState>>,
     ui: Option<Res<'w, UiRenderState>>,
     viewport_requests: Option<Res<'w, RenderViewportRequests>>,
     main_scene_to_swapchain: Option<Res<'w, RenderMainSceneToSwapchain>>,
-    streaming_tuning: Option<Res<'w, BevyStreamingTuning>>,
-    lod_tuning: Option<Res<'w, BevyLodTuning>>,
-    worker_tuning: Option<Res<'w, BevyRenderWorkerTuning>>,
-    runtime_profiling: Option<Res<'w, BevyRuntimeProfiling>>,
+    streaming_tuning: Option<Res<'w, BecsStreamingTuning>>,
+    lod_tuning: Option<Res<'w, BecsLodTuning>>,
+    worker_tuning: Option<Res<'w, BecsRenderWorkerTuning>>,
+    runtime_profiling: Option<Res<'w, BecsRuntimeProfiling>>,
 }
 
 #[derive(SystemParam)]
@@ -605,9 +602,9 @@ pub struct SpriteTextQueries<'w, 's> {
                 's,
                 (
                     Entity,
-                    &'static BevyTransform,
-                    &'static BevySpriteRenderer,
-                    Option<&'static BevySpriteImageSequence>,
+                    &'static Transform,
+                    &'static SpriteRenderer,
+                    Option<&'static SpriteImageSequence>,
                 ),
             >,
             Query<
@@ -615,17 +612,17 @@ pub struct SpriteTextQueries<'w, 's> {
                 's,
                 (
                     Entity,
-                    &'static BevyTransform,
-                    &'static BevySpriteRenderer,
-                    Option<&'static BevySpriteImageSequence>,
+                    &'static Transform,
+                    &'static SpriteRenderer,
+                    Option<&'static SpriteImageSequence>,
                 ),
                 Or<(
-                    Added<BevyTransform>,
-                    Added<BevySpriteRenderer>,
-                    Added<BevySpriteImageSequence>,
-                    Changed<BevyTransform>,
-                    Changed<BevySpriteRenderer>,
-                    Changed<BevySpriteImageSequence>,
+                    Added<Transform>,
+                    Added<SpriteRenderer>,
+                    Added<SpriteImageSequence>,
+                    Changed<Transform>,
+                    Changed<SpriteRenderer>,
+                    Changed<SpriteImageSequence>,
                 )>,
             >,
         ),
@@ -634,23 +631,23 @@ pub struct SpriteTextQueries<'w, 's> {
         'w,
         's,
         (
-            Query<'w, 's, (Entity, &'static BevyTransform, &'static BevyText2d)>,
+            Query<'w, 's, (Entity, &'static Transform, &'static Text2d)>,
             Query<
                 'w,
                 's,
-                (Entity, &'static BevyTransform, &'static BevyText2d),
+                (Entity, &'static Transform, &'static Text2d),
                 Or<(
-                    Added<BevyTransform>,
-                    Added<BevyText2d>,
-                    Changed<BevyTransform>,
-                    Changed<BevyText2d>,
+                    Added<Transform>,
+                    Added<Text2d>,
+                    Changed<Transform>,
+                    Changed<Text2d>,
                 )>,
             >,
         ),
     >,
-    removed_sprite_renderers: RemovedComponents<'w, 's, BevySpriteRenderer>,
-    removed_sprite_sequences: RemovedComponents<'w, 's, BevySpriteImageSequence>,
-    removed_text2d: RemovedComponents<'w, 's, BevyText2d>,
+    removed_sprite_renderers: RemovedComponents<'w, 's, SpriteRenderer>,
+    removed_sprite_sequences: RemovedComponents<'w, 's, SpriteImageSequence>,
+    removed_text2d: RemovedComponents<'w, 's, Text2d>,
 }
 
 struct ProfilingScope {
@@ -1446,7 +1443,7 @@ impl RenderWorkerCore {
                     if needs_update {
                         objects_upsert.push(RenderObjectDelta {
                             id: entity.to_bits() as usize,
-                            transform: current_transform,
+                            transform: current_transform.into(),
                             mesh_id: entry.mesh_id,
                             material_id: entry.material_id,
                             casts_shadow: entry.casts_shadow,
@@ -1511,7 +1508,7 @@ impl RenderWorkerCore {
                 if needs_update {
                     objects_upsert.push(RenderObjectDelta {
                         id: entity.to_bits() as usize,
-                        transform: current_transform,
+                        transform: current_transform.into(),
                         mesh_id: entry.mesh_id,
                         material_id: entry.material_id,
                         casts_shadow: entry.casts_shadow,
@@ -1717,7 +1714,7 @@ impl RenderWorkerCore {
                     if needs_update {
                         objects_upsert.push(RenderObjectDelta {
                             id: cell.proxy_id,
-                            transform: proxy_transform,
+                            transform: proxy_transform.into(),
                             mesh_id: proxy_mesh_id,
                             material_id: proxy_material_id,
                             casts_shadow: false,
@@ -1898,10 +1895,10 @@ impl RenderWorkerCore {
             if needs_update {
                 lights_upsert.push(RenderLightDelta {
                     id: entity.to_bits() as usize,
-                    transform: current_transform,
+                    transform: current_transform.into(),
                     color: entry.light.color.into(),
                     intensity: entry.light.intensity,
-                    light_type: entry.light.light_type,
+                    light_type: entry.light.light_type.into(),
                 });
                 entry.last_sent_present = true;
                 entry.last_sent_transform = current_transform;
@@ -1941,8 +1938,8 @@ impl RenderWorkerCore {
 
         if send_camera {
             render_delta.camera = Some(RenderCameraDelta {
-                transform: *render_camera_transform,
-                camera: *camera_component,
+                transform: (*render_camera_transform).into(),
+                camera: (*camera_component).into(),
             });
         }
         if send_config {
@@ -2255,7 +2252,7 @@ fn apply_skinning_delta(delta: &mut RenderDelta, skinning: &SkinningResource) {
 }
 
 //================================================================================
-// The Bevy System
+// The Render Data System
 //================================================================================
 
 /// Collects all data required for rendering, performs culling and LOD selection.
@@ -2263,52 +2260,52 @@ fn apply_skinning_delta(delta: &mut RenderDelta, skinning: &SkinningResource) {
 pub fn render_data_system(
     mut worker_state: Local<RenderWorkerState>,
     resources: RenderSystemResources,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
     mut render_packet: ResMut<RenderPacket>,
     mut render_object_count: ResMut<RenderObjectCount>,
     mut render_reset: ResMut<RenderResetRequest>,
     mut render_sync: ResMut<RenderSyncRequest>,
     mut skinning: ResMut<SkinningResource>,
-    camera_query: Query<(Ref<BevyCamera>, Ref<BevyTransform>), With<BevyActiveCamera>>,
+    camera_query: Query<(Ref<Camera>, Ref<Transform>), With<ActiveCamera>>,
     mut object_queries: ParamSet<(
-        Query<(Entity, &BevyTransform, &BevyMeshRenderer)>,
+        Query<(Entity, &Transform, &MeshRenderer)>,
         Query<
-            (Entity, &BevyTransform, &BevyMeshRenderer),
+            (Entity, &Transform, &MeshRenderer),
             Or<(
-                Added<BevyTransform>,
-                Added<BevyMeshRenderer>,
-                Changed<BevyTransform>,
-                Changed<BevyMeshRenderer>,
+                Added<Transform>,
+                Added<MeshRenderer>,
+                Changed<Transform>,
+                Changed<MeshRenderer>,
             )>,
         >,
-        Query<(Entity, &BevyTransform, &BevySkinnedMeshRenderer)>,
+        Query<(Entity, &Transform, &SkinnedMeshRenderer)>,
         Query<
-            (Entity, &BevyTransform, &BevySkinnedMeshRenderer),
+            (Entity, &Transform, &SkinnedMeshRenderer),
             Or<(
-                Added<BevyTransform>,
-                Added<BevySkinnedMeshRenderer>,
-                Changed<BevyTransform>,
-                Changed<BevySkinnedMeshRenderer>,
+                Added<Transform>,
+                Added<SkinnedMeshRenderer>,
+                Changed<Transform>,
+                Changed<SkinnedMeshRenderer>,
             )>,
         >,
     )>,
     mut sprite_text: SpriteTextQueries,
-    mut removed_mesh_renderers: RemovedComponents<BevyMeshRenderer>,
-    mut removed_skinned_renderers: RemovedComponents<BevySkinnedMeshRenderer>,
-    mut removed_transforms: RemovedComponents<BevyTransform>,
+    mut removed_mesh_renderers: RemovedComponents<MeshRenderer>,
+    mut removed_skinned_renderers: RemovedComponents<SkinnedMeshRenderer>,
+    mut removed_transforms: RemovedComponents<Transform>,
     mut light_queries: ParamSet<(
-        Query<(Entity, &BevyTransform, &BevyLight)>,
+        Query<(Entity, &Transform, &Light)>,
         Query<
-            (Entity, &BevyTransform, &BevyLight),
+            (Entity, &Transform, &Light),
             Or<(
-                Added<BevyTransform>,
-                Added<BevyLight>,
-                Changed<BevyTransform>,
-                Changed<BevyLight>,
+                Added<Transform>,
+                Added<Light>,
+                Changed<Transform>,
+                Changed<Light>,
             )>,
         >,
     )>,
-    mut removed_lights: RemovedComponents<BevyLight>,
+    mut removed_lights: RemovedComponents<Light>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -2525,8 +2522,8 @@ pub fn render_data_system(
                 &mut *worker_state,
                 &mut worker,
                 RenderChange::UpdateCamera {
-                    camera: camera_component,
-                    transform: camera_transform,
+                    camera: camera_component.into(),
+                    transform: camera_transform.into(),
                 },
                 "camera update",
             )
@@ -2552,8 +2549,8 @@ pub fn render_data_system(
                     &mut *worker_state,
                     &mut worker,
                     RenderChange::UpdateCamera {
-                        camera: (*camera).0,
-                        transform: (*transform).0,
+                        camera: *camera,
+                        transform: *transform,
                     },
                     "camera update",
                 )
@@ -2561,8 +2558,8 @@ pub fn render_data_system(
                 send_failed = true;
             }
             direct_delta.camera = Some(RenderCameraDelta {
-                transform: (*transform).0,
-                camera: (*camera).0,
+                transform: (*transform).into(),
+                camera: (*camera).into(),
             });
             if !send_failed {
                 worker_state.camera_sent = true;
@@ -2593,16 +2590,11 @@ pub fn render_data_system(
         let (count, _) = iter.size_hint();
         let mut sprites = Vec::with_capacity(count);
         for (entity, transform, sprite, image_sequence) in iter {
-            let sprite = sprite.0;
+            let sprite = *sprite;
             if !sprite.visible {
                 continue;
             }
-            sprites.push(to_render_sprite(
-                entity,
-                &transform.0,
-                &sprite,
-                image_sequence.map(|sequence| &sequence.0),
-            ));
+            sprites.push(to_render_sprite(entity, transform, &sprite, image_sequence));
         }
         direct_delta.sprites = Some(sprites);
     }
@@ -2617,10 +2609,10 @@ pub fn render_data_system(
         let (count, _) = iter.size_hint();
         let mut text_2d = Vec::with_capacity(count);
         for (entity, transform, text) in iter {
-            if !text.0.visible || text.0.text.is_empty() {
+            if !text.visible || text.text.is_empty() {
                 continue;
             }
-            text_2d.push(to_render_text(entity, &transform.0, &text.0));
+            text_2d.push(to_render_text(entity, transform, text));
         }
         direct_delta.text_2d = Some(text_2d);
     }
@@ -2711,8 +2703,8 @@ pub fn render_data_system(
                     for (entity, transform, mesh_renderer) in objects_iter {
                         updates.push(RenderObjectUpdate {
                             entity,
-                            transform: transform.0,
-                            mesh: RenderMeshInfo::from_mesh_renderer(&mesh_renderer.0),
+                            transform: *transform,
+                            mesh: RenderMeshInfo::from_mesh_renderer(mesh_renderer),
                         });
                     }
                 }
@@ -2722,7 +2714,7 @@ pub fn render_data_system(
                     let (skinned_count, _) = skinned_iter.size_hint();
                     updates.reserve(skinned_count);
                     for (entity, transform, skinned_renderer) in skinned_iter {
-                        let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
+                        let mut mesh = RenderMeshInfo::from_skinned_renderer(skinned_renderer);
                         if cpu_skinning {
                             if let Some(cpu_mesh) =
                                 skinning.cpu_mesh_id_for(entity.to_bits() as usize)
@@ -2732,7 +2724,7 @@ pub fn render_data_system(
                         }
                         updates.push(RenderObjectUpdate {
                             entity,
-                            transform: transform.0,
+                            transform: *transform,
                             mesh,
                         });
                     }
@@ -2748,8 +2740,8 @@ pub fn render_data_system(
                     for (entity, transform, mesh_renderer) in objects_iter {
                         updates.push(RenderObjectUpdate {
                             entity,
-                            transform: transform.0,
-                            mesh: RenderMeshInfo::from_mesh_renderer(&mesh_renderer.0),
+                            transform: *transform,
+                            mesh: RenderMeshInfo::from_mesh_renderer(mesh_renderer),
                         });
                     }
                 }
@@ -2759,7 +2751,7 @@ pub fn render_data_system(
                     let (skinned_count, _) = skinned_iter.size_hint();
                     updates.reserve(skinned_count);
                     for (entity, transform, skinned_renderer) in skinned_iter {
-                        let mut mesh = RenderMeshInfo::from_skinned_renderer(&skinned_renderer.0);
+                        let mut mesh = RenderMeshInfo::from_skinned_renderer(skinned_renderer);
                         if cpu_skinning {
                             if let Some(cpu_mesh) =
                                 skinning.cpu_mesh_id_for(entity.to_bits() as usize)
@@ -2769,7 +2761,7 @@ pub fn render_data_system(
                         }
                         updates.push(RenderObjectUpdate {
                             entity,
-                            transform: transform.0,
+                            transform: *transform,
                             mesh,
                         });
                     }
@@ -2807,8 +2799,8 @@ pub fn render_data_system(
                 for (entity, transform, light) in lights_iter {
                     updates.push(RenderLightUpdate {
                         entity,
-                        transform: transform.0,
-                        light: light.0,
+                        transform: *transform,
+                        light: *light,
                     });
                 }
                 updates
@@ -2820,8 +2812,8 @@ pub fn render_data_system(
                 for (entity, transform, light) in lights_iter {
                     updates.push(RenderLightUpdate {
                         entity,
-                        transform: transform.0,
-                        light: light.0,
+                        transform: *transform,
+                        light: *light,
                     });
                 }
                 updates

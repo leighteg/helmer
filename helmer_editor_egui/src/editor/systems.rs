@@ -5,16 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy_ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
-use bevy_ecs::{component::Component, name::Name};
 use egui::{Id, Order, Pos2, Rect, Ui, Vec2};
 use glam::{DVec2, Quat, Vec3};
-use helmer::graphics::common::renderer::{RenderViewportGizmoOptions, RenderViewportRequest};
-use helmer::provided::components::{
-    Camera, Light, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Transform,
-};
-use helmer::runtime::asset_server::{Handle, Material, Mesh};
-use helmer::runtime::runtime::RuntimeCursorGrabMode;
+use helmer_asset::runtime::asset_server::{Handle, Material, Mesh};
+use helmer_becs::ecs::prelude::{Changed, Entity, Or, Query, Res, ResMut, With, World};
+use helmer_becs::ecs::{component::Component, name::Name};
 use helmer_becs::egui_integration::{
     EguiInputPassthrough, EguiResource, EguiWindowChrome, EguiWindowSpec,
 };
@@ -26,13 +21,17 @@ use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    AudioBackendResource, BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera,
-    BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt, BevyMeshRenderer,
-    BevyPoseOverride, BevyRuntimeCursorState, BevySkinnedMeshRenderer, BevySpline,
-    BevySplineFollower, BevySystemProfiler, BevyTransform, BevyWrapper, DeltaTime, DraggedFile,
+    Animator, AudioBackendResource, AudioEmitter, AudioListener, BecsInputManager,
+    BecsRuntimeCursorState, BecsSystemProfiler, Camera, DeltaTime, DraggedFile, EntityFollower,
+    Light, LookAt, MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower,
+    Transform,
 };
 use helmer_editor_runtime::scene_state::scene_display_name;
 use helmer_editor_runtime::script_registry::update_script_registry_with_loader;
+use helmer_render::graphics::common::renderer::{
+    RenderViewportGizmoOptions, RenderViewportRequest,
+};
+use helmer_window::runtime::runtime::RuntimeCursorGrabMode;
 use walkdir::WalkDir;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
@@ -104,8 +103,8 @@ fn begin_system_scope(
     system_name: &'static str,
 ) -> Option<helmer_becs::profiling::SystemProfileScope> {
     world
-        .get_resource::<BevySystemProfiler>()
-        .and_then(|profiler| profiler.0.begin_scope(system_name))
+        .get_resource::<BecsSystemProfiler>()
+        .and_then(|profiler| profiler.begin_scope(system_name))
 }
 
 pub fn editor_ui_system(world: &mut World) {
@@ -1433,7 +1432,7 @@ fn snap_edge(edge: f32, clusters: &[EdgeCluster], epsilon: f32) -> f32 {
 pub fn editor_physics_state_system(
     scene_state: Res<EditorSceneState>,
     mut phys: ResMut<PhysicsResource>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1521,7 +1520,7 @@ pub fn editor_command_system(world: &mut World) {
                 if let Some(mut selection) = world.get_resource_mut::<
                     helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource,
                 >() {
-                    if selection.0.is_some_and(|selected| removed.contains(&selected)) {
+                    if selection.is_some_and(|selected| removed.contains(&selected)) {
                         selection.0 = None;
                     }
                 }
@@ -1603,7 +1602,7 @@ fn collect_entity_subtree(world: &mut World, root: Entity) -> Vec<Entity> {
 pub fn asset_scan_system(
     mut state: ResMut<AssetBrowserState>,
     watcher: Option<Res<FileWatchState>>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1638,7 +1637,7 @@ pub fn drag_drop_system(
     mut dragged: ResMut<DraggedFile>,
     mut queue: ResMut<EditorCommandQueue>,
     assets: Res<AssetBrowserState>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1665,9 +1664,9 @@ pub fn drag_drop_system(
 }
 
 pub fn editor_shortcut_system(
-    input_manager: Res<BevyInputManager>,
+    input_manager: Res<BecsInputManager>,
     mut queue: ResMut<EditorCommandQueue>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1675,7 +1674,7 @@ pub fn editor_shortcut_system(
             .begin_scope("helmer_editor_egui::editor::editor_shortcut_system")
     });
 
-    let input_manager = input_manager.0.read();
+    let input_manager = input_manager.read();
 
     if input_manager.egui_wants_key {
         return;
@@ -1709,7 +1708,7 @@ pub fn editor_shortcut_system(
 pub fn pane_manager_toggle_system(
     mut pane_manager: ResMut<EditorPaneManagerState>,
     egui_res: Res<EguiResource>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1737,18 +1736,18 @@ pub fn scene_dirty_system(
         (
             Or<(With<EditorEntity>, With<SceneChild>)>,
             Or<(
-                Changed<BevyTransform>,
-                Changed<BevyMeshRenderer>,
-                Changed<BevySkinnedMeshRenderer>,
+                Changed<Transform>,
+                Changed<MeshRenderer>,
+                Changed<SkinnedMeshRenderer>,
                 Changed<EditorMesh>,
                 Changed<EditorSkinnedMesh>,
-                Changed<BevyLight>,
-                Changed<BevyCamera>,
-                Changed<BevyPoseOverride>,
-                Changed<BevySpline>,
-                Changed<BevySplineFollower>,
-                Changed<BevyLookAt>,
-                Changed<BevyEntityFollower>,
+                Changed<Light>,
+                Changed<Camera>,
+                Changed<PoseOverride>,
+                Changed<Spline>,
+                Changed<SplineFollower>,
+                Changed<LookAt>,
+                Changed<EntityFollower>,
                 Changed<EntityParent>,
             )>,
         ),
@@ -1758,8 +1757,8 @@ pub fn scene_dirty_system(
         (
             Or<(With<EditorEntity>, With<SceneChild>)>,
             Or<(
-                Changed<BevyAudioEmitter>,
-                Changed<BevyAudioListener>,
+                Changed<AudioEmitter>,
+                Changed<AudioListener>,
                 Changed<EditorAudio>,
                 Changed<Name>,
                 Changed<SceneRoot>,
@@ -1775,8 +1774,8 @@ pub fn scene_dirty_system(
             Or<(Changed<ScriptComponent>, Changed<DynamicComponents>)>,
         ),
     >,
-    pose_child_query: Query<(), (With<SceneChild>, Changed<BevyPoseOverride>)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    pose_child_query: Query<(), (With<SceneChild>, Changed<PoseOverride>)>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1803,10 +1802,10 @@ pub fn apply_scene_child_animations_system(
     project: Res<EditorProject>,
     scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
     child_query: Query<(Entity, &SceneChild)>,
-    mut animator_query: Query<&mut BevyAnimator>,
-    skinned_query: Query<&BevySkinnedMeshRenderer>,
+    mut animator_query: Query<&mut Animator>,
+    skinned_query: Query<&SkinnedMeshRenderer>,
     name_query: Query<&Name>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1847,7 +1846,7 @@ pub fn apply_scene_child_animations_system(
 
         let skeleton = skinned_query
             .get(child_entity)
-            .map(|skinned| skinned.0.skin.skeleton.as_ref())
+            .map(|skinned| skinned.skin.skeleton.as_ref())
             .ok();
         let name = name_query
             .get(child_entity)
@@ -1877,14 +1876,14 @@ pub fn apply_scene_child_animations_system(
 }
 
 pub fn apply_scene_child_pose_overrides_system(
-    mut commands: bevy_ecs::prelude::Commands,
+    mut commands: helmer_becs::ecs::prelude::Commands,
     mut pending: ResMut<PendingSceneChildPoseOverrides>,
     project: Res<EditorProject>,
     scene_roots: Query<(Entity, &SceneAssetPath), With<SceneRoot>>,
     child_query: Query<(Entity, &SceneChild)>,
-    skinned_query: Query<&BevySkinnedMeshRenderer>,
-    mut pose_query: Query<&mut BevyPoseOverride>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    skinned_query: Query<&SkinnedMeshRenderer>,
+    mut pose_query: Query<&mut PoseOverride>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1924,7 +1923,7 @@ pub fn apply_scene_child_pose_overrides_system(
         };
 
         let skeleton = match skinned_query.get(child_entity) {
-            Ok(skinned) => skinned.0.skin.skeleton.clone(),
+            Ok(skinned) => skinned.skin.skeleton.clone(),
             Err(_) => {
                 remaining.push(entry);
                 continue;
@@ -1937,11 +1936,9 @@ pub fn apply_scene_child_pose_overrides_system(
         };
 
         if let Ok(mut existing) = pose_query.get_mut(child_entity) {
-            existing.0 = pose_override;
+            *existing = pose_override;
         } else {
-            commands
-                .entity(child_entity)
-                .try_insert(BevyPoseOverride(pose_override));
+            commands.entity(child_entity).try_insert(pose_override);
         }
     }
 
@@ -1962,10 +1959,10 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
     }
 
     let asset_server = {
-        let Some(asset_server) = world.get_resource::<helmer_becs::BevyAssetServer>() else {
+        let Some(asset_server) = world.get_resource::<helmer_becs::BecsAssetServer>() else {
             return;
         };
-        asset_server.0.clone()
+        asset_server.clone()
     };
 
     let mut pending_entries = Vec::new();
@@ -1988,7 +1985,7 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
                     .remove::<PendingSceneChildRenderer>();
                 continue;
             };
-            scene_root.0.clone()
+            scene_root.0
         };
 
         let scene = {
@@ -2022,22 +2019,22 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
             SceneChildRendererKind::Auto => {}
             SceneChildRendererKind::None => {
                 let mut entity_mut = world.entity_mut(entity);
-                entity_mut.remove::<BevyMeshRenderer>();
-                entity_mut.remove::<BevySkinnedMeshRenderer>();
+                entity_mut.remove::<MeshRenderer>();
+                entity_mut.remove::<SkinnedMeshRenderer>();
                 entity_mut.remove::<PendingSkinnedMeshAsset>();
-                entity_mut.remove::<BevyAnimator>();
-                entity_mut.remove::<BevyPoseOverride>();
+                entity_mut.remove::<Animator>();
+                entity_mut.remove::<PoseOverride>();
                 entity_mut.remove::<PendingSceneChildRenderer>();
             }
             SceneChildRendererKind::Mesh => {
                 let mesh_renderer =
                     MeshRenderer::new(mesh_id, material_id, pending.casts_shadow, pending.visible);
                 let mut entity_mut = world.entity_mut(entity);
-                entity_mut.remove::<BevySkinnedMeshRenderer>();
+                entity_mut.remove::<SkinnedMeshRenderer>();
                 entity_mut.remove::<PendingSkinnedMeshAsset>();
-                entity_mut.remove::<BevyAnimator>();
-                entity_mut.remove::<BevyPoseOverride>();
-                entity_mut.insert(BevyWrapper(mesh_renderer));
+                entity_mut.remove::<Animator>();
+                entity_mut.remove::<PoseOverride>();
+                entity_mut.insert(mesh_renderer);
                 entity_mut.remove::<PendingSceneChildRenderer>();
             }
             SceneChildRendererKind::Skinned => {
@@ -2049,11 +2046,11 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
                         pending.visible,
                     );
                     let mut entity_mut = world.entity_mut(entity);
-                    entity_mut.remove::<BevySkinnedMeshRenderer>();
+                    entity_mut.remove::<SkinnedMeshRenderer>();
                     entity_mut.remove::<PendingSkinnedMeshAsset>();
-                    entity_mut.remove::<BevyAnimator>();
-                    entity_mut.remove::<BevyPoseOverride>();
-                    entity_mut.insert(BevyWrapper(mesh_renderer));
+                    entity_mut.remove::<Animator>();
+                    entity_mut.remove::<PoseOverride>();
+                    entity_mut.insert(mesh_renderer);
                     entity_mut.remove::<PendingSceneChildRenderer>();
                     continue;
                 };
@@ -2069,12 +2066,12 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
                     pending.visible,
                 );
 
-                let has_animator = world.get::<BevyAnimator>(entity).is_some();
+                let has_animator = world.get::<Animator>(entity).is_some();
                 {
                     let mut entity_mut = world.entity_mut(entity);
-                    entity_mut.remove::<BevyMeshRenderer>();
+                    entity_mut.remove::<MeshRenderer>();
                     entity_mut.remove::<PendingSkinnedMeshAsset>();
-                    entity_mut.insert(BevySkinnedMeshRenderer(skinned));
+                    entity_mut.insert(skinned);
                     entity_mut.remove::<PendingSceneChildRenderer>();
                 }
 
@@ -2082,7 +2079,7 @@ pub fn pending_scene_child_renderer_system(world: &mut World) {
                     if let Some(anim_lib) = anim_lib {
                         world
                             .entity_mut(entity)
-                            .insert(BevyAnimator(build_default_animator(anim_lib)));
+                            .insert(Animator(build_default_animator(anim_lib)));
                     }
                 }
             }
@@ -2104,10 +2101,10 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
     }
 
     let asset_server = {
-        let Some(asset_server) = world.get_resource::<helmer_becs::BevyAssetServer>() else {
+        let Some(asset_server) = world.get_resource::<helmer_becs::BecsAssetServer>() else {
             return;
         };
-        asset_server.0.clone()
+        asset_server.clone()
     };
 
     let mut pending_entries = Vec::new();
@@ -2172,8 +2169,8 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
         };
 
         let (casts_shadow, visible) = world
-            .get::<BevyMeshRenderer>(entity)
-            .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+            .get::<MeshRenderer>(entity)
+            .map(|renderer| (renderer.casts_shadow, renderer.visible))
             .or_else(|| {
                 world
                     .get::<EditorSkinnedMesh>(entity)
@@ -2184,20 +2181,20 @@ pub fn pending_skinned_mesh_system(world: &mut World) {
         let skinned =
             SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
 
-        let has_animator = world.get::<BevyAnimator>(entity).is_some();
+        let has_animator = world.get::<Animator>(entity).is_some();
         {
             let mut entity_mut = world.entity_mut(entity);
-            entity_mut.remove::<BevyMeshRenderer>();
+            entity_mut.remove::<MeshRenderer>();
             entity_mut.remove::<EditorMesh>();
             entity_mut.remove::<PendingSkinnedMeshAsset>();
-            entity_mut.insert(BevySkinnedMeshRenderer(skinned));
+            entity_mut.insert(skinned);
         }
 
         if !has_animator {
             if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
                 world
                     .entity_mut(entity)
-                    .insert(BevyAnimator(build_default_animator(anim_lib)));
+                    .insert(Animator(build_default_animator(anim_lib)));
             }
         }
 
@@ -2228,13 +2225,13 @@ pub fn editor_render_refresh_system(world: &mut World) {
     }
 
     let entities: Vec<Entity> = world
-        .query_filtered::<Entity, Or<(With<BevyMeshRenderer>, With<BevySkinnedMeshRenderer>)>>()
+        .query_filtered::<Entity, Or<(With<MeshRenderer>, With<SkinnedMeshRenderer>)>>()
         .iter(world)
         .collect();
     for entity in entities {
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-            let current = transform.0;
-            transform.0 = current;
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            let current = *transform;
+            *transform = current;
         }
     }
 }
@@ -2242,7 +2239,7 @@ pub fn editor_render_refresh_system(world: &mut World) {
 pub fn script_registry_system(
     mut registry: ResMut<ScriptRegistry>,
     project: Res<EditorProject>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -2369,7 +2366,7 @@ fn record_recent_project(world: &mut World, path: &Path) {
 fn initialize_project_state(world: &mut World, project: &EditorProject) {
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = world
-            .get_resource::<helmer_becs::BevyAssetServer>()
+            .get_resource::<helmer_becs::BecsAssetServer>()
             .expect("AssetServer missing");
         ensure_default_material(project, &mut cache, asset_server);
     });
@@ -2443,9 +2440,9 @@ fn handle_open_scene(world: &mut World, path: &Path) {
                 world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
                     let asset_server = {
                         let asset_server = world
-                            .get_resource::<helmer_becs::BevyAssetServer>()
+                            .get_resource::<helmer_becs::BecsAssetServer>()
                             .expect("AssetServer missing");
-                        helmer_becs::BevyAssetServer(asset_server.0.clone())
+                        asset_server.cloned()
                     };
                     spawn_scene_from_document(
                         world,
@@ -2533,21 +2530,21 @@ fn handle_save_scene_as(world: &mut World, path: &Path) {
 fn handle_create_entity(world: &mut World, kind: SpawnKind) {
     match kind {
         SpawnKind::Empty => {
-            world.spawn((EditorEntity, BevyTransform::default(), Name::new("Empty")));
+            world.spawn((EditorEntity, Transform::default(), Name::new("Empty")));
         }
         SpawnKind::Camera => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
-                BevyCamera::default(),
+                Transform::default(),
+                Camera::default(),
                 Name::new("Camera"),
             ));
         }
         SpawnKind::FreecamCamera => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
-                BevyCamera::default(),
+                Transform::default(),
+                Camera::default(),
                 Freecam::default(),
                 Name::new("Freecam Camera"),
             ));
@@ -2555,28 +2552,24 @@ fn handle_create_entity(world: &mut World, kind: SpawnKind) {
         SpawnKind::DirectionalLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::directional(glam::vec3(1.0, 1.0, 1.0), 25.0)),
+                Transform::default(),
+                Light::directional(glam::vec3(1.0, 1.0, 1.0), 25.0),
                 Name::new("Directional Light"),
             ));
         }
         SpawnKind::PointLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0)),
+                Transform::default(),
+                Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0),
                 Name::new("Point Light"),
             ));
         }
         SpawnKind::SpotLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::spot(
-                    glam::vec3(1.0, 1.0, 1.0),
-                    10.0,
-                    45.0_f32.to_radians(),
-                )),
+                Transform::default(),
+                Light::spot(glam::vec3(1.0, 1.0, 1.0), 10.0, 45.0_f32.to_radians()),
                 Name::new("Spot Light"),
             ));
         }
@@ -2586,7 +2579,7 @@ fn handle_create_entity(world: &mut World, kind: SpawnKind) {
         SpawnKind::DynamicBodyCuboid => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 DynamicRigidBody { mass: 1.0 },
                 ColliderShape::Cuboid,
                 Name::new("Dynamic Body (Box)"),
@@ -2595,7 +2588,7 @@ fn handle_create_entity(world: &mut World, kind: SpawnKind) {
         SpawnKind::DynamicBodySphere => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 DynamicRigidBody { mass: 1.0 },
                 ColliderShape::Sphere,
                 Name::new("Dynamic Body (Sphere)"),
@@ -2604,7 +2597,7 @@ fn handle_create_entity(world: &mut World, kind: SpawnKind) {
         SpawnKind::FixedColliderCuboid => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 FixedCollider,
                 ColliderShape::Cuboid,
                 Name::new("Fixed Collider (Box)"),
@@ -2613,7 +2606,7 @@ fn handle_create_entity(world: &mut World, kind: SpawnKind) {
         SpawnKind::FixedColliderSphere => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 FixedCollider,
                 ColliderShape::Sphere,
                 Name::new("Fixed Collider (Sphere)"),
@@ -2768,7 +2761,7 @@ fn handle_create_asset(world: &mut World, directory: &Path, name: &str, kind: As
 }
 
 fn handle_set_active_camera(world: &mut World, entity: Entity) -> bool {
-    if world.get::<BevyCamera>(entity).is_none() {
+    if world.get::<Camera>(entity).is_none() {
         set_status(world, "Selected entity has no camera".to_string());
         return false;
     }
@@ -2799,7 +2792,7 @@ fn handle_set_active_camera(world: &mut World, entity: Entity) -> bool {
 }
 
 fn has_camera(world: &World, entity: Entity) -> bool {
-    world.get::<BevyCamera>(entity).is_some() && world.get::<BevyTransform>(entity).is_some()
+    world.get::<Camera>(entity).is_some() && world.get::<Transform>(entity).is_some()
 }
 
 fn viewport_gizmo_options(
@@ -2845,8 +2838,8 @@ fn viewport_request_for_entity(
     graph_template: Option<String>,
     gizmo_options: RenderViewportGizmoOptions,
 ) -> Option<RenderViewportRequest> {
-    let transform = world.get::<BevyTransform>(entity)?.0;
-    let mut camera = world.get::<BevyCamera>(entity)?.0;
+    let transform = *world.get::<Transform>(entity)?;
+    let mut camera = *world.get::<Camera>(entity)?;
     let target_size = target_size_override.unwrap_or_else(|| viewport_rect.target_size());
     let aspect_ratio = target_size[0].max(1) as f32 / target_size[1].max(1) as f32;
     if aspect_ratio.is_finite() && aspect_ratio > 0.0 {
@@ -2858,8 +2851,8 @@ fn viewport_request_for_entity(
     };
     Some(RenderViewportRequest {
         id,
-        camera_transform: transform,
-        camera_component: camera,
+        camera_transform: transform.into(),
+        camera_component: camera.into(),
         texture_handle,
         texture_is_managed,
         target_size,
@@ -2921,7 +2914,7 @@ pub fn editor_viewport_camera_mode_system(world: &mut World) {
     };
 
     let current = world
-        .query::<(Entity, &helmer_becs::BevyActiveCamera)>()
+        .query::<(Entity, &helmer_becs::ActiveCamera)>()
         .iter(world)
         .next()
         .map(|(entity, _)| entity);
@@ -3156,7 +3149,7 @@ fn handle_toggle_play(world: &mut World) {
     match state {
         WorldState::Edit => {
             if let Some(audio) = world.get_resource::<AudioBackendResource>() {
-                audio.0.clear_emitters();
+                audio.clear_emitters();
             }
             let project = world
                 .get_resource::<EditorProject>()
@@ -3183,7 +3176,7 @@ fn handle_toggle_play(world: &mut World) {
         }
         WorldState::Play => {
             if let Some(audio) = world.get_resource::<AudioBackendResource>() {
-                audio.0.clear_emitters();
+                audio.clear_emitters();
             }
             if let Some(mut phys_res) = world.get_resource_mut::<PhysicsResource>() {
                 phys_res.running = false;
@@ -3211,9 +3204,9 @@ fn handle_toggle_play(world: &mut World) {
                     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
                         let asset_server = {
                             let asset_server = world
-                                .get_resource::<helmer_becs::BevyAssetServer>()
+                                .get_resource::<helmer_becs::BecsAssetServer>()
                                 .expect("AssetServer missing");
-                            helmer_becs::BevyAssetServer(asset_server.0.clone())
+                            asset_server.cloned()
                         };
                         spawn_scene_from_document(
                             world,
@@ -3274,7 +3267,7 @@ fn spawn_primitive(world: &mut World, kind: PrimitiveKind) {
 
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = world
-            .get_resource::<helmer_becs::BevyAssetServer>()
+            .get_resource::<helmer_becs::BecsAssetServer>()
             .expect("AssetServer missing");
         let material_handle = ensure_default_material(&project, &mut cache, asset_server);
         let mesh_handle = load_primitive_mesh(kind, &mut cache, asset_server);
@@ -3286,13 +3279,8 @@ fn spawn_primitive(world: &mut World, kind: PrimitiveKind) {
 
         world.spawn((
             EditorEntity,
-            BevyTransform::default(),
-            BevyWrapper(MeshRenderer::new(
-                mesh_handle.id,
-                material_handle.id,
-                true,
-                true,
-            )),
+            Transform::default(),
+            MeshRenderer::new(mesh_handle.id, material_handle.id, true, true),
             EditorMesh {
                 source: MeshSource::Primitive(kind),
                 material_path,
@@ -3303,18 +3291,18 @@ fn spawn_primitive(world: &mut World, kind: PrimitiveKind) {
 
 fn spawn_scene_asset(world: &mut World, path: &Path) {
     let asset_server = world
-        .get_resource::<helmer_becs::BevyAssetServer>()
-        .map(|server| helmer_becs::BevyAssetServer(server.0.clone()))
+        .get_resource::<helmer_becs::BecsAssetServer>()
+        .map(helmer_becs::BecsAssetServer::cloned)
         .expect("AssetServer missing");
     let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
         cached_scene_handle(&mut cache, &asset_server, path)
     } else {
-        asset_server.0.lock().load_scene(path)
+        asset_server.lock().load_scene(path)
     };
 
     world.spawn((
         EditorEntity,
-        BevyTransform::default(),
+        Transform::default(),
         SceneRoot(handle),
         SceneAssetPath {
             path: path.to_path_buf(),
@@ -3330,7 +3318,7 @@ fn spawn_mesh_asset(world: &mut World, path: &Path) {
 
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = world
-            .get_resource::<helmer_becs::BevyAssetServer>()
+            .get_resource::<helmer_becs::BecsAssetServer>()
             .expect("AssetServer missing");
         let material_handle = ensure_default_material(&project, &mut cache, asset_server);
         let mesh_handle = load_mesh_asset(path, &mut cache, asset_server);
@@ -3342,13 +3330,8 @@ fn spawn_mesh_asset(world: &mut World, path: &Path) {
 
         world.spawn((
             EditorEntity,
-            BevyTransform::default(),
-            BevyWrapper(MeshRenderer::new(
-                mesh_handle.id,
-                material_handle.id,
-                true,
-                true,
-            )),
+            Transform::default(),
+            MeshRenderer::new(mesh_handle.id, material_handle.id, true, true),
             EditorMesh {
                 source: MeshSource::Asset {
                     path: path.to_string_lossy().replace('\\', "/"),
@@ -3362,7 +3345,7 @@ fn spawn_mesh_asset(world: &mut World, path: &Path) {
 fn ensure_default_material(
     project: &EditorProject,
     cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
 ) -> Option<Handle<Material>> {
     if let Some(handle) = cache.default_material {
         return Some(handle);
@@ -3371,7 +3354,7 @@ fn ensure_default_material(
     let root = project.root.as_ref()?;
     let config = project.config.as_ref()?;
     let default_path = config.materials_root(root).join("default.ron");
-    let handle = asset_server.0.lock().load_material(&default_path);
+    let handle = asset_server.lock().load_material(&default_path);
 
     let relative = default_path
         .strip_prefix(root)
@@ -3389,14 +3372,14 @@ fn ensure_default_material(
 fn load_mesh_asset(
     path: &Path,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
 ) -> Handle<Mesh> {
     let key = path.to_string_lossy().replace('\\', "/");
     if let Some(handle) = asset_cache.mesh_handles.get(&key).copied() {
         return handle;
     }
 
-    let handle = asset_server.0.lock().load_mesh(path);
+    let handle = asset_server.lock().load_mesh(path);
     asset_cache.mesh_handles.insert(key, handle);
     handle
 }
@@ -3404,7 +3387,7 @@ fn load_mesh_asset(
 fn load_primitive_mesh(
     kind: PrimitiveKind,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
 ) -> Handle<Mesh> {
     if let Some(handle) = asset_cache.primitive_meshes.get(&kind).copied() {
         return handle;
@@ -3591,8 +3574,8 @@ impl Freecam {
 }
 
 pub fn freecam_system(
-    mut state: bevy_ecs::system::Local<FreecamState>,
-    input: Res<BevyInputManager>,
+    mut state: helmer_becs::ecs::system::Local<FreecamState>,
+    input: Res<BecsInputManager>,
     egui_res: Res<EguiResource>,
     time: Res<DeltaTime>,
     gizmo_state: Res<EditorGizmoState>,
@@ -3600,43 +3583,43 @@ pub fn freecam_system(
     viewport_state: Res<EditorViewportState>,
     pane_viewport_state: Option<Res<EditorPaneViewportState>>,
     viewport_runtime: Res<EditorViewportRuntime>,
-    runtime_cursor_state: Option<Res<BevyRuntimeCursorState>>,
+    runtime_cursor_state: Option<Res<BecsRuntimeCursorState>>,
     mut cursor_control_state: ResMut<EditorCursorControlState>,
-    mut viewport_query: bevy_ecs::prelude::Query<
-        (Entity, &mut BevyTransform, &mut BevyCamera),
+    mut viewport_query: helmer_becs::ecs::prelude::Query<
+        (Entity, &mut Transform, &mut Camera),
         (
-            bevy_ecs::prelude::With<EditorViewportCamera>,
-            bevy_ecs::prelude::Without<EditorPlayCamera>,
+            helmer_becs::ecs::prelude::With<EditorViewportCamera>,
+            helmer_becs::ecs::prelude::Without<EditorPlayCamera>,
         ),
     >,
-    mut play_query: bevy_ecs::prelude::Query<
-        (Entity, &mut BevyTransform, &mut BevyCamera),
+    mut play_query: helmer_becs::ecs::prelude::Query<
+        (Entity, &mut Transform, &mut Camera),
         (
-            bevy_ecs::prelude::With<EditorPlayCamera>,
-            bevy_ecs::prelude::With<Freecam>,
-            bevy_ecs::prelude::Without<EditorViewportCamera>,
+            helmer_becs::ecs::prelude::With<EditorPlayCamera>,
+            helmer_becs::ecs::prelude::With<Freecam>,
+            helmer_becs::ecs::prelude::Without<EditorViewportCamera>,
         ),
     >,
-    mut camera_candidates: bevy_ecs::system::ParamSet<(
-        bevy_ecs::prelude::Query<
+    mut camera_candidates: helmer_becs::ecs::system::ParamSet<(
+        helmer_becs::ecs::prelude::Query<
             Entity,
             (
-                bevy_ecs::prelude::With<EditorViewportCamera>,
-                bevy_ecs::prelude::Without<EditorPlayCamera>,
+                helmer_becs::ecs::prelude::With<EditorViewportCamera>,
+                helmer_becs::ecs::prelude::Without<EditorPlayCamera>,
             ),
         >,
-        bevy_ecs::prelude::Query<
+        helmer_becs::ecs::prelude::Query<
             Entity,
             (
-                bevy_ecs::prelude::With<EditorPlayCamera>,
-                bevy_ecs::prelude::With<Freecam>,
-                bevy_ecs::prelude::Without<EditorViewportCamera>,
+                helmer_becs::ecs::prelude::With<EditorPlayCamera>,
+                helmer_becs::ecs::prelude::With<Freecam>,
+                helmer_becs::ecs::prelude::Without<EditorViewportCamera>,
             ),
         >,
-        bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
+        helmer_becs::ecs::prelude::Query<Entity, helmer_becs::ecs::prelude::With<EditorPlayCamera>>,
     )>,
-    freecam_components: bevy_ecs::prelude::Query<&Freecam>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    freecam_components: helmer_becs::ecs::prelude::Query<&Freecam>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -3685,7 +3668,7 @@ pub fn freecam_system(
     }
 
     let dt = time.0;
-    let input_manager = &input.0.read();
+    let input_manager = &input.read();
     let raw_mouse_delta = input_manager.mouse_motion;
     let capture_cursor_position = input_manager.cursor_position;
     let egui_pixels_per_point = egui_res.ctx.pixels_per_point() as f64;
@@ -4121,9 +4104,7 @@ pub fn freecam_system(
         speed *= state.boost_multiplier;
     }
 
-    let mut apply_freecam = |entity: Entity,
-                             transform: &mut BevyTransform,
-                             camera: &mut BevyCamera| {
+    let mut apply_freecam = |entity: Entity, transform: &mut Transform, camera: &mut Camera| {
         if state.active_entity != Some(entity) {
             state.active_entity = Some(entity);
             state.current_fov_multiplier = 1.0;
@@ -4137,8 +4118,8 @@ pub fn freecam_system(
             state.middle_orbit_focus = None;
         }
 
-        let transform = &mut transform.0;
-        let camera = &mut camera.0;
+        let transform = &mut *transform;
+        let camera = &mut *camera;
         let previous_forward = transform.forward().normalize_or_zero();
         let middle_orbit_active = state.is_middle_looking && !state.is_looking;
         let middle_pan_active = middle_orbit_active && shift_active;
@@ -4342,7 +4323,10 @@ fn pointer_over_play_viewport(
     scene_state: &EditorSceneState,
     viewport_state: &EditorViewportState,
     viewport_runtime: &EditorViewportRuntime,
-    _play_cameras: &bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
+    _play_cameras: &helmer_becs::ecs::prelude::Query<
+        Entity,
+        helmer_becs::ecs::prelude::With<EditorPlayCamera>,
+    >,
     cursor_position: DVec2,
 ) -> bool {
     if scene_state.world_state != WorldState::Play {
@@ -4367,7 +4351,10 @@ fn play_viewport_rect_for_capture(
     scene_state: &EditorSceneState,
     viewport_state: &EditorViewportState,
     viewport_runtime: &EditorViewportRuntime,
-    _play_cameras: &bevy_ecs::prelude::Query<Entity, bevy_ecs::prelude::With<EditorPlayCamera>>,
+    _play_cameras: &helmer_becs::ecs::prelude::Query<
+        Entity,
+        helmer_becs::ecs::prelude::With<EditorPlayCamera>,
+    >,
     cursor_position: DVec2,
 ) -> Option<ViewportRectPixels> {
     if scene_state.world_state != WorldState::Play {
@@ -4408,7 +4395,7 @@ fn script_cursor_capture_allowed_for_viewports(
     focused_play_viewport: bool,
     script_capture_suspended: bool,
     script_capture_was_allowed: bool,
-    script_policy: Option<helmer::runtime::runtime::RuntimeCursorStateSnapshot>,
+    script_policy: Option<helmer_window::runtime::runtime::RuntimeCursorStateSnapshot>,
 ) -> bool {
     if !in_play_mode || script_capture_suspended {
         return false;
@@ -4426,7 +4413,7 @@ fn sync_editor_cursor_control(
     freecam_state: &FreecamState,
     cursor_control_state: &mut EditorCursorControlState,
     script_cursor_capture_allowed: bool,
-    runtime_cursor_state: Option<&BevyRuntimeCursorState>,
+    runtime_cursor_state: Option<&BecsRuntimeCursorState>,
     restore_cursor_position: Option<DVec2>,
 ) {
     cursor_control_state.freecam_capture_active = freecam_state.is_looking;

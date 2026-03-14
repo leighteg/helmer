@@ -3,9 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy_ecs::prelude::World;
+use helmer_becs::ecs::prelude::World;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
-use helmer_becs::{BevySkinnedMeshRenderer, BevySystemProfiler};
+use helmer_becs::{BecsSystemProfiler, SkinnedMeshRenderer};
 use helmer_editor_runtime::undo::EditorUndoState as RuntimeUndoState;
 
 use crate::editor::{
@@ -295,7 +295,7 @@ pub fn process_undo_requests(world: &mut World) {
 
 pub fn editor_undo_request_system(world: &mut World) {
     let _system_scope = world
-        .get_resource::<BevySystemProfiler>()
+        .get_resource::<BecsSystemProfiler>()
         .and_then(|profiler| {
             profiler
                 .0
@@ -524,9 +524,9 @@ fn apply_snapshot(world: &mut World, snapshot: &SceneSnapshot) {
     let created_entities = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = {
             let asset_server = world
-                .get_resource::<helmer_becs::BevyAssetServer>()
+                .get_resource::<helmer_becs::BecsAssetServer>()
                 .expect("AssetServer missing");
-            helmer_becs::BevyAssetServer(asset_server.0.clone())
+            asset_server.cloned()
         };
         spawn_scene_from_document(
             world,
@@ -569,8 +569,8 @@ fn apply_snapshot(world: &mut World, snapshot: &SceneSnapshot) {
             .get_resource::<InspectorSelectedEntityResource>()
             .and_then(|selection| selection.0);
         let selected_joint_count = selected_entity
-            .and_then(|entity| world.get::<BevySkinnedMeshRenderer>(entity))
-            .map(|skinned| skinned.0.skin.skeleton.joint_count());
+            .and_then(|entity| world.get::<SkinnedMeshRenderer>(entity))
+            .map(|skinned| skinned.skin.skeleton.joint_count());
 
         if let Some(mut pose_state) = world.get_resource_mut::<PoseEditorState>() {
             let mut next_state = prev_pose_state;

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use bevy_ecs::prelude::{Component, Resource};
+use helmer_becs::ecs::prelude::{Component, Resource};
 
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct EditorEntity;

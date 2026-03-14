@@ -1,5 +1,5 @@
-use bevy_ecs::prelude::{Res, ResMut};
-use helmer_becs::BevySystemProfiler;
+use helmer_becs::BecsSystemProfiler;
+use helmer_becs::ecs::prelude::{Res, ResMut};
 pub use helmer_editor_runtime::file_watch::{FileWatchState, configure_file_watcher};
 use helmer_editor_runtime::{file_watch::poll_file_watcher, project::ProjectConfig};
 
@@ -10,7 +10,7 @@ pub fn file_watch_system(
     mut assets: ResMut<AssetBrowserState>,
     mut scripts: ResMut<ScriptRegistry>,
     project: Res<EditorProject>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler

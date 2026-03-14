@@ -1,4 +1,4 @@
-use bevy_ecs::entity::Entity;
+use helmer_becs::ecs::entity::Entity;
 use std::collections::{HashMap, HashSet};
 
 use helmer_ui::{

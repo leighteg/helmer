@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 

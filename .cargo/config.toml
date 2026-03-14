@@ -13,5 +13,3 @@ rustflags = [
 [env]
 CC_wasm32_unknown_unknown = "clang"
 CXX_wasm32_unknown_unknown = "clang++"
-CFLAGS_wasm32_unknown_unknown = "-isystem /usr/include -isystem /usr/include/x86_64-linux-gnu"
-CXXFLAGS_wasm32_unknown_unknown = "-isystem /usr/include/c++/v1 -isystem /usr/include/x86_64-solus-linux/c++/v1 -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu -D_LIBCPP_HAS_NO_THREADS"

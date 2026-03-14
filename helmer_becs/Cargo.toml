@@ -5,6 +5,12 @@ edition = "2024"
 
 [dependencies]
 helmer = { path = "../helmer" }
+helmer_animation = { path = "../helmer_animation" }
+helmer_audio = { path = "../helmer_audio" }
+helmer_render = { path = "../helmer_render" }
+helmer_asset = { path = "../helmer_asset" }
+helmer_window = { path = "../helmer_window" }
+helmer_input = { path = "../helmer_input" }
 helmer_ui = { path = "../helmer_ui" }
 bevy_ecs = { version = "0.17.2", features = ["reflect_auto_register", "reflect_functions"] }
 glam = "0.30.9"

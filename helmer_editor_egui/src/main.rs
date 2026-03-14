@@ -1,12 +1,12 @@
 use std::{env, path::PathBuf, sync::OnceLock};
 
-use bevy_ecs::schedule::IntoScheduleConfigs;
-use helmer::graphics::render_graphs::template_for_graph;
-use helmer::runtime::asset_server::AssetServer;
+use helmer_asset::runtime::asset_server::AssetServer;
+use helmer_becs::ecs::schedule::IntoScheduleConfigs;
 use helmer_becs::systems::render_system::{RenderGizmoState, RenderMainSceneToSwapchain};
 use helmer_becs::{
-    AudioBackendResource, BevySystemProfiler, egui_integration::EguiResource, helmer_becs_init,
+    AudioBackendResource, BecsSystemProfiler, egui_integration::EguiResource, helmer_becs_init,
 };
+use helmer_render::graphics::render_graphs::template_for_graph;
 
 use helmer_editor_egui::editor::{
     AnimatorUiState, AssetBrowserState, AssetDragState, EditorAssetCache, EditorAudioDeviceCache,
@@ -58,8 +58,8 @@ fn main() {
 }
 
 fn editor_init(
-    world: &mut bevy_ecs::world::World,
-    schedule: &mut bevy_ecs::schedule::Schedule,
+    world: &mut helmer_becs::ecs::world::World,
+    schedule: &mut helmer_becs::ecs::schedule::Schedule,
     _asset_server: &AssetServer,
 ) {
     world.insert_resource(EditorProject::default());
@@ -115,8 +115,8 @@ fn editor_init(
     world.insert_resource(EditorProfilerPaneState::default());
     world.insert_resource(EditorAudioDeviceCache::default());
 
-    if let Some(system_profiler) = world.get_resource::<BevySystemProfiler>() {
-        system_profiler.0.register_systems(&[
+    if let Some(system_profiler) = world.get_resource::<BecsSystemProfiler>() {
+        system_profiler.register_systems(&[
             "helmer_editor_egui::editor::editor_command_system",
             "helmer_editor_egui::editor::editor_physics_state_system",
             "helmer_editor_egui::editor::file_watch_system",
@@ -147,8 +147,8 @@ fn editor_init(
     }
 
     if let Some(audio) = world.get_resource::<AudioBackendResource>() {
-        audio.0.set_enabled(true);
-        audio.0.clear_emitters();
+        audio.set_enabled(true);
+        audio.clear_emitters();
     }
 
     activate_viewport_camera(world);

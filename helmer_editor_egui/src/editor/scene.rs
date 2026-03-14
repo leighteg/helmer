@@ -4,22 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy_ecs::name::Name;
-use bevy_ecs::prelude::{Component, Entity, Resource, World};
-use bevy_ecs::query::{With, Without};
-use helmer::{
-    animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton},
-    graphics::common::renderer::{
-        SpriteAnimationPlayback, SpriteBlendMode, SpriteSheetAnimation, SpriteSpace, TextAlignH,
-        TextAlignV, TextFontStyle,
-    },
-    provided::components::{
-        AudioEmitter, AudioListener, Camera, EntityFollower, Light, LightType, LookAt,
-        MeshRenderer, PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode,
-        SpriteImageSequence, SpriteRenderer, Text2d, Transform,
-    },
-    runtime::asset_server::{Handle, Scene},
-};
+use helmer_animation::{AnimationChannel, AnimationClip, Interpolation, Keyframe, Pose, Skeleton};
+use helmer_asset::runtime::asset_server::{Handle, Scene};
+use helmer_becs::ecs::name::Name;
+use helmer_becs::ecs::prelude::{Component, Entity, Resource, World};
+use helmer_becs::ecs::query::{With, Without};
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, ColliderProperties, ColliderPropertyInheritance,
     ColliderShape, DynamicRigidBody, FixedCollider, JointMotor, KinematicMode, KinematicRigidBody,
@@ -28,15 +17,19 @@ use helmer_becs::physics::components::{
     PhysicsWorldDefaults, RigidBodyProperties, RigidBodyPropertyInheritance,
 };
 use helmer_becs::{
-    BevyAnimator, BevyAudioEmitter, BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight,
-    BevyLookAt, BevyMeshRenderer, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline,
-    BevySplineFollower, BevySpriteImageSequence, BevySpriteRenderer, BevyText2d, BevyTransform,
-    BevyWrapper,
+    Animator, AudioEmitter, AudioListener, Camera, EntityFollower, Light, LookAt, MeshRenderer,
+    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SpriteImageSequence, SpriteRenderer,
+    Text2d, Transform,
+    components::{
+        LightType, SplineMode, SpriteAnimationPlayback, SpriteBlendMode, SpriteSheetAnimation,
+        SpriteSpace, TextAlignH, TextAlignV, TextFontStyle,
+    },
     systems::scene_system::{
         EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, SpawnedScene,
         build_default_animator,
     },
 };
+use helmer_render::graphics::common::renderer::Transform as RenderTransform;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
@@ -1098,7 +1091,7 @@ pub struct AudioEmitterData {
     pub path: Option<String>,
     #[serde(default)]
     pub streaming: bool,
-    pub bus: helmer::audio::AudioBus,
+    pub bus: helmer_audio::AudioBus,
     pub volume: f32,
     pub pitch: f32,
     pub looping: bool,
@@ -1109,14 +1102,14 @@ pub struct AudioEmitterData {
     #[serde(default)]
     pub spatial_blend: f32,
     #[serde(default)]
-    pub playback_state: helmer::audio::AudioPlaybackState,
+    pub playback_state: helmer_audio::AudioPlaybackState,
     #[serde(default)]
     pub play_on_spawn: bool,
 }
 
 impl Default for AudioEmitterData {
     fn default() -> Self {
-        let defaults = helmer::provided::components::AudioEmitter::default();
+        let defaults = AudioEmitter::default();
         Self {
             path: None,
             streaming: false,
@@ -2066,6 +2059,16 @@ impl From<&Transform> for SerializedTransform {
     }
 }
 
+impl From<&RenderTransform> for SerializedTransform {
+    fn from(transform: &RenderTransform) -> Self {
+        Self {
+            position: transform.position.to_array(),
+            rotation: transform.rotation.to_array(),
+            scale: transform.scale.to_array(),
+        }
+    }
+}
+
 impl SerializedTransform {
     pub fn to_transform(&self) -> Transform {
         Transform {
@@ -2073,6 +2076,10 @@ impl SerializedTransform {
             rotation: glam::Quat::from_array(self.rotation),
             scale: glam::Vec3::from_array(self.scale),
         }
+    }
+
+    pub fn to_render_transform(&self) -> RenderTransform {
+        RenderTransform::from(self.to_transform())
     }
 }
 
@@ -2496,7 +2503,7 @@ pub(crate) fn pose_from_serialized(
         for index in 0..skeleton.joint_count() {
             let local = transforms
                 .get(index)
-                .map(SerializedTransform::to_transform)
+                .map(SerializedTransform::to_render_transform)
                 .unwrap_or_else(|| skeleton.joints[index].bind_transform);
             locals.push(local);
         }
@@ -2505,7 +2512,7 @@ pub(crate) fn pose_from_serialized(
         Pose {
             locals: transforms
                 .iter()
-                .map(SerializedTransform::to_transform)
+                .map(SerializedTransform::to_render_transform)
                 .collect(),
         }
     }
@@ -2547,7 +2554,7 @@ fn animation_track_from_data(
                 .map(|key| JointKey {
                     id: key.id,
                     time: key.time,
-                    transform: key.transform.to_transform(),
+                    transform: key.transform.to_render_transform(),
                 })
                 .collect();
             Some(TimelineTrack::Joint(JointTrack {
@@ -2773,11 +2780,11 @@ fn update_timeline_next_id(timeline: &mut EditorTimelineState) {
     timeline.next_id = max_id.saturating_add(1);
 }
 
-pub(crate) fn apply_custom_clips_to_animator(animator: &mut BevyAnimator, clips: &[AnimationClip]) {
+pub(crate) fn apply_custom_clips_to_animator(animator: &mut Animator, clips: &[AnimationClip]) {
     if clips.is_empty() {
         return;
     }
-    for layer in animator.0.layers.iter_mut() {
+    for layer in animator.layers.iter_mut() {
         let mut library = (*layer.graph.library).clone();
         for clip in clips {
             library.upsert_clip(clip.clone());
@@ -2947,8 +2954,8 @@ pub fn spawn_default_camera(world: &mut World) -> Entity {
     world
         .spawn((
             EditorEntity,
-            BevyTransform::default(),
-            BevyCamera::default(),
+            Transform::default(),
+            Camera::default(),
             EditorPlayCamera,
             Name::new("Scene Camera"),
         ))
@@ -2959,7 +2966,7 @@ pub fn spawn_default_light(world: &mut World) -> Entity {
     world
         .spawn((
             EditorEntity,
-            BevyWrapper(Transform {
+            Transform {
                 position: glam::Vec3::new(0.0, 4.0, 0.0),
                 rotation: glam::Quat::from_euler(
                     glam::EulerRot::YXZ,
@@ -2968,8 +2975,8 @@ pub fn spawn_default_light(world: &mut World) -> Entity {
                     20.0f32.to_radians(),
                 ),
                 scale: glam::Vec3::ONE,
-            }),
-            BevyWrapper(Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0)),
+            },
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
             Name::new("Directional Light"),
         ))
         .id()
@@ -2977,10 +2984,7 @@ pub fn spawn_default_light(world: &mut World) -> Entity {
 
 pub fn ensure_active_camera(world: &mut World) {
     let mut active_found = false;
-    for _ in world
-        .query::<(&BevyCamera, &EditorPlayCamera)>()
-        .iter(world)
-    {
+    for _ in world.query::<(&Camera, &EditorPlayCamera)>().iter(world) {
         active_found = true;
         break;
     }
@@ -2990,7 +2994,7 @@ pub fn ensure_active_camera(world: &mut World) {
     }
 
     if let Some((entity, _)) = world
-        .query_filtered::<(Entity, &BevyCamera), Without<EditorViewportCamera>>()
+        .query_filtered::<(Entity, &Camera), Without<EditorViewportCamera>>()
         .iter(world)
         .next()
     {
@@ -3012,13 +3016,13 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
     let mut query = world.query::<(
         Entity,
         Option<&Name>,
-        Option<&BevyTransform>,
-        Option<&BevyMeshRenderer>,
+        Option<&Transform>,
+        Option<&MeshRenderer>,
         Option<&EditorMesh>,
-        Option<&BevySkinnedMeshRenderer>,
+        Option<&SkinnedMeshRenderer>,
         Option<&EditorSkinnedMesh>,
-        Option<&BevyLight>,
-        Option<&BevyCamera>,
+        Option<&Light>,
+        Option<&Camera>,
         Option<&EditorPlayCamera>,
         Option<&EditorEntity>,
         Option<&SceneChild>,
@@ -3045,13 +3049,13 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             continue;
         }
 
-        let audio_emitter = world.get::<BevyAudioEmitter>(entity);
+        let audio_emitter = world.get::<AudioEmitter>(entity);
         let editor_audio = world.get::<EditorAudio>(entity);
-        let audio_listener = world.get::<BevyAudioListener>(entity);
+        let audio_listener = world.get::<AudioListener>(entity);
         let scene_root = world.get::<SceneRoot>(entity);
         let scene_asset = world.get::<SceneAssetPath>(entity);
         let script = world.get::<ScriptComponent>(entity);
-        let transform = transform.map(|t| t.0).unwrap_or_default();
+        let transform = transform.copied().unwrap_or_default();
         let serialized_transform = SerializedTransform::from(&transform);
 
         let mesh = if let (Some(mesh_renderer), Some(editor_mesh)) = (mesh_renderer, editor_mesh) {
@@ -3061,8 +3065,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                     .material_path
                     .as_ref()
                     .map(|path| normalize_path(path, root)),
-                casts_shadow: mesh_renderer.0.casts_shadow,
-                visible: mesh_renderer.0.visible,
+                casts_shadow: mesh_renderer.casts_shadow,
+                visible: mesh_renderer.visible,
             })
         } else {
             None
@@ -3074,7 +3078,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 return None;
             }
             let (casts_shadow, visible) = skinned_renderer
-                .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+                .map(|renderer| (renderer.casts_shadow, renderer.visible))
                 .unwrap_or((skinned.casts_shadow, skinned.visible));
             Some(SkinnedMeshComponentData {
                 scene_path: normalize_path(path, root),
@@ -3083,7 +3087,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 visible,
             })
         });
-        let sprite = world.get::<BevySpriteRenderer>(entity).map(|sprite| {
+        let sprite = world.get::<SpriteRenderer>(entity).map(|sprite| {
             let editor_sprite = world.get::<EditorSprite>(entity).cloned();
             let texture = editor_sprite
                 .as_ref()
@@ -3097,7 +3101,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                     }
                 });
             let image_sequence = world
-                .get::<BevySpriteImageSequence>(entity)
+                .get::<SpriteImageSequence>(entity)
                 .map(|sequence| {
                     let texture_paths = editor_sprite
                         .as_ref()
@@ -3113,73 +3117,71 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                             }
                         })
                         .collect::<Vec<_>>();
-                    SpriteImageSequenceData::from_component(&sequence.0, texture_paths)
+                    SpriteImageSequenceData::from_component(sequence, texture_paths)
                 })
                 .unwrap_or_default();
             SpriteComponentData {
                 texture,
-                color: sprite.0.color,
-                uv_min: sprite.0.uv_min,
-                uv_max: sprite.0.uv_max,
-                sheet_animation: SpriteSheetAnimationData::from_sheet(sprite.0.sheet_animation),
+                color: sprite.color,
+                uv_min: sprite.uv_min,
+                uv_max: sprite.uv_max,
+                sheet_animation: SpriteSheetAnimationData::from_sheet(sprite.sheet_animation),
                 image_sequence,
-                pivot: sprite.0.pivot,
-                clip_rect: sprite.0.clip_rect,
-                layer: sprite.0.layer,
-                space: sprite.0.space.into(),
-                blend_mode: sprite.0.blend_mode.into(),
-                billboard: sprite.0.billboard,
-                visible: sprite.0.visible,
-                pick_id: sprite.0.pick_id,
+                pivot: sprite.pivot,
+                clip_rect: sprite.clip_rect,
+                layer: sprite.layer,
+                space: sprite.space.into(),
+                blend_mode: sprite.blend_mode.into(),
+                billboard: sprite.billboard,
+                visible: sprite.visible,
+                pick_id: sprite.pick_id,
             }
         });
-        let text_2d = world
-            .get::<BevyText2d>(entity)
-            .map(|text| Text2dComponentData {
-                text: text.0.text.clone(),
-                color: text.0.color,
-                font_path: text.0.font_path.as_ref().and_then(|path| {
-                    let path = path.trim();
-                    if path.is_empty() {
-                        None
-                    } else {
-                        Some(normalize_path(path, root))
-                    }
-                }),
-                font_family: text.0.font_family.clone(),
-                font_size: text.0.font_size,
-                font_weight: text.0.font_weight,
-                font_width: text.0.font_width,
-                font_style: text.0.font_style.into(),
-                line_height_scale: text.0.line_height_scale,
-                letter_spacing: text.0.letter_spacing,
-                word_spacing: text.0.word_spacing,
-                underline: text.0.underline,
-                strikethrough: text.0.strikethrough,
-                max_width: text.0.max_width,
-                align_h: text.0.align_h.into(),
-                align_v: text.0.align_v.into(),
-                space: text.0.space.into(),
-                billboard: text.0.billboard,
-                blend_mode: text.0.blend_mode.into(),
-                layer: text.0.layer,
-                clip_rect: text.0.clip_rect,
-                visible: text.0.visible,
-                pick_id: text.0.pick_id,
-            });
+        let text_2d = world.get::<Text2d>(entity).map(|text| Text2dComponentData {
+            text: text.text.clone(),
+            color: text.color,
+            font_path: text.font_path.as_ref().and_then(|path| {
+                let path = path.trim();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(normalize_path(path, root))
+                }
+            }),
+            font_family: text.font_family.clone(),
+            font_size: text.font_size,
+            font_weight: text.font_weight,
+            font_width: text.font_width,
+            font_style: text.font_style.into(),
+            line_height_scale: text.line_height_scale,
+            letter_spacing: text.letter_spacing,
+            word_spacing: text.word_spacing,
+            underline: text.underline,
+            strikethrough: text.strikethrough,
+            max_width: text.max_width,
+            align_h: text.align_h.into(),
+            align_v: text.align_v.into(),
+            space: text.space.into(),
+            billboard: text.billboard,
+            blend_mode: text.blend_mode.into(),
+            layer: text.layer,
+            clip_rect: text.clip_rect,
+            visible: text.visible,
+            pick_id: text.pick_id,
+        });
         let scene_child_renderer =
             if scene_child_meta.is_some() && mesh.is_none() && skinned.is_none() {
                 if let Some(renderer) = skinned_renderer {
                     Some(SceneChildRendererData {
                         kind: SceneChildRendererKind::Skinned,
-                        casts_shadow: renderer.0.casts_shadow,
-                        visible: renderer.0.visible,
+                        casts_shadow: renderer.casts_shadow,
+                        visible: renderer.visible,
                     })
                 } else if let Some(renderer) = mesh_renderer {
                     Some(SceneChildRendererData {
                         kind: SceneChildRendererKind::Mesh,
-                        casts_shadow: renderer.0.casts_shadow,
-                        visible: renderer.0.visible,
+                        casts_shadow: renderer.casts_shadow,
+                        visible: renderer.visible,
                     })
                 } else {
                     Some(SceneChildRendererData {
@@ -3193,20 +3195,20 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             };
 
         let light = light.map(|light| LightComponentData {
-            kind: match light.0.light_type {
+            kind: match light.light_type {
                 LightType::Directional => LightKind::Directional,
                 LightType::Point => LightKind::Point,
                 LightType::Spot { angle } => LightKind::Spot { angle },
             },
-            color: [light.0.color.x, light.0.color.y, light.0.color.z],
-            intensity: light.0.intensity,
+            color: [light.color.x, light.color.y, light.color.z],
+            intensity: light.intensity,
         });
 
         let camera = camera.map(|camera| CameraComponentData {
-            fov_y_rad: camera.0.fov_y_rad,
-            aspect_ratio: camera.0.aspect_ratio,
-            near_plane: camera.0.near_plane,
-            far_plane: camera.0.far_plane,
+            fov_y_rad: camera.fov_y_rad,
+            aspect_ratio: camera.aspect_ratio,
+            near_plane: camera.near_plane,
+            far_plane: camera.far_plane,
             active: active_camera.is_some(),
         });
 
@@ -3240,73 +3242,65 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             .map(|components| components.components.clone())
             .unwrap_or_default();
         let spline = world
-            .get::<BevySpline>(entity)
+            .get::<Spline>(entity)
             .map(|spline| SplineComponentData {
-                points: spline
-                    .0
-                    .points
-                    .iter()
-                    .map(|point| point.to_array())
-                    .collect(),
-                closed: spline.0.closed,
-                mode: spline.0.mode.into(),
-                tension: spline.0.tension,
+                points: spline.points.iter().map(|point| point.to_array()).collect(),
+                closed: spline.closed,
+                mode: spline.mode.into(),
+                tension: spline.tension,
             });
         let spline_follower =
             world
-                .get::<BevySplineFollower>(entity)
+                .get::<SplineFollower>(entity)
                 .map(|follower| SplineFollowerData {
                     spline_name: follower
-                        .0
                         .spline_entity
                         .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
                         .map(|name| name.to_string()),
-                    t: follower.0.t,
-                    speed: follower.0.speed,
-                    looped: follower.0.looped,
-                    follow_rotation: follower.0.follow_rotation,
-                    up: follower.0.up.to_array(),
-                    offset: follower.0.offset.to_array(),
-                    length_samples: follower.0.length_samples,
+                    t: follower.t,
+                    speed: follower.speed,
+                    looped: follower.looped,
+                    follow_rotation: follower.follow_rotation,
+                    up: follower.up.to_array(),
+                    offset: follower.offset.to_array(),
+                    length_samples: follower.length_samples,
                 });
-        let look_at = world.get::<BevyLookAt>(entity).map(|look_at| LookAtData {
+        let look_at = world.get::<LookAt>(entity).map(|look_at| LookAtData {
             target_name: look_at
-                .0
                 .target_entity
                 .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
                 .map(|name| name.to_string()),
-            target_offset: look_at.0.target_offset.to_array(),
-            offset_in_target_space: look_at.0.offset_in_target_space,
-            up: look_at.0.up.to_array(),
-            rotation_smooth_time: look_at.0.rotation_smooth_time,
+            target_offset: look_at.target_offset.to_array(),
+            offset_in_target_space: look_at.offset_in_target_space,
+            up: look_at.up.to_array(),
+            rotation_smooth_time: look_at.rotation_smooth_time,
         });
         let entity_follower =
             world
-                .get::<BevyEntityFollower>(entity)
+                .get::<EntityFollower>(entity)
                 .map(|follower| EntityFollowerData {
                     target_name: follower
-                        .0
                         .target_entity
                         .and_then(|id| world.get::<Name>(Entity::from_bits(id)))
                         .map(|name| name.to_string()),
-                    position_offset: follower.0.position_offset.to_array(),
-                    offset_in_target_space: follower.0.offset_in_target_space,
-                    follow_rotation: follower.0.follow_rotation,
-                    position_smooth_time: follower.0.position_smooth_time,
-                    rotation_smooth_time: follower.0.rotation_smooth_time,
+                    position_offset: follower.position_offset.to_array(),
+                    offset_in_target_space: follower.offset_in_target_space,
+                    follow_rotation: follower.follow_rotation,
+                    position_smooth_time: follower.position_smooth_time,
+                    rotation_smooth_time: follower.rotation_smooth_time,
                 });
         let skeleton = world
-            .get::<BevySkinnedMeshRenderer>(entity)
-            .map(|skinned| skinned.0.skin.skeleton.as_ref());
+            .get::<SkinnedMeshRenderer>(entity)
+            .map(|skinned| skinned.skin.skeleton.as_ref());
         let animation = timeline_groups
             .as_ref()
             .and_then(|groups| groups.iter().find(|group| group.entity == entity.to_bits()))
             .and_then(|group| animation_component_from_group(group, skeleton));
         let pose_override = world
-            .get::<BevyPoseOverride>(entity)
+            .get::<PoseOverride>(entity)
             .map(|pose| PoseOverrideData {
-                enabled: pose.0.enabled,
-                locals: pose_to_serialized(&pose.0.pose),
+                enabled: pose.enabled,
+                locals: pose_to_serialized(&pose.pose),
             });
         let freecam_settings = world.get::<Freecam>(entity).copied().map(|component| {
             let mut component = component;
@@ -3401,22 +3395,22 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             AudioEmitterData {
                 path: path.map(|path| normalize_path(&path, root)),
                 streaming,
-                bus: emitter.0.bus,
-                volume: emitter.0.volume,
-                pitch: emitter.0.pitch,
-                looping: emitter.0.looping,
-                spatial: emitter.0.spatial,
-                min_distance: emitter.0.min_distance,
-                max_distance: emitter.0.max_distance,
-                rolloff: emitter.0.rolloff,
-                spatial_blend: emitter.0.spatial_blend,
-                playback_state: emitter.0.playback_state,
-                play_on_spawn: emitter.0.play_on_spawn,
+                bus: emitter.bus,
+                volume: emitter.volume,
+                pitch: emitter.pitch,
+                looping: emitter.looping,
+                spatial: emitter.spatial,
+                min_distance: emitter.min_distance,
+                max_distance: emitter.max_distance,
+                rolloff: emitter.rolloff,
+                spatial_blend: emitter.spatial_blend,
+                playback_state: emitter.playback_state,
+                play_on_spawn: emitter.play_on_spawn,
             }
         });
 
         let audio_listener = audio_listener.map(|listener| AudioListenerData {
-            enabled: listener.0.enabled,
+            enabled: listener.enabled,
         });
 
         let components = SceneComponents {
@@ -3497,8 +3491,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
                 continue;
             };
             let skeleton = world
-                .get::<BevySkinnedMeshRenderer>(entity)
-                .map(|skinned| skinned.0.skin.skeleton.as_ref());
+                .get::<SkinnedMeshRenderer>(entity)
+                .map(|skinned| skinned.skin.skeleton.as_ref());
             let Some(animation) = animation_component_from_group(group, skeleton) else {
                 continue;
             };
@@ -3512,7 +3506,7 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
     }
 
     let mut scene_child_pose_overrides: Vec<SceneChildPoseOverrideData> = Vec::new();
-    let mut pose_query = world.query::<(Entity, &SceneChild, &BevyPoseOverride)>();
+    let mut pose_query = world.query::<(Entity, &SceneChild, &PoseOverride)>();
     for (entity, child, pose_override) in pose_query.iter(world) {
         if saved_entities.contains(&entity.to_bits()) {
             continue;
@@ -3525,8 +3519,8 @@ pub fn serialize_scene(world: &mut World, project: &EditorProject) -> (SceneDocu
             scene_path,
             scene_node_index: child.scene_node_index,
             pose: PoseOverrideData {
-                enabled: pose_override.0.enabled,
-                locals: pose_to_serialized(&pose_override.0.pose),
+                enabled: pose_override.enabled,
+                locals: pose_to_serialized(&pose_override.pose),
             },
         });
     }
@@ -3578,7 +3572,7 @@ pub fn spawn_scene_from_document(
     document: &SceneDocument,
     project: &EditorProject,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
 ) -> Vec<Entity> {
     let mut created = Vec::new();
     let root = project.root.as_deref();
@@ -3594,7 +3588,7 @@ pub fn spawn_scene_from_document(
 
     for entity_data in &document.entities {
         let transform = entity_data.transform.to_transform();
-        let mut entity = world.spawn((EditorEntity, BevyWrapper(transform)));
+        let mut entity = world.spawn((EditorEntity, transform));
         let skinned_data = entity_data.components.skinned.clone();
 
         if let Some(name) = &entity_data.name {
@@ -3623,16 +3617,16 @@ pub fn spawn_scene_from_document(
         }
 
         if let Some(light) = &entity_data.components.light {
-            entity.insert(BevyWrapper(serde_light_to_component(light)));
+            entity.insert(serde_light_to_component(light));
         }
 
         if let Some(camera) = &entity_data.components.camera {
-            entity.insert(BevyWrapper(Camera {
+            entity.insert(Camera {
                 fov_y_rad: camera.fov_y_rad,
                 aspect_ratio: camera.aspect_ratio,
                 near_plane: camera.near_plane,
                 far_plane: camera.far_plane,
-            }));
+            });
             if camera.active {
                 any_play_camera = true;
                 entity.insert(EditorPlayCamera);
@@ -3664,7 +3658,7 @@ pub fn spawn_scene_from_document(
                     cached_texture_handle(asset_cache, asset_server, &resolved).id
                 })
                 .collect::<Vec<_>>();
-            entity.insert(BevyWrapper(SpriteRenderer {
+            entity.insert(SpriteRenderer {
                 color: sprite.color,
                 texture_id,
                 uv_min: sprite.uv_min,
@@ -3678,11 +3672,9 @@ pub fn spawn_scene_from_document(
                 billboard: sprite.billboard,
                 visible: sprite.visible,
                 pick_id: sprite.pick_id,
-            }));
+            });
             if sprite.image_sequence.has_component_state() {
-                entity.insert(BevySpriteImageSequence(
-                    sprite.image_sequence.to_component(sequence_texture_ids),
-                ));
+                entity.insert(sprite.image_sequence.to_component(sequence_texture_ids));
             }
             entity.insert(EditorSprite {
                 texture_path: texture_path.clone(),
@@ -3699,7 +3691,7 @@ pub fn spawn_scene_from_document(
                     Some(resolve_path(path, root).to_string_lossy().to_string())
                 }
             });
-            entity.insert(BevyText2d(Text2d {
+            entity.insert(Text2d {
                 text: text.text.clone(),
                 color: text.color,
                 font_path,
@@ -3723,13 +3715,13 @@ pub fn spawn_scene_from_document(
                 clip_rect: text.clip_rect,
                 visible: text.visible,
                 pick_id: text.pick_id,
-            }));
+            });
         }
 
         if let Some(listener) = &entity_data.components.audio_listener {
-            entity.insert(BevyWrapper(AudioListener {
+            entity.insert(AudioListener {
                 enabled: listener.enabled,
-            }));
+            });
         }
 
         if let Some(audio) = &entity_data.components.audio_emitter {
@@ -3764,7 +3756,7 @@ pub fn spawn_scene_from_document(
                 });
             }
 
-            entity.insert(BevyWrapper(emitter));
+            entity.insert(emitter);
         }
 
         if entity_data.components.freecam || entity_data.components.freecam_settings.is_some() {
@@ -3825,16 +3817,16 @@ pub fn spawn_scene_from_document(
                 .iter()
                 .map(|point| glam::Vec3::from_array(*point))
                 .collect();
-            entity.insert(BevySpline(Spline {
+            entity.insert(Spline {
                 points,
                 closed: spline.closed,
                 mode: spline.mode.to_mode(),
                 tension: spline.tension,
-            }));
+            });
         }
 
         if let Some(follower) = &entity_data.components.spline_follower {
-            entity.insert(BevySplineFollower(SplineFollower {
+            entity.insert(SplineFollower {
                 spline_entity: None,
                 t: follower.t,
                 speed: follower.speed,
@@ -3843,30 +3835,30 @@ pub fn spawn_scene_from_document(
                 up: glam::Vec3::from_array(follower.up),
                 offset: glam::Vec3::from_array(follower.offset),
                 length_samples: follower.length_samples,
-            }));
+            });
             pending_followers.push((entity.id(), follower.clone()));
         }
 
         if let Some(look_at) = &entity_data.components.look_at {
-            entity.insert(BevyLookAt(LookAt {
+            entity.insert(LookAt {
                 target_entity: None,
                 target_offset: glam::Vec3::from_array(look_at.target_offset),
                 offset_in_target_space: look_at.offset_in_target_space,
                 up: glam::Vec3::from_array(look_at.up),
                 rotation_smooth_time: look_at.rotation_smooth_time,
-            }));
+            });
             pending_look_ats.push((entity.id(), look_at.clone()));
         }
 
         if let Some(follower) = &entity_data.components.entity_follower {
-            entity.insert(BevyEntityFollower(EntityFollower {
+            entity.insert(EntityFollower {
                 target_entity: None,
                 position_offset: glam::Vec3::from_array(follower.position_offset),
                 offset_in_target_space: follower.offset_in_target_space,
                 follow_rotation: follower.follow_rotation,
                 position_smooth_time: follower.position_smooth_time,
                 rotation_smooth_time: follower.rotation_smooth_time,
-            }));
+            });
             pending_entity_followers.push((entity.id(), follower.clone()));
         }
 
@@ -3954,7 +3946,7 @@ pub fn spawn_scene_from_document(
             let path = resolve_path(&skinned.scene_path, root);
             let (scene_handle, scene) = {
                 let handle = cached_scene_handle(asset_cache, asset_server, &path);
-                let scene = asset_server.0.lock().get_scene(&handle);
+                let scene = asset_server.lock().get_scene(&handle);
                 (handle, scene)
             };
 
@@ -4021,25 +4013,25 @@ pub fn spawn_scene_from_document(
 
             {
                 let mut entity_mut = world.entity_mut(entity_id);
-                entity_mut.remove::<BevyMeshRenderer>();
+                entity_mut.remove::<MeshRenderer>();
                 entity_mut.remove::<EditorMesh>();
                 entity_mut.remove::<PendingSkinnedMeshAsset>();
-                entity_mut.insert(BevySkinnedMeshRenderer(skinned_renderer));
+                entity_mut.insert(skinned_renderer);
             }
 
-            if world.get::<BevyAnimator>(entity_id).is_none() {
+            if world.get::<Animator>(entity_id).is_none() {
                 if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
                     world
                         .entity_mut(entity_id)
-                        .insert(BevyAnimator(build_default_animator(anim_lib)));
+                        .insert(Animator(build_default_animator(anim_lib)));
                 }
             }
         }
 
         if let Some(animation) = &entity_data.components.animation {
             let skeleton = world
-                .get::<BevySkinnedMeshRenderer>(entity_id)
-                .map(|skinned| skinned.0.skin.skeleton.clone());
+                .get::<SkinnedMeshRenderer>(entity_id)
+                .map(|skinned| skinned.skin.skeleton.clone());
             let skeleton_ref = skeleton.as_deref();
             if let Some(mut timeline) = world.get_resource_mut::<EditorTimelineState>() {
                 let name = entity_data
@@ -4054,7 +4046,7 @@ pub fn spawn_scene_from_document(
                     skeleton_ref,
                 );
             }
-            if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity_id) {
+            if let Some(mut animator) = world.get_mut::<Animator>(entity_id) {
                 let custom_clips = animation
                     .clips
                     .iter()
@@ -4066,15 +4058,13 @@ pub fn spawn_scene_from_document(
 
         if let Some(pose_override) = &entity_data.components.pose_override {
             let skeleton = world
-                .get::<BevySkinnedMeshRenderer>(entity_id)
-                .map(|skinned| skinned.0.skin.skeleton.clone());
+                .get::<SkinnedMeshRenderer>(entity_id)
+                .map(|skinned| skinned.skin.skeleton.clone());
             let pose = pose_from_serialized(&pose_override.locals, skeleton.as_deref());
-            world
-                .entity_mut(entity_id)
-                .insert(BevyPoseOverride(PoseOverride {
-                    enabled: pose_override.enabled,
-                    pose,
-                }));
+            world.entity_mut(entity_id).insert(PoseOverride {
+                enabled: pose_override.enabled,
+                pose,
+            });
         }
 
         created.push(entity_id);
@@ -4103,8 +4093,8 @@ pub fn spawn_scene_from_document(
             pending_scene_child_renderers.into_iter().collect();
         for (entity, _) in restored_scene_links.iter() {
             let explicit = pending_renderer_map.remove(entity);
-            let has_runtime_renderer = world.get::<BevyMeshRenderer>(*entity).is_some()
-                || world.get::<BevySkinnedMeshRenderer>(*entity).is_some()
+            let has_runtime_renderer = world.get::<MeshRenderer>(*entity).is_some()
+                || world.get::<SkinnedMeshRenderer>(*entity).is_some()
                 || world.get::<PendingSkinnedMeshAsset>(*entity).is_some();
             let has_authored_renderer = world.get::<EditorMesh>(*entity).is_some()
                 || world.get::<EditorSkinnedMesh>(*entity).is_some();
@@ -4153,13 +4143,10 @@ pub fn spawn_scene_from_document(
         if entity == parent_entity {
             continue;
         }
-        let child_transform = world
-            .get::<BevyTransform>(entity)
-            .map(|transform| transform.0)
-            .unwrap_or_default();
+        let child_transform = world.get::<Transform>(entity).copied().unwrap_or_default();
         let parent_matrix = world
-            .get::<BevyTransform>(parent_entity)
-            .map(|transform| transform.0.to_matrix())
+            .get::<Transform>(parent_entity)
+            .map(|transform| transform.to_matrix())
             .unwrap_or(glam::Mat4::IDENTITY);
         world.entity_mut(entity).insert(EntityParent {
             parent: parent_entity,
@@ -4186,8 +4173,8 @@ pub fn spawn_scene_from_document(
             let Some(target_entity) = name_map.get(target_name) else {
                 continue;
             };
-            if let Some(mut component) = world.get_mut::<BevySplineFollower>(entity) {
-                component.0.spline_entity = Some(target_entity.to_bits());
+            if let Some(mut component) = world.get_mut::<SplineFollower>(entity) {
+                component.spline_entity = Some(target_entity.to_bits());
             }
         }
 
@@ -4198,8 +4185,8 @@ pub fn spawn_scene_from_document(
             let Some(target_entity) = name_map.get(target_name) else {
                 continue;
             };
-            if let Some(mut component) = world.get_mut::<BevyLookAt>(entity) {
-                component.0.target_entity = Some(target_entity.to_bits());
+            if let Some(mut component) = world.get_mut::<LookAt>(entity) {
+                component.target_entity = Some(target_entity.to_bits());
             }
         }
 
@@ -4210,8 +4197,8 @@ pub fn spawn_scene_from_document(
             let Some(target_entity) = name_map.get(target_name) else {
                 continue;
             };
-            if let Some(mut component) = world.get_mut::<BevyEntityFollower>(entity) {
-                component.0.target_entity = Some(target_entity.to_bits());
+            if let Some(mut component) = world.get_mut::<EntityFollower>(entity) {
+                component.target_entity = Some(target_entity.to_bits());
             }
         }
 
@@ -4254,8 +4241,8 @@ pub fn restore_scene_transforms_from_document(
     entities: &[Entity],
 ) {
     for (entity, entity_data) in entities.iter().zip(document.entities.iter()) {
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(*entity) {
-            transform.0 = entity_data.transform.to_transform();
+        if let Some(mut transform) = world.get_mut::<Transform>(*entity) {
+            *transform = entity_data.transform.to_transform();
         }
     }
 }
@@ -4263,9 +4250,9 @@ pub fn restore_scene_transforms_from_document(
 fn build_mesh_renderer(
     mesh: &MeshComponentData,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
     project: &EditorProject,
-) -> Option<BevyMeshRenderer> {
+) -> Option<MeshRenderer> {
     let material_handle = mesh
         .material
         .as_ref()
@@ -4283,27 +4270,27 @@ fn build_mesh_renderer(
         }
     }?;
 
-    Some(BevyWrapper(MeshRenderer::new(
+    Some(MeshRenderer::new(
         mesh_handle.id,
         material_handle.id,
         mesh.casts_shadow,
         mesh.visible,
-    )))
+    ))
 }
 
 fn load_material_handle(
     path: &str,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
     project: &EditorProject,
-) -> Option<Handle<helmer::runtime::asset_server::Material>> {
+) -> Option<Handle<helmer_asset::runtime::asset_server::Material>> {
     if let Some(handle) = asset_cache.material_handles.get(path).copied() {
         return Some(handle);
     }
 
     let root = project.root.as_deref()?;
     let full_path = resolve_path(path, Some(root));
-    let handle = asset_server.0.lock().load_material(full_path);
+    let handle = asset_server.lock().load_material(full_path);
     asset_cache
         .material_handles
         .insert(path.to_string(), handle);
@@ -4313,16 +4300,16 @@ fn load_material_handle(
 fn load_mesh_asset(
     path: &str,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
+    asset_server: &helmer_becs::BecsAssetServer,
     project: &EditorProject,
-) -> Handle<helmer::runtime::asset_server::Mesh> {
+) -> Handle<helmer_asset::runtime::asset_server::Mesh> {
     if let Some(handle) = asset_cache.mesh_handles.get(path).copied() {
         return handle;
     }
 
     let root = project.root.as_deref();
     let full_path = resolve_path(path, root);
-    let handle = asset_server.0.lock().load_mesh(full_path);
+    let handle = asset_server.lock().load_mesh(full_path);
     asset_cache.mesh_handles.insert(path.to_string(), handle);
     handle
 }
@@ -4330,8 +4317,8 @@ fn load_mesh_asset(
 fn load_primitive_mesh(
     kind: PrimitiveKind,
     asset_cache: &mut EditorAssetCache,
-    asset_server: &helmer_becs::BevyAssetServer,
-) -> Handle<helmer::runtime::asset_server::Mesh> {
+    asset_server: &helmer_becs::BecsAssetServer,
+) -> Handle<helmer_asset::runtime::asset_server::Mesh> {
     if let Some(handle) = asset_cache.primitive_meshes.get(&kind).copied() {
         return handle;
     }

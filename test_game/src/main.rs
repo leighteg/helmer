@@ -1,10 +1,7 @@
 use std::{any::TypeId, collections::HashSet, env, f32::consts::FRAC_PI_2};
 
 use glam::{DVec2, Mat3, Mat4, Quat, Vec3, Vec4};
-use helmer::{
-    provided::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform},
-    runtime::{config::RuntimeConfig, input_manager::InputManager},
-};
+use helmer_ecs::components::{ActiveCamera, Camera, Light, MeshAsset, MeshRenderer, Transform};
 use helmer_ecs::{
     ecs::{
         ecs_core::{ECSCore, Entity},
@@ -17,6 +14,8 @@ use helmer_ecs::{
     },
     systems::scene_system::SceneRoot,
 };
+use helmer_render::runtime::RuntimeConfig;
+use helmer_window::runtime::input_manager::InputManager;
 use rand::Rng;
 use rapier3d::{
     math::Pose,

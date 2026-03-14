@@ -4,11 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy_ecs::prelude::{Component, Resource};
 use egui::Pos2;
-use helmer::audio::AudioLoadMode;
-use helmer::runtime::asset_server::{AssetKind, Handle, Material, Mesh, Scene, Texture};
-use helmer_becs::BevyAssetServer;
+use helmer_asset::runtime::asset_server::{AssetKind, Handle, Material, Mesh, Scene, Texture};
+use helmer_audio::AudioLoadMode;
+use helmer_becs::BecsAssetServer;
+use helmer_becs::ecs::prelude::{Component, Resource};
 pub use helmer_editor_runtime::editor_commands::PrimitiveKind;
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
@@ -57,7 +57,7 @@ pub struct EditorAssetCache {
     pub mesh_handles: HashMap<String, Handle<Mesh>>,
     pub primitive_meshes: HashMap<PrimitiveKind, Handle<Mesh>>,
     pub scene_handles: HashMap<String, Handle<Scene>>,
-    pub audio_handles: HashMap<String, Handle<helmer::audio::AudioClip>>,
+    pub audio_handles: HashMap<String, Handle<helmer_audio::AudioClip>>,
     pub texture_handles: HashMap<String, Handle<Texture>>,
 }
 
@@ -73,24 +73,24 @@ fn audio_cache_key(path: &Path, streaming: bool) -> String {
 
 pub fn cached_scene_handle(
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     path: &Path,
 ) -> Handle<Scene> {
     let key = scene_cache_key(path);
     if let Some(handle) = cache.scene_handles.get(&key) {
         return handle.clone();
     }
-    let handle = asset_server.0.lock().load_scene(path);
+    let handle = asset_server.lock().load_scene(path);
     cache.scene_handles.insert(key, handle.clone());
     handle
 }
 
 pub fn cached_audio_handle(
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     path: &Path,
     streaming: bool,
-) -> Handle<helmer::audio::AudioClip> {
+) -> Handle<helmer_audio::AudioClip> {
     let key = audio_cache_key(path, streaming);
     if let Some(handle) = cache.audio_handles.get(&key) {
         return handle.clone();
@@ -100,21 +100,21 @@ pub fn cached_audio_handle(
     } else {
         AudioLoadMode::Static
     };
-    let handle = asset_server.0.lock().load_audio(path, mode);
+    let handle = asset_server.lock().load_audio(path, mode);
     cache.audio_handles.insert(key, handle.clone());
     handle
 }
 
 pub fn cached_texture_handle(
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     path: &Path,
 ) -> Handle<Texture> {
     let key = scene_cache_key(path);
     if let Some(handle) = cache.texture_handles.get(&key) {
         return handle.clone();
     }
-    let handle = asset_server.0.lock().load_texture(path, AssetKind::Albedo);
+    let handle = asset_server.lock().load_texture(path, AssetKind::Albedo);
     cache.texture_handles.insert(key, handle.clone());
     handle
 }

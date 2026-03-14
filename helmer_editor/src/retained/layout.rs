@@ -1,4 +1,4 @@
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 use helmer_ui::UiId;
 use helmer_ui_layout::{LayoutRect, WindowFrame, WindowLayoutSnapshot, WindowLayoutState};
 use std::collections::HashMap;

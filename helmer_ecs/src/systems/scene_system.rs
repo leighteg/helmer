@@ -1,19 +1,15 @@
+use crate::components::{MeshRenderer, SkinnedMeshRenderer, Transform};
 use crate::ecs::{
     component::Component,
     ecs_core::{ECSCore, Entity},
     system::System,
 };
-use helmer::{
-    animation::{
-        AnimationGraph, AnimationLayer, AnimationLibrary, AnimationNode, AnimationParameters,
-        AnimationState, AnimationStateMachine, Animator, BlendMode, BlendNode, ClipNode,
-    },
-    provided::components::{MeshRenderer, SkinnedMeshRenderer, Transform},
-    runtime::{
-        asset_server::{AssetServer, Handle, Scene},
-        input_manager::InputManager,
-    },
+use helmer_animation::{
+    AnimationGraph, AnimationLayer, AnimationLibrary, AnimationNode, AnimationParameters,
+    AnimationState, AnimationStateMachine, Animator, BlendMode, BlendNode, ClipNode,
 };
+use helmer_asset::runtime::asset_server::{AssetServer, Handle, Scene};
+use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::Mutex;
 use proc::Component as ComponentDerive;
 use std::any::TypeId;

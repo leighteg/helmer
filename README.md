@@ -1,14 +1,14 @@
 # [helmer](http://helmer.leighteg.dev) &nbsp; ![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
 
-a performant, flexible, extensible, scalable foundation for creation - featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
+A performant, flexible, extensible, scalable foundation for creation - featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
 
-massively scalable runtime/collection of tooling masquerading as a game engine
+Massively scalable runtime/collection of tooling masquerading as a game engine
 
 ![city corner screenshot (legacy deferred renderer)](assets/screenshots/city_corner.png)
 
 💬 **[Stoat server](https://stt.gg/43zc35Aw)**
 
-## features
+## Features
 - multiplatform
 - large scale hardware/driver support
 - performant multithreading
@@ -39,13 +39,17 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 
 ---
 
-- #### [`helmer`](/helmer) - the core (runtime/render graph/audio engine/etc) [to be modularized!!]
-- #### [`helmer_ui`](/helmer_ui) - ui 'runtime'. robust retained APIs, rich `egui`-like immediate APIs
+- #### [`helmer`](/helmer) - the core runtime
+- #### [`helmer_window`](/helmer_window) - `winit` windowing integration runtime extension
+- #### [`helmer_input`](/helmer_input) - input handling/APIs runtime extension
+- #### [`helmer_audio`](/helmer_input) - audio core/engine runtime extension
+- #### [`helmer_render`](/helmer_render) - render graph runtime extension
+- #### [`helmer_ui`](/helmer_ui) - ui runtime extension. robust retained APIs, rich `egui`-like immediate APIs
 - #### [`helmer_editor_runtime`](/helmer_editor_runtime) - a robust runtime over `helmer_becs`, serving as the foundation for the editors/player
 - #### [`helmer_editor_egui`](/helmer_editor_egui) - a featured, robust yet ergonomic editor over `helmer_becs`' egui integration, providing rich luau/rust/visual scripting integrations
 - #### [`helmer_player`](/helmer_player) - runtime to be shipped alongside the resulting asset packs of editor projects
 
-## ways to use helmer
+## Ways to use helmer
 
 - ### `helmer_editor_egui`
   ![helmer_editor_egui screenshot](assets/screenshots/editor.png)
@@ -66,19 +70,19 @@ massively scalable runtime/collection of tooling masquerading as a game engine
 #### helmer_ecs examples
 - **[test_game](/test_game)**: was the sandbox for spearheading features early on. bevy's ecs is objectively better in every possible way and for that reason i have been using `helmer_becs` for everything since implementing it (which condescends my more recent decisions like the introduction of the graph, audio engine, etc.. so i really do wonder if there is any point in putting actual effort into a proper helmer ecs but the same question can be asked for helmers entire existance. why not i guess)
 
-## troubleshooting
+## Troubleshooting
 - **assets popping in/out, flickering**: the default vram budgets are incredibly low - combined with the aggressive nature of the default streaming tuning this results in the churning of render/vram resources. hit `ctrl+g` to bring up the `render graph` window and increase the gpu budgets, then hit `evict gpu only`. **helmer currently lacks the ability to agnostically probe avail/total vram**
 
-## left to do
-- #### taskable work pool [`helmer`]
+## Left to do
+- #### ~~taskable work pool [`helmer`]~~
 - #### promote statelessness of GraphRenderer
 - #### WASM audio (and likely more im forgetting)
 - #### proper editor
   - `helmer_editor_egui`'s immediate nature is not scaling with the scope of the project 
   - `helmer_editor` served as a loose port of `helmer_editor_egui` as to ensure & spearhead features of `helmer_ui`'s retained APIs, meaning it inherited naughty/monolithic & immediate-motivated architectural decisions of `helmer_editor_egui`
-- #### enforce proper, clean code structure (break up monoliths like AssetServer, audio, GraphRenderer, helmer_editor_egui/scripting, etc..)
+- #### [50%] enforce proper, clean code structure (break up monoliths like AssetServer, audio, GraphRenderer, helmer_editor_egui/scripting, etc..)
 
-## why you did that
+## Why you did that
 - `basis-universal-sys` was vendorized for WASM compatibility
 - `egui-snarl` was vendorized because it handled rclick content menu input in a way that didnt allow elements like a search bar to be interacted with without the menu closing (closed on any click instead of clicks of proper intent)
 - `egui-wgpu` vendorized for wgpu28 compatibility

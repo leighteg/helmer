@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 use walkdir::WalkDir;
 
 use crate::{project::ProjectConfig, scripting as runtime_scripting};

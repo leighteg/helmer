@@ -1,17 +1,20 @@
-use bevy_ecs::{
+use glam::Quat;
+use helmer_becs::DeltaTime;
+use helmer_becs::ecs::{
     component::Component,
     query::With,
     system::{Query, Res},
 };
-use glam::Quat;
-use helmer_becs::{BevyMeshRenderer, BevyTransform, DeltaTime};
 
 #[derive(Component)]
 pub struct SpinnerObject {}
 
 pub fn spinner_system(
     dt: Res<DeltaTime>,
-    objects_query: Query<(&mut BevyTransform, &BevyMeshRenderer), With<SpinnerObject>>,
+    objects_query: Query<
+        (&mut helmer_becs::Transform, &helmer_becs::MeshRenderer),
+        With<SpinnerObject>,
+    >,
 ) {
     let rotation_speed = 5.0 * dt.0;
     let delta_x_rotation = Quat::from_axis_angle(glam::Vec3::X, 0.0);
@@ -19,7 +22,7 @@ pub fn spinner_system(
     let delta_z_rotation = Quat::from_axis_angle(glam::Vec3::Z, 0.0);
 
     for (mut transform, _mesh_renderer) in objects_query {
-        transform.0.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
-        let _ = transform.0.rotation.normalize();
+        transform.rotation *= delta_x_rotation * delta_y_rotation * delta_z_rotation;
+        let _ = transform.rotation.normalize();
     }
 }

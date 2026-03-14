@@ -5,17 +5,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bevy_ecs::{
+use helmer_becs::ecs::{
     entity::Entity,
     prelude::{Component, Resource, World},
 };
-use helmer::graphics::common::renderer::GizmoMode;
-use helmer::runtime::runtime::{
-    RuntimeLogEntry, RuntimeLogLevel, RuntimeLogListener, set_runtime_log_listener,
-};
 use helmer_becs::{
-    BevyCamera, BevyLight, BevyMeshRenderer, BevySkinnedMeshRenderer, BevySpriteRenderer,
-    BevyText2d, BevyTransform,
+    Camera, Light, MeshRenderer, SkinnedMeshRenderer, SpriteRenderer, Text2d, Transform,
     physics::components::{ColliderShape, DynamicRigidBody},
 };
 pub use helmer_editor_runtime::editor_commands::{
@@ -27,6 +22,10 @@ use helmer_editor_runtime::project::{load_project_config, push_recent_project};
 pub use helmer_editor_runtime::scene_state::{EditorEntity, WorldState};
 pub use helmer_editor_runtime::script_registry::ScriptRegistry;
 use helmer_editor_runtime::undo::EditorUndoState as RuntimeUndoState;
+use helmer_render::graphics::common::renderer::GizmoMode;
+use helmer_window::runtime::runtime::{
+    RuntimeLogEntry, RuntimeLogLevel, RuntimeLogListener, set_runtime_log_listener,
+};
 use walkdir::WalkDir;
 
 use super::workspace::{
@@ -48,14 +47,14 @@ pub struct RetainedPlayEntitySnapshot {
     pub source: Entity,
     pub name: Option<String>,
     pub editor_entity: bool,
-    pub transform: Option<BevyTransform>,
-    pub camera: Option<BevyCamera>,
+    pub transform: Option<Transform>,
+    pub camera: Option<Camera>,
     pub active_camera: bool,
-    pub light: Option<BevyLight>,
-    pub mesh_renderer: Option<BevyMeshRenderer>,
-    pub skinned_mesh_renderer: Option<BevySkinnedMeshRenderer>,
-    pub sprite_renderer: Option<BevySpriteRenderer>,
-    pub text_2d: Option<BevyText2d>,
+    pub light: Option<Light>,
+    pub mesh_renderer: Option<MeshRenderer>,
+    pub skinned_mesh_renderer: Option<SkinnedMeshRenderer>,
+    pub sprite_renderer: Option<SpriteRenderer>,
+    pub text_2d: Option<Text2d>,
     pub dynamic_body: Option<DynamicRigidBody>,
     pub fixed_collider: bool,
     pub collider_shape: Option<ColliderShape>,

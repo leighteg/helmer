@@ -1,20 +1,16 @@
 use std::collections::HashMap;
 
-use bevy_ecs::prelude::{Resource, World};
-use bevy_ecs::{entity::Entity, name::Name};
-use helmer::graphics::common::renderer::{
-    GizmoAxis, RenderViewportGizmoOptions, RenderViewportRequest,
-};
-use helmer::provided::components::{ActiveCamera, Camera, Transform};
-use helmer::runtime::runtime::{RuntimeCursorGrabMode, RuntimeCursorStateSnapshot};
 use helmer_becs::DeltaTime;
+use helmer_becs::ecs::prelude::{Resource, World};
+use helmer_becs::ecs::{entity::Entity, name::Name};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::{RenderGizmoState, RenderViewportRequests};
-use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyInputManager, BevyRuntimeCursorState, BevyTransform,
-    BevyWrapper,
+use helmer_becs::{ActiveCamera, BecsInputManager, BecsRuntimeCursorState, Camera, Transform};
+use helmer_render::graphics::common::renderer::{
+    GizmoAxis, RenderViewportGizmoOptions, RenderViewportRequest,
 };
 use helmer_ui::UiRect;
+use helmer_window::runtime::runtime::{RuntimeCursorGrabMode, RuntimeCursorStateSnapshot};
 
 use crate::retained::panes::{
     ViewportPaneMode, ViewportPaneSurfaceKey, retained_viewport_id, retained_viewport_preview_id,
@@ -38,12 +34,7 @@ pub fn retained_active_camera_system(world: &mut World) {
         .map(|scene| scene.world_state)
         .unwrap_or(WorldState::Edit);
     let camera_entities = world
-        .query::<(
-            Entity,
-            &BevyCamera,
-            &BevyTransform,
-            Option<&BevyActiveCamera>,
-        )>()
+        .query::<(Entity, &Camera, &Transform, Option<&ActiveCamera>)>()
         .iter(world)
         .map(|(entity, _, _, active)| {
             (
@@ -55,9 +46,7 @@ pub fn retained_active_camera_system(world: &mut World) {
         .collect::<Vec<_>>();
 
     if camera_entities.is_empty() {
-        world
-            .entity_mut(editor_camera)
-            .insert(BevyWrapper(ActiveCamera {}));
+        world.entity_mut(editor_camera).insert(ActiveCamera {});
         return;
     }
 
@@ -84,23 +73,21 @@ pub fn retained_active_camera_system(world: &mut World) {
     for (entity, is_active, _) in camera_entities {
         if entity == preferred {
             if !is_active {
-                world
-                    .entity_mut(entity)
-                    .insert(BevyWrapper(ActiveCamera {}));
+                world.entity_mut(entity).insert(ActiveCamera {});
             }
             continue;
         }
         if is_active {
-            world.entity_mut(entity).remove::<BevyActiveCamera>();
+            world.entity_mut(entity).remove::<ActiveCamera>();
         }
     }
 }
 
 pub(crate) fn ensure_retained_editor_camera(world: &mut World) -> Entity {
     if let Some((entity, _, _)) = world
-        .query::<(Entity, &RetainedEditorViewportCamera, &BevyCamera)>()
+        .query::<(Entity, &RetainedEditorViewportCamera, &Camera)>()
         .iter(world)
-        .find(|(entity, _, _)| world.get::<BevyTransform>(*entity).is_some())
+        .find(|(entity, _, _)| world.get::<Transform>(*entity).is_some())
     {
         return entity;
     }
@@ -109,8 +96,8 @@ pub(crate) fn ensure_retained_editor_camera(world: &mut World) -> Entity {
         .spawn((
             RetainedEditorViewportCamera,
             Name::new("Editor Camera"),
-            BevyTransform::default(),
-            BevyCamera::default(),
+            Transform::default(),
+            Camera::default(),
         ))
         .id()
 }
@@ -119,17 +106,16 @@ pub(crate) fn camera_snapshot_for_entity(
     world: &World,
     entity: Entity,
 ) -> Option<(Camera, Transform)> {
-    let camera = world.get::<BevyCamera>(entity)?;
-    let transform = world.get::<BevyTransform>(entity)?;
-    Some((camera.0.clone(), transform.0))
+    let camera = world.get::<Camera>(entity)?;
+    let transform = world.get::<Transform>(entity)?;
+    Some((camera.clone(), *transform))
 }
 
 pub(crate) fn resolve_gameplay_camera(world: &World, editor_camera: Entity) -> Option<Entity> {
     let mut fallback: Option<Entity> = None;
     for entity_ref in world.iter_entities() {
         let entity = entity_ref.id();
-        if world.get::<BevyCamera>(entity).is_none() || world.get::<BevyTransform>(entity).is_none()
-        {
+        if world.get::<Camera>(entity).is_none() || world.get::<Transform>(entity).is_none() {
             continue;
         }
         if entity == editor_camera || world.get::<RetainedEditorViewportCamera>(entity).is_some() {
@@ -138,7 +124,7 @@ pub(crate) fn resolve_gameplay_camera(world: &World, editor_camera: Entity) -> O
         if fallback.is_none() {
             fallback = Some(entity);
         }
-        if world.get::<BevyActiveCamera>(entity).is_some() {
+        if world.get::<ActiveCamera>(entity).is_some() {
             return Some(entity);
         }
     }
@@ -152,8 +138,8 @@ fn resolve_preview_camera_entity(world: &World, editor_camera: Entity) -> Option
         .filter(|entity| {
             *entity != editor_camera
                 && world.get::<RetainedEditorViewportCamera>(*entity).is_none()
-                && world.get::<BevyCamera>(*entity).is_some()
-                && world.get::<BevyTransform>(*entity).is_some()
+                && world.get::<Camera>(*entity).is_some()
+                && world.get::<Transform>(*entity).is_some()
         })
 }
 
@@ -247,10 +233,10 @@ impl Default for RetainedCursorControlState {
 }
 
 pub fn retained_viewport_camera_controls_system(world: &mut World) {
-    let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+    let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
         return;
     };
-    let input = input_manager.0.read();
+    let input = input_manager.read();
     let cursor_position = glam::DVec2::new(input.cursor_position.x, input.cursor_position.y);
     let pointer = glam::Vec2::new(cursor_position.x as f32, cursor_position.y as f32);
     let raw_mouse_delta = input.mouse_motion;
@@ -393,7 +379,7 @@ pub fn retained_viewport_camera_controls_system(world: &mut World) {
         world
             .get_resource::<InspectorSelectedEntityResource>()
             .and_then(|selection| selection.0)
-            .and_then(|entity| world.get::<BevyTransform>(entity).map(|t| t.0.position))
+            .and_then(|entity| world.get::<Transform>(entity).map(|t| t.position))
     } else {
         None
     };
@@ -561,7 +547,7 @@ pub fn retained_viewport_camera_controls_system(world: &mut World) {
     }
 
     if let Some(camera_entity) = active_camera_entity {
-        let mut camera_query = world.query::<(Entity, &mut BevyTransform, &mut BevyCamera)>();
+        let mut camera_query = world.query::<(Entity, &mut Transform, &mut Camera)>();
         if let Ok((entity, mut transform, mut camera)) = camera_query.get_mut(world, camera_entity)
         {
             if control_state.active_entity != Some(entity) {
@@ -576,8 +562,8 @@ pub fn retained_viewport_camera_controls_system(world: &mut World) {
                 control_state.middle_orbit_focus = None;
             }
 
-            let transform = &mut transform.0;
-            let camera = &mut camera.0;
+            let transform = &mut *transform;
+            let camera = &mut *camera;
             let previous_forward = transform.forward().normalize_or_zero();
             let middle_orbit_active = control_state.is_middle_looking && !control_state.is_looking;
             let middle_pan_active = middle_orbit_active && shift_active;
@@ -737,7 +723,7 @@ pub fn retained_viewport_camera_controls_system(world: &mut World) {
     sync_retained_cursor_control(
         &control_state,
         &mut cursor_control_state,
-        world.get_resource::<BevyRuntimeCursorState>(),
+        world.get_resource::<BecsRuntimeCursorState>(),
         restore_cursor_position,
     );
     world.insert_resource(control_state);
@@ -754,7 +740,7 @@ pub(crate) fn can_control_surface(
 fn sync_retained_cursor_control(
     control_state: &RetainedViewportControlState,
     cursor_control_state: &mut RetainedCursorControlState,
-    runtime_cursor_state: Option<&BevyRuntimeCursorState>,
+    runtime_cursor_state: Option<&BecsRuntimeCursorState>,
     restore_cursor_position: Option<glam::DVec2>,
 ) {
     cursor_control_state.freecam_capture_active =
@@ -858,8 +844,8 @@ pub fn retained_viewport_requests_system(world: &mut World) {
             {
                 requests.push(RenderViewportRequest {
                     id: viewport_id,
-                    camera_transform,
-                    camera_component,
+                    camera_transform: camera_transform.into(),
+                    camera_component: camera_component.into(),
                     texture_handle: viewport_id,
                     texture_is_managed: false,
                     target_size,
@@ -893,8 +879,8 @@ pub fn retained_viewport_requests_system(world: &mut World) {
                 let preview_viewport_id = retained_viewport_preview_id(surface_key.tab_id);
                 requests.push(RenderViewportRequest {
                     id: preview_viewport_id,
-                    camera_transform,
-                    camera_component,
+                    camera_transform: camera_transform.into(),
+                    camera_component: camera_component.into(),
                     texture_handle: preview_viewport_id,
                     texture_is_managed: false,
                     target_size: preview_target,

@@ -1,14 +1,15 @@
-use bevy_ecs::entity::Entity;
-use bevy_ecs::prelude::{Resource, World};
 use glam::{Mat4, Quat, Vec3};
+use helmer_becs::ecs::entity::Entity;
+use helmer_becs::ecs::prelude::{Resource, World};
 
-use helmer::graphics::common::renderer::{
-    GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoMode,
-};
-use helmer::provided::components::{Camera, LightType, Transform};
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::RenderGizmoState;
-use helmer_becs::{BevyActiveCamera, BevyCamera, BevyInputManager, BevyLight, BevyTransform};
+use helmer_becs::{
+    ActiveCamera, BecsInputManager, Camera, Light, Transform, components::LightType,
+};
+use helmer_render::graphics::common::renderer::{
+    GizmoAxis, GizmoData, GizmoIcon, GizmoIconKind, GizmoMode,
+};
 use helmer_ui::UiRect;
 
 use crate::retained::panes::{ViewportPaneMode, ViewportPaneSurfaceKey};
@@ -123,8 +124,8 @@ pub fn retained_gizmo_state_system(world: &mut World) {
         control_active,
         shift_active,
         alt_active,
-    ) = if let Some(input_manager) = world.get_resource::<BevyInputManager>() {
-        let input = input_manager.0.read();
+    ) = if let Some(input_manager) = world.get_resource::<BecsInputManager>() {
+        let input = input_manager.read();
         (
             input.cursor_position,
             glam::Vec2::new(
@@ -224,13 +225,10 @@ pub fn retained_gizmo_state_system(world: &mut World) {
     let selected_entity = world
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selection| selection.0)
-        .filter(|entity| world.get::<BevyTransform>(*entity).is_some());
+        .filter(|entity| world.get::<Transform>(*entity).is_some());
 
-    let mut selected_transform = selected_entity.and_then(|entity| {
-        world
-            .get::<BevyTransform>(entity)
-            .map(|transform| transform.0)
-    });
+    let mut selected_transform =
+        selected_entity.and_then(|entity| world.get::<Transform>(entity).copied());
 
     if !show_gizmos || selected_transform.is_none() {
         interaction_state.hover_axis = GizmoAxis::None;
@@ -343,10 +341,10 @@ pub fn retained_gizmo_state_system(world: &mut World) {
     }
 
     if let (Some(entity), Some(transform)) = (selected_entity, selected_transform)
-        && let Some(mut transform_component) = world.get_mut::<BevyTransform>(entity)
-        && !transform_approx_eq(transform_component.0, transform)
+        && let Some(mut transform_component) = world.get_mut::<Transform>(entity)
+        && !transform_approx_eq(*transform_component, transform)
     {
-        transform_component.0 = transform;
+        *transform_component = transform;
         mark_scene_dirty(world);
     }
 
@@ -355,9 +353,7 @@ pub fn retained_gizmo_state_system(world: &mut World) {
 
     if show_gizmos
         && let Some(entity) = selected_entity
-        && let Some(transform) = world
-            .get::<BevyTransform>(entity)
-            .map(|component| component.0)
+        && let Some(transform) = world.get::<Transform>(entity).copied()
     {
         let camera_position = camera_snapshot
             .map(|(_, camera_transform)| camera_transform.position)
@@ -404,38 +400,35 @@ fn append_icon_gizmos(
 
         if viewport_state.show_camera_gizmos
             && world.get::<RetainedEditorViewportCamera>(entity).is_none()
-            && let (Some(camera), Some(transform)) = (
-                world.get::<BevyCamera>(entity),
-                world.get::<BevyTransform>(entity),
-            )
+            && let (Some(camera), Some(transform)) =
+                (world.get::<Camera>(entity), world.get::<Transform>(entity))
         {
-            let active = world.get::<BevyActiveCamera>(entity).is_some();
+            let active = world.get::<ActiveCamera>(entity).is_some();
             let color = if active {
                 glam::Vec3::new(1.0, 0.6, 0.2)
             } else {
                 glam::Vec3::new(0.75, 0.9, 1.0)
             };
             gizmo.icons.push(GizmoIcon {
-                position: transform.0.position,
-                rotation: transform.0.rotation,
+                position: transform.position,
+                rotation: transform.rotation,
                 size: 0.9,
                 color,
                 alpha: if active { 1.0 } else { 0.9 },
                 kind: GizmoIconKind::Camera,
                 params: [
-                    camera.0.fov_y_rad,
-                    camera.0.aspect_ratio,
-                    camera.0.near_plane,
-                    camera.0.far_plane,
+                    camera.fov_y_rad,
+                    camera.aspect_ratio,
+                    camera.near_plane,
+                    camera.far_plane,
                 ],
             });
         }
 
-        if let (Some(light), Some(transform)) = (
-            world.get::<BevyLight>(entity),
-            world.get::<BevyTransform>(entity),
-        ) {
-            let kind = match light.0.light_type {
+        if let (Some(light), Some(transform)) =
+            (world.get::<Light>(entity), world.get::<Transform>(entity))
+        {
+            let kind = match light.light_type {
                 LightType::Directional if viewport_state.show_directional_light_gizmos => {
                     Some(GizmoIconKind::LightDirectional)
                 }
@@ -449,13 +442,13 @@ fn append_icon_gizmos(
             };
             if let Some(kind) = kind {
                 gizmo.icons.push(GizmoIcon {
-                    position: transform.0.position,
-                    rotation: transform.0.rotation,
+                    position: transform.position,
+                    rotation: transform.rotation,
                     size: 0.85,
-                    color: light.0.color.clamp(glam::Vec3::ZERO, glam::Vec3::ONE),
+                    color: light.color.clamp(glam::Vec3::ZERO, glam::Vec3::ONE),
                     alpha: 0.9,
                     kind,
-                    params: [light.0.intensity, 0.0, 0.0, 0.0],
+                    params: [light.intensity, 0.0, 0.0, 0.0],
                 });
             }
         }
@@ -463,9 +456,9 @@ fn append_icon_gizmos(
 }
 
 fn camera_snapshot_for_entity(world: &World, entity: Entity) -> Option<(Camera, Transform)> {
-    let camera = world.get::<BevyCamera>(entity)?;
-    let transform = world.get::<BevyTransform>(entity)?;
-    Some((camera.0.clone(), transform.0))
+    let camera = world.get::<Camera>(entity)?;
+    let transform = world.get::<Transform>(entity)?;
+    Some((camera.clone(), *transform))
 }
 
 fn camera_inv_view_proj(

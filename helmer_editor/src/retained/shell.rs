@@ -1,19 +1,18 @@
-use bevy_ecs::{
+use glam::{Vec2, Vec3};
+use helmer_becs::ecs::{
     entity::Entity,
     name::Name,
     prelude::{Resource, World},
 };
-use glam::{Vec2, Vec3};
-use helmer::graphics::common::renderer::GizmoMode;
-use helmer::graphics::render_graphs::graph_templates;
-use helmer::provided::components::Light;
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::systems::scene_system::{EntityParent, SceneChild};
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyInputManager, BevyLight, BevyMeshRenderer,
-    BevySkinnedMeshRenderer, BevySpriteRenderer, BevyText2d, BevyTransform, BevyWrapper,
+    ActiveCamera, BecsInputManager, Camera, Light, MeshRenderer, SkinnedMeshRenderer,
+    SpriteRenderer, Text2d, Transform, components::LightType,
     provided::ui::inspector::InspectorSelectedEntityResource, ui_integration::UiRuntimeState,
 };
+use helmer_render::graphics::common::renderer::GizmoMode;
+use helmer_render::graphics::render_graphs::graph_templates;
 use helmer_ui::{
     RetainedUi, RetainedUiNode, UiButton, UiButtonVariant, UiColor, UiDimension, UiId, UiLabel,
     UiLayoutBuilder, UiRect, UiStyle, UiTextAlign, UiTextStyle, UiTextValue, UiVisualStyle,
@@ -714,9 +713,9 @@ pub fn editor_retained_shell_system(world: &mut World) {
         input_ctrl_down,
         input_just_pressed_keys,
     ) = world
-        .get_resource::<BevyInputManager>()
+        .get_resource::<BecsInputManager>()
         .map(|input| {
-            let input = input.0.read();
+            let input = input.read();
             let shift_down = input
                 .active_keys
                 .contains(&winit::keyboard::KeyCode::ShiftLeft)
@@ -2047,9 +2046,7 @@ pub fn editor_retained_shell_system(world: &mut World) {
                 entry.entity,
                 HierarchyContextInfo {
                     can_unparent: world.get::<EntityParent>(entry.entity).is_some(),
-                    can_set_active_camera: world
-                        .get::<helmer_becs::BevyCamera>(entry.entity)
-                        .is_some(),
+                    can_set_active_camera: world.get::<helmer_becs::Camera>(entry.entity).is_some(),
                     scene_root: world
                         .get::<SceneChild>(entry.entity)
                         .map(|scene_child| scene_child.scene_root),
@@ -5036,8 +5033,8 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddTransform(entity) => {
             let mut changed = false;
-            if world.get::<BevyTransform>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<Transform>(entity).is_none() {
+                world.entity_mut(entity).insert(Transform::default());
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -5046,11 +5043,11 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddCamera(entity) => {
             let mut changed = false;
-            if world.get::<BevyTransform>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<Transform>(entity).is_none() {
+                world.entity_mut(entity).insert(Transform::default());
             }
-            if world.get::<BevyCamera>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyCamera::default());
+            if world.get::<Camera>(entity).is_none() {
+                world.entity_mut(entity).insert(Camera::default());
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -5059,16 +5056,13 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddDirectionalLight(entity) => {
             let mut changed = false;
-            if world.get::<BevyTransform>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<Transform>(entity).is_none() {
+                world.entity_mut(entity).insert(Transform::default());
             }
-            if world.get::<BevyLight>(entity).is_none() {
+            if world.get::<Light>(entity).is_none() {
                 world
                     .entity_mut(entity)
-                    .insert(BevyWrapper(Light::directional(
-                        glam::vec3(1.0, 1.0, 1.0),
-                        25.0,
-                    )));
+                    .insert((Light::directional(glam::vec3(1.0, 1.0, 1.0), 25.0)));
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -5077,13 +5071,13 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddPointLight(entity) => {
             let mut changed = false;
-            if world.get::<BevyTransform>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<Transform>(entity).is_none() {
+                world.entity_mut(entity).insert(Transform::default());
             }
-            if world.get::<BevyLight>(entity).is_none() {
+            if world.get::<Light>(entity).is_none() {
                 world
                     .entity_mut(entity)
-                    .insert(BevyWrapper(Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0)));
+                    .insert((Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0)));
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -5092,15 +5086,13 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddSpotLight(entity) => {
             let mut changed = false;
-            if world.get::<BevyTransform>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<Transform>(entity).is_none() {
+                world.entity_mut(entity).insert(Transform::default());
             }
-            if world.get::<BevyLight>(entity).is_none() {
-                world.entity_mut(entity).insert(BevyWrapper(Light::spot(
-                    glam::vec3(1.0, 1.0, 1.0),
-                    10.0,
-                    45.0_f32.to_radians(),
-                )));
+            if world.get::<Light>(entity).is_none() {
+                world
+                    .entity_mut(entity)
+                    .insert((Light::spot(glam::vec3(1.0, 1.0, 1.0), 10.0, 45.0_f32.to_radians())));
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -5109,13 +5101,13 @@ fn apply_context_menu_action(world: &mut World, action: ContextMenuAction) {
         }
         ContextMenuAction::InspectorAddMeshRenderer(entity) => {
             let mut changed = false;
-            if world.get::<BevyMeshRenderer>(entity).is_none() {
-                if world.get::<BevyTransform>(entity).is_none() {
-                    world.entity_mut(entity).insert(BevyTransform::default());
+            if world.get::<MeshRenderer>(entity).is_none() {
+                if world.get::<Transform>(entity).is_none() {
+                    world.entity_mut(entity).insert(Transform::default());
                 }
-                world.entity_mut(entity).insert(BevyWrapper(
-                    helmer::provided::components::MeshRenderer::new(0, 0, true, true),
-                ));
+                world
+                    .entity_mut(entity)
+                    .insert((MeshRenderer::new(0, 0, true, true)));
                 changed = true;
             }
             if changed && let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
@@ -6468,10 +6460,10 @@ fn apply_content_drop_to_inspector(world: &mut World, path: &Path) {
 
     let mut message = None::<String>;
     if is_model_file(path) {
-        if world.get::<BevyMeshRenderer>(entity).is_none() {
-            world.entity_mut(entity).insert(BevyWrapper(
-                helmer::provided::components::MeshRenderer::new(0, 0, true, true),
-            ));
+        if world.get::<MeshRenderer>(entity).is_none() {
+            world
+                .entity_mut(entity)
+                .insert((MeshRenderer::new(0, 0, true, true)));
             if let Some(mut scene) = world.get_resource_mut::<EditorSceneState>() {
                 scene.dirty = true;
             }
@@ -6633,11 +6625,11 @@ fn inspector_drag_uses_pointer_position(action: InspectorPaneDragAction) -> bool
 }
 
 fn light_color_for_entity(world: &World, entity: Entity) -> Option<[f32; 3]> {
-    world.get::<BevyLight>(entity).map(|light| {
+    world.get::<Light>(entity).map(|light| {
         [
-            light.0.color.x.clamp(0.0, 1.0),
-            light.0.color.y.clamp(0.0, 1.0),
-            light.0.color.z.clamp(0.0, 1.0),
+            light.color.x.clamp(0.0, 1.0),
+            light.color.y.clamp(0.0, 1.0),
+            light.color.z.clamp(0.0, 1.0),
         ]
     })
 }
@@ -6668,7 +6660,7 @@ fn sync_inspector_light_color_picker(
         *picker_state = None;
         return;
     }
-    if world.get::<BevyLight>(picker.entity).is_none() {
+    if world.get::<Light>(picker.entity).is_none() {
         *picker_state = None;
         return;
     }
@@ -6867,7 +6859,7 @@ fn update_console_scroll_from_pointer(
 
 fn active_scene_camera_entity(world: &mut World) -> Option<Entity> {
     let mut fallback = None;
-    let mut query = world.query::<(Entity, Option<&BevyActiveCamera>, &BevyCamera)>();
+    let mut query = world.query::<(Entity, Option<&ActiveCamera>, &Camera)>();
     for (entity, active, _camera) in query.iter(world) {
         if fallback.is_none() {
             fallback = Some(entity);
@@ -6883,10 +6875,10 @@ fn reset_active_viewport_camera(world: &mut World) {
     let Some(camera_entity) = active_scene_camera_entity(world) else {
         return;
     };
-    if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
-        transform.0.position = Vec3::new(0.0, 0.0, 0.0);
-        transform.0.rotation = glam::Quat::IDENTITY;
-        transform.0.scale = Vec3::ONE;
+    if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+        transform.position = Vec3::new(0.0, 0.0, 0.0);
+        transform.rotation = glam::Quat::IDENTITY;
+        transform.scale = Vec3::ONE;
     }
 }
 
@@ -6894,19 +6886,15 @@ fn frame_selection_in_active_viewport(world: &mut World) {
     let selected = world
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selection| selection.0)
-        .and_then(|entity| {
-            world
-                .get::<BevyTransform>(entity)
-                .map(|transform| transform.0)
-        });
+        .and_then(|entity| world.get::<Transform>(entity).copied());
     let Some(selected_transform) = selected else {
         return;
     };
     let Some(camera_entity) = active_scene_camera_entity(world) else {
         return;
     };
-    if let Some(mut camera_transform) = world.get_mut::<BevyTransform>(camera_entity) {
-        camera_transform.0.position = selected_transform.position + Vec3::new(0.0, 2.5, 6.0);
+    if let Some(mut camera_transform) = world.get_mut::<Transform>(camera_entity) {
+        camera_transform.position = selected_transform.position + Vec3::new(0.0, 2.5, 6.0);
     }
 }
 
@@ -7318,14 +7306,14 @@ fn retained_preview_camera_aspect_ratio(world: &World) -> f32 {
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selected| selected.0)
         .filter(|entity| {
-            world.get::<BevyCamera>(*entity).is_some()
-                && world.get::<BevyTransform>(*entity).is_some()
+            world.get::<Camera>(*entity).is_some()
+                && world.get::<Transform>(*entity).is_some()
                 && world.get::<RetainedEditorViewportCamera>(*entity).is_none()
         })
         .and_then(|entity| {
             world
-                .get::<BevyCamera>(entity)
-                .map(|camera| camera.0.aspect_ratio)
+                .get::<Camera>(entity)
+                .map(|camera| camera.aspect_ratio)
         })
         .filter(|aspect| aspect.is_finite() && *aspect > 0.01)
         .unwrap_or(16.0 / 9.0)
@@ -8216,13 +8204,13 @@ fn duplicate_entity_shallow(
             }
         });
         let editor_entity = world.get::<EditorEntity>(source).copied();
-        let transform = world.get::<BevyTransform>(source).copied();
-        let camera = world.get::<BevyCamera>(source).copied();
-        let light = world.get::<BevyLight>(source).copied();
-        let mesh_renderer = world.get::<BevyMeshRenderer>(source).copied();
-        let skinned_mesh = world.get::<BevySkinnedMeshRenderer>(source).cloned();
-        let sprite = world.get::<BevySpriteRenderer>(source).copied();
-        let text_2d = world.get::<BevyText2d>(source).cloned();
+        let transform = world.get::<Transform>(source).copied();
+        let camera = world.get::<Camera>(source).copied();
+        let light = world.get::<Light>(source).copied();
+        let mesh_renderer = world.get::<MeshRenderer>(source).copied();
+        let skinned_mesh = world.get::<SkinnedMeshRenderer>(source).cloned();
+        let sprite = world.get::<SpriteRenderer>(source).copied();
+        let text_2d = world.get::<Text2d>(source).cloned();
         let dynamic_body = world.get::<DynamicRigidBody>(source).copied();
         let fixed_collider = world.get::<FixedCollider>(source).is_some();
         let collider_shape = world.get::<ColliderShape>(source).copied();
@@ -8422,62 +8410,51 @@ fn inspector_text_field_value(world: &World, field: InspectorPaneTextField) -> S
             .map(|name| name.as_str().to_string())
             .unwrap_or_default(),
         InspectorPaneTextField::Transform(component_field) => world
-            .get::<helmer_becs::BevyTransform>(entity)
+            .get::<helmer_becs::Transform>(entity)
             .map(|transform| match component_field {
-                crate::retained::panes::InspectorTransformField::PositionX => {
-                    transform.0.position.x
-                }
-                crate::retained::panes::InspectorTransformField::PositionY => {
-                    transform.0.position.y
-                }
-                crate::retained::panes::InspectorTransformField::PositionZ => {
-                    transform.0.position.z
-                }
+                crate::retained::panes::InspectorTransformField::PositionX => transform.position.x,
+                crate::retained::panes::InspectorTransformField::PositionY => transform.position.y,
+                crate::retained::panes::InspectorTransformField::PositionZ => transform.position.z,
                 crate::retained::panes::InspectorTransformField::RotationX => transform
-                    .0
                     .rotation
                     .to_euler(glam::EulerRot::YXZ)
                     .0
                     .to_degrees(),
                 crate::retained::panes::InspectorTransformField::RotationY => transform
-                    .0
                     .rotation
                     .to_euler(glam::EulerRot::YXZ)
                     .1
                     .to_degrees(),
                 crate::retained::panes::InspectorTransformField::RotationZ => transform
-                    .0
                     .rotation
                     .to_euler(glam::EulerRot::YXZ)
                     .2
                     .to_degrees(),
-                crate::retained::panes::InspectorTransformField::ScaleX => transform.0.scale.x,
-                crate::retained::panes::InspectorTransformField::ScaleY => transform.0.scale.y,
-                crate::retained::panes::InspectorTransformField::ScaleZ => transform.0.scale.z,
+                crate::retained::panes::InspectorTransformField::ScaleX => transform.scale.x,
+                crate::retained::panes::InspectorTransformField::ScaleY => transform.scale.y,
+                crate::retained::panes::InspectorTransformField::ScaleZ => transform.scale.z,
             })
             .map(numeric_field_text)
             .unwrap_or_default(),
         InspectorPaneTextField::Camera(component_field) => world
-            .get::<helmer_becs::BevyCamera>(entity)
+            .get::<helmer_becs::Camera>(entity)
             .map(|camera| match component_field {
                 crate::retained::panes::InspectorCameraField::FovDeg => {
-                    camera.0.fov_y_rad.to_degrees()
+                    camera.fov_y_rad.to_degrees()
                 }
-                crate::retained::panes::InspectorCameraField::Aspect => camera.0.aspect_ratio,
-                crate::retained::panes::InspectorCameraField::Near => camera.0.near_plane,
-                crate::retained::panes::InspectorCameraField::Far => camera.0.far_plane,
+                crate::retained::panes::InspectorCameraField::Aspect => camera.aspect_ratio,
+                crate::retained::panes::InspectorCameraField::Near => camera.near_plane,
+                crate::retained::panes::InspectorCameraField::Far => camera.far_plane,
             })
             .map(numeric_field_text)
             .unwrap_or_default(),
         InspectorPaneTextField::Light(component_field) => world
-            .get::<helmer_becs::BevyLight>(entity)
+            .get::<helmer_becs::Light>(entity)
             .map(|light| match component_field {
-                crate::retained::panes::InspectorLightField::Intensity => light.0.intensity,
+                crate::retained::panes::InspectorLightField::Intensity => light.intensity,
                 crate::retained::panes::InspectorLightField::SpotAngleDeg => {
-                    match light.0.light_type {
-                        helmer::provided::components::LightType::Spot { angle } => {
-                            angle.to_degrees()
-                        }
+                    match light.light_type {
+                        LightType::Spot { angle } => angle.to_degrees(),
                         _ => 45.0,
                     }
                 }
@@ -8579,40 +8556,32 @@ fn apply_inspector_text_field_input(
             }
         }
         InspectorPaneTextField::Transform(component_field) => {
-            let Some(current) = world
-                .get::<helmer_becs::BevyTransform>(entity)
-                .map(|value| match component_field {
-                    crate::retained::panes::InspectorTransformField::PositionX => {
-                        value.0.position.x
-                    }
-                    crate::retained::panes::InspectorTransformField::PositionY => {
-                        value.0.position.y
-                    }
-                    crate::retained::panes::InspectorTransformField::PositionZ => {
-                        value.0.position.z
-                    }
-                    crate::retained::panes::InspectorTransformField::RotationX => value
-                        .0
-                        .rotation
-                        .to_euler(glam::EulerRot::YXZ)
-                        .0
-                        .to_degrees(),
-                    crate::retained::panes::InspectorTransformField::RotationY => value
-                        .0
-                        .rotation
-                        .to_euler(glam::EulerRot::YXZ)
-                        .1
-                        .to_degrees(),
-                    crate::retained::panes::InspectorTransformField::RotationZ => value
-                        .0
-                        .rotation
-                        .to_euler(glam::EulerRot::YXZ)
-                        .2
-                        .to_degrees(),
-                    crate::retained::panes::InspectorTransformField::ScaleX => value.0.scale.x,
-                    crate::retained::panes::InspectorTransformField::ScaleY => value.0.scale.y,
-                    crate::retained::panes::InspectorTransformField::ScaleZ => value.0.scale.z,
-                })
+            let Some(current) =
+                world
+                    .get::<helmer_becs::Transform>(entity)
+                    .map(|value| match component_field {
+                        crate::retained::panes::InspectorTransformField::PositionX => {
+                            value.position.x
+                        }
+                        crate::retained::panes::InspectorTransformField::PositionY => {
+                            value.position.y
+                        }
+                        crate::retained::panes::InspectorTransformField::PositionZ => {
+                            value.position.z
+                        }
+                        crate::retained::panes::InspectorTransformField::RotationX => {
+                            value.rotation.to_euler(glam::EulerRot::YXZ).0.to_degrees()
+                        }
+                        crate::retained::panes::InspectorTransformField::RotationY => {
+                            value.rotation.to_euler(glam::EulerRot::YXZ).1.to_degrees()
+                        }
+                        crate::retained::panes::InspectorTransformField::RotationZ => {
+                            value.rotation.to_euler(glam::EulerRot::YXZ).2.to_degrees()
+                        }
+                        crate::retained::panes::InspectorTransformField::ScaleX => value.scale.x,
+                        crate::retained::panes::InspectorTransformField::ScaleY => value.scale.y,
+                        crate::retained::panes::InspectorTransformField::ScaleZ => value.scale.z,
+                    })
             else {
                 return;
             };
@@ -8635,16 +8604,14 @@ fn apply_inspector_text_field_input(
         InspectorPaneTextField::Camera(component_field) => {
             let Some(current) =
                 world
-                    .get::<helmer_becs::BevyCamera>(entity)
+                    .get::<helmer_becs::Camera>(entity)
                     .map(|value| match component_field {
                         crate::retained::panes::InspectorCameraField::FovDeg => {
-                            value.0.fov_y_rad.to_degrees()
+                            value.fov_y_rad.to_degrees()
                         }
-                        crate::retained::panes::InspectorCameraField::Aspect => {
-                            value.0.aspect_ratio
-                        }
-                        crate::retained::panes::InspectorCameraField::Near => value.0.near_plane,
-                        crate::retained::panes::InspectorCameraField::Far => value.0.far_plane,
+                        crate::retained::panes::InspectorCameraField::Aspect => value.aspect_ratio,
+                        crate::retained::panes::InspectorCameraField::Near => value.near_plane,
+                        crate::retained::panes::InspectorCameraField::Far => value.far_plane,
                     })
             else {
                 return;
@@ -8668,14 +8635,12 @@ fn apply_inspector_text_field_input(
         InspectorPaneTextField::Light(component_field) => {
             let Some(current) =
                 world
-                    .get::<helmer_becs::BevyLight>(entity)
+                    .get::<helmer_becs::Light>(entity)
                     .map(|value| match component_field {
-                        crate::retained::panes::InspectorLightField::Intensity => value.0.intensity,
+                        crate::retained::panes::InspectorLightField::Intensity => value.intensity,
                         crate::retained::panes::InspectorLightField::SpotAngleDeg => {
-                            match value.0.light_type {
-                                helmer::provided::components::LightType::Spot { angle } => {
-                                    angle.to_degrees()
-                                }
+                            match value.light_type {
+                                LightType::Spot { angle } => angle.to_degrees(),
                                 _ => 45.0,
                             }
                         }

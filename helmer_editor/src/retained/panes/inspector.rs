@@ -1,4 +1,4 @@
-use bevy_ecs::entity::Entity;
+use helmer_becs::ecs::entity::Entity;
 use helmer_ui::{
     RetainedUi, RetainedUiNode, UiButton, UiButtonVariant, UiColor, UiDimension, UiId, UiLabel,
     UiLayoutBuilder, UiRect, UiStyle, UiTextAlign, UiTextField, UiTextStyle, UiTextValue,

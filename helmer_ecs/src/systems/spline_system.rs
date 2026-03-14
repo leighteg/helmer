@@ -1,8 +1,8 @@
+use crate::components::{Spline, SplineFollower, Transform};
 use crate::ecs::{ecs_core::ECSCore, system::System};
 use glam::{Mat3, Vec3};
 use hashbrown::HashMap;
-use helmer::provided::components::{Spline, SplineFollower, Transform};
-use helmer::runtime::input_manager::InputManager;
+use helmer_window::runtime::input_manager::InputManager;
 
 pub struct SplineFollowSystem;
 

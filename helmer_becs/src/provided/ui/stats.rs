@@ -4,34 +4,32 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
+use crate::components::LightType;
 use bevy_ecs::prelude::{Entity, World};
 use egui::{Align2, Color32, ComboBox, Stroke, StrokeKind, TextStyle, pos2, vec2};
 use hashbrown::HashSet;
-use helmer::{
-    graphics::{
-        backend::binding_backend::BindingBackendChoice,
-        common::{
-            config::{RenderConfig, TransparentSortMode},
-            constants::MAX_SHADOW_CASCADES,
-            renderer::{
-                OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
-                OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderMessage,
-                ShaderConstants, WgpuBackend,
-            },
+use helmer_render::graphics::{
+    backend::binding_backend::BindingBackendChoice,
+    common::{
+        config::{RenderConfig, TransparentSortMode},
+        constants::MAX_SHADOW_CASCADES,
+        renderer::{
+            OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
+            OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderMessage,
+            ShaderConstants, WgpuBackend,
         },
-        graph::definition::resource_id::ResourceKind,
-        render_graphs::{graph_templates, template_for_graph},
     },
-    provided::components::LightType,
-    runtime::input_manager::InputManager,
+    graph::definition::resource_id::ResourceKind,
+    render_graphs::{graph_templates, template_for_graph},
 };
+use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::RwLock;
 
 use crate::{
-    AudioBackendResource, BevyActiveCamera, BevyAssetServer, BevyCamera, BevyLight, BevyLodTuning,
-    BevyPerformanceMetrics, BevyRenderSender, BevyRenderWorkerTuning, BevyRendererStats,
-    BevyRuntimeConfig, BevyRuntimeProfiling, BevyRuntimeTuning, BevySceneTuning,
-    BevyStreamingTuning, BevyTransform, DebugGraphHistory, ProfilingHistory,
+    ActiveCamera, AudioBackendResource, BecsAssetServer, BecsLodTuning, BecsPerformanceMetrics,
+    BecsRenderSender, BecsRenderWorkerTuning, BecsRendererStats, BecsRuntimeConfig,
+    BecsRuntimeProfiling, BecsRuntimeTuning, BecsSceneTuning, BecsStreamingTuning, Camera,
+    DebugGraphHistory, Light, ProfilingHistory, Transform,
     egui_integration::{EguiResource, EguiWindowSpec},
     physics::physics_resource::PhysicsResource,
     systems::render_system::{RenderGraphResource, RenderObjectCount},
@@ -234,10 +232,10 @@ fn window_spec(title: &str) -> EguiWindowSpec {
 
 pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
     let runtime_profiling = world
-        .get_resource::<BevyRuntimeProfiling>()
+        .get_resource::<BecsRuntimeProfiling>()
         .map(|profiling| profiling.0.clone());
     let renderer_stats = world
-        .get_resource::<BevyRendererStats>()
+        .get_resource::<BecsRendererStats>()
         .map(|stats| stats.0.clone());
     let ui_perf_stats = world.get_resource::<UiPerfStats>().cloned();
     let audio_stats = world
@@ -1127,7 +1125,7 @@ impl StatsUI {
             Box::new(move |ui, world, _input_arc| {
                 let (fps, tps) = {
                     let pm = &world
-                        .get_resource::<BevyPerformanceMetrics>()
+                        .get_resource::<BecsPerformanceMetrics>()
                         .expect("PerformanceMetrics resource not found")
                         .0;
                     (
@@ -1141,7 +1139,7 @@ impl StatsUI {
                     .map(|count| count.0);
 
                 let (vram_used_mb, vram_soft_mb, vram_hard_mb) = world
-                    .get_resource::<BevyRendererStats>()
+                    .get_resource::<BecsRendererStats>()
                     .map(|stats| {
                         let mb = 1024.0 * 1024.0;
                         let used = stats.0.vram_used_bytes.load(Ordering::Relaxed) as f64 / mb;
@@ -1155,9 +1153,9 @@ impl StatsUI {
 
                 let (mesh_bytes, tex_bytes, mat_bytes, audio_bytes) = {
                     #[cfg(target_arch = "wasm32")]
-                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+                    let asset_server = world.get_non_send_resource::<BecsAssetServer>();
                     #[cfg(not(target_arch = "wasm32"))]
-                    let asset_server = world.get_resource::<BevyAssetServer>();
+                    let asset_server = world.get_resource::<BecsAssetServer>();
                     asset_server
                         .map(|srv| {
                             let srv = srv.0.lock();
@@ -1169,7 +1167,7 @@ impl StatsUI {
                 };
 
                 let history_samples = world
-                    .get_resource::<BevyRuntimeProfiling>()
+                    .get_resource::<BecsRuntimeProfiling>()
                     .map(|profiling| profiling.0.history_samples.load(Ordering::Relaxed) as usize)
                     .unwrap_or(0);
 
@@ -1179,6 +1177,7 @@ impl StatsUI {
 
                 let mb_div = 1024.0 * 1024.0;
                 push_history(&mut history.fps, fps as f64, history_samples);
+                push_history(&mut history.tps, tps as f64, history_samples);
                 push_history(&mut history.vram_bytes, vram_used_mb, history_samples);
                 push_history(
                     &mut history.mesh_bytes,
@@ -1220,7 +1219,10 @@ impl StatsUI {
                 draw_history_plot(
                     ui,
                     120.0,
-                    &[("FPS", &history.fps, Color32::from_rgb(90, 210, 120))],
+                    &[
+                        ("FPS", &history.fps, Color32::from_rgb(90, 210, 120)),
+                        ("TPS", &history.tps, Color32::from_rgb(90, 160, 240)),
+                    ],
                 );
 
                 draw_history_plot(
@@ -1269,7 +1271,7 @@ impl StatsUI {
                 ui.heading("runtime tuning");
                 ui.separator();
 
-                if let Some(runtime_tuning) = world.get_resource::<BevyRuntimeTuning>() {
+                if let Some(runtime_tuning) = world.get_resource::<BecsRuntimeTuning>() {
                     let tuning = &runtime_tuning.0;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -1311,6 +1313,19 @@ impl StatsUI {
 
                             ui.separator();
                             ui.collapsing("thread budgets", |ui| {
+                                let mut task_worker_count =
+                                    tuning.load_task_worker_count().min(u32::MAX as usize) as u32;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut task_worker_count)
+                                            .speed(1.0)
+                                            .prefix("task workers: "),
+                                    )
+                                    .changed()
+                                {
+                                    tuning.store_task_worker_count(task_worker_count as usize);
+                                }
+
                                 let mut render_message_capacity =
                                     tuning.render_message_capacity.load(Ordering::Relaxed) as u32;
                                 if ui
@@ -1503,7 +1518,7 @@ impl StatsUI {
                 ui.heading("render worker");
                 ui.separator();
 
-                if let Some(mut tuning_res) = world.get_resource_mut::<BevyRenderWorkerTuning>() {
+                if let Some(mut tuning_res) = world.get_resource_mut::<BecsRenderWorkerTuning>() {
                     let tuning = &mut tuning_res.0;
                     if ui.button("reset render worker tuning").clicked() {
                         *tuning = Default::default();
@@ -1653,11 +1668,11 @@ impl StatsUI {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
                 let sender = world
-                    .get_resource::<BevyRenderSender>()
+                    .get_resource::<BecsRenderSender>()
                     .map(|s| s.0.clone());
                 {
                     let mut runtime_cfg = world
-                        .get_resource_mut::<BevyRuntimeConfig>()
+                        .get_resource_mut::<BecsRuntimeConfig>()
                         .expect("RuntimeConfig resource not found");
                     let mut wgpu_experimental = runtime_cfg.0.wgpu_experimental_features;
                     let mut wgpu_backend = runtime_cfg.0.wgpu_backend;
@@ -2751,7 +2766,7 @@ impl StatsUI {
                     }
                 }
 
-                if let Some(mut lod_tuning) = world.get_resource_mut::<BevyLodTuning>() {
+                if let Some(mut lod_tuning) = world.get_resource_mut::<BecsLodTuning>() {
                     ui.separator();
                     ui.heading("LOD tuning");
                     ui.collapsing("LOD tuning", |ui| {
@@ -2799,7 +2814,7 @@ impl StatsUI {
                 ui.heading("occlusion diagnostics");
                 ui.separator();
 
-                let stats = world.get_resource::<BevyRendererStats>();
+                let stats = world.get_resource::<BecsRendererStats>();
                 if let Some(stats) = stats {
                     let status = stats.0.occlusion_status.load(Ordering::Relaxed);
                     let status_label = match status {
@@ -2848,7 +2863,7 @@ impl StatsUI {
                 ui.heading("gpu driven diagnostics");
                 ui.separator();
 
-                let stats = world.get_resource::<BevyRendererStats>();
+                let stats = world.get_resource::<BecsRendererStats>();
                 if let Some(stats) = stats {
                     let draw_count = stats.0.gpu_draw_count.load(Ordering::Relaxed);
                     let mesh_count = stats.0.gpu_mesh_count.load(Ordering::Relaxed);
@@ -2875,16 +2890,16 @@ impl StatsUI {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
                 let sender = world
-                    .get_resource::<BevyRenderSender>()
+                    .get_resource::<BecsRenderSender>()
                     .map(|s| s.0.clone());
                 let asset_server = {
                     #[cfg(target_arch = "wasm32")]
-                    let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+                    let asset_server = world.get_non_send_resource::<BecsAssetServer>();
                     #[cfg(not(target_arch = "wasm32"))]
-                    let asset_server = world.get_resource::<BevyAssetServer>();
+                    let asset_server = world.get_resource::<BecsAssetServer>();
                     asset_server.map(|s| s.0.clone())
                 };
-                let stats = world.get_resource::<BevyRendererStats>();
+                let stats = world.get_resource::<BecsRendererStats>();
                 let mb_bytes: usize = 1024 * 1024;
                 let mb_f = mb_bytes as f32;
                 let mb_u64 = mb_bytes as u64;
@@ -2963,7 +2978,7 @@ impl StatsUI {
 
                 ui.separator();
                 ui.heading("passes");
-                if let Some(mut runtime_cfg) = world.get_resource_mut::<BevyRuntimeConfig>() {
+                if let Some(mut runtime_cfg) = world.get_resource_mut::<BecsRuntimeConfig>() {
                     let render_cfg = &mut runtime_cfg.0.render_config;
                     for pass in active_template.pass_toggles {
                         let mut enabled = pass.toggle.get(render_cfg);
@@ -3263,7 +3278,7 @@ impl StatsUI {
 
                     ui.separator();
                     ui.label("streaming + eviction tuning");
-                    if let Some(mut tuning_res) = world.get_resource_mut::<BevyStreamingTuning>() {
+                    if let Some(mut tuning_res) = world.get_resource_mut::<BecsStreamingTuning>() {
                         let tuning = &mut tuning_res.0;
                         let mut tuning_changed = false;
 
@@ -3832,10 +3847,10 @@ impl StatsUI {
                 ui.separator();
 
                 let sender = world
-                    .get_resource::<BevyRenderSender>()
+                    .get_resource::<BecsRenderSender>()
                     .map(|s| s.0.clone());
                 let (pass_timings, profiling_enabled) = world
-                    .get_resource::<BevyRendererStats>()
+                    .get_resource::<BecsRendererStats>()
                     .map(|stats| {
                         (
                             stats.0.pass_timings.read().clone(),
@@ -3970,11 +3985,11 @@ impl StatsUI {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc: &Arc<RwLock<InputManager>>| {
                 let mut camera_query =
-                    world.query::<(&mut BevyTransform, &mut BevyCamera, &BevyActiveCamera)>();
+                    world.query::<(&mut Transform, &mut Camera, &ActiveCamera)>();
 
                 for (mut transform, mut camera, _) in camera_query.iter_mut(world) {
-                    let transform = &mut transform.0;
-                    let camera = &mut camera.0;
+                    let transform = &mut *transform;
+                    let camera = &mut *camera;
 
                     ui.heading("active camera");
 
@@ -4009,11 +4024,11 @@ impl StatsUI {
                     ui.separator();
                 }
 
-                let mut light_query = world.query::<(&mut BevyTransform, &mut BevyLight)>();
+                let mut light_query = world.query::<(&mut Transform, &mut Light)>();
 
                 for (mut transform, mut light) in light_query.iter_mut(world) {
-                    let transform = &mut transform.0;
-                    let light = &mut light.0;
+                    let transform = &mut *transform;
+                    let light = &mut *light;
 
                     if light.light_type != LightType::Directional {
                         continue;
@@ -4035,7 +4050,7 @@ impl StatsUI {
                     ui.separator();
                 }
 
-                if let Some(mut scene_tuning) = world.get_resource_mut::<BevySceneTuning>() {
+                if let Some(mut scene_tuning) = world.get_resource_mut::<BecsSceneTuning>() {
                     ui.collapsing("scene tuning", |ui| {
                         ui.add(
                             egui::DragValue::new(&mut scene_tuning.0.transform_epsilon)

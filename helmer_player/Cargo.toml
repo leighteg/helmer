@@ -6,6 +6,10 @@ edition = "2024"
 [dependencies]
 bevy_ecs = "0.17.2"
 helmer = { path = "../helmer" }
+helmer_audio = { path = "../helmer_audio" }
+helmer_render = { path = "../helmer_render" }
+helmer_asset = { path = "../helmer_asset" }
+helmer_window = { path = "../helmer_window" }
 helmer_becs = { path = "../helmer_becs" }
 helmer_build_runtime = { path = "../helmer_build_runtime" }
 helmer_editor_egui = { path = "../helmer_editor_egui" }

@@ -1,27 +1,27 @@
+use crate::components::{
+    ActiveCamera, Camera, Light, MeshRenderer, SkinnedMeshRenderer, Transform,
+};
 use crate::ecs::{
     ecs_core::{ECSCore, Entity},
     system::System,
 };
 use glam::{Mat3, Mat4, Vec3, Vec4, Vec4Swizzles};
 use hashbrown::{HashMap, HashSet};
-use helmer::{
-    animation::{Animator, Pose, write_skin_palette},
-    graphics::{
-        common::{
-            config::{RenderConfig, SkinningMode},
-            graph::RenderGraphSpec,
-            renderer::{
-                Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
-                RenderLightDelta, RenderObjectDelta, Vertex,
-            },
+use helmer_animation::{Animator, Pose, write_skin_palette};
+use helmer_asset::runtime::asset_server::AssetServer;
+use helmer_render::graphics::{
+    common::{
+        config::{RenderConfig, SkinningMode},
+        graph::RenderGraphSpec,
+        renderer::{
+            Aabb, AssetStreamKind, AssetStreamingRequest, RenderCameraDelta, RenderDelta,
+            RenderLightDelta, RenderObjectDelta, Vertex,
         },
-        render_graphs::default_graph_spec,
     },
-    provided::components::{
-        ActiveCamera, Camera, Light, MeshRenderer, SkinnedMeshRenderer, Transform,
-    },
-    runtime::{asset_server::AssetServer, config::RuntimeConfig, input_manager::InputManager},
+    render_graphs::default_graph_spec,
 };
+use helmer_render::runtime::RuntimeConfig;
+use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tracing::warn;

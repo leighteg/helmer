@@ -1,18 +1,27 @@
-use bevy_ecs::component::Component;
+use crate::components::LightType;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::name::Name;
 use bevy_ecs::prelude::ReflectComponent;
 use bevy_ecs::resource::Resource;
-use bevy_reflect::{PartialReflect, Reflect, ReflectMut, TypeRegistry};
+use bevy_reflect::{PartialReflect, ReflectMut, TypeRegistry};
 use egui::Id;
-use helmer::provided::components::{Light, LightType};
 use std::any::TypeId;
 
 use crate::egui_integration::{EguiResource, EguiWindowSpec};
-use crate::{BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform};
+use crate::{ActiveCamera, Camera, Light, MeshRenderer, Transform};
 
 #[derive(Resource, Default)]
 pub struct InspectorSelectedEntityResource(pub Option<Entity>);
+
+impl InspectorSelectedEntityResource {
+    #[inline]
+    pub fn is_some_and<F>(&self, f: F) -> bool
+    where
+        F: FnOnce(Entity) -> bool,
+    {
+        self.0.is_some_and(f)
+    }
+}
 
 pub struct InspectorUI {}
 
@@ -200,19 +209,18 @@ impl InspectorUI {
                                 world.components().get_info(component_id).and_then(|info| {
                                     info.type_id().map(|type_id| {
                                         // Match known custom types for real names (bypass placeholder)
-                                        let short_name = if type_id == TypeId::of::<BevyTransform>()
+                                        let short_name = if type_id == TypeId::of::<Transform>()
                                         {
                                             "Transform".to_string()
-                                        } else if type_id == TypeId::of::<BevyCamera>() {
+                                        } else if type_id == TypeId::of::<Camera>() {
                                             "Camera".to_string()
-                                        } else if type_id == TypeId::of::<BevyActiveCamera>() {
+                                        } else if type_id == TypeId::of::<ActiveCamera>() {
                                             "Active Camera".to_string()
-                                        } else if type_id == TypeId::of::<BevyLight>() {
+                                        } else if type_id == TypeId::of::<Light>() {
                                             match world
                                                 .entity(entity)
-                                                .get::<BevyLight>()
+                                                .get::<Light>()
                                                 .unwrap()
-                                                .0
                                                 .light_type
                                             {
                                                 LightType::Directional => {
@@ -223,7 +231,7 @@ impl InspectorUI {
                                                 }
                                                 LightType::Point => "Point Light".to_string(),
                                             }
-                                        } else if type_id == TypeId::of::<BevyMeshRenderer>() {
+                                        } else if type_id == TypeId::of::<MeshRenderer>() {
                                             "Mesh Renderer".to_string()
                                         } else {
                                             // Fallback for reflectable/unknown (safe now, as knowns are handled)
@@ -270,12 +278,12 @@ impl InspectorUI {
                                 // Entity header (expandable)
                                 let header_title = if let Some(name) = world.entity(entity).get::<Name>() {
                                     &name.to_string()
-                                } else if let Some(_) = world.entity(entity).get::<BevyActiveCamera>() {
+                                } else if let Some(_) = world.entity(entity).get::<ActiveCamera>() {
                                     "Active Camera"
-                                } else if let Some(light) = world.entity(entity).get::<BevyLight>() {
-                                    match light.0.light_type {
+                                } else if let Some(light) = world.entity(entity).get::<Light>() {
+                                    match light.light_type {
                                         LightType::Directional => "Directional Light",
-                                        LightType::Point => "Spot Light",
+                                        LightType::Point => "Point Light",
                                         LightType::Spot { angle: _ } => "Spot Light",
                                     }
                                 } else { &{
@@ -315,13 +323,13 @@ impl InspectorUI {
                                         // Non-reflectable: Handle custom types via TypeId matching
                                         let mut entity_mut = world.entity_mut(entity);
 
-                                        if type_id == TypeId::of::<BevyTransform>() {
-                                            if let Some(mut transform_wrapper) = entity_mut.get_mut::<BevyTransform>() {
+                                        if type_id == TypeId::of::<Transform>() {
+                                            if let Some(mut transform_wrapper) = entity_mut.get_mut::<Transform>() {
                                                 egui::CollapsingHeader::new(&short_name)
                                                     .id_salt(unique_id)  // ← Make header ID unique
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
-                                                            let t = &mut transform_wrapper.0;
+                                                            let t = &mut *transform_wrapper;
 
                                                             ui.label("Position:");
                                                             ui.horizontal(|ui| {
@@ -347,13 +355,13 @@ impl InspectorUI {
                                                         });
                                                     });
                                             }
-                                        } else if type_id == TypeId::of::<BevyCamera>() {
-                                            if let Some(mut camera_wrapper) = entity_mut.get_mut::<BevyCamera>() {
+                                        } else if type_id == TypeId::of::<Camera>() {
+                                            if let Some(mut camera_wrapper) = entity_mut.get_mut::<Camera>() {
                                                 egui::CollapsingHeader::new(&short_name)
                                                     .id_salt(unique_id)  // ← Make header ID unique
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
-                                                            let c = &mut camera_wrapper.0;
+                                                            let c = &mut *camera_wrapper;
 
                                                             ui.horizontal(|ui| {
                                                                 ui.label("FOV:");
@@ -374,13 +382,13 @@ impl InspectorUI {
                                                         });
                                                     });
                                             }
-                                        } else if type_id == TypeId::of::<BevyLight>() {
-                                            if let Some(mut light_wrapper) = entity_mut.get_mut::<BevyLight>() {
+                                        } else if type_id == TypeId::of::<Light>() {
+                                            if let Some(mut light_wrapper) = entity_mut.get_mut::<Light>() {
                                                 egui::CollapsingHeader::new(&short_name)
                                                     .id_salt(unique_id)  // ← Make header ID unique
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // ← Push ID for children
-                                                            let l = &mut light_wrapper.0;
+                                                            let l = &mut *light_wrapper;
 
                                                             ui.horizontal(|ui| {
                                                                 ui.label("Color:");
@@ -398,13 +406,13 @@ impl InspectorUI {
                                                         });
                                                     });
                                             }
-                                        } else if type_id == TypeId::of::<BevyMeshRenderer>() {
-                                            if let Some(mut mesh_wrapper) = entity_mut.get_mut::<BevyMeshRenderer>() {
+                                        } else if type_id == TypeId::of::<MeshRenderer>() {
+                                            if let Some(mut mesh_wrapper) = entity_mut.get_mut::<MeshRenderer>() {
                                                 egui::CollapsingHeader::new(&short_name)
                                                     .id_salt(unique_id)  // make header ID unique
                                                     .show(ui, |ui| {
                                                         ui.push_id(unique_id, |ui| {  // push ID for children
-                                                            let mesh_renderer = &mut mesh_wrapper.0;
+                                                            let mesh_renderer = &mut *mesh_wrapper;
 
                                                             ui.label("mesh id");
                                                             ui.add(egui::DragValue::new(&mut mesh_renderer.mesh_id));

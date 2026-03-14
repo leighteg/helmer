@@ -3,7 +3,8 @@ use arboard::Clipboard;
 use bevy_ecs::prelude::*;
 use egui::collapsing_header::CollapsingState;
 use egui::{Context, Event, Frame, Key, Order, OutputCommand, Pos2, Rect, Shadow, TextStyle, Vec2};
-use helmer::{graphics::common::renderer::EguiRenderData, runtime::input_manager::InputManager};
+use helmer_render::graphics::common::renderer::EguiRenderData;
+use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +17,7 @@ use std::{
 use winit::keyboard::KeyCode;
 
 use crate::{
-    BevyInputManager, BevyRuntimeConfig, BevySystemProfiler,
+    BecsInputManager, BecsRuntimeConfig, BecsSystemProfiler,
     provided::ui::{inspector::InspectorUI, stats::StatsUI},
 };
 
@@ -314,7 +315,7 @@ fn apply_clipboard_commands(output: &egui::PlatformOutput, clipboard: &mut EguiC
 
 pub fn egui_system(world: &mut World) {
     let _system_scope = world
-        .get_resource::<BevySystemProfiler>()
+        .get_resource::<BecsSystemProfiler>()
         .and_then(|profiler| {
             profiler
                 .0
@@ -322,13 +323,13 @@ pub fn egui_system(world: &mut World) {
         });
 
     let input_arc = world
-        .get_resource::<BevyInputManager>()
+        .get_resource::<BecsInputManager>()
         .expect("InputManager resource not found")
         .0
         .clone();
 
     let mut runtime_cfg = world
-        .get_resource_mut::<BevyRuntimeConfig>()
+        .get_resource_mut::<BecsRuntimeConfig>()
         .expect("RuntimeConfig resource not found");
 
     if !runtime_cfg.0.egui {

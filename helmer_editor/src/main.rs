@@ -1,10 +1,10 @@
 use std::{env, path::PathBuf, sync::OnceLock};
 
-use bevy_ecs::schedule::IntoScheduleConfigs;
-use helmer::runtime::asset_server::AssetServer;
+use helmer_asset::runtime::asset_server::AssetServer;
+use helmer_becs::ecs::schedule::IntoScheduleConfigs;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::render_system::{RenderGizmoState, RenderMainSceneToSwapchain};
-use helmer_becs::{AudioBackendResource, BevyRuntimeConfig, helmer_becs_init};
+use helmer_becs::{AudioBackendResource, BecsRuntimeConfig, helmer_becs_init};
 use helmer_editor_runtime::editor_commands::EditorCommand;
 
 mod retained;
@@ -47,8 +47,8 @@ fn main() {
 }
 
 fn editor_init(
-    world: &mut bevy_ecs::world::World,
-    schedule: &mut bevy_ecs::schedule::Schedule,
+    world: &mut helmer_becs::ecs::world::World,
+    schedule: &mut helmer_becs::ecs::schedule::Schedule,
     _asset_server: &AssetServer,
 ) {
     world.insert_resource(EditorProject::default());
@@ -80,15 +80,15 @@ fn editor_init(
     world.insert_resource(RenderGizmoState::default());
     world.insert_resource(RenderMainSceneToSwapchain(false));
 
-    if let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() {
-        runtime_config.0.egui = false;
-        runtime_config.0.render_config.ui_pass = true;
-        runtime_config.0.render_config.egui_pass = false;
+    if let Some(mut runtime_config) = world.get_resource_mut::<BecsRuntimeConfig>() {
+        runtime_config.egui = false;
+        runtime_config.render_config.ui_pass = true;
+        runtime_config.render_config.egui_pass = false;
     }
 
     if let Some(audio) = world.get_resource::<AudioBackendResource>() {
-        audio.0.set_enabled(true);
-        audio.0.clear_emitters();
+        audio.set_enabled(true);
+        audio.clear_emitters();
     }
 
     let projects_root = DEFAULT_PROJECTS_ROOT

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use bevy_ecs::prelude::{Entity, Resource};
-use helmer::provided::components::MeshAsset;
+use helmer_becs::components::MeshAsset;
+use helmer_becs::ecs::prelude::{Entity, Resource};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
+use crate::components::{MeshRenderer, SkinnedMeshRenderer, Transform};
 use crate::{
-    BevyAnimator, BevyAssetServerParam, BevyMeshRenderer, BevyRuntimeProfiling,
-    BevySkinnedMeshRenderer, BevySystemProfiler, BevyTransform, BevyWrapper,
+    Animator, BecsAssetServerParam, BecsRuntimeProfiling, BecsSceneTuning, BecsSystemProfiler,
 };
 use bevy_ecs::{
     component::Component,
@@ -11,12 +11,12 @@ use bevy_ecs::{
 };
 use glam::Mat4;
 use hashbrown::{HashMap, HashSet};
-use helmer::animation::{
+use helmer_animation::{
     AnimationGraph, AnimationLayer, AnimationLibrary, AnimationNode, AnimationParameters,
-    AnimationState, AnimationStateMachine, Animator, BlendMode, BlendNode, ClipNode,
+    AnimationState, AnimationStateMachine, Animator as AnimatorData, BlendMode, BlendNode,
+    ClipNode,
 };
-use helmer::provided::components::{MeshRenderer, SkinnedMeshRenderer, Transform};
-use helmer::runtime::asset_server::{Handle, Scene};
+use helmer_asset::runtime::asset_server::{Handle, Scene};
 use std::sync::Arc;
 use tracing::info;
 use web_time::Instant;
@@ -27,7 +27,7 @@ pub struct SceneSpawnedChildren {
 }
 
 //================================================================================
-// Bevy Wrapper Components
+// ECS Wrapper Components
 //================================================================================
 #[derive(Component)]
 pub struct SceneRoot(pub Handle<Scene>);
@@ -42,7 +42,7 @@ pub struct SceneChild {
 pub struct EntityParent {
     pub parent: Entity,
     pub local_transform: Mat4,   // Transform in parent's local space
-    pub last_written: Transform, // Last world transform written to BevyTransform
+    pub last_written: Transform, // Last world transform written to Transform
 }
 
 #[derive(Component)]
@@ -84,7 +84,7 @@ pub struct SceneChildUpdateCache {
     stack: Vec<(Entity, Mat4)>,
 }
 
-pub fn build_default_animator(library: Arc<AnimationLibrary>) -> Animator {
+pub fn build_default_animator(library: Arc<AnimationLibrary>) -> AnimatorData {
     let mut nodes = Vec::new();
     if !library.clips.is_empty() {
         nodes.push(AnimationNode::Clip(ClipNode {
@@ -115,7 +115,7 @@ pub fn build_default_animator(library: Arc<AnimationLibrary>) -> Animator {
         graph,
         state_machine,
     };
-    Animator {
+    AnimatorData {
         layers: vec![layer],
         parameters: AnimationParameters::default(),
         enabled: true,
@@ -137,11 +137,11 @@ pub struct PendingSkinnedMesh {
 pub fn scene_spawning_system(
     mut commands: Commands,
     mut scene_children: ResMut<SceneSpawnedChildren>,
-    asset_server: BevyAssetServerParam<'_>,
+    asset_server: BecsAssetServerParam<'_>,
     scene_root_query: Query<(Entity, &SceneRoot), Without<SpawnedScene>>,
-    root_transforms: Query<&BevyTransform, With<SceneRoot>>,
-    profiling_res: Option<Res<BevyRuntimeProfiling>>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    root_transforms: Query<&Transform, With<SceneRoot>>,
+    profiling_res: Option<Res<BecsRuntimeProfiling>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -177,7 +177,7 @@ pub fn scene_spawning_system(
 
             let parent_matrix = root_transforms
                 .get(root_entity)
-                .map(|t| t.0.to_matrix())
+                .map(|t| t.to_matrix())
                 .unwrap_or(Mat4::IDENTITY);
 
             let mut spawned_children = Vec::with_capacity(scene.nodes.len());
@@ -225,8 +225,8 @@ pub fn scene_spawning_system(
                     let skinned =
                         SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, true, true);
                     let mut commands = commands.spawn((
-                        BevyWrapper(world_transform),
-                        BevySkinnedMeshRenderer(skinned),
+                        world_transform,
+                        skinned,
                         EntityParent {
                             parent: parent_entity,
                             local_transform,
@@ -246,18 +246,13 @@ pub fn scene_spawning_system(
                         .skin_index
                         .and_then(|idx| scene.animations.read().get(idx).cloned())
                     {
-                        commands.insert(BevyAnimator(build_default_animator(anim_lib)));
+                        commands.insert(Animator(build_default_animator(anim_lib)));
                     }
                     commands
                 } else {
                     let mut commands = commands.spawn((
-                        BevyWrapper(world_transform),
-                        BevyWrapper(MeshRenderer::new(
-                            node.mesh.id,
-                            node.material.id,
-                            true,
-                            true,
-                        )),
+                        world_transform,
+                        MeshRenderer::new(node.mesh.id, node.material.id, true, true),
                         EntityParent {
                             parent: parent_entity,
                             local_transform,
@@ -325,15 +320,15 @@ pub fn scene_spawning_system(
 
 pub fn scene_child_skinning_system(
     mut commands: Commands,
-    asset_server: BevyAssetServerParam<'_>,
+    asset_server: BecsAssetServerParam<'_>,
     scene_root_query: Query<&SceneRoot>,
     pending_query: Query<(
         Entity,
         &SceneChild,
         &PendingSkinnedMesh,
-        Option<&BevyMeshRenderer>,
+        Option<&MeshRenderer>,
     )>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -361,19 +356,19 @@ pub fn scene_child_skinning_system(
         };
 
         let (casts_shadow, visible) = mesh_renderer
-            .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+            .map(|renderer| (renderer.casts_shadow, renderer.visible))
             .unwrap_or((true, true));
 
         let skinned =
             SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
 
         let mut entity_commands = commands.entity(entity);
-        entity_commands.try_remove::<BevyMeshRenderer>();
-        entity_commands.try_insert(BevySkinnedMeshRenderer(skinned));
+        entity_commands.try_remove::<MeshRenderer>();
+        entity_commands.try_insert(skinned);
         entity_commands.try_remove::<PendingSkinnedMesh>();
 
         if let Some(anim_lib) = scene.animations.read().get(pending.skin_index).cloned() {
-            entity_commands.try_insert(BevyAnimator(build_default_animator(anim_lib)));
+            entity_commands.try_insert(Animator(build_default_animator(anim_lib)));
         }
     }
 }
@@ -381,7 +376,7 @@ pub fn scene_child_skinning_system(
 /// Flush deferred commands so downstream systems can see spawned scene entities in the same frame.
 pub fn apply_scene_commands_system(world: &mut World) {
     let _system_scope = world
-        .get_resource::<BevySystemProfiler>()
+        .get_resource::<BecsSystemProfiler>()
         .and_then(|profiler| {
             profiler
                 .0
@@ -396,17 +391,17 @@ pub fn apply_scene_commands_system(world: &mut World) {
 /// authored by this system. External edits to a child update local space. External edits to a
 /// parent are propagated recursively down the subtree
 pub fn update_scene_child_transforms(
-    scene_tuning: Res<crate::BevySceneTuning>,
+    scene_tuning: Res<BecsSceneTuning>,
     mut cache: Local<SceneChildUpdateCache>,
     mut queries: ParamSet<(
-        Query<Entity, Changed<BevyTransform>>,
-        Query<&BevyTransform>,
+        Query<Entity, Changed<Transform>>,
+        Query<&Transform>,
         Query<(Entity, &EntityParent)>,
-        Query<(&mut EntityParent, &mut BevyTransform)>,
-        Query<(Entity, &EntityParent, &BevyTransform), Changed<BevyTransform>>,
+        Query<(&mut EntityParent, &mut Transform)>,
+        Query<(Entity, &EntityParent, &Transform), Changed<Transform>>,
     )>,
-    profiling_res: Option<Res<BevyRuntimeProfiling>>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    profiling_res: Option<Res<BecsRuntimeProfiling>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -458,7 +453,7 @@ pub fn update_scene_child_transforms(
                 continue;
             }
 
-            let current_transform = child_transform.0;
+            let current_transform = *child_transform;
             if transform_approx_eq(&current_transform, &relation.last_written, epsilon) {
                 continue;
             }
@@ -476,7 +471,7 @@ pub fn update_scene_child_transforms(
             let Ok(parent_transform) = transform_query.get(parent_entity) else {
                 continue;
             };
-            parent_transform.0.to_matrix()
+            parent_transform.to_matrix()
         };
         let inverse = parent.inverse();
         cache
@@ -528,7 +523,7 @@ pub fn update_scene_child_transforms(
                 let Ok(parent_transform) = transform_query.get(entity) else {
                     continue;
                 };
-                parent_transform.0.to_matrix()
+                parent_transform.to_matrix()
             };
             let inverse = parent.inverse();
             let matrices = RootMatrices { parent, inverse };
@@ -555,7 +550,7 @@ pub fn update_scene_child_transforms(
                     continue;
                 };
 
-                let current_transform = child_transform.0;
+                let current_transform = *child_transform;
                 if !transform_approx_eq(&current_transform, &relation.last_written, epsilon) {
                     relation.local_transform = parent_inverse * current_transform.to_matrix();
                 }
@@ -563,7 +558,7 @@ pub fn update_scene_child_transforms(
                 let world_transform =
                     Transform::from_matrix(parent_matrix * relation.local_transform);
                 if !transform_approx_eq(&world_transform, &current_transform, epsilon) {
-                    child_transform.0 = world_transform;
+                    *child_transform = world_transform;
                 }
                 if !transform_approx_eq(&world_transform, &relation.last_written, epsilon) {
                     relation.last_written = world_transform;

@@ -8,10 +8,9 @@ use crate::{
     provided::ui::StatsUI,
 };
 use egui::Context;
-use helmer::{
-    graphics::common::renderer::EguiRenderData,
-    runtime::{config::RuntimeConfig, input_manager::InputManager},
-};
+use helmer_render::graphics::common::renderer::EguiRenderData;
+use helmer_render::runtime::RuntimeConfig;
+use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::RwLock;
 use winit::keyboard::KeyCode;
 

@@ -7,6 +7,10 @@ edition = "2024"
 gilrs = "0.11.1"
 glam = "0.30.9"
 helmer = { path = "../helmer" }
+helmer_audio = { path = "../helmer_audio" }
+helmer_render = { path = "../helmer_render" }
+helmer_asset = { path = "../helmer_asset" }
+helmer_window = { path = "../helmer_window" }
 helmer_becs = { path = "../helmer_becs" }
 helmer_editor_runtime = { path = "../helmer_editor_runtime" }
 helmer_script_sdk = { path = "../helmer_script_sdk" }

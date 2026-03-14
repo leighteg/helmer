@@ -1,0 +1,62 @@
+[package]
+name = "helmer_asset"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+asset-worker = []
+
+[dependencies]
+helmer = { path = "../helmer" }
+helmer_animation = { path = "../helmer_animation" }
+helmer_audio = { path = "../helmer_audio" }
+helmer_render = { path = "../helmer_render" }
+base64 = "0.22.1"
+basis-universal = "0.3.1"
+bincode = "1.3.3"
+bytemuck = "1.25.0"
+crossbeam-channel = "0.5.15"
+glam = "0.30.9"
+gltf = { version = "1.4.1", features = ["KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_materials_pbrSpecularGlossiness"] }
+hashbrown = "0.16.1"
+ktx2 = "0.4.0"
+meshopt = "0.6.2"
+parking_lot = "0.12.5"
+serde = { version = "1.0.228", features = ["derive"] }
+tracing = "0.1.44"
+web-time = "1.1.0"
+image = { version = "0.25.9", features = ["png"] }
+mikktspace = "0.3.0"
+ron = "0.12.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memmap2 = "0.9.9"
+wgpu = { version = "28.0.0", features = ["static-dxc"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.85"
+wasm-bindgen = "0.2.108"
+wasm-bindgen-futures = "0.4.58"
+wgpu = { version = "28.0.0", features = ["webgl"] }
+web-sys = { version = "0.3.85", features = [
+    "console",
+    "CssStyleDeclaration",
+    "Document",
+    "Element",
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemWritableFileStream",
+    "Navigator",
+    "Node",
+    "Response",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "Window",
+] }

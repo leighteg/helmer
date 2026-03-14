@@ -3,16 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bevy_ecs::prelude::{With, World};
-use bevy_ecs::{entity::Entity, name::Name};
-use helmer::provided::components::{ActiveCamera, Light, Transform};
+use helmer_becs::ecs::prelude::{With, World};
+use helmer_becs::ecs::{entity::Entity, name::Name};
 use helmer_becs::physics::components::{ColliderShape, DynamicRigidBody, FixedCollider};
 use helmer_becs::physics::physics_resource::PhysicsResource;
 use helmer_becs::provided::ui::inspector::InspectorSelectedEntityResource;
 use helmer_becs::systems::scene_system::{EntityParent, SceneChild, SceneRoot};
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevySkinnedMeshRenderer,
-    BevySpriteRenderer, BevyText2d, BevyTransform, BevyWrapper, DeltaTime,
+    ActiveCamera, Camera, DeltaTime, Light, MeshRenderer, SkinnedMeshRenderer, SpriteRenderer,
+    Text2d, Transform,
 };
 use helmer_editor_runtime::{
     file_watch::poll_file_watcher,
@@ -464,16 +463,16 @@ fn reset_editor_scene_entities(world: &mut World) {
 fn spawn_default_scene_entities(world: &mut World) {
     world.spawn((
         EditorEntity,
-        BevyTransform::default(),
-        BevyCamera::default(),
-        BevyWrapper(ActiveCamera {}),
+        Transform::default(),
+        Camera::default(),
+        ActiveCamera {},
         Name::new("Scene Camera"),
     ));
 
     let light_entity = world
         .spawn((
             EditorEntity,
-            BevyWrapper(Transform {
+            Transform {
                 position: glam::Vec3::new(0.0, 4.0, 0.0),
                 rotation: glam::Quat::from_euler(
                     glam::EulerRot::YXZ,
@@ -482,8 +481,8 @@ fn spawn_default_scene_entities(world: &mut World) {
                     20.0f32.to_radians(),
                 ),
                 scale: glam::Vec3::ONE,
-            }),
-            BevyWrapper(Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0)),
+            },
+            Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
             Name::new("Directional Light"),
         ))
         .id();
@@ -521,14 +520,14 @@ fn capture_play_backup(world: &World) -> RetainedPlayBackup {
                 .get::<Name>(entity)
                 .map(|name| name.as_str().to_string()),
             editor_entity: world.get::<EditorEntity>(entity).is_some(),
-            transform: world.get::<BevyTransform>(entity).copied(),
-            camera: world.get::<BevyCamera>(entity).copied(),
-            active_camera: world.get::<BevyActiveCamera>(entity).is_some(),
-            light: world.get::<BevyLight>(entity).copied(),
-            mesh_renderer: world.get::<BevyMeshRenderer>(entity).copied(),
-            skinned_mesh_renderer: world.get::<BevySkinnedMeshRenderer>(entity).cloned(),
-            sprite_renderer: world.get::<BevySpriteRenderer>(entity).copied(),
-            text_2d: world.get::<BevyText2d>(entity).cloned(),
+            transform: world.get::<Transform>(entity).copied(),
+            camera: world.get::<Camera>(entity).copied(),
+            active_camera: world.get::<ActiveCamera>(entity).is_some(),
+            light: world.get::<Light>(entity).copied(),
+            mesh_renderer: world.get::<MeshRenderer>(entity).copied(),
+            skinned_mesh_renderer: world.get::<SkinnedMeshRenderer>(entity).cloned(),
+            sprite_renderer: world.get::<SpriteRenderer>(entity).copied(),
+            text_2d: world.get::<Text2d>(entity).cloned(),
             dynamic_body: world.get::<DynamicRigidBody>(entity).copied(),
             fixed_collider: world.get::<FixedCollider>(entity).is_some(),
             collider_shape: world.get::<ColliderShape>(entity).copied(),
@@ -577,9 +576,7 @@ fn restore_play_backup(world: &mut World, backup: RetainedPlayBackup) {
             world.entity_mut(entity).insert(camera);
         }
         if snapshot.active_camera {
-            world
-                .entity_mut(entity)
-                .insert(BevyWrapper(ActiveCamera {}));
+            world.entity_mut(entity).insert(ActiveCamera {});
         }
         if let Some(light) = snapshot.light {
             world.entity_mut(entity).insert(light);
@@ -628,12 +625,12 @@ fn restore_play_backup(world: &mut World, backup: RetainedPlayBackup) {
         }
 
         let child_transform = world
-            .get::<BevyTransform>(child_entity)
-            .map(|transform| transform.0)
+            .get::<Transform>(child_entity)
+            .copied()
             .unwrap_or_default();
         let parent_matrix = world
-            .get::<BevyTransform>(parent_entity)
-            .map(|transform| transform.0.to_matrix())
+            .get::<Transform>(parent_entity)
+            .map(|transform| transform.to_matrix())
             .unwrap_or(glam::Mat4::IDENTITY);
         world.entity_mut(child_entity).insert(EntityParent {
             parent: parent_entity,
@@ -680,55 +677,51 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
 
     match kind {
         SpawnKind::Empty => {
-            world.spawn((EditorEntity, BevyTransform::default(), Name::new("Empty")));
+            world.spawn((EditorEntity, Transform::default(), Name::new("Empty")));
         }
         SpawnKind::Camera | SpawnKind::FreecamCamera => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
-                BevyCamera::default(),
+                Transform::default(),
+                Camera::default(),
                 Name::new("Camera"),
             ));
         }
         SpawnKind::DirectionalLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::directional(glam::vec3(1.0, 1.0, 1.0), 25.0)),
+                Transform::default(),
+                Light::directional(glam::vec3(1.0, 1.0, 1.0), 25.0),
                 Name::new("Directional Light"),
             ));
         }
         SpawnKind::PointLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0)),
+                Transform::default(),
+                Light::point(glam::vec3(1.0, 1.0, 1.0), 10.0),
                 Name::new("Point Light"),
             ));
         }
         SpawnKind::SpotLight => {
             world.spawn((
                 EditorEntity,
-                BevyWrapper(Transform::default()),
-                BevyWrapper(Light::spot(
-                    glam::vec3(1.0, 1.0, 1.0),
-                    10.0,
-                    45.0_f32.to_radians(),
-                )),
+                Transform::default(),
+                Light::spot(glam::vec3(1.0, 1.0, 1.0), 10.0, 45.0_f32.to_radians()),
                 Name::new("Spot Light"),
             ));
         }
         SpawnKind::Primitive(kind) => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 Name::new(format!("{} Primitive", kind.display_name())),
             ));
         }
         SpawnKind::DynamicBodyCuboid => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 DynamicRigidBody { mass: 1.0 },
                 ColliderShape::Cuboid,
                 Name::new("Dynamic Body (Box)"),
@@ -737,7 +730,7 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
         SpawnKind::DynamicBodySphere => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 DynamicRigidBody { mass: 1.0 },
                 ColliderShape::Sphere,
                 Name::new("Dynamic Body (Sphere)"),
@@ -746,7 +739,7 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
         SpawnKind::FixedColliderCuboid => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 FixedCollider,
                 ColliderShape::Cuboid,
                 Name::new("Fixed Collider (Box)"),
@@ -755,7 +748,7 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
         SpawnKind::FixedColliderSphere => {
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 FixedCollider,
                 ColliderShape::Sphere,
                 Name::new("Fixed Collider (Sphere)"),
@@ -768,7 +761,7 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
                 .unwrap_or("Scene");
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 Name::new(format!("Scene Asset ({name})")),
             ));
         }
@@ -779,7 +772,7 @@ fn create_entity(world: &mut World, kind: SpawnKind) -> Option<String> {
                 .unwrap_or("Mesh");
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 Name::new(format!("Mesh Asset ({name})")),
             ));
         }
@@ -796,12 +789,12 @@ fn delete_entity(world: &mut World, entity: Entity) -> bool {
 }
 
 fn set_active_camera(world: &mut World, entity: Entity) -> bool {
-    if world.get::<BevyCamera>(entity).is_none() {
+    if world.get::<Camera>(entity).is_none() {
         return false;
     }
 
     let camera_entities = world
-        .query::<(Entity, &BevyCamera, Option<&BevyActiveCamera>)>()
+        .query::<(Entity, &Camera, Option<&ActiveCamera>)>()
         .iter(world)
         .map(|(camera_entity, _, active)| (camera_entity, active.is_some()))
         .collect::<Vec<_>>();
@@ -809,14 +802,12 @@ fn set_active_camera(world: &mut World, entity: Entity) -> bool {
     for (camera_entity, is_active) in camera_entities {
         if camera_entity == entity {
             if !is_active {
-                world
-                    .entity_mut(camera_entity)
-                    .insert(BevyWrapper(ActiveCamera {}));
+                world.entity_mut(camera_entity).insert((ActiveCamera {}));
             }
             continue;
         }
         if is_active {
-            world.entity_mut(camera_entity).remove::<BevyActiveCamera>();
+            world.entity_mut(camera_entity).remove::<ActiveCamera>();
         }
     }
 

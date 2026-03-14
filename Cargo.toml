@@ -1,6 +1,12 @@
 [workspace]
 members = [
     "helmer",
+    "helmer_animation",
+    "helmer_audio",
+    "helmer_render",
+    "helmer_asset",
+    "helmer_window",
+    "helmer_input",
     "helmer_ui",
     "helmer_ui_layout",
     "helmer_ui_docking",

@@ -7,8 +7,6 @@ use std::{
     sync::Arc,
 };
 
-use bevy_ecs::name::Name;
-use bevy_ecs::prelude::{Component, Entity, Resource, With, World};
 use egui::containers::menu::{MenuButton, MenuConfig};
 use egui::{
     Align, Align2, Color32, ComboBox, DragValue, FontId, Id, Layout, Modifiers, Order,
@@ -16,22 +14,11 @@ use egui::{
     TextStyle, Ui, Vec2,
 };
 use glam::{DVec2, EulerRot, Mat3, Quat, Vec3};
-use helmer::animation::{AnimationClip, Pose, Skeleton};
-use helmer::audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
-use helmer::graphics::common::config::{RenderConfig, SkinningMode};
-use helmer::graphics::{
-    common::renderer::{
-        GizmoMode, SpriteAnimationPlayback, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV,
-        TextFontStyle,
-    },
-    render_graphs::{graph_templates, template_for_graph},
-};
-use helmer::provided::components::{
-    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer,
-    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SplineMode, SpriteImageSequence,
-    SpriteRenderer, Text2d,
-};
-use helmer::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
+use helmer_animation::{AnimationClip, Pose, Skeleton};
+use helmer_asset::runtime::asset_server::{Handle, Material, MaterialFile, Mesh, Scene};
+use helmer_audio::{AudioBus, AudioLoadMode, AudioPlaybackState};
+use helmer_becs::ecs::name::Name;
+use helmer_becs::ecs::prelude::{Component, Entity, Resource, With, World};
 use helmer_becs::egui_integration::{EguiClipboard, EguiInputPassthrough, EguiResource};
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
@@ -48,11 +35,19 @@ use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren, build_default_animator,
 };
 use helmer_becs::{
-    AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
-    BevyAudioListener, BevyCamera, BevyEntityFollower, BevyLight, BevyLookAt, BevyMeshRenderer,
-    BevyPoseOverride, BevyRuntimeConfig, BevySkinnedMeshRenderer, BevySpline, BevySplineFollower,
-    BevySpriteImageSequence, BevySpriteRenderer, BevySystemProfiler, BevyText2d, BevyTransform,
-    BevyWrapper,
+    ActiveCamera, Animator, AudioBackendResource, AudioEmitter, AudioListener, BecsAssetServer,
+    BecsRuntimeConfig, BecsSystemProfiler, Camera, EntityFollower, Light, LookAt, MeshRenderer,
+    PoseOverride, SkinnedMeshRenderer, Spline, SplineFollower, SpriteImageSequence, SpriteRenderer,
+    Text2d, Transform,
+    components::{LightType, SplineMode},
+};
+use helmer_render::graphics::common::config::{RenderConfig, SkinningMode};
+use helmer_render::graphics::{
+    common::renderer::{
+        GizmoMode, SpriteAnimationPlayback, SpriteBlendMode, SpriteSpace, TextAlignH, TextAlignV,
+        TextFontStyle, Transform as RenderTransform,
+    },
+    render_graphs::{graph_templates, template_for_graph},
 };
 use ron::ser::PrettyConfig;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -320,11 +315,11 @@ impl PaneDropZone {
 
 #[derive(Debug, Clone, Resource)]
 pub struct EditorAudioDeviceCache {
-    pub hosts: Vec<helmer::audio::AudioHostId>,
-    pub devices: Vec<helmer::audio::AudioOutputDevice>,
-    pub last_host: Option<helmer::audio::AudioHostId>,
+    pub hosts: Vec<helmer_audio::AudioHostId>,
+    pub devices: Vec<helmer_audio::AudioOutputDevice>,
+    pub last_host: Option<helmer_audio::AudioHostId>,
     pub show_system_devices: bool,
-    pub pending_output: Option<helmer::audio::AudioOutputSettings>,
+    pub pending_output: Option<helmer_audio::AudioOutputSettings>,
     pub pending_dirty: bool,
     pub new_bus_name: String,
 }
@@ -1062,7 +1057,7 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
     with_middle_drag_blocked(ui, world, |ui, world| {
         let audio = match world
             .get_resource::<AudioBackendResource>()
-            .map(|backend| backend.0.clone())
+            .map(|backend| backend.clone())
         {
             Some(audio) => audio,
             None => {
@@ -1150,7 +1145,7 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
             }
 
             let mut name_counts: HashMap<String, usize> = HashMap::new();
-            let mut filtered_devices: Vec<helmer::audio::AudioOutputDevice> = Vec::new();
+            let mut filtered_devices: Vec<helmer_audio::AudioOutputDevice> = Vec::new();
             for device in cache.devices.iter() {
                 let lower = device.name.to_lowercase();
                 let is_alias = matches!(
@@ -1325,11 +1320,11 @@ pub fn draw_audio_mixer_window(ui: &mut Ui, world: &mut World) {
         ui.label("asset budgets");
         let mb = 1024.0 * 1024.0;
         #[cfg(target_arch = "wasm32")]
-        let asset_server = world.get_non_send_resource::<BevyAssetServer>();
+        let asset_server = world.get_non_send_resource::<BecsAssetServer>();
         #[cfg(not(target_arch = "wasm32"))]
-        let asset_server = world.get_resource::<BevyAssetServer>();
+        let asset_server = world.get_resource::<BecsAssetServer>();
         if let Some(asset_server) = asset_server {
-            let mut server = asset_server.0.lock();
+            let mut server = asset_server.lock();
             let mut audio_budget_mb = server.audio_budget_bytes() as f32 / mb as f32;
             let audio_cache_mb = server.audio_cache_usage_bytes() as f32 / mb as f32;
             if ui
@@ -1513,8 +1508,8 @@ fn draw_system_profiler_section(
     pane_state: &mut EditorProfilerPaneState,
 ) {
     let Some(system_profiler) = world
-        .get_resource::<BevySystemProfiler>()
-        .map(|profiler| profiler.0.clone())
+        .get_resource::<BecsSystemProfiler>()
+        .map(|profiler| profiler.clone())
     else {
         ui.label("System profiler is unavailable");
         return;
@@ -1689,8 +1684,8 @@ fn draw_script_profiler_section(
     }
 
     if let Some(system_profiler) = world
-        .get_resource::<BevySystemProfiler>()
-        .map(|profiler| profiler.0.clone())
+        .get_resource::<BecsSystemProfiler>()
+        .map(|profiler| profiler.clone())
     {
         if let Some(snapshot) = system_profiler
             .snapshots()
@@ -2024,14 +2019,14 @@ fn navigation_focus_point(world: &World, orbit_selected_entity: bool) -> Option<
         .and_then(|selection| selection.0)
         .and_then(|entity| {
             world
-                .get::<BevyTransform>(entity)
-                .map(|transform| transform.0.position)
+                .get::<Transform>(entity)
+                .map(|transform| transform.position)
         })
 }
 
 fn navigation_orbit_focus_and_distance(
     world: &World,
-    current_transform: &helmer::provided::components::Transform,
+    current_transform: &Transform,
     orbit_selected_entity: bool,
 ) -> (Vec3, f32) {
     const DEFAULT_DISTANCE: f32 = 5.0;
@@ -2100,8 +2095,8 @@ fn draw_viewport_navigation_gizmo(
     let mut settings = settings.clone();
     settings.sanitize();
 
-    let camera_rotation = if let Some(transform) = world.get::<BevyTransform>(camera_entity) {
-        transform.0.rotation
+    let camera_rotation = if let Some(transform) = world.get::<Transform>(camera_entity) {
+        transform.rotation
     } else {
         return false;
     };
@@ -2292,8 +2287,8 @@ fn draw_viewport_navigation_gizmo(
         && pointer_pos_now.is_some_and(|pointer| orbit_rect.contains(pointer))
     {
         let current_transform = world
-            .get::<BevyTransform>(camera_entity)
-            .map(|transform| transform.0)
+            .get::<Transform>(camera_entity)
+            .copied()
             .unwrap_or_default();
         let (focus, distance) = navigation_orbit_focus_and_distance(
             world,
@@ -2428,8 +2423,8 @@ fn draw_viewport_navigation_gizmo(
         let pointer_delta = ui.ctx().input(|input| input.pointer.delta());
         if pointer_delta.length_sq() > 0.0 {
             let current_transform = world
-                .get::<BevyTransform>(camera_entity)
-                .map(|transform| transform.0)
+                .get::<Transform>(camera_entity)
+                .copied()
                 .unwrap_or_default();
             let anchor = ui
                 .ctx()
@@ -2503,9 +2498,9 @@ fn draw_viewport_navigation_gizmo(
             let new_forward = (next_rotation * Vec3::Z).normalize_or_zero();
             if new_forward.length_squared() > 1.0e-6 {
                 let position = focus - new_forward * distance;
-                if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
-                    transform.0.position = position;
-                    transform.0.rotation = next_rotation;
+                if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+                    transform.position = position;
+                    transform.rotation = next_rotation;
                 }
                 if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
                     runtime.active_camera_entity = Some(camera_entity);
@@ -2522,8 +2517,8 @@ fn draw_viewport_navigation_gizmo(
     let clicked_home = home_response.clicked();
     if !drag_orbit && double_clicked_origin {
         let current_transform = world
-            .get::<BevyTransform>(camera_entity)
-            .map(|transform| transform.0)
+            .get::<Transform>(camera_entity)
+            .copied()
             .unwrap_or_default();
         let mut forward = current_transform.forward().normalize_or_zero();
         if forward.length_squared() < 1.0e-6 {
@@ -2539,9 +2534,9 @@ fn draw_viewport_navigation_gizmo(
             distance = 5.0;
         }
         let position = -forward * distance.max(0.25);
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
-            transform.0.position = position;
-            transform.0.rotation = navigation_rotation_from_forward(forward);
+        if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+            transform.position = position;
+            transform.rotation = navigation_rotation_from_forward(forward);
         }
         if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
             runtime.active_camera_entity = Some(camera_entity);
@@ -2552,8 +2547,8 @@ fn draw_viewport_navigation_gizmo(
         }
     } else if !drag_orbit && (clicked_home || target_axis.is_some()) {
         let current_transform = world
-            .get::<BevyTransform>(camera_entity)
-            .map(|transform| transform.0)
+            .get::<Transform>(camera_entity)
+            .copied()
             .unwrap_or_default();
         let (focus, distance) = navigation_orbit_focus_and_distance(
             world,
@@ -2565,9 +2560,9 @@ fn draw_viewport_navigation_gizmo(
         let forward = (focus - position).normalize_or_zero();
         let rotation = navigation_rotation_from_forward(forward);
 
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
-            transform.0.position = position;
-            transform.0.rotation = rotation;
+        if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+            transform.position = position;
+            transform.rotation = rotation;
         }
         if let Some(mut runtime) = world.get_resource_mut::<EditorViewportRuntime>() {
             runtime.active_camera_entity = Some(camera_entity);
@@ -2582,7 +2577,7 @@ fn draw_viewport_navigation_gizmo(
 }
 
 fn first_camera_with_component<T: Component>(world: &mut World) -> Option<Entity> {
-    let mut query = world.query_filtered::<(Entity, &BevyCamera), With<T>>();
+    let mut query = world.query_filtered::<(Entity, &Camera), With<T>>();
     query.iter(world).map(|(entity, _)| entity).next()
 }
 
@@ -2604,7 +2599,7 @@ fn resolve_preview_camera_for_viewport(world: &mut World) -> Option<Entity> {
     candidates.dedup();
 
     candidates.into_iter().find(|entity| {
-        world.get::<BevyCamera>(*entity).is_some() && world.get::<BevyTransform>(*entity).is_some()
+        world.get::<Camera>(*entity).is_some() && world.get::<Transform>(*entity).is_some()
     })
 }
 
@@ -3080,7 +3075,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
         let selected_camera = world
             .get_resource::<InspectorSelectedEntityResource>()
             .and_then(|selection| selection.0)
-            .filter(|entity| world.get::<BevyCamera>(*entity).is_some());
+            .filter(|entity| world.get::<Camera>(*entity).is_some());
 
         let Some(texture_id) = ensure_pane_viewport_texture_id(ui, world, pane_id) else {
             ui.label("Viewport texture allocation failed!");
@@ -3671,9 +3666,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             ui.separator();
                             ui.collapsing("Skinning", |ui| {
                                 if let Some(mut runtime_config) =
-                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                    world.get_resource_mut::<BecsRuntimeConfig>()
                                 {
-                                    let mut render_config = runtime_config.0.render_config;
+                                    let mut render_config = runtime_config.render_config;
                                     ui.label("Mode");
                                     ui.horizontal_wrapped(|ui| {
                                         ui.selectable_value(
@@ -3718,7 +3713,7 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                                             .speed(1),
                                         );
                                     });
-                                    runtime_config.0.render_config = render_config;
+                                    runtime_config.render_config = render_config;
                                 } else {
                                     ui.label("Runtime config unavailable");
                                 }
@@ -3727,11 +3722,11 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
                             ui.separator();
                             ui.collapsing("Text/Sprite Quality", |ui| {
                                 if let Some(mut runtime_config) =
-                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                    world.get_resource_mut::<BecsRuntimeConfig>()
                                 {
-                                    let mut render_config = runtime_config.0.render_config;
+                                    let mut render_config = runtime_config.render_config;
                                     draw_world_text_quality_controls(ui, &mut render_config);
-                                    runtime_config.0.render_config = render_config;
+                                    runtime_config.render_config = render_config;
                                 } else {
                                     ui.label("Runtime config unavailable");
                                 }
@@ -3739,12 +3734,9 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
 
                             ui.separator();
                             ui.collapsing("Camera", |ui| {
-                                let camera_snapshot = world
-                                    .get::<BevyCamera>(camera_entity)
-                                    .map(|camera| camera.0);
-                                let transform_snapshot = world
-                                    .get::<BevyTransform>(camera_entity)
-                                    .map(|transform| transform.0);
+                                let camera_snapshot = world.get::<Camera>(camera_entity).copied();
+                                let transform_snapshot =
+                                    world.get::<Transform>(camera_entity).copied();
                                 if let (Some(mut camera_data), Some(mut transform_data)) =
                                     (camera_snapshot, transform_snapshot)
                                 {
@@ -3778,16 +3770,16 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
 
                                     if camera_changed {
                                         if let Some(mut camera) =
-                                            world.get_mut::<BevyCamera>(camera_entity)
+                                            world.get_mut::<Camera>(camera_entity)
                                         {
-                                            camera.0 = camera_data;
+                                            *camera = camera_data;
                                         }
                                     }
                                     if transform_changed {
                                         if let Some(mut transform) =
-                                            world.get_mut::<BevyTransform>(camera_entity)
+                                            world.get_mut::<Transform>(camera_entity)
                                         {
-                                            transform.0 = transform_data;
+                                            *transform = transform_data;
                                         }
                                     }
                                 } else {
@@ -3858,8 +3850,8 @@ pub fn draw_viewport_pane(ui: &mut Ui, world: &mut World, pane_id: u64, play_vie
             ) {
                 if camera_entity != preview_entity {
                     let preview_aspect = world
-                        .get::<BevyCamera>(preview_entity)
-                        .map(|camera| camera.0.aspect_ratio)
+                        .get::<Camera>(preview_entity)
+                        .map(|camera| camera.aspect_ratio)
                         .unwrap_or(16.0 / 9.0)
                         .max(0.1);
                     let scene_w = scene_rect.width().max(1.0);
@@ -4395,7 +4387,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
         let selected_camera = world
             .get_resource::<InspectorSelectedEntityResource>()
             .and_then(|selection| selection.0)
-            .filter(|entity| world.get::<BevyCamera>(*entity).is_some());
+            .filter(|entity| world.get::<Camera>(*entity).is_some());
 
         ui.horizontal_wrapped(|ui| {
             ui.label("Viewport");
@@ -4975,9 +4967,9 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                             ui.separator();
                             ui.collapsing("Skinning", |ui| {
                                 if let Some(mut runtime_config) =
-                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                    world.get_resource_mut::<BecsRuntimeConfig>()
                                 {
-                                    let mut render_config = runtime_config.0.render_config;
+                                    let mut render_config = runtime_config.render_config;
                                     ui.label("Mode");
                                     ui.horizontal_wrapped(|ui| {
                                         ui.selectable_value(
@@ -5022,7 +5014,7 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                                             .speed(1),
                                         );
                                     });
-                                    runtime_config.0.render_config = render_config;
+                                    runtime_config.render_config = render_config;
                                 } else {
                                     ui.label("Runtime config unavailable");
                                 }
@@ -5031,11 +5023,11 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                             ui.separator();
                             ui.collapsing("Text/Sprite Quality", |ui| {
                                 if let Some(mut runtime_config) =
-                                    world.get_resource_mut::<BevyRuntimeConfig>()
+                                    world.get_resource_mut::<BecsRuntimeConfig>()
                                 {
-                                    let mut render_config = runtime_config.0.render_config;
+                                    let mut render_config = runtime_config.render_config;
                                     draw_world_text_quality_controls(ui, &mut render_config);
-                                    runtime_config.0.render_config = render_config;
+                                    runtime_config.render_config = render_config;
                                 } else {
                                     ui.label("Runtime config unavailable");
                                 }
@@ -5044,14 +5036,14 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
                             ui.separator();
                             ui.collapsing("Camera", |ui| {
                                 let mut camera_query = world.query_filtered::<
-                                (&mut BevyCamera, &mut BevyTransform),
+                                (&mut Camera, &mut Transform),
                                 With<EditorViewportCamera>,
                             >();
                                 if let Some((mut camera, mut transform)) =
                                     camera_query.iter_mut(world).next()
                                 {
-                                    let camera = &mut camera.0;
-                                    let transform = &mut transform.0;
+                                    let camera = &mut *camera;
+                                    let transform = &mut *transform;
 
                                     let mut fov = camera.fov_y_rad.to_degrees();
                                     let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
@@ -5153,8 +5145,8 @@ pub fn draw_viewport_window(ui: &mut Ui, world: &mut World) {
             if let Some(preview_entity) = preview_camera {
                 if main_camera_entity != Some(preview_entity) {
                     let preview_aspect = world
-                        .get::<BevyCamera>(preview_entity)
-                        .map(|camera| camera.0.aspect_ratio)
+                        .get::<Camera>(preview_entity)
+                        .map(|camera| camera.aspect_ratio)
                         .unwrap_or(16.0 / 9.0)
                         .max(0.1);
                     let scene_w = scene_rect.width().max(1.0);
@@ -8633,12 +8625,12 @@ fn collect_hierarchy_entries(world: &mut World) -> HierarchyData {
             .map(|name| name.to_string())
             .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
 
-        let camera = world.get::<BevyCamera>(entity);
-        let light = world.get::<BevyLight>(entity);
-        let mesh = world.get::<BevyMeshRenderer>(entity);
-        let skinned = world.get::<BevySkinnedMeshRenderer>(entity);
-        let sprite = world.get::<BevySpriteRenderer>(entity);
-        let text_2d = world.get::<BevyText2d>(entity);
+        let camera = world.get::<Camera>(entity);
+        let light = world.get::<Light>(entity);
+        let mesh = world.get::<MeshRenderer>(entity);
+        let skinned = world.get::<SkinnedMeshRenderer>(entity);
+        let sprite = world.get::<SpriteRenderer>(entity);
+        let text_2d = world.get::<Text2d>(entity);
         let editor_skinned = world.get::<EditorSkinnedMesh>(entity);
         let editor_mesh = world.get::<EditorMesh>(entity);
         let script = world.get::<ScriptComponent>(entity);
@@ -8913,9 +8905,7 @@ fn draw_hierarchy_row(
                     focus_entity_in_view(world, entity);
                     ui.close_menu();
                 }
-                if world.get::<BevyCamera>(entity).is_some()
-                    && ui.button("Set Game Camera").clicked()
-                {
+                if world.get::<Camera>(entity).is_some() && ui.button("Set Game Camera").clicked() {
                     push_command(world, EditorCommand::SetActiveCamera { entity });
                     ui.close_menu();
                 }
@@ -9038,15 +9028,12 @@ fn apply_entity_parent_change(
     }
 
     let previous_scene_child = world.get::<SceneChild>(child).copied();
-    let child_transform = world
-        .get::<BevyTransform>(child)
-        .map(|transform| transform.0)
-        .unwrap_or_default();
+    let child_transform = world.get::<Transform>(child).copied().unwrap_or_default();
 
     if let Some(parent) = new_parent {
         let parent_matrix = world
-            .get::<BevyTransform>(parent)
-            .map(|transform| transform.0.to_matrix())
+            .get::<Transform>(parent)
+            .map(|transform| transform.to_matrix())
             .unwrap_or(glam::Mat4::IDENTITY);
         world.entity_mut(child).insert(EntityParent {
             parent,
@@ -9206,7 +9193,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         .and_then(|state| state.selected.clone());
     let project = world.get_resource::<EditorProject>().cloned();
 
-    if world.get::<BevyTransform>(entity).is_some() {
+    if world.get::<Transform>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Transform");
@@ -9216,18 +9203,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyTransform>();
+            world.entity_mut(entity).remove::<Transform>();
             push_undo_snapshot(world, "Remove Transform");
-        } else if let Some(transform) = world
-            .get::<BevyTransform>(entity)
-            .map(|transform| transform.0)
-        {
+        } else if let Some(transform) = world.get::<Transform>(entity).copied() {
             let mut position = transform.position;
             let position_response = edit_vec3(ui, "Position", &mut position, 0.1);
             begin_edit_undo(world, "Move", position_response);
             if position_response.changed {
-                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-                    transform.0.position = position;
+                if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                    transform.position = position;
                 }
             }
             end_edit_undo(world, position_response);
@@ -9237,8 +9221,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let rotation_response = edit_vec3(ui, "Rotation", &mut rotation, 0.5);
             begin_edit_undo(world, "Rotate", rotation_response);
             if rotation_response.changed {
-                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-                    transform.0.rotation = Quat::from_euler(
+                if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                    transform.rotation = Quat::from_euler(
                         EulerRot::YXZ,
                         rotation.x.to_radians(),
                         rotation.y.to_radians(),
@@ -9252,8 +9236,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let scale_response = edit_vec3(ui, "Scale", &mut scale, 0.05);
             begin_edit_undo(world, "Scale", scale_response);
             if scale_response.changed {
-                if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-                    transform.0.scale = scale;
+                if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+                    transform.scale = scale;
                 }
             }
             end_edit_undo(world, scale_response);
@@ -9261,7 +9245,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyCamera>(entity).is_some() {
+    if world.get::<Camera>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Camera");
@@ -9271,9 +9255,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyCamera>();
+            world.entity_mut(entity).remove::<Camera>();
             world.entity_mut(entity).remove::<EditorPlayCamera>();
-            world.entity_mut(entity).remove::<BevyActiveCamera>();
+            world.entity_mut(entity).remove::<ActiveCamera>();
             world.entity_mut(entity).remove::<Freecam>();
             push_undo_snapshot(world, "Remove Camera");
         } else {
@@ -9286,13 +9270,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.label("Game Camera");
             }
 
-            if let Some(camera) = world.get::<BevyCamera>(entity).map(|camera| camera.0) {
+            if let Some(camera) = world.get::<Camera>(entity).copied() {
                 let mut fov = camera.fov_y_rad.to_degrees();
                 let fov_response = edit_float(ui, "FOV (deg)", &mut fov, 0.25);
                 begin_edit_undo(world, "Camera", fov_response);
                 if fov_response.changed {
-                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
-                        camera.0.fov_y_rad = fov.to_radians();
+                    if let Some(mut camera) = world.get_mut::<Camera>(entity) {
+                        camera.fov_y_rad = fov.to_radians();
                     }
                 }
                 end_edit_undo(world, fov_response);
@@ -9301,8 +9285,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let aspect_response = edit_float(ui, "Aspect Ratio", &mut aspect_ratio, 0.01);
                 begin_edit_undo(world, "Camera", aspect_response);
                 if aspect_response.changed {
-                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
-                        camera.0.aspect_ratio = aspect_ratio;
+                    if let Some(mut camera) = world.get_mut::<Camera>(entity) {
+                        camera.aspect_ratio = aspect_ratio;
                     }
                 }
                 end_edit_undo(world, aspect_response);
@@ -9311,8 +9295,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let near_response = edit_float(ui, "Near", &mut near_plane, 0.01);
                 begin_edit_undo(world, "Camera", near_response);
                 if near_response.changed {
-                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
-                        camera.0.near_plane = near_plane;
+                    if let Some(mut camera) = world.get_mut::<Camera>(entity) {
+                        camera.near_plane = near_plane;
                     }
                 }
                 end_edit_undo(world, near_response);
@@ -9321,8 +9305,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let far_response = edit_float(ui, "Far", &mut far_plane, 1.0);
                 begin_edit_undo(world, "Camera", far_response);
                 if far_response.changed {
-                    if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
-                        camera.0.far_plane = far_plane;
+                    if let Some(mut camera) = world.get_mut::<Camera>(entity) {
+                        camera.far_plane = far_plane;
                     }
                 }
                 end_edit_undo(world, far_response);
@@ -9367,7 +9351,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyLight>(entity).is_some() {
+    if world.get::<Light>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Light");
@@ -9377,9 +9361,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyLight>();
+            world.entity_mut(entity).remove::<Light>();
             push_undo_snapshot(world, "Remove Light");
-        } else if let Some(light) = world.get::<BevyLight>(entity).map(|light| light.0) {
+        } else if let Some(light) = world.get::<Light>(entity).copied() {
             let mut light_type = light.light_type;
             let mut type_changed = false;
             let current_label = match light_type {
@@ -9422,8 +9406,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 });
 
             if type_changed {
-                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                    light.0.light_type = light_type;
+                if let Some(mut light) = world.get_mut::<Light>(entity) {
+                    light.light_type = light_type;
                 }
                 push_undo_snapshot(world, "Light Type");
             }
@@ -9436,8 +9420,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let color_response = EditResponse::from_response(&color_response.inner);
             begin_edit_undo(world, "Light", color_response);
             if color_response.changed {
-                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                    light.0.color = Vec3::new(color[0], color[1], color[2]);
+                if let Some(mut light) = world.get_mut::<Light>(entity) {
+                    light.color = Vec3::new(color[0], color[1], color[2]);
                 }
             }
             end_edit_undo(world, color_response);
@@ -9446,8 +9430,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let intensity_response = edit_float(ui, "Intensity", &mut intensity, 0.1);
             begin_edit_undo(world, "Light", intensity_response);
             if intensity_response.changed {
-                if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                    light.0.intensity = intensity;
+                if let Some(mut light) = world.get_mut::<Light>(entity) {
+                    light.intensity = intensity;
                 }
             }
             end_edit_undo(world, intensity_response);
@@ -9457,8 +9441,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let angle_response = edit_float(ui, "Spot Angle", &mut angle_deg, 0.5);
                 begin_edit_undo(world, "Light", angle_response);
                 if angle_response.changed {
-                    if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                        light.0.light_type = LightType::Spot {
+                    if let Some(mut light) = world.get_mut::<Light>(entity) {
+                        light.light_type = LightType::Spot {
                             angle: angle_deg.to_radians(),
                         };
                     }
@@ -9469,7 +9453,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyAudioListener>(entity).is_some() {
+    if world.get::<AudioListener>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Audio Listener");
@@ -9479,16 +9463,16 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyAudioListener>();
+            world.entity_mut(entity).remove::<AudioListener>();
             push_undo_snapshot(world, "Remove Audio Listener");
-        } else if let Some(listener) = world.get::<BevyAudioListener>(entity).map(|l| l.0) {
+        } else if let Some(listener) = world.get::<AudioListener>(entity).copied() {
             let mut enabled = listener.enabled;
             let response = ui.checkbox(&mut enabled, "Enabled");
             let response = EditResponse::from_response(&response);
             begin_edit_undo(world, "Audio Listener", response);
             if response.changed {
-                if let Some(mut listener) = world.get_mut::<BevyAudioListener>(entity) {
-                    listener.0.enabled = enabled;
+                if let Some(mut listener) = world.get_mut::<AudioListener>(entity) {
+                    listener.enabled = enabled;
                 }
             }
             end_edit_undo(world, response);
@@ -9496,7 +9480,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyAudioEmitter>(entity).is_some() {
+    if world.get::<AudioEmitter>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Audio Emitter");
@@ -9506,10 +9490,10 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyAudioEmitter>();
+            world.entity_mut(entity).remove::<AudioEmitter>();
             world.entity_mut(entity).remove::<EditorAudio>();
             push_undo_snapshot(world, "Remove Audio Emitter");
-        } else if let Some(emitter_snapshot) = world.get::<BevyAudioEmitter>(entity).map(|e| e.0) {
+        } else if let Some(emitter_snapshot) = world.get::<AudioEmitter>(entity).copied() {
             let mut emitter = emitter_snapshot;
             let mut editor_audio =
                 world
@@ -9571,8 +9555,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             streaming: editor_audio.streaming,
                         });
                     }
-                    if let Some(mut emitter_comp) = world.get_mut::<BevyAudioEmitter>(entity) {
-                        emitter_comp.0.clip_id = None;
+                    if let Some(mut emitter_comp) = world.get_mut::<AudioEmitter>(entity) {
+                        emitter_comp.clip_id = None;
                     }
                     push_undo_snapshot(world, "Clear Audio Clip");
                 }
@@ -9598,7 +9582,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let bus_options: Vec<(String, AudioBus)> = world
                 .get_resource::<AudioBackendResource>()
                 .map(|backend| {
-                    let audio = backend.0.clone();
+                    let audio = backend.clone();
                     audio
                         .bus_list()
                         .into_iter()
@@ -9706,21 +9690,21 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             });
 
             if clip_applied {
-                if let Some(current) = world.get::<BevyAudioEmitter>(entity) {
-                    emitter.clip_id = current.0.clip_id;
+                if let Some(current) = world.get::<AudioEmitter>(entity) {
+                    emitter.clip_id = current.clip_id;
                 }
             }
 
-            if let Some(mut emitter_comp) = world.get_mut::<BevyAudioEmitter>(entity) {
-                emitter_comp.0 = emitter;
+            if let Some(mut emitter_comp) = world.get_mut::<AudioEmitter>(entity) {
+                *emitter_comp = emitter;
             } else {
-                world.entity_mut(entity).insert(BevyWrapper(emitter));
+                world.entity_mut(entity).insert(emitter);
             }
         }
         ui.separator();
     }
 
-    if world.get::<BevyMeshRenderer>(entity).is_some() {
+    if world.get::<MeshRenderer>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Mesh Renderer");
@@ -9730,7 +9714,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyMeshRenderer>();
+            world.entity_mut(entity).remove::<MeshRenderer>();
             world.entity_mut(entity).remove::<EditorMesh>();
             push_undo_snapshot(world, "Remove Mesh");
         } else {
@@ -9744,12 +9728,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             let mut mesh_source = mesh_state.source.clone();
             let mut material_path = mesh_state.material_path.clone();
             let mut casts_shadow = world
-                .get::<BevyMeshRenderer>(entity)
-                .map(|renderer| renderer.0.casts_shadow)
+                .get::<MeshRenderer>(entity)
+                .map(|renderer| renderer.casts_shadow)
                 .unwrap_or(true);
             let mut visible = world
-                .get::<BevyMeshRenderer>(entity)
-                .map(|renderer| renderer.0.visible)
+                .get::<MeshRenderer>(entity)
+                .map(|renderer| renderer.visible)
                 .unwrap_or(true);
 
             let mesh_label = match &mesh_source {
@@ -10063,15 +10047,15 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             highlight_drop_target(ui, &material_button.response);
 
             if ui.checkbox(&mut casts_shadow, "Casts Shadow").changed() {
-                if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
-                    renderer.0.casts_shadow = casts_shadow;
+                if let Some(mut renderer) = world.get_mut::<MeshRenderer>(entity) {
+                    renderer.casts_shadow = casts_shadow;
                 }
                 mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Mesh");
             }
             if ui.checkbox(&mut visible, "Visible").changed() {
-                if let Some(mut renderer) = world.get_mut::<BevyMeshRenderer>(entity) {
-                    renderer.0.visible = visible;
+                if let Some(mut renderer) = world.get_mut::<MeshRenderer>(entity) {
+                    renderer.visible = visible;
                 }
                 mark_entity_render_dirty(world, entity);
                 push_undo_snapshot(world, "Mesh");
@@ -10104,7 +10088,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    let has_skinned_panel = world.get::<BevySkinnedMeshRenderer>(entity).is_some()
+    let has_skinned_panel = world.get::<SkinnedMeshRenderer>(entity).is_some()
         || world.get::<PendingSkinnedMeshAsset>(entity).is_some()
         || world.get::<EditorSkinnedMesh>(entity).is_some();
     if has_skinned_panel {
@@ -10117,17 +10101,17 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevySkinnedMeshRenderer>();
-            world.entity_mut(entity).remove::<BevyAnimator>();
-            world.entity_mut(entity).remove::<BevyPoseOverride>();
+            world.entity_mut(entity).remove::<SkinnedMeshRenderer>();
+            world.entity_mut(entity).remove::<Animator>();
+            world.entity_mut(entity).remove::<PoseOverride>();
             world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
             world.entity_mut(entity).remove::<EditorSkinnedMesh>();
             push_undo_snapshot(world, "Remove Skinned Mesh");
         } else {
             if world.get::<EditorSkinnedMesh>(entity).is_none() {
                 let (casts_shadow, visible) = world
-                    .get::<BevySkinnedMeshRenderer>(entity)
-                    .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+                    .get::<SkinnedMeshRenderer>(entity)
+                    .map(|renderer| (renderer.casts_shadow, renderer.visible))
                     .unwrap_or((true, true));
                 world.entity_mut(entity).insert(EditorSkinnedMesh {
                     scene_path: None,
@@ -10181,9 +10165,9 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         skinned.scene_path = None;
                         skinned.node_index = None;
                     }
-                    world.entity_mut(entity).remove::<BevySkinnedMeshRenderer>();
-                    world.entity_mut(entity).remove::<BevyAnimator>();
-                    world.entity_mut(entity).remove::<BevyPoseOverride>();
+                    world.entity_mut(entity).remove::<SkinnedMeshRenderer>();
+                    world.entity_mut(entity).remove::<Animator>();
+                    world.entity_mut(entity).remove::<PoseOverride>();
                     world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
                     skinned_changed = true;
                     ui.close_menu();
@@ -10203,24 +10187,24 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             }
             highlight_drop_target(ui, &skinned_source_button.response);
 
-            if let Some(skinned_renderer) = world.get::<BevySkinnedMeshRenderer>(entity).cloned() {
-                ui.label(format!("Mesh ID: {}", skinned_renderer.0.mesh_id));
-                ui.label(format!("Material ID: {}", skinned_renderer.0.material_id));
+            if let Some(skinned_renderer) = world.get::<SkinnedMeshRenderer>(entity).cloned() {
+                ui.label(format!("Mesh ID: {}", skinned_renderer.mesh_id));
+                ui.label(format!("Material ID: {}", skinned_renderer.material_id));
                 ui.label(format!(
                     "Skin: {} ({} joints)",
-                    skinned_renderer.0.skin.name,
-                    skinned_renderer.0.skin.skeleton.joint_count()
+                    skinned_renderer.skin.name,
+                    skinned_renderer.skin.skeleton.joint_count()
                 ));
             }
 
             if let Some(skinned) = world.get::<EditorSkinnedMesh>(entity).cloned() {
                 let mut casts_shadow = world
-                    .get::<BevySkinnedMeshRenderer>(entity)
-                    .map(|renderer| renderer.0.casts_shadow)
+                    .get::<SkinnedMeshRenderer>(entity)
+                    .map(|renderer| renderer.casts_shadow)
                     .unwrap_or(skinned.casts_shadow);
                 if ui.checkbox(&mut casts_shadow, "Casts Shadow").changed() {
-                    if let Some(mut renderer) = world.get_mut::<BevySkinnedMeshRenderer>(entity) {
-                        renderer.0.casts_shadow = casts_shadow;
+                    if let Some(mut renderer) = world.get_mut::<SkinnedMeshRenderer>(entity) {
+                        renderer.casts_shadow = casts_shadow;
                     }
                     if let Some(mut editor_skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
                         editor_skinned.casts_shadow = casts_shadow;
@@ -10229,12 +10213,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
 
                 let mut visible = world
-                    .get::<BevySkinnedMeshRenderer>(entity)
-                    .map(|renderer| renderer.0.visible)
+                    .get::<SkinnedMeshRenderer>(entity)
+                    .map(|renderer| renderer.visible)
                     .unwrap_or(skinned.visible);
                 if ui.checkbox(&mut visible, "Visible").changed() {
-                    if let Some(mut renderer) = world.get_mut::<BevySkinnedMeshRenderer>(entity) {
-                        renderer.0.visible = visible;
+                    if let Some(mut renderer) = world.get_mut::<SkinnedMeshRenderer>(entity) {
+                        renderer.visible = visible;
                     }
                     if let Some(mut editor_skinned) = world.get_mut::<EditorSkinnedMesh>(entity) {
                         editor_skinned.visible = visible;
@@ -10251,8 +10235,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    let has_sprite_panel = world.get::<BevySpriteRenderer>(entity).is_some()
-        || world.get::<BevySpriteImageSequence>(entity).is_some()
+    let has_sprite_panel = world.get::<SpriteRenderer>(entity).is_some()
+        || world.get::<SpriteImageSequence>(entity).is_some()
         || world.get::<EditorSprite>(entity).is_some();
     if has_sprite_panel {
         let mut remove = false;
@@ -10264,25 +10248,24 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevySpriteRenderer>();
-            world.entity_mut(entity).remove::<BevySpriteImageSequence>();
+            world.entity_mut(entity).remove::<SpriteRenderer>();
+            world.entity_mut(entity).remove::<SpriteImageSequence>();
             world.entity_mut(entity).remove::<EditorSprite>();
             push_undo_snapshot(world, "Remove Sprite");
         } else {
             let mut sprite = world
-                .get::<BevySpriteRenderer>(entity)
-                .map(|component| component.0)
+                .get::<SpriteRenderer>(entity)
+                .copied()
                 .unwrap_or_default();
             let mut editor_sprite = world
                 .get::<EditorSprite>(entity)
                 .cloned()
                 .unwrap_or_default();
             let mut sprite_sequence = world
-                .get::<BevySpriteImageSequence>(entity)
-                .map(|component| component.0.clone())
+                .get::<SpriteImageSequence>(entity)
+                .map(|component| component.clone())
                 .unwrap_or_default();
-            let mut sprite_sequence_present =
-                world.get::<BevySpriteImageSequence>(entity).is_some();
+            let mut sprite_sequence_present = world.get::<SpriteImageSequence>(entity).is_some();
             let mut discrete_changed = false;
             let mut edit_response = EditResponse::default();
 
@@ -10295,8 +10278,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if texture_button.clicked() {
                 if let Some(path) = selected_asset.as_ref().filter(|path| is_texture_file(path)) {
                     if apply_sprite_texture_from_asset(world, entity, &project, path) {
-                        if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
-                            sprite.texture_id = updated.0.texture_id;
+                        if let Some(updated) = world.get::<SpriteRenderer>(entity) {
+                            sprite.texture_id = updated.texture_id;
                         }
                         if let Some(updated) = world.get::<EditorSprite>(entity) {
                             editor_sprite = updated.clone();
@@ -10309,8 +10292,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_texture_file(path) {
                         if apply_sprite_texture_from_asset(world, entity, &project, path) {
-                            if let Some(updated) = world.get::<BevySpriteRenderer>(entity) {
-                                sprite.texture_id = updated.0.texture_id;
+                            if let Some(updated) = world.get::<SpriteRenderer>(entity) {
+                                sprite.texture_id = updated.texture_id;
                             }
                             if let Some(updated) = world.get::<EditorSprite>(entity) {
                                 editor_sprite = updated.clone();
@@ -10823,11 +10806,11 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             begin_edit_undo(world, "Sprite", edit_response);
             if edit_response.changed || discrete_changed {
                 let mut entity_ref = world.entity_mut(entity);
-                entity_ref.insert((BevyWrapper(sprite), editor_sprite));
+                entity_ref.insert((sprite, editor_sprite));
                 if sprite_sequence_present {
-                    entity_ref.insert(BevySpriteImageSequence(sprite_sequence));
+                    entity_ref.insert(sprite_sequence);
                 } else {
-                    entity_ref.remove::<BevySpriteImageSequence>();
+                    entity_ref.remove::<SpriteImageSequence>();
                 }
                 mark_entity_render_dirty(world, entity);
             }
@@ -10839,7 +10822,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyText2d>(entity).is_some() {
+    if world.get::<Text2d>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Text 2D");
@@ -10849,11 +10832,11 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyText2d>();
+            world.entity_mut(entity).remove::<Text2d>();
             push_undo_snapshot(world, "Remove Text 2D");
         } else if let Some(mut text) = world
-            .get::<BevyText2d>(entity)
-            .map(|component| component.0.clone())
+            .get::<Text2d>(entity)
+            .map(|component| component.clone())
         {
             let mut discrete_changed = false;
             let mut edit_response = EditResponse::default();
@@ -11292,7 +11275,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
             begin_edit_undo(world, "Text 2D", edit_response);
             if edit_response.changed || discrete_changed {
-                world.entity_mut(entity).insert(BevyText2d(text));
+                world.entity_mut(entity).insert(text);
                 mark_entity_render_dirty(world, entity);
             }
             end_edit_undo(world, edit_response);
@@ -11303,7 +11286,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyAnimator>(entity).is_some() {
+    if world.get::<Animator>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Animator");
@@ -11313,7 +11296,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyAnimator>();
+            world.entity_mut(entity).remove::<Animator>();
             push_undo_snapshot(world, "Remove Animator");
         } else {
             let mut animator_changed = false;
@@ -11341,25 +11324,25 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 highlight_drop_target(ui, &apply_button);
             });
             world.resource_scope::<AnimatorUiState, _>(|world, mut ui_state| {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(entity) else {
                     return;
                 };
 
-                let mut enabled = animator.0.enabled;
+                let mut enabled = animator.enabled;
                 if ui.checkbox(&mut enabled, "Enabled").changed() {
-                    animator.0.enabled = enabled;
+                    animator.enabled = enabled;
                     animator_changed = true;
                 }
 
-                let mut time_scale = animator.0.time_scale;
+                let mut time_scale = animator.time_scale;
                 let time_response = edit_float(ui, "Time Scale", &mut time_scale, 0.01);
                 if time_response.changed {
-                    animator.0.time_scale = time_scale.max(0.0);
+                    animator.time_scale = time_scale.max(0.0);
                     animator_changed = true;
                 }
 
                 ui.collapsing("Layers", |ui| {
-                    for (layer_index, layer) in animator.0.layers.iter_mut().enumerate() {
+                    for (layer_index, layer) in animator.layers.iter_mut().enumerate() {
                         let header = format!("Layer {}: {}", layer_index, layer.name);
                         ui.collapsing(header, |ui| {
                             ui.horizontal(|ui| {
@@ -11393,8 +11376,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                                 .get(layer.state_machine.current_state)
                             {
                                 if let Some(node) = layer.graph.nodes.get_mut(state.node) {
-                                    if let helmer::animation::AnimationNode::Clip(clip_node) = node
-                                    {
+                                    if let helmer_animation::AnimationNode::Clip(clip_node) = node {
                                         let clip_names: Vec<String> = layer
                                             .graph
                                             .library
@@ -11470,7 +11452,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label("Floats");
                     let mut remove_float = None;
                     let mut float_keys: Vec<String> =
-                        animator.0.parameters.floats.keys().cloned().collect();
+                        animator.parameters.floats.keys().cloned().collect();
                     float_keys.sort();
                     for key in float_keys {
                         let mut value = animator
@@ -11484,7 +11466,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             ui.label(&key);
                             let response = ui.add(DragValue::new(&mut value).speed(0.05));
                             if response.changed() {
-                                animator.0.parameters.set_float(key.clone(), value);
+                                animator.parameters.set_float(key.clone(), value);
                                 animator_changed = true;
                             }
                             if ui.button("X").clicked() {
@@ -11493,7 +11475,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         });
                     }
                     if let Some(key) = remove_float {
-                        animator.0.parameters.floats.remove(&key);
+                        animator.parameters.floats.remove(&key);
                         animator_changed = true;
                     }
                     ui.horizontal(|ui| {
@@ -11516,7 +11498,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.label("Bools");
                     let mut remove_bool = None;
                     let mut bool_keys: Vec<String> =
-                        animator.0.parameters.bools.keys().cloned().collect();
+                        animator.parameters.bools.keys().cloned().collect();
                     bool_keys.sort();
                     for key in bool_keys {
                         let mut value = animator
@@ -11541,12 +11523,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             .unwrap_or(false)
                             != value
                         {
-                            animator.0.parameters.set_bool(key.clone(), value);
+                            animator.parameters.set_bool(key.clone(), value);
                             animator_changed = true;
                         }
                     }
                     if let Some(key) = remove_bool {
-                        animator.0.parameters.bools.remove(&key);
+                        animator.parameters.bools.remove(&key);
                         animator_changed = true;
                     }
                     ui.horizontal(|ui| {
@@ -11568,13 +11550,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     ui.separator();
                     ui.label("Triggers");
                     let mut trigger_keys: Vec<String> =
-                        animator.0.parameters.triggers.iter().cloned().collect();
+                        animator.parameters.triggers.iter().cloned().collect();
                     trigger_keys.sort();
                     for key in trigger_keys {
                         ui.horizontal(|ui| {
                             ui.label(&key);
                             if ui.button("Fire").clicked() {
-                                animator.0.parameters.trigger(key.clone());
+                                animator.parameters.trigger(key.clone());
                             }
                         });
                     }
@@ -11583,7 +11565,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         if ui.button("Add Trigger").clicked() {
                             let name = ui_state.new_trigger_name.trim();
                             if !name.is_empty() {
-                                animator.0.parameters.trigger(name.to_string());
+                                animator.parameters.trigger(name.to_string());
                                 ui_state.new_trigger_name.clear();
                             }
                         }
@@ -11597,7 +11579,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
+    if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity) {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Pose Override");
@@ -11607,21 +11589,21 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyPoseOverride>();
+            world.entity_mut(entity).remove::<PoseOverride>();
             push_undo_snapshot(world, "Remove Pose Override");
         } else {
-            let skeleton = skinned.0.skin.skeleton.clone();
+            let skeleton = skinned.skin.skeleton.clone();
             let mut enabled = world
-                .get::<BevyPoseOverride>(entity)
-                .map(|pose| pose.0.enabled)
+                .get::<PoseOverride>(entity)
+                .map(|pose| pose.enabled)
                 .unwrap_or(false);
             if ui.checkbox(&mut enabled, "Enable Pose Override").changed() {
                 if enabled {
                     world
                         .entity_mut(entity)
-                        .insert(BevyPoseOverride(PoseOverride::new(&skeleton)));
-                } else if let Some(mut pose_override) = world.get_mut::<BevyPoseOverride>(entity) {
-                    pose_override.0.enabled = false;
+                        .insert(PoseOverride::new(&skeleton));
+                } else if let Some(mut pose_override) = world.get_mut::<PoseOverride>(entity) {
+                    pose_override.enabled = false;
                 }
                 push_undo_snapshot(world, "Pose Override");
             }
@@ -11629,12 +11611,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             if enabled {
                 world.resource_scope::<PoseEditorState, _>(|world, mut pose_state| {
                     let mut pose_changed = false;
-                    let Some(mut pose_override) = world.get_mut::<BevyPoseOverride>(entity) else {
+                    let Some(mut pose_override) = world.get_mut::<PoseOverride>(entity) else {
                         return;
                     };
 
-                    if pose_override.0.pose.locals.len() != skeleton.joint_count() {
-                        pose_override.0.pose.reset_to_bind(&skeleton);
+                    if pose_override.pose.locals.len() != skeleton.joint_count() {
+                        pose_override.pose.reset_to_bind(&skeleton);
                     }
 
                     let mut edit_mode =
@@ -11648,8 +11630,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             pose_state.hover_joint = None;
                             None
                         };
-                        if edit_mode && !pose_override.0.enabled {
-                            pose_override.0.enabled = true;
+                        if edit_mode && !pose_override.enabled {
+                            pose_override.enabled = true;
                             pose_changed = true;
                         }
                     }
@@ -11675,7 +11657,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
 
                     ui.horizontal(|ui| {
                         if ui.button("Reset Pose").clicked() {
-                            pose_override.0.pose.reset_to_bind(&skeleton);
+                            pose_override.pose.reset_to_bind(&skeleton);
                             pose_changed = true;
                         }
                         if ui.button("Clear Selection").clicked() {
@@ -11729,7 +11711,6 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             ui.label(format!("Selected: {}", joint.name));
                         }
                         let mut transform = pose_override
-                            .0
                             .pose
                             .locals
                             .get(index)
@@ -11737,7 +11718,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             .unwrap_or_default();
                         let response = edit_vec3(ui, "Position", &mut transform.position, 0.05);
                         if response.changed {
-                            pose_override.0.pose.locals[index].position = transform.position;
+                            pose_override.pose.locals[index].position = transform.position;
                             pose_changed = true;
                         }
                         let (yaw, pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
@@ -11745,7 +11726,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees());
                         let rotation_response = edit_vec3(ui, "Rotation", &mut rotation, 0.5);
                         if rotation_response.changed {
-                            pose_override.0.pose.locals[index].rotation = Quat::from_euler(
+                            pose_override.pose.locals[index].rotation = Quat::from_euler(
                                 EulerRot::YXZ,
                                 rotation.x.to_radians(),
                                 rotation.y.to_radians(),
@@ -11755,12 +11736,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         }
                         let scale_response = edit_vec3(ui, "Scale", &mut transform.scale, 0.05);
                         if scale_response.changed {
-                            pose_override.0.pose.locals[index].scale = transform.scale;
+                            pose_override.pose.locals[index].scale = transform.scale;
                             pose_changed = true;
                         }
                         if ui.button("Reset Joint").clicked() {
                             if let Some(joint) = skeleton.joints.get(index) {
-                                pose_override.0.pose.locals[index] = joint.bind_transform;
+                                pose_override.pose.locals[index] = joint.bind_transform;
                                 pose_changed = true;
                             }
                         }
@@ -11774,7 +11755,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevySpline>(entity).is_some() {
+    if world.get::<Spline>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Spline");
@@ -11784,16 +11765,16 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevySpline>();
+            world.entity_mut(entity).remove::<Spline>();
             push_undo_snapshot(world, "Remove Spline");
         } else {
             let mut spline_changed = false;
             {
-                let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+                let Some(mut spline) = world.get_mut::<Spline>(entity) else {
                     return;
                 };
 
-                let mut mode = spline.0.mode;
+                let mut mode = spline.mode;
                 let mode_label = match mode {
                     SplineMode::Linear => "Linear",
                     SplineMode::CatmullRom => "Catmull-Rom",
@@ -11821,40 +11802,40 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                             mode = SplineMode::Bezier;
                         }
                     });
-                if mode != spline.0.mode {
-                    spline.0.mode = mode;
+                if mode != spline.mode {
+                    spline.mode = mode;
                     spline_changed = true;
                 }
 
-                let mut closed = spline.0.closed;
+                let mut closed = spline.closed;
                 if ui.checkbox(&mut closed, "Closed").changed() {
-                    spline.0.closed = closed;
+                    spline.closed = closed;
                     spline_changed = true;
                 }
 
-                let tension_response = edit_float(ui, "Catmull Alpha", &mut spline.0.tension, 0.01);
+                let tension_response = edit_float(ui, "Catmull Alpha", &mut spline.tension, 0.01);
                 if tension_response.changed {
                     spline_changed = true;
                 }
 
                 ui.horizontal(|ui| {
                     if ui.button("Add Point").clicked() {
-                        spline.0.points.push(Vec3::ZERO);
+                        spline.points.push(Vec3::ZERO);
                         spline_changed = true;
                     }
                     if ui.button("Clear").clicked() {
-                        spline.0.points.clear();
+                        spline.points.clear();
                         spline_changed = true;
                     }
                     if ui.button("Reverse").clicked() {
-                        spline.0.points.reverse();
+                        spline.points.reverse();
                         spline_changed = true;
                     }
                 });
 
                 ui.collapsing("Points", |ui| {
                     let mut remove_index = None;
-                    for (index, point) in spline.0.points.iter_mut().enumerate() {
+                    for (index, point) in spline.points.iter_mut().enumerate() {
                         let label = format!("Point {}", index);
                         let response = edit_vec3(ui, &label, point, 0.05);
                         if response.changed {
@@ -11866,8 +11847,8 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         ui.separator();
                     }
                     if let Some(index) = remove_index {
-                        if index < spline.0.points.len() {
-                            spline.0.points.remove(index);
+                        if index < spline.points.len() {
+                            spline.points.remove(index);
                             spline_changed = true;
                         }
                     }
@@ -11900,23 +11881,23 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     }
                     if ui.button("Insert Midpoint").clicked() {
                         if let Some(active_index) = spline_state.active_point {
-                            if let Some(mut spline) = world.get_mut::<BevySpline>(entity) {
-                                let count = spline.0.points.len();
+                            if let Some(mut spline) = world.get_mut::<Spline>(entity) {
+                                let count = spline.points.len();
                                 if count >= 2 {
                                     let active_index = active_index.min(count.saturating_sub(1));
                                     let next_index = if active_index + 1 < count {
                                         active_index + 1
-                                    } else if spline.0.closed {
+                                    } else if spline.closed {
                                         0
                                     } else {
                                         active_index
                                     };
                                     if next_index != active_index {
-                                        let a = spline.0.points[active_index];
-                                        let b = spline.0.points[next_index];
+                                        let a = spline.points[active_index];
+                                        let b = spline.points[next_index];
                                         let insert_index =
-                                            (active_index + 1).min(spline.0.points.len());
-                                        spline.0.points.insert(insert_index, (a + b) * 0.5);
+                                            (active_index + 1).min(spline.points.len());
+                                        spline.points.insert(insert_index, (a + b) * 0.5);
                                         spline_state.active_point = Some(insert_index);
                                         spline_state.selected_points.clear();
                                         spline_state.selected_points.push(insert_index);
@@ -12052,7 +12033,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevySplineFollower>(entity).is_some() {
+    if world.get::<SplineFollower>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Spline Follower");
@@ -12062,18 +12043,18 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevySplineFollower>();
+            world.entity_mut(entity).remove::<SplineFollower>();
             push_undo_snapshot(world, "Remove Spline Follower");
         } else {
             let pinned_entity = world
                 .get_resource::<InspectorPinnedEntityResource>()
                 .and_then(|res| res.0);
             let pinned_has_spline = pinned_entity
-                .map(|pinned| world.get::<BevySpline>(pinned).is_some())
+                .map(|pinned| world.get::<Spline>(pinned).is_some())
                 .unwrap_or(false);
             let target_name = world
-                .get::<BevySplineFollower>(entity)
-                .and_then(|follower| follower.0.spline_entity)
+                .get::<SplineFollower>(entity)
+                .and_then(|follower| follower.spline_entity)
                 .and_then(Entity::try_from_bits)
                 .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
@@ -12086,7 +12067,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 egui::Button::new("Drop Spline Here").sense(Sense::hover()),
             );
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
-                drop_hint = Some(world.get::<BevySpline>(payload.entity).is_some());
+                drop_hint = Some(world.get::<Spline>(payload.entity).is_some());
             }
             if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
@@ -12111,42 +12092,42 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 );
             }
             let dropped_valid = dropped_entity
-                .map(|entity| world.get::<BevySpline>(entity).is_some())
+                .map(|entity| world.get::<Spline>(entity).is_some())
                 .unwrap_or(false);
 
             let mut follower_changed = false;
             {
-                let Some(mut follower) = world.get_mut::<BevySplineFollower>(entity) else {
+                let Some(mut follower) = world.get_mut::<SplineFollower>(entity) else {
                     return;
                 };
 
-                let speed_response = edit_float(ui, "Speed", &mut follower.0.speed, 0.01);
+                let speed_response = edit_float(ui, "Speed", &mut follower.speed, 0.01);
                 if speed_response.changed {
                     follower_changed = true;
                 }
 
-                let t_response = edit_float(ui, "T", &mut follower.0.t, 0.01);
+                let t_response = edit_float(ui, "T", &mut follower.t, 0.01);
                 if t_response.changed {
                     follower_changed = true;
                 }
 
-                if ui.checkbox(&mut follower.0.looped, "Looped").changed() {
+                if ui.checkbox(&mut follower.looped, "Looped").changed() {
                     follower_changed = true;
                 }
 
                 if ui
-                    .checkbox(&mut follower.0.follow_rotation, "Follow Rotation")
+                    .checkbox(&mut follower.follow_rotation, "Follow Rotation")
                     .changed()
                 {
                     follower_changed = true;
                 }
 
-                let up_response = edit_vec3(ui, "Up", &mut follower.0.up, 0.01);
+                let up_response = edit_vec3(ui, "Up", &mut follower.up, 0.01);
                 if up_response.changed {
                     follower_changed = true;
                 }
 
-                let offset_response = edit_vec3(ui, "Offset", &mut follower.0.offset, 0.01);
+                let offset_response = edit_vec3(ui, "Offset", &mut follower.offset, 0.01);
                 if offset_response.changed {
                     follower_changed = true;
                 }
@@ -12154,7 +12135,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.horizontal(|ui| {
                     ui.label("Length Samples");
                     ui.add(
-                        DragValue::new(&mut follower.0.length_samples)
+                        DragValue::new(&mut follower.length_samples)
                             .range(4..=512)
                             .speed(1),
                     );
@@ -12163,7 +12144,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.label(format!("Target: {}", target_name));
 
                 if ui.button("Clear Target").clicked() {
-                    follower.0.spline_entity = None;
+                    follower.spline_entity = None;
                     follower_changed = true;
                 }
 
@@ -12172,13 +12153,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .add_enabled(pinned_has_spline, egui::Button::new("Use Pinned Spline"))
                         .clicked()
                     {
-                        follower.0.spline_entity = Some(pinned.to_bits());
+                        follower.spline_entity = Some(pinned.to_bits());
                         follower_changed = true;
                     }
                 }
 
                 if dropped_valid {
-                    follower.0.spline_entity = dropped_entity.map(|entity| entity.to_bits());
+                    follower.spline_entity = dropped_entity.map(|entity| entity.to_bits());
                     follower_changed = true;
                 }
             }
@@ -12189,7 +12170,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyLookAt>(entity).is_some() {
+    if world.get::<LookAt>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Look At");
@@ -12199,18 +12180,18 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyLookAt>();
+            world.entity_mut(entity).remove::<LookAt>();
             push_undo_snapshot(world, "Remove Look At");
         } else {
             let pinned_entity = world
                 .get_resource::<InspectorPinnedEntityResource>()
                 .and_then(|res| res.0);
             let pinned_has_transform = pinned_entity
-                .map(|pinned| world.get::<BevyTransform>(pinned).is_some())
+                .map(|pinned| world.get::<Transform>(pinned).is_some())
                 .unwrap_or(false);
             let target_name = world
-                .get::<BevyLookAt>(entity)
-                .and_then(|look_at| look_at.0.target_entity)
+                .get::<LookAt>(entity)
+                .and_then(|look_at| look_at.target_entity)
                 .and_then(Entity::try_from_bits)
                 .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
@@ -12224,7 +12205,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             );
             highlight_drop_target(ui, &drop_response);
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
-                drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
+                drop_hint = Some(world.get::<Transform>(payload.entity).is_some());
             }
             if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
@@ -12249,24 +12230,24 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 );
             }
             let dropped_valid = dropped_entity
-                .map(|entity| world.get::<BevyTransform>(entity).is_some())
+                .map(|entity| world.get::<Transform>(entity).is_some())
                 .unwrap_or(false);
 
             let mut look_changed = false;
             {
-                let Some(mut look_at) = world.get_mut::<BevyLookAt>(entity) else {
+                let Some(mut look_at) = world.get_mut::<LookAt>(entity) else {
                     return;
                 };
 
                 let offset_response =
-                    edit_vec3(ui, "Target Offset", &mut look_at.0.target_offset, 0.05);
+                    edit_vec3(ui, "Target Offset", &mut look_at.target_offset, 0.05);
                 if offset_response.changed {
                     look_changed = true;
                 }
 
                 if ui
                     .checkbox(
-                        &mut look_at.0.offset_in_target_space,
+                        &mut look_at.offset_in_target_space,
                         "Offset in Target Space",
                     )
                     .changed()
@@ -12274,7 +12255,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                     look_changed = true;
                 }
 
-                let up_response = edit_vec3(ui, "Up", &mut look_at.0.up, 0.05);
+                let up_response = edit_vec3(ui, "Up", &mut look_at.up, 0.05);
                 if up_response.changed {
                     look_changed = true;
                 }
@@ -12282,12 +12263,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let smooth_response = edit_float(
                     ui,
                     "Rotation Smooth Time",
-                    &mut look_at.0.rotation_smooth_time,
+                    &mut look_at.rotation_smooth_time,
                     0.01,
                 );
                 if smooth_response.changed {
-                    if look_at.0.rotation_smooth_time < 0.0 {
-                        look_at.0.rotation_smooth_time = 0.0;
+                    if look_at.rotation_smooth_time < 0.0 {
+                        look_at.rotation_smooth_time = 0.0;
                     }
                     look_changed = true;
                 }
@@ -12295,7 +12276,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.label(format!("Target: {}", target_name));
 
                 if ui.button("Clear Target").clicked() {
-                    look_at.0.target_entity = None;
+                    look_at.target_entity = None;
                     look_changed = true;
                 }
 
@@ -12304,13 +12285,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .add_enabled(pinned_has_transform, egui::Button::new("Use Pinned Entity"))
                         .clicked()
                     {
-                        look_at.0.target_entity = Some(pinned.to_bits());
+                        look_at.target_entity = Some(pinned.to_bits());
                         look_changed = true;
                     }
                 }
 
                 if dropped_valid {
-                    look_at.0.target_entity = dropped_entity.map(|entity| entity.to_bits());
+                    look_at.target_entity = dropped_entity.map(|entity| entity.to_bits());
                     look_changed = true;
                 }
             }
@@ -12322,7 +12303,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         ui.separator();
     }
 
-    if world.get::<BevyEntityFollower>(entity).is_some() {
+    if world.get::<EntityFollower>(entity).is_some() {
         let mut remove = false;
         ui.horizontal(|ui| {
             ui.heading("Entity Follower");
@@ -12332,18 +12313,18 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
         });
 
         if remove {
-            world.entity_mut(entity).remove::<BevyEntityFollower>();
+            world.entity_mut(entity).remove::<EntityFollower>();
             push_undo_snapshot(world, "Remove Entity Follower");
         } else {
             let pinned_entity = world
                 .get_resource::<InspectorPinnedEntityResource>()
                 .and_then(|res| res.0);
             let pinned_has_transform = pinned_entity
-                .map(|pinned| world.get::<BevyTransform>(pinned).is_some())
+                .map(|pinned| world.get::<Transform>(pinned).is_some())
                 .unwrap_or(false);
             let target_name = world
-                .get::<BevyEntityFollower>(entity)
-                .and_then(|follower| follower.0.target_entity)
+                .get::<EntityFollower>(entity)
+                .and_then(|follower| follower.target_entity)
                 .and_then(Entity::try_from_bits)
                 .and_then(|entity| world.get::<Name>(entity))
                 .map(|name| name.to_string())
@@ -12357,7 +12338,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
             );
             highlight_drop_target(ui, &drop_response);
             if let Some(payload) = drop_response.dnd_hover_payload::<EntityDragPayload>() {
-                drop_hint = Some(world.get::<BevyTransform>(payload.entity).is_some());
+                drop_hint = Some(world.get::<Transform>(payload.entity).is_some());
             }
             if let Some(payload) = typed_dnd_release_payload::<EntityDragPayload>(&drop_response) {
                 dropped_entity = Some(payload.entity);
@@ -12382,24 +12363,24 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 );
             }
             let dropped_valid = dropped_entity
-                .map(|entity| world.get::<BevyTransform>(entity).is_some())
+                .map(|entity| world.get::<Transform>(entity).is_some())
                 .unwrap_or(false);
 
             let mut follower_changed = false;
             {
-                let Some(mut follower) = world.get_mut::<BevyEntityFollower>(entity) else {
+                let Some(mut follower) = world.get_mut::<EntityFollower>(entity) else {
                     return;
                 };
 
                 let offset_response =
-                    edit_vec3(ui, "Position Offset", &mut follower.0.position_offset, 0.05);
+                    edit_vec3(ui, "Position Offset", &mut follower.position_offset, 0.05);
                 if offset_response.changed {
                     follower_changed = true;
                 }
 
                 if ui
                     .checkbox(
-                        &mut follower.0.offset_in_target_space,
+                        &mut follower.offset_in_target_space,
                         "Offset in Target Space",
                     )
                     .changed()
@@ -12408,7 +12389,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 }
 
                 if ui
-                    .checkbox(&mut follower.0.follow_rotation, "Follow Rotation")
+                    .checkbox(&mut follower.follow_rotation, "Follow Rotation")
                     .changed()
                 {
                     follower_changed = true;
@@ -12417,12 +12398,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let pos_smooth_response = edit_float(
                     ui,
                     "Position Smooth Time",
-                    &mut follower.0.position_smooth_time,
+                    &mut follower.position_smooth_time,
                     0.01,
                 );
                 if pos_smooth_response.changed {
-                    if follower.0.position_smooth_time < 0.0 {
-                        follower.0.position_smooth_time = 0.0;
+                    if follower.position_smooth_time < 0.0 {
+                        follower.position_smooth_time = 0.0;
                     }
                     follower_changed = true;
                 }
@@ -12430,13 +12411,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.horizontal(|ui| {
                     ui.label("Rotation Smooth Time");
                     let rot_smooth_response = ui.add_enabled(
-                        follower.0.follow_rotation,
-                        egui::DragValue::new(&mut follower.0.rotation_smooth_time).speed(0.01),
+                        follower.follow_rotation,
+                        egui::DragValue::new(&mut follower.rotation_smooth_time).speed(0.01),
                     );
                     let rot_smooth_response = EditResponse::from_response(&rot_smooth_response);
                     if rot_smooth_response.changed {
-                        if follower.0.rotation_smooth_time < 0.0 {
-                            follower.0.rotation_smooth_time = 0.0;
+                        if follower.rotation_smooth_time < 0.0 {
+                            follower.rotation_smooth_time = 0.0;
                         }
                         follower_changed = true;
                     }
@@ -12445,7 +12426,7 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 ui.label(format!("Target: {}", target_name));
 
                 if ui.button("Clear Target").clicked() {
-                    follower.0.target_entity = None;
+                    follower.target_entity = None;
                     follower_changed = true;
                 }
 
@@ -12454,13 +12435,13 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .add_enabled(pinned_has_transform, egui::Button::new("Use Pinned Entity"))
                         .clicked()
                     {
-                        follower.0.target_entity = Some(pinned.to_bits());
+                        follower.target_entity = Some(pinned.to_bits());
                         follower_changed = true;
                     }
                 }
 
                 if dropped_valid {
-                    follower.0.target_entity = dropped_entity.map(|entity| entity.to_bits());
+                    follower.target_entity = dropped_entity.map(|entity| entity.to_bits());
                     follower_changed = true;
                 }
             }
@@ -13380,12 +13361,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .clicked()
                     {
                         let mesh_id = world
-                            .get::<BevyMeshRenderer>(entity)
-                            .map(|renderer| renderer.0.mesh_id)
+                            .get::<MeshRenderer>(entity)
+                            .map(|renderer| renderer.mesh_id)
                             .or_else(|| {
                                 world
-                                    .get::<BevySkinnedMeshRenderer>(entity)
-                                    .map(|renderer| renderer.0.mesh_id)
+                                    .get::<SkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.mesh_id)
                             });
                         current = ColliderShape::Mesh {
                             mesh_id,
@@ -13408,12 +13389,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                         .clicked()
                     {
                         let mesh_id = world
-                            .get::<BevyMeshRenderer>(entity)
-                            .map(|renderer| renderer.0.mesh_id)
+                            .get::<MeshRenderer>(entity)
+                            .map(|renderer| renderer.mesh_id)
                             .or_else(|| {
                                 world
-                                    .get::<BevySkinnedMeshRenderer>(entity)
-                                    .map(|renderer| renderer.0.mesh_id)
+                                    .get::<SkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.mesh_id)
                             });
                         current = ColliderShape::Mesh {
                             mesh_id,
@@ -13440,12 +13421,12 @@ fn draw_inspector_panel(ui: &mut Ui, world: &mut World, entity: Entity) {
                 let mesh_source_button = ui.menu_button(mesh_source_label, |ui| {
                     if ui.button("Use Entity Mesh").clicked() {
                         *mesh_id = world
-                            .get::<BevyMeshRenderer>(entity)
-                            .map(|renderer| renderer.0.mesh_id)
+                            .get::<MeshRenderer>(entity)
+                            .map(|renderer| renderer.mesh_id)
                             .or_else(|| {
                                 world
-                                    .get::<BevySkinnedMeshRenderer>(entity)
-                                    .map(|renderer| renderer.0.mesh_id)
+                                    .get::<SkinnedMeshRenderer>(entity)
+                                    .map(|renderer| renderer.mesh_id)
                             });
                         shape_changed = true;
                         ui.close_menu();
@@ -17416,17 +17397,17 @@ fn draw_material_editor_tab(
 }
 
 fn default_collider_shape_for_entity(world: &World, entity: Entity) -> ColliderShape {
-    if let Some(renderer) = world.get::<BevyMeshRenderer>(entity) {
+    if let Some(renderer) = world.get::<MeshRenderer>(entity) {
         return ColliderShape::Mesh {
-            mesh_id: Some(renderer.0.mesh_id),
+            mesh_id: Some(renderer.mesh_id),
             lod: MeshColliderLod::Lowest,
             kind: MeshColliderKind::TriMesh,
         };
     }
 
-    if let Some(renderer) = world.get::<BevySkinnedMeshRenderer>(entity) {
+    if let Some(renderer) = world.get::<SkinnedMeshRenderer>(entity) {
         return ColliderShape::Mesh {
-            mesh_id: Some(renderer.0.mesh_id),
+            mesh_id: Some(renderer.mesh_id),
             lod: MeshColliderLod::Lowest,
             kind: MeshColliderKind::TriMesh,
         };
@@ -17502,7 +17483,7 @@ fn collider_mesh_id_from_asset(
 
     let cache_key = project_relative_path(project, path);
     let mesh_id = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
-        let asset_server = world.get_resource::<BevyAssetServer>()?;
+        let asset_server = world.get_resource::<BecsAssetServer>()?;
         Some(load_mesh_asset(&cache_key, &mut cache, asset_server, project.as_ref()).id)
     });
 
@@ -17541,13 +17522,13 @@ fn draw_add_component_menu(
     project: &Option<EditorProject>,
     selected_asset: Option<PathBuf>,
 ) {
-    let has_transform = world.get::<BevyTransform>(entity).is_some();
-    let has_camera = world.get::<BevyCamera>(entity).is_some();
-    let has_light = world.get::<BevyLight>(entity).is_some();
-    let has_mesh = world.get::<BevyMeshRenderer>(entity).is_some();
-    let has_sprite = world.get::<BevySpriteRenderer>(entity).is_some();
-    let has_text_2d = world.get::<BevyText2d>(entity).is_some();
-    let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some()
+    let has_transform = world.get::<Transform>(entity).is_some();
+    let has_camera = world.get::<Camera>(entity).is_some();
+    let has_light = world.get::<Light>(entity).is_some();
+    let has_mesh = world.get::<MeshRenderer>(entity).is_some();
+    let has_sprite = world.get::<SpriteRenderer>(entity).is_some();
+    let has_text_2d = world.get::<Text2d>(entity).is_some();
+    let has_skinned = world.get::<SkinnedMeshRenderer>(entity).is_some()
         || world.get::<EditorSkinnedMesh>(entity).is_some()
         || world.get::<PendingSkinnedMeshAsset>(entity).is_some();
     let has_scene = world.get::<SceneRoot>(entity).is_some();
@@ -17566,12 +17547,12 @@ fn draw_add_component_menu(
         let mut query = world.query::<&PhysicsWorldDefaults>();
         query.iter(world).next().is_some()
     };
-    let has_spline = world.get::<BevySpline>(entity).is_some();
-    let has_spline_follower = world.get::<BevySplineFollower>(entity).is_some();
-    let has_look_at = world.get::<BevyLookAt>(entity).is_some();
-    let has_entity_follower = world.get::<BevyEntityFollower>(entity).is_some();
-    let has_audio_emitter = world.get::<BevyAudioEmitter>(entity).is_some();
-    let has_audio_listener = world.get::<BevyAudioListener>(entity).is_some();
+    let has_spline = world.get::<Spline>(entity).is_some();
+    let has_spline_follower = world.get::<SplineFollower>(entity).is_some();
+    let has_look_at = world.get::<LookAt>(entity).is_some();
+    let has_entity_follower = world.get::<EntityFollower>(entity).is_some();
+    let has_audio_emitter = world.get::<AudioEmitter>(entity).is_some();
+    let has_audio_listener = world.get::<AudioListener>(entity).is_some();
     let collider_shape = world.get::<ColliderShape>(entity).copied();
 
     let selected_mesh_source = selected_asset
@@ -17589,13 +17570,13 @@ fn draw_add_component_menu(
 
     ui.menu_button("Add Component", |ui| {
         if !has_transform && ui.button("Transform").clicked() {
-            world.entity_mut(entity).insert(BevyTransform::default());
+            world.entity_mut(entity).insert(Transform::default());
             push_undo_snapshot(world, "Add Transform");
             ui.close_menu();
         }
         if !has_camera && ui.button("Camera").clicked() {
             ensure_transform(world, entity);
-            world.entity_mut(entity).insert(BevyCamera::default());
+            world.entity_mut(entity).insert(Camera::default());
             push_undo_snapshot(world, "Add Camera");
             ui.close_menu();
         }
@@ -17605,7 +17586,7 @@ fn draw_add_component_menu(
                     ensure_transform(world, entity);
                     world
                         .entity_mut(entity)
-                        .insert(BevyWrapper(Light::directional(Vec3::ONE, 25.0)));
+                        .insert(Light::directional(Vec3::ONE, 25.0));
                     push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
@@ -17613,17 +17594,17 @@ fn draw_add_component_menu(
                     ensure_transform(world, entity);
                     world
                         .entity_mut(entity)
-                        .insert(BevyWrapper(Light::point(Vec3::ONE, 10.0)));
+                        .insert(Light::point(Vec3::ONE, 10.0));
                     push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
                 if ui.button("Spot").clicked() {
                     ensure_transform(world, entity);
-                    world.entity_mut(entity).insert(BevyWrapper(Light::spot(
+                    world.entity_mut(entity).insert(Light::spot(
                         Vec3::ONE,
                         10.0,
                         45.0_f32.to_radians(),
-                    )));
+                    ));
                     push_undo_snapshot(world, "Add Light");
                     ui.close_menu();
                 }
@@ -17633,9 +17614,7 @@ fn draw_add_component_menu(
             let audio_button = ui.button("Audio Emitter");
             if audio_button.clicked() {
                 ensure_transform(world, entity);
-                world
-                    .entity_mut(entity)
-                    .insert(BevyWrapper(AudioEmitter::default()));
+                world.entity_mut(entity).insert(AudioEmitter::default());
                 world.entity_mut(entity).insert(EditorAudio {
                     path: None,
                     streaming: false,
@@ -17650,9 +17629,7 @@ fn draw_add_component_menu(
                 if let Some(path) = payload_primary_path(&payload) {
                     if is_audio_file(path) {
                         ensure_transform(world, entity);
-                        world
-                            .entity_mut(entity)
-                            .insert(BevyWrapper(AudioEmitter::default()));
+                        world.entity_mut(entity).insert(AudioEmitter::default());
                         apply_audio_emitter_from_asset(world, entity, project, path, false);
                         push_undo_snapshot(world, "Add Audio Emitter");
                     }
@@ -17663,9 +17640,7 @@ fn draw_add_component_menu(
         }
         if !has_audio_listener && ui.button("Audio Listener").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevyWrapper(AudioListener::default()));
+            world.entity_mut(entity).insert(AudioListener::default());
             push_undo_snapshot(world, "Add Audio Listener");
             ui.close_menu();
         }
@@ -17688,9 +17663,7 @@ fn draw_add_component_menu(
         }
         if !has_sprite && ui.button("Sprite Renderer").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevyWrapper(SpriteRenderer::default()));
+            world.entity_mut(entity).insert(SpriteRenderer::default());
             world.entity_mut(entity).insert(EditorSprite::default());
             push_undo_snapshot(world, "Add Sprite");
             ui.close_menu();
@@ -17699,7 +17672,7 @@ fn draw_add_component_menu(
             ensure_transform(world, entity);
             let mut text = Text2d::default();
             text.text = "Text".to_string();
-            world.entity_mut(entity).insert(BevyText2d(text));
+            world.entity_mut(entity).insert(text);
             push_undo_snapshot(world, "Add Text 2D");
             ui.close_menu();
         }
@@ -17749,33 +17722,25 @@ fn draw_add_component_menu(
         }
         if !has_spline && ui.button("Spline").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevySpline(Spline::default()));
+            world.entity_mut(entity).insert(Spline::default());
             push_undo_snapshot(world, "Add Spline");
             ui.close_menu();
         }
         if !has_spline_follower && ui.button("Spline Follower").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevySplineFollower(SplineFollower::default()));
+            world.entity_mut(entity).insert(SplineFollower::default());
             push_undo_snapshot(world, "Add Spline Follower");
             ui.close_menu();
         }
         if !has_look_at && ui.button("Look At").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevyLookAt(LookAt::default()));
+            world.entity_mut(entity).insert(LookAt::default());
             push_undo_snapshot(world, "Add Look At");
             ui.close_menu();
         }
         if !has_entity_follower && ui.button("Entity Follower").clicked() {
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert(BevyEntityFollower(EntityFollower::default()));
+            world.entity_mut(entity).insert(EntityFollower::default());
             push_undo_snapshot(world, "Add Entity Follower");
             ui.close_menu();
         }
@@ -17809,8 +17774,8 @@ fn draw_add_component_menu(
         ui.menu_button("Provided", |ui| {
             if !has_freecam && ui.button("Freecam Controller").clicked() {
                 ensure_transform(world, entity);
-                if world.get::<BevyCamera>(entity).is_none() {
-                    world.entity_mut(entity).insert(BevyCamera::default());
+                if world.get::<Camera>(entity).is_none() {
+                    world.entity_mut(entity).insert(Camera::default());
                 }
                 world.entity_mut(entity).insert(Freecam::default());
                 push_undo_snapshot(world, "Add Freecam");
@@ -17962,13 +17927,9 @@ fn draw_add_component_menu(
                 .clicked()
             {
                 let mesh_id = world
-                    .get::<BevyMeshRenderer>(entity)
-                    .map(|renderer| renderer.0.mesh_id)
-                    .or_else(|| {
-                        world
-                            .get::<BevySkinnedMeshRenderer>(entity)
-                            .map(|r| r.0.mesh_id)
-                    });
+                    .get::<MeshRenderer>(entity)
+                    .map(|renderer| renderer.mesh_id)
+                    .or_else(|| world.get::<SkinnedMeshRenderer>(entity).map(|r| r.mesh_id));
                 world.entity_mut(entity).insert(ColliderShape::Mesh {
                     mesh_id,
                     lod: MeshColliderLod::Lowest,
@@ -17991,13 +17952,9 @@ fn draw_add_component_menu(
                 .clicked()
             {
                 let mesh_id = world
-                    .get::<BevyMeshRenderer>(entity)
-                    .map(|renderer| renderer.0.mesh_id)
-                    .or_else(|| {
-                        world
-                            .get::<BevySkinnedMeshRenderer>(entity)
-                            .map(|r| r.0.mesh_id)
-                    });
+                    .get::<MeshRenderer>(entity)
+                    .map(|renderer| renderer.mesh_id)
+                    .or_else(|| world.get::<SkinnedMeshRenderer>(entity).map(|r| r.mesh_id));
                 world.entity_mut(entity).insert(ColliderShape::Mesh {
                     mesh_id,
                     lod: MeshColliderLod::Lowest,
@@ -18772,8 +18729,8 @@ fn dynamic_value_kind_label(kind: DynamicValueKind) -> &'static str {
 }
 
 fn ensure_transform(world: &mut World, entity: Entity) {
-    if world.get::<BevyTransform>(entity).is_none() {
-        world.entity_mut(entity).insert(BevyTransform::default());
+    if world.get::<Transform>(entity).is_none() {
+        world.entity_mut(entity).insert(Transform::default());
     }
 }
 
@@ -18816,9 +18773,9 @@ fn resolve_asset_path(project: Option<&EditorProject>, path: &str) -> PathBuf {
 }
 
 fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
-    if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-        let current = transform.0;
-        transform.0 = current;
+    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+        let current = *transform;
+        *transform = current;
     }
 }
 
@@ -18828,8 +18785,8 @@ fn resolve_sprite_sequence_textures(
     paths: &[String],
 ) -> Option<(Vec<String>, Vec<usize>)> {
     let Some(asset_server) = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))
+        .get_resource::<BecsAssetServer>()
+        .map(|server| server.cloned())
     else {
         set_status(world, "Asset server missing".to_string());
         return None;
@@ -18852,10 +18809,10 @@ fn resolve_sprite_sequence_textures(
         let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
             cached_texture_handle(&mut cache, &asset_server, &resolved)
         } else {
-            asset_server
-                .0
-                .lock()
-                .load_texture(&resolved, helmer::runtime::asset_server::AssetKind::Albedo)
+            asset_server.lock().load_texture(
+                &resolved,
+                helmer_asset::runtime::asset_server::AssetKind::Albedo,
+            )
         };
         texture_ids.push(handle.id);
     }
@@ -18870,8 +18827,8 @@ fn apply_sprite_texture_from_asset(
     path: &Path,
 ) -> bool {
     let Some(asset_server) = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))
+        .get_resource::<BecsAssetServer>()
+        .map(|server| server.cloned())
     else {
         set_status(world, "Asset server missing".to_string());
         return false;
@@ -18883,15 +18840,15 @@ fn apply_sprite_texture_from_asset(
     let texture_handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
         cached_texture_handle(&mut cache, &asset_server, &resolved_path)
     } else {
-        asset_server.0.lock().load_texture(
+        asset_server.lock().load_texture(
             &resolved_path,
-            helmer::runtime::asset_server::AssetKind::Albedo,
+            helmer_asset::runtime::asset_server::AssetKind::Albedo,
         )
     };
 
     let mut sprite = world
-        .get::<BevySpriteRenderer>(entity)
-        .map(|component| component.0)
+        .get::<SpriteRenderer>(entity)
+        .copied()
         .unwrap_or_default();
     sprite.texture_id = Some(texture_handle.id);
     let mut editor_sprite = world
@@ -18901,9 +18858,7 @@ fn apply_sprite_texture_from_asset(
     editor_sprite.texture_path = Some(relative_path);
 
     ensure_transform(world, entity);
-    world
-        .entity_mut(entity)
-        .insert((BevyWrapper(sprite), editor_sprite));
+    world.entity_mut(entity).insert((sprite, editor_sprite));
     mark_entity_render_dirty(world, entity);
     true
 }
@@ -18919,7 +18874,7 @@ fn apply_mesh_renderer(
 ) {
     let project_ref = project.as_ref();
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
-        let asset_server = match world.get_resource::<BevyAssetServer>() {
+        let asset_server = match world.get_resource::<BecsAssetServer>() {
             Some(server) => server,
             None => return,
         };
@@ -18951,12 +18906,7 @@ fn apply_mesh_renderer(
         };
 
         world.entity_mut(entity).insert((
-            BevyWrapper(MeshRenderer::new(
-                mesh_handle.id,
-                material_handle.id,
-                casts_shadow,
-                visible,
-            )),
+            MeshRenderer::new(mesh_handle.id, material_handle.id, casts_shadow, visible),
             EditorMesh {
                 source,
                 material_path,
@@ -18974,8 +18924,8 @@ fn apply_audio_emitter_from_asset(
     streaming: bool,
 ) {
     let Some(asset_server) = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))
+        .get_resource::<BecsAssetServer>()
+        .map(|server| server.cloned())
     else {
         set_status(world, "Asset server missing".to_string());
         return;
@@ -18987,7 +18937,7 @@ fn apply_audio_emitter_from_asset(
     let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
         cached_audio_handle(&mut cache, &asset_server, &resolved_path, streaming)
     } else {
-        asset_server.0.lock().load_audio(
+        asset_server.lock().load_audio(
             &resolved_path,
             if streaming {
                 AudioLoadMode::Streaming
@@ -18998,13 +18948,13 @@ fn apply_audio_emitter_from_asset(
     };
 
     let mut emitter = world
-        .get::<BevyAudioEmitter>(entity)
-        .map(|emitter| emitter.0)
+        .get::<AudioEmitter>(entity)
+        .copied()
         .unwrap_or_default();
     emitter.clip_id = Some(handle.id);
 
     world.entity_mut(entity).insert((
-        BevyWrapper(emitter),
+        emitter,
         EditorAudio {
             path: Some(relative_path),
             streaming,
@@ -19019,8 +18969,8 @@ fn apply_skinned_mesh_renderer_from_asset(
     path: &Path,
 ) -> bool {
     let Some(asset_server) = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))
+        .get_resource::<BecsAssetServer>()
+        .map(|server| server.cloned())
     else {
         set_status(world, "Asset server missing".to_string());
         return false;
@@ -19033,9 +18983,9 @@ fn apply_skinned_mesh_renderer_from_asset(
         let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
             cached_scene_handle(&mut cache, &asset_server, &resolved_path)
         } else {
-            asset_server.0.lock().load_scene(&resolved_path)
+            asset_server.lock().load_scene(&resolved_path)
         };
-        let scene = asset_server.0.lock().get_scene(&handle);
+        let scene = asset_server.lock().get_scene(&handle);
         (handle, scene)
     };
 
@@ -19043,8 +18993,8 @@ fn apply_skinned_mesh_renderer_from_asset(
         .get::<EditorSkinnedMesh>(entity)
         .and_then(|skinned| skinned.node_index);
     let (casts_shadow, visible) = world
-        .get::<BevyMeshRenderer>(entity)
-        .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+        .get::<MeshRenderer>(entity)
+        .map(|renderer| (renderer.casts_shadow, renderer.visible))
         .or_else(|| {
             world
                 .get::<EditorSkinnedMesh>(entity)
@@ -19136,13 +19086,13 @@ fn apply_skinned_mesh_renderer_from_scene_node(
     world: &mut World,
     entity: Entity,
     scene: &Scene,
-    node: &helmer::runtime::asset_server::SceneNode,
+    node: &helmer_asset::runtime::asset_server::SceneNode,
     skin_index: usize,
-    skin: std::sync::Arc<helmer::animation::Skin>,
+    skin: std::sync::Arc<helmer_animation::Skin>,
 ) -> bool {
     let (casts_shadow, visible) = world
-        .get::<BevyMeshRenderer>(entity)
-        .map(|renderer| (renderer.0.casts_shadow, renderer.0.visible))
+        .get::<MeshRenderer>(entity)
+        .map(|renderer| (renderer.casts_shadow, renderer.visible))
         .or_else(|| {
             world
                 .get::<EditorSkinnedMesh>(entity)
@@ -19153,19 +19103,17 @@ fn apply_skinned_mesh_renderer_from_scene_node(
     let skinned =
         SkinnedMeshRenderer::new(node.mesh.id, node.material.id, skin, casts_shadow, visible);
 
-    world.entity_mut(entity).remove::<BevyMeshRenderer>();
+    world.entity_mut(entity).remove::<MeshRenderer>();
     world.entity_mut(entity).remove::<EditorMesh>();
     world.entity_mut(entity).remove::<PendingSkinnedMeshAsset>();
-    world
-        .entity_mut(entity)
-        .insert(BevySkinnedMeshRenderer(skinned));
+    world.entity_mut(entity).insert(skinned);
     mark_entity_render_dirty(world, entity);
 
-    if world.get::<BevyAnimator>(entity).is_none() {
+    if world.get::<Animator>(entity).is_none() {
         if let Some(anim_lib) = scene.animations.read().get(skin_index).cloned() {
             world
                 .entity_mut(entity)
-                .insert(BevyAnimator(build_default_animator(anim_lib)));
+                .insert(Animator(build_default_animator(anim_lib)));
         }
     }
 
@@ -19176,15 +19124,15 @@ pub fn refresh_material_usage(world: &mut World, project: &Option<EditorProject>
     let material_key = project_relative_path(project, path);
     let mut targets = Vec::new();
 
-    let mut query = world.query::<(Entity, &EditorMesh, &BevyMeshRenderer)>();
+    let mut query = world.query::<(Entity, &EditorMesh, &MeshRenderer)>();
     for (entity, mesh, renderer) in query.iter(world) {
         if mesh.material_path.as_deref() == Some(material_key.as_str()) {
             targets.push((
                 entity,
                 mesh.source.clone(),
                 mesh.material_path.clone(),
-                renderer.0.casts_shadow,
-                renderer.0.visible,
+                renderer.casts_shadow,
+                renderer.visible,
             ));
         }
     }
@@ -19219,15 +19167,15 @@ fn save_material_file(path: &Path, data: &MaterialFile) -> Result<(), String> {
 
 fn apply_scene_asset(world: &mut World, entity: Entity, path: &Path) {
     let Some(asset_server) = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))
+        .get_resource::<BecsAssetServer>()
+        .map(|server| server.cloned())
     else {
         return;
     };
     let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
         cached_scene_handle(&mut cache, &asset_server, path)
     } else {
-        asset_server.0.lock().load_scene(path)
+        asset_server.lock().load_scene(path)
     };
     reset_scene_root_instance(world, entity);
     world.entity_mut(entity).insert(SceneRoot(handle));
@@ -19426,7 +19374,7 @@ fn unique_path(path: &Path) -> PathBuf {
 fn ensure_default_material(
     project: &EditorProject,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
 ) -> Option<Handle<Material>> {
     if let Some(handle) = cache.default_material {
         return Some(handle);
@@ -19435,7 +19383,7 @@ fn ensure_default_material(
     let root = project.root.as_ref()?;
     let config = project.config.as_ref()?;
     let default_path = config.materials_root(root).join("default.ron");
-    let handle = asset_server.0.lock().load_material(&default_path);
+    let handle = asset_server.lock().load_material(&default_path);
 
     let relative = default_path
         .strip_prefix(root)
@@ -19453,7 +19401,7 @@ fn ensure_default_material(
 fn load_material_handle(
     path: &str,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     project: Option<&EditorProject>,
 ) -> Option<Handle<Material>> {
     if let Some(handle) = cache.material_handles.get(path).copied() {
@@ -19461,7 +19409,7 @@ fn load_material_handle(
     }
 
     let full_path = resolve_asset_path(project, path);
-    let handle = asset_server.0.lock().load_material(full_path);
+    let handle = asset_server.lock().load_material(full_path);
     cache.material_handles.insert(path.to_string(), handle);
     Some(handle)
 }
@@ -19469,7 +19417,7 @@ fn load_material_handle(
 fn load_mesh_asset(
     path: &str,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     project: Option<&EditorProject>,
 ) -> Handle<Mesh> {
     if let Some(handle) = cache.mesh_handles.get(path).copied() {
@@ -19477,7 +19425,7 @@ fn load_mesh_asset(
     }
 
     let full_path = resolve_asset_path(project, path);
-    let handle = asset_server.0.lock().load_mesh(full_path);
+    let handle = asset_server.lock().load_mesh(full_path);
     cache.mesh_handles.insert(path.to_string(), handle);
     handle
 }
@@ -19485,7 +19433,7 @@ fn load_mesh_asset(
 fn load_primitive_mesh(
     kind: PrimitiveKind,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
 ) -> Handle<Mesh> {
     if let Some(handle) = cache.primitive_meshes.get(&kind).copied() {
         return handle;
@@ -19494,7 +19442,6 @@ fn load_primitive_mesh(
     let mesh_asset = kind.to_mesh_asset();
 
     let handle = asset_server
-        .0
         .lock()
         .add_mesh(mesh_asset.vertices.unwrap(), mesh_asset.indices);
     cache.primitive_meshes.insert(kind, handle);
@@ -19503,18 +19450,18 @@ fn load_primitive_mesh(
 
 fn focus_entity_in_view(world: &mut World, entity: Entity) {
     let target = world
-        .get::<BevyTransform>(entity)
-        .map(|transform| transform.0.position)
+        .get::<Transform>(entity)
+        .map(|transform| transform.position)
         .unwrap_or(Vec3::ZERO);
     let scale = world
-        .get::<BevyTransform>(entity)
-        .map(|transform| transform.0.scale)
+        .get::<Transform>(entity)
+        .map(|transform| transform.scale)
         .unwrap_or(Vec3::ONE);
     let max_scale = scale.x.max(scale.y).max(scale.z).max(1.0);
     let distance = (max_scale * 2.5).max(3.0);
 
     let mut active_camera = None;
-    let mut query = world.query::<(Entity, &BevyCamera, Option<&BevyActiveCamera>)>();
+    let mut query = world.query::<(Entity, &Camera, Option<&ActiveCamera>)>();
     for (candidate, _, active) in query.iter(world) {
         if active.is_some() {
             active_camera = Some(candidate);
@@ -19529,14 +19476,12 @@ fn focus_entity_in_view(world: &mut World, entity: Entity) {
         return;
     };
 
-    if world.get::<BevyTransform>(camera_entity).is_none() {
-        world
-            .entity_mut(camera_entity)
-            .insert(BevyTransform::default());
+    if world.get::<Transform>(camera_entity).is_none() {
+        world.entity_mut(camera_entity).insert(Transform::default());
     }
 
-    if let Some(mut transform) = world.get_mut::<BevyTransform>(camera_entity) {
-        let transform = &mut transform.0;
+    if let Some(mut transform) = world.get_mut::<Transform>(camera_entity) {
+        let transform = &mut *transform;
         let direction = target - transform.position;
         let mut forward = if direction.length_squared() > 0.0001 {
             direction.normalize()
@@ -20362,9 +20307,9 @@ fn duplicate_entity_subtree(world: &mut World, entity: Entity) -> bool {
     let created = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = {
             let asset_server = world
-                .get_resource::<BevyAssetServer>()
+                .get_resource::<BecsAssetServer>()
                 .expect("AssetServer missing");
-            BevyAssetServer(asset_server.0.clone())
+            asset_server.cloned()
         };
         spawn_scene_from_document(world, &document, &project, &mut cache, &asset_server)
     });
@@ -20376,8 +20321,8 @@ fn duplicate_entity_subtree(world: &mut World, entity: Entity) -> bool {
 
     let offset = Vec3::new(0.75, 0.0, 0.0);
     for duplicate in created.iter().copied() {
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(duplicate) {
-            transform.0.position += offset;
+        if let Some(mut transform) = world.get_mut::<Transform>(duplicate) {
+            transform.position += offset;
         }
     }
 
@@ -20414,9 +20359,9 @@ fn paste_entity_from_clipboard(world: &mut World) -> bool {
     let created = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
         let asset_server = {
             let asset_server = world
-                .get_resource::<BevyAssetServer>()
+                .get_resource::<BecsAssetServer>()
                 .expect("AssetServer missing");
-            BevyAssetServer(asset_server.0.clone())
+            asset_server.cloned()
         };
         spawn_scene_from_document(world, &document, &project, &mut cache, &asset_server)
     });
@@ -20437,8 +20382,8 @@ fn paste_entity_from_clipboard(world: &mut World) -> bool {
     let offset_amount = 0.75 * (paste_count.saturating_add(1) as f32);
     let offset = Vec3::new(offset_amount, 0.0, 0.0);
     for entity in created.iter().copied() {
-        if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-            transform.0.position += offset;
+        if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+            transform.position += offset;
         }
     }
 
@@ -20464,8 +20409,8 @@ fn apply_animation_asset_to_entity(world: &mut World, entity: Entity, path: &Pat
     };
 
     let skeleton = world
-        .get::<BevySkinnedMeshRenderer>(entity)
-        .map(|skinned| skinned.0.skin.skeleton.clone());
+        .get::<SkinnedMeshRenderer>(entity)
+        .map(|skinned| skinned.skin.skeleton.clone());
     let skeleton_ref = skeleton.as_deref();
     let name = world
         .get::<Name>(entity)
@@ -20478,7 +20423,7 @@ fn apply_animation_asset_to_entity(world: &mut World, entity: Entity, path: &Pat
         Vec::new()
     };
 
-    if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) {
+    if let Some(mut animator) = world.get_mut::<Animator>(entity) {
         apply_custom_clips_to_animator(&mut animator, &clips);
     }
 
@@ -20760,12 +20705,12 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     .unwrap_or_else(|| format!("Entity {}", entity.index()));
                 ui.label(format!("Active: {}", name));
 
-                let has_transform = world.get::<BevyTransform>(entity).is_some();
-                let has_camera = world.get::<BevyCamera>(entity).is_some();
-                let has_light = world.get::<BevyLight>(entity).is_some();
-                let has_skinned = world.get::<BevySkinnedMeshRenderer>(entity).is_some();
-                let has_spline = world.get::<BevySpline>(entity).is_some();
-                let has_animator = world.get::<BevyAnimator>(entity).is_some();
+                let has_transform = world.get::<Transform>(entity).is_some();
+                let has_camera = world.get::<Camera>(entity).is_some();
+                let has_light = world.get::<Light>(entity).is_some();
+                let has_skinned = world.get::<SkinnedMeshRenderer>(entity).is_some();
+                let has_spline = world.get::<Spline>(entity).is_some();
+                let has_animator = world.get::<Animator>(entity).is_some();
 
                 let group_index = if let Some(index) =
                     groups.iter().position(|group| group.entity == entity.to_bits())
@@ -20800,8 +20745,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                             if let Some(path) = dialog.set_file_name(default_name).save_file() {
                                 let path = ensure_animation_asset_extension(&path);
                                 let skeleton = world
-                                    .get::<BevySkinnedMeshRenderer>(entity)
-                                    .map(|skinned| skinned.0.skin.skeleton.as_ref());
+                                    .get::<SkinnedMeshRenderer>(entity)
+                                    .map(|skinned| skinned.skin.skeleton.as_ref());
                                 let doc = animation_asset_from_group(group, skeleton);
                                 match write_animation_asset_document(&path, &doc) {
                                     Ok(()) => {
@@ -20837,10 +20782,9 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                         }
                     });
                 let selected_joint_name = if let (Some(joint_index), Some(skinned)) =
-                    (selected_joint, world.get::<BevySkinnedMeshRenderer>(entity))
+                    (selected_joint, world.get::<SkinnedMeshRenderer>(entity))
                 {
                     skinned
-                        .0
                         .skin
                         .skeleton
                         .joints
@@ -20978,7 +20922,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                         let group = &mut groups[group_index];
 
                         if has_transform {
-                            if let Some(transform) = world.get::<BevyTransform>(entity) {
+                            if let Some(transform) = world.get::<Transform>(entity) {
                                 let index = ensure_transform_track(group, &mut alloc_id);
                                 if let TimelineTrack::Transform(track) =
                                     &mut group.tracks[index]
@@ -20986,7 +20930,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                     if upsert_transform_key(
                                         track,
                                         key_time,
-                                        transform.0,
+                                        *transform,
                                         *smart_key,
                                         &mut alloc_id,
                                     ) {
@@ -20996,13 +20940,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                             }
                         }
                         if has_camera {
-                            if let Some(camera) = world.get::<BevyCamera>(entity) {
+                            if let Some(camera) = world.get::<Camera>(entity) {
                                 let index = ensure_camera_track(group, &mut alloc_id);
                                 if let TimelineTrack::Camera(track) = &mut group.tracks[index] {
                                     if upsert_camera_key(
                                         track,
                                         key_time,
-                                        camera.0,
+                                        *camera,
                                         *smart_key,
                                         &mut alloc_id,
                                     ) {
@@ -21012,13 +20956,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                             }
                         }
                         if has_light {
-                            if let Some(light) = world.get::<BevyLight>(entity) {
+                            if let Some(light) = world.get::<Light>(entity) {
                                 let index = ensure_light_track(group, &mut alloc_id);
                                 if let TimelineTrack::Light(track) = &mut group.tracks[index] {
                                     if upsert_light_key(
                                         track,
                                         key_time,
-                                        light.0,
+                                        *light,
                                         *smart_key,
                                         &mut alloc_id,
                                     ) {
@@ -21040,16 +20984,16 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 })
                                 .unwrap_or(false);
                             let pose_override_enabled = world
-                                .get::<BevyPoseOverride>(entity)
-                                .map(|pose| pose.0.enabled)
+                                .get::<PoseOverride>(entity)
+                                .map(|pose| pose.enabled)
                                 .unwrap_or(false);
                             if pose_track_exists || pose_edit_active || pose_override_enabled {
-                                if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity)
+                                if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity)
                                 {
-                                    let skeleton = &skinned.0.skin.skeleton;
+                                    let skeleton = &skinned.skin.skeleton;
                                     let pose = world
-                                        .get::<BevyPoseOverride>(entity)
-                                        .map(|pose| pose.0.pose.clone())
+                                        .get::<PoseOverride>(entity)
+                                        .map(|pose| pose.pose.clone())
                                         .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
                                     let index = ensure_pose_track(group, &mut alloc_id);
                                     if let TimelineTrack::Pose(track) =
@@ -21098,7 +21042,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 .iter()
                                 .any(|track| matches!(track, TimelineTrack::Spline(_)));
                             if spline_track_exists {
-                                if let Some(spline) = world.get::<BevySpline>(entity) {
+                                if let Some(spline) = world.get::<Spline>(entity) {
                                     let index = ensure_spline_track(group, &mut alloc_id);
                                     if let TimelineTrack::Spline(track) =
                                         &mut group.tracks[index]
@@ -21106,7 +21050,7 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                         if upsert_spline_key(
                                             track,
                                             key_time,
-                                            spline.0.clone(),
+                                            spline.clone(),
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -21124,8 +21068,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                 });
 
                 if has_skinned && has_animator {
-                    if let Some(animator) = world.get::<BevyAnimator>(entity) {
-                        if let Some(layer) = animator.0.layers.first() {
+                    if let Some(animator) = world.get::<Animator>(entity) {
+                        if let Some(layer) = animator.layers.first() {
                             let clips = &layer.graph.library.clips;
                             if !clips.is_empty() {
                                 ui.horizontal(|ui| {
@@ -21156,9 +21100,9 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
 
                                     if ui.button("Fork to Pose Track").clicked() {
                                         if let Some(skinned) =
-                                            world.get::<BevySkinnedMeshRenderer>(entity)
+                                            world.get::<SkinnedMeshRenderer>(entity)
                                         {
-                                            let skeleton = &skinned.0.skin.skeleton;
+                                            let skeleton = &skinned.skin.skeleton;
                                             let clip = clips
                                                 .get(selected)
                                                 .map(|clip| clip.as_ref())
@@ -21308,11 +21252,11 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 }
 
                                 if ui.button("Add Keyframe").clicked() {
-                                    if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
-                                        let skeleton = &skinned.0.skin.skeleton;
+                                    if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity) {
+                                        let skeleton = &skinned.skin.skeleton;
                                         let pose = world
-                                            .get::<BevyPoseOverride>(entity)
-                                            .map(|pose| pose.0.pose.clone())
+                                            .get::<PoseOverride>(entity)
+                                            .map(|pose| pose.pose.clone())
                                             .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
                                         let key_time =
                                             snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
@@ -21364,11 +21308,11 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                             if ui.button("Capture").clicked() {
-                                                if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
-                                                    let skeleton = &skinned.0.skin.skeleton;
+                                                if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity) {
+                                                    let skeleton = &skinned.skin.skeleton;
                                                     let pose = world
-                                                        .get::<BevyPoseOverride>(entity)
-                                                        .map(|pose| pose.0.pose.clone())
+                                                        .get::<PoseOverride>(entity)
+                                                        .map(|pose| pose.pose.clone())
                                                         .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
                                                     key.pose = pose;
                                                     *apply_requested = true;
@@ -21389,8 +21333,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                     ui.label("Clip Name");
                                     ui.text_edit_singleline(new_clip_name);
                                     if ui.button("Bake Clip").clicked() {
-                                        if let Some(skinned) = world.get::<BevySkinnedMeshRenderer>(entity) {
-                                            let skeleton = &skinned.0.skin.skeleton;
+                                        if let Some(skinned) = world.get::<SkinnedMeshRenderer>(entity) {
+                                            let skeleton = &skinned.skin.skeleton;
                                             if let Some(clip) = build_clip_from_pose_track(
                                                 new_clip_name.clone(),
                                                 track,
@@ -21413,10 +21357,9 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 );
 
                                 let joint_label = world
-                                    .get::<BevySkinnedMeshRenderer>(entity)
+                                    .get::<SkinnedMeshRenderer>(entity)
                                     .and_then(|skinned| {
                                         skinned
-                                            .0
                                             .skin
                                             .skeleton
                                             .joints
@@ -21696,13 +21639,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 }
 
                                 if ui.button("Add Keyframe").clicked() {
-                                    if let Some(transform) = world.get::<BevyTransform>(entity) {
+                                    if let Some(transform) = world.get::<Transform>(entity) {
                                         let key_time =
                                             snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
                                         if upsert_transform_key(
                                             track,
                                             key_time,
-                                            transform.0,
+                                            *transform,
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -21745,8 +21688,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                             if ui.button("Capture").clicked() {
-                                                if let Some(transform) = world.get::<BevyTransform>(entity) {
-                                                    key.transform = transform.0;
+                                                if let Some(transform) = world.get::<Transform>(entity) {
+                                                    key.transform = *transform;
                                                     *apply_requested = true;
                                                 }
                                             }
@@ -21793,13 +21736,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 }
 
                                 if ui.button("Add Keyframe").clicked() {
-                                    if let Some(camera) = world.get::<BevyCamera>(entity) {
+                                    if let Some(camera) = world.get::<Camera>(entity) {
                                         let key_time =
                                             snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
                                         if upsert_camera_key(
                                             track,
                                             key_time,
-                                            camera.0,
+                                            *camera,
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -21842,8 +21785,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                             if ui.button("Capture").clicked() {
-                                                if let Some(camera) = world.get::<BevyCamera>(entity) {
-                                                    key.camera = camera.0;
+                                                if let Some(camera) = world.get::<Camera>(entity) {
+                                                    key.camera = *camera;
                                                     *apply_requested = true;
                                                 }
                                             }
@@ -21890,13 +21833,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 }
 
                                 if ui.button("Add Keyframe").clicked() {
-                                    if let Some(light) = world.get::<BevyLight>(entity) {
+                                    if let Some(light) = world.get::<Light>(entity) {
                                         let key_time =
                                             snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
                                         if upsert_light_key(
                                             track,
                                             key_time,
-                                            light.0,
+                                            *light,
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -21939,8 +21882,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                             if ui.button("Capture").clicked() {
-                                                if let Some(light) = world.get::<BevyLight>(entity) {
-                                                    key.light = light.0;
+                                                if let Some(light) = world.get::<Light>(entity) {
+                                                    key.light = *light;
                                                     *apply_requested = true;
                                                 }
                                             }
@@ -21994,13 +21937,13 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 }
 
                                 if ui.button("Add Keyframe").clicked() {
-                                    if let Some(spline) = world.get::<BevySpline>(entity) {
+                                    if let Some(spline) = world.get::<Spline>(entity) {
                                         let key_time =
                                             snap_time_to_frame(*current_time).clamp(0.0, duration_limit);
                                         if upsert_spline_key(
                                             track,
                                             key_time,
-                                            spline.0.clone(),
+                                            spline.clone(),
                                             *smart_key,
                                             &mut alloc_id,
                                         ) {
@@ -22045,8 +21988,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                                 *apply_requested = true;
                                             }
                                             if ui.button("Capture").clicked() {
-                                                if let Some(spline) = world.get::<BevySpline>(entity) {
-                                                    key.spline = spline.0.clone();
+                                                if let Some(spline) = world.get::<Spline>(entity) {
+                                                    key.spline = spline.clone();
                                                     *apply_requested = true;
                                                 }
                                             }
@@ -22067,8 +22010,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.add(DragValue::new(&mut track.weight).speed(0.05).clamp_range(0.0..=1.0));
 
                                 let clip_names = world
-                                    .get::<BevyAnimator>(entity)
-                                    .and_then(|animator| animator.0.layers.first().map(|layer| layer.graph.library.clips.clone()))
+                                    .get::<Animator>(entity)
+                                    .and_then(|animator| animator.layers.first().map(|layer| layer.graph.library.clips.clone()))
                                     .unwrap_or_default();
                                 if !clip_names.is_empty() {
                                     let current = (*new_clip_index).min(clip_names.len().saturating_sub(1));
@@ -22094,8 +22037,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                 ui.checkbox(new_clip_looping, "Loop Segment");
 
                                 if ui.button("Add Segment").clicked() {
-                                    if let Some(animator) = world.get::<BevyAnimator>(entity) {
-                                        if let Some(layer) = animator.0.layers.first() {
+                                    if let Some(animator) = world.get::<Animator>(entity) {
+                                        if let Some(layer) = animator.layers.first() {
                                             if let Some(clip) = layer.graph.library.clip(*new_clip_index) {
                                                 let duration = (clip.duration / new_clip_speed.max(0.01)).max(0.01);
                                                 let clip_name = clip.name.clone();
@@ -22119,10 +22062,10 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                                     ui.text_edit_singleline(new_clip_name);
                                     if ui.button("Bake Arrangement").clicked() {
                                         if let (Some(skinned), Some(animator)) = (
-                                            world.get::<BevySkinnedMeshRenderer>(entity),
-                                            world.get::<BevyAnimator>(entity),
+                                            world.get::<SkinnedMeshRenderer>(entity),
+                                            world.get::<Animator>(entity),
                                         ) {
-                                            let skeleton = &skinned.0.skin.skeleton;
+                                            let skeleton = &skinned.skin.skeleton;
                                             if let Some(clip) = build_clip_from_clip_track(
                                                 new_clip_name.clone(),
                                                 track,
@@ -22212,8 +22155,8 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
                     }
 
                     if !baked_clips.is_empty() {
-                        if let Some(mut animator) = world.get_mut::<BevyAnimator>(entity) {
-                            for layer in animator.0.layers.iter_mut() {
+                        if let Some(mut animator) = world.get_mut::<Animator>(entity) {
+                            for layer in animator.layers.iter_mut() {
                                 let mut library = (*layer.graph.library).clone();
                                 for clip in baked_clips.iter() {
                                     library.upsert_clip(clip.clone());
@@ -22271,10 +22214,10 @@ pub fn draw_timeline_window(ui: &mut Ui, world: &mut World) {
 
                     if let Some(segment) = target_segment {
                         if let (Some(skinned), Some(animator)) = (
-                            world.get::<BevySkinnedMeshRenderer>(entity),
-                            world.get::<BevyAnimator>(entity),
+                            world.get::<SkinnedMeshRenderer>(entity),
+                            world.get::<Animator>(entity),
                         ) {
-                            let skeleton = &skinned.0.skin.skeleton;
+                            let skeleton = &skinned.skin.skeleton;
                             let name = format!("{} (Expanded)", segment.clip_name);
                             if let Some(track) = build_pose_track_from_clip_segment(
                                 alloc_id(),
@@ -23257,19 +23200,19 @@ fn vec3_differs(a: Vec3, b: Vec3) -> bool {
     (a - b).length_squared() > (FLOAT_EPS * FLOAT_EPS)
 }
 
-fn transform_differs(
-    a: &helmer::provided::components::Transform,
-    b: &helmer::provided::components::Transform,
-) -> bool {
+fn transform_differs(a: &Transform, b: &Transform) -> bool {
     vec3_differs(a.position, b.position)
         || vec3_differs(a.scale, b.scale)
         || quat_differs(a.rotation, b.rotation)
 }
 
-fn camera_differs(
-    a: &helmer::provided::components::Camera,
-    b: &helmer::provided::components::Camera,
-) -> bool {
+fn render_transform_differs(a: &RenderTransform, b: &RenderTransform) -> bool {
+    vec3_differs(a.position, b.position)
+        || vec3_differs(a.scale, b.scale)
+        || quat_differs(a.rotation, b.rotation)
+}
+
+fn camera_differs(a: &Camera, b: &Camera) -> bool {
     (a.fov_y_rad - b.fov_y_rad).abs() > FLOAT_EPS
         || (a.aspect_ratio - b.aspect_ratio).abs() > FLOAT_EPS
         || (a.near_plane - b.near_plane).abs() > FLOAT_EPS
@@ -23294,7 +23237,7 @@ fn pose_differs(a: &Pose, b: &Pose) -> bool {
         return true;
     }
     for (left, right) in a.locals.iter().zip(b.locals.iter()) {
-        if transform_differs(left, right) {
+        if render_transform_differs(left, right) {
             return true;
         }
     }
@@ -23348,7 +23291,7 @@ fn upsert_pose_key(
 fn upsert_joint_key(
     track: &mut JointTrack,
     time: f32,
-    transform: helmer::provided::components::Transform,
+    transform: RenderTransform,
     smart_key: bool,
     alloc_id: &mut impl FnMut() -> u64,
 ) -> bool {
@@ -23358,7 +23301,7 @@ fn upsert_joint_key(
     }
     if smart_key {
         if let Some(prev) = last_key_before_time(&track.keys, time, |key| key.time) {
-            if !transform_differs(&prev.transform, &transform) {
+            if !render_transform_differs(&prev.transform, &transform) {
                 return false;
             }
         }
@@ -23377,7 +23320,7 @@ fn upsert_joint_key(
 fn upsert_transform_key(
     track: &mut TransformTrack,
     time: f32,
-    transform: helmer::provided::components::Transform,
+    transform: Transform,
     smart_key: bool,
     alloc_id: &mut impl FnMut() -> u64,
 ) -> bool {
@@ -23406,7 +23349,7 @@ fn upsert_transform_key(
 fn upsert_camera_key(
     track: &mut CameraTrack,
     time: f32,
-    camera: helmer::provided::components::Camera,
+    camera: Camera,
     smart_key: bool,
     alloc_id: &mut impl FnMut() -> u64,
 ) -> bool {
@@ -23659,12 +23602,12 @@ fn current_joint_transform(
     world: &World,
     entity: Entity,
     joint_index: usize,
-) -> Option<helmer::provided::components::Transform> {
-    let skinned = world.get::<BevySkinnedMeshRenderer>(entity)?;
-    let skeleton = &skinned.0.skin.skeleton;
+) -> Option<RenderTransform> {
+    let skinned = world.get::<SkinnedMeshRenderer>(entity)?;
+    let skeleton = &skinned.skin.skeleton;
     let pose = world
-        .get::<BevyPoseOverride>(entity)
-        .map(|pose| pose.0.pose.clone())
+        .get::<PoseOverride>(entity)
+        .map(|pose| pose.pose.clone())
         .unwrap_or_else(|| PoseOverride::new(skeleton).pose);
     pose.locals.get(joint_index).copied().or_else(|| {
         skeleton

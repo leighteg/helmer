@@ -1,11 +1,11 @@
-use bevy_ecs::prelude::{Commands, Entity, Query, Res, ResMut, Resource};
 use glam::{Quat, Vec3};
-use helmer::animation::{AnimationChannel, AnimationClip, Interpolation, Pose, Skeleton};
-use helmer::provided::components::{Camera, Light, LightType, PoseOverride, Spline, Transform};
+use helmer_animation::{AnimationChannel, AnimationClip, Interpolation, Pose, Skeleton};
+use helmer_becs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, Resource};
 use helmer_becs::{
-    BevyAnimator, BevyPoseOverride, BevySkinnedMeshRenderer, BevySpline, BevySystemProfiler,
-    DeltaTime,
+    Animator, BecsSystemProfiler, Camera, DeltaTime, Light, PoseOverride, SkinnedMeshRenderer,
+    Spline, Transform as BecsTransform, components::LightType,
 };
+use helmer_render::graphics::common::renderer::Transform as RenderTransform;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Resource)]
@@ -233,7 +233,7 @@ pub struct JointTrack {
 pub struct JointKey {
     pub id: u64,
     pub time: f32,
-    pub transform: Transform,
+    pub transform: RenderTransform,
 }
 
 #[derive(Debug, Clone)]
@@ -251,7 +251,7 @@ pub struct TransformTrack {
 pub struct TransformKey {
     pub id: u64,
     pub time: f32,
-    pub transform: Transform,
+    pub transform: BecsTransform,
 }
 
 #[derive(Debug, Clone)]
@@ -360,14 +360,14 @@ pub fn timeline_playback_system(
     time: Res<DeltaTime>,
     mut timeline: ResMut<EditorTimelineState>,
     mut commands: Commands,
-    mut pose_overrides: Query<&mut BevyPoseOverride>,
-    mut transform_query: Query<&mut helmer_becs::BevyTransform>,
-    mut camera_query: Query<&mut helmer_becs::BevyCamera>,
-    mut light_query: Query<&mut helmer_becs::BevyLight>,
-    mut spline_query: Query<&mut BevySpline>,
-    skinned_query: Query<&BevySkinnedMeshRenderer>,
-    animator_query: Query<&BevyAnimator>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    mut pose_overrides: Query<&mut PoseOverride>,
+    mut transform_query: Query<&mut helmer_becs::Transform>,
+    mut camera_query: Query<&mut helmer_becs::Camera>,
+    mut light_query: Query<&mut helmer_becs::Light>,
+    mut spline_query: Query<&mut Spline>,
+    skinned_query: Query<&SkinnedMeshRenderer>,
+    animator_query: Query<&Animator>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -431,22 +431,22 @@ pub fn timeline_playback_system(
 
         if let Some(sample) = transform_sample {
             if let Ok(mut transform) = transform_query.get_mut(entity) {
-                transform.0 = sample;
+                *transform = sample;
             }
         }
         if let Some(sample) = camera_sample {
             if let Ok(mut camera) = camera_query.get_mut(entity) {
-                camera.0 = sample;
+                *camera = sample;
             }
         }
         if let Some(sample) = light_sample {
             if let Ok(mut light) = light_query.get_mut(entity) {
-                light.0 = sample;
+                *light = sample;
             }
         }
 
         if let Ok(skinned) = skinned_query.get(entity) {
-            let skeleton = &skinned.0.skin.skeleton;
+            let skeleton = &skinned.skin.skeleton;
             let mut base_pose = Pose::from_skeleton(skeleton);
             let mut has_pose = false;
             for track in &group.tracks {
@@ -489,22 +489,20 @@ pub fn timeline_playback_system(
 
             if has_pose {
                 if let Ok(mut override_pose) = pose_overrides.get_mut(entity) {
-                    override_pose.0.enabled = true;
-                    override_pose.0.pose = base_pose;
+                    override_pose.enabled = true;
+                    override_pose.pose = base_pose;
                 } else {
-                    commands
-                        .entity(entity)
-                        .try_insert(BevyPoseOverride(PoseOverride {
-                            enabled: true,
-                            pose: base_pose,
-                        }));
+                    commands.entity(entity).try_insert(PoseOverride {
+                        enabled: true,
+                        pose: base_pose,
+                    });
                 }
             }
         }
 
         if let Some(sample) = spline_sample {
             if let Ok(mut spline) = spline_query.get_mut(entity) {
-                spline.0 = sample;
+                *spline = sample;
             }
         }
     }
@@ -536,7 +534,7 @@ fn sample_pose_track(track: &PoseTrack, time: f32) -> Option<Pose> {
     None
 }
 
-fn sample_joint_track(track: &JointTrack, time: f32) -> Option<Transform> {
+fn sample_joint_track(track: &JointTrack, time: f32) -> Option<RenderTransform> {
     if track.keys.is_empty() {
         return None;
     }
@@ -577,7 +575,7 @@ fn sample_joint_track(track: &JointTrack, time: f32) -> Option<Transform> {
             } else {
                 a.transform.scale.lerp(b.transform.scale, t)
             };
-            return Some(Transform {
+            return Some(RenderTransform {
                 position,
                 rotation,
                 scale,
@@ -633,7 +631,7 @@ fn sample_spline_track(track: &SplineTrack, time: f32) -> Option<Spline> {
     None
 }
 
-fn sample_transform_track(track: &TransformTrack, time: f32) -> Option<Transform> {
+fn sample_transform_track(track: &TransformTrack, time: f32) -> Option<BecsTransform> {
     if track.keys.is_empty() {
         return None;
     }
@@ -674,7 +672,7 @@ fn sample_transform_track(track: &TransformTrack, time: f32) -> Option<Transform
             } else {
                 a.transform.scale.lerp(b.transform.scale, t)
             };
-            return Some(Transform {
+            return Some(BecsTransform {
                 position,
                 rotation,
                 scale,
@@ -772,7 +770,7 @@ fn sample_light_track(track: &LightTrack, time: f32) -> Option<Light> {
 
 fn sample_clip_track(
     track: &ClipTrack,
-    animator: Option<&BevyAnimator>,
+    animator: Option<&Animator>,
     skeleton: &Skeleton,
     time: f32,
 ) -> Option<Pose> {
@@ -825,7 +823,7 @@ fn interpolate_pose(track: &PoseTrack, a: &Pose, b: &Pose, t: f32) -> Pose {
         } else {
             ta.scale.lerp(tb.scale, t)
         };
-        out.locals.push(Transform {
+        out.locals.push(RenderTransform {
             position,
             rotation,
             scale,
@@ -843,7 +841,7 @@ fn blend_pose(target: &mut Pose, source: &Pose, weight: f32) {
     for idx in 0..count {
         let a = target.locals[idx];
         let b = source.locals[idx];
-        target.locals[idx] = Transform {
+        target.locals[idx] = RenderTransform {
             position: a.position.lerp(b.position, weight),
             rotation: a.rotation.slerp(b.rotation, weight).normalize(),
             scale: a.scale.lerp(b.scale, weight),
@@ -855,7 +853,7 @@ fn apply_joint_sample(
     base_pose: &mut Pose,
     skeleton: &Skeleton,
     track: &JointTrack,
-    sample: Transform,
+    sample: RenderTransform,
 ) {
     let joint_index = track.joint_index;
     if joint_index >= base_pose.locals.len() {
@@ -875,13 +873,13 @@ fn apply_joint_sample(
         let delta_pos = sample.position - bind.position;
         let delta_scale = sample.scale - bind.scale;
         let delta_rot = bind.rotation.inverse() * sample.rotation;
-        base_pose.locals[joint_index] = Transform {
+        base_pose.locals[joint_index] = RenderTransform {
             position: current.position + delta_pos * weight,
             rotation: current.rotation * Quat::IDENTITY.slerp(delta_rot, weight),
             scale: current.scale + delta_scale * weight,
         };
     } else {
-        base_pose.locals[joint_index] = Transform {
+        base_pose.locals[joint_index] = RenderTransform {
             position: current.position.lerp(sample.position, weight),
             rotation: current.rotation.slerp(sample.rotation, weight).normalize(),
             scale: current.scale.lerp(sample.scale, weight),
@@ -891,7 +889,7 @@ fn apply_joint_sample(
 
 const BAKE_EPS: f32 = 1e-4;
 
-fn bake_transform_differs(a: &Transform, b: &Transform) -> bool {
+fn bake_transform_differs(a: &RenderTransform, b: &RenderTransform) -> bool {
     let pos_diff = (a.position - b.position).length_squared();
     let scale_diff = (a.scale - b.scale).length_squared();
     let rot_diff = 1.0 - a.rotation.dot(b.rotation).abs();
@@ -915,7 +913,7 @@ fn apply_additive_pose(target: &mut Pose, additive: &Pose, skeleton: &Skeleton, 
         let delta_scale = add.scale - base.scale;
         let delta_rot = base.rotation.inverse() * add.rotation;
         let current = target.locals[idx];
-        target.locals[idx] = Transform {
+        target.locals[idx] = RenderTransform {
             position: current.position + delta_pos * weight,
             rotation: current.rotation * Quat::IDENTITY.slerp(delta_rot, weight),
             scale: current.scale + delta_scale * weight,
@@ -952,46 +950,46 @@ pub fn build_clip_from_pose_track(
 
     let mut channels = Vec::new();
     let translation_interp = match track.translation_interpolation {
-        TimelineInterpolation::Step => helmer::animation::Interpolation::Step,
-        TimelineInterpolation::Linear => helmer::animation::Interpolation::Linear,
+        TimelineInterpolation::Step => helmer_animation::Interpolation::Step,
+        TimelineInterpolation::Linear => helmer_animation::Interpolation::Linear,
     };
     let rotation_interp = match track.rotation_interpolation {
-        TimelineInterpolation::Step => helmer::animation::Interpolation::Step,
-        TimelineInterpolation::Linear => helmer::animation::Interpolation::Linear,
+        TimelineInterpolation::Step => helmer_animation::Interpolation::Step,
+        TimelineInterpolation::Linear => helmer_animation::Interpolation::Linear,
     };
     let scale_interp = match track.scale_interpolation {
-        TimelineInterpolation::Step => helmer::animation::Interpolation::Step,
-        TimelineInterpolation::Linear => helmer::animation::Interpolation::Linear,
+        TimelineInterpolation::Step => helmer_animation::Interpolation::Step,
+        TimelineInterpolation::Linear => helmer_animation::Interpolation::Linear,
     };
 
     for joint_index in 0..joint_count {
         if !translation_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Translation {
+            channels.push(helmer_animation::AnimationChannel::Translation {
                 target: joint_index,
                 interpolation: translation_interp,
                 keyframes: translation_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
         if !rotation_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Rotation {
+            channels.push(helmer_animation::AnimationChannel::Rotation {
                 target: joint_index,
                 interpolation: rotation_interp,
                 keyframes: rotation_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
         if !scale_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Scale {
+            channels.push(helmer_animation::AnimationChannel::Scale {
                 target: joint_index,
                 interpolation: scale_interp,
                 keyframes: scale_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
@@ -1009,7 +1007,7 @@ pub fn build_clip_from_pose_track(
 pub fn build_clip_from_clip_track(
     name: String,
     track: &ClipTrack,
-    animator: &BevyAnimator,
+    animator: &Animator,
     skeleton: &Skeleton,
     frame_rate: f32,
 ) -> Option<AnimationClip> {
@@ -1029,7 +1027,7 @@ pub fn build_clip_from_clip_track(
     let mut translation_channels = vec![Vec::new(); joint_count];
     let mut rotation_channels = vec![Vec::new(); joint_count];
     let mut scale_channels = vec![Vec::new(); joint_count];
-    let mut last: Vec<Option<Transform>> = vec![None; joint_count];
+    let mut last: Vec<Option<RenderTransform>> = vec![None; joint_count];
 
     let sample_rate = frame_rate.max(1.0);
     let step = 1.0 / sample_rate;
@@ -1061,32 +1059,32 @@ pub fn build_clip_from_clip_track(
     let mut channels = Vec::new();
     for joint_index in 0..joint_count {
         if !translation_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Translation {
+            channels.push(helmer_animation::AnimationChannel::Translation {
                 target: joint_index,
-                interpolation: helmer::animation::Interpolation::Linear,
+                interpolation: helmer_animation::Interpolation::Linear,
                 keyframes: translation_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
         if !rotation_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Rotation {
+            channels.push(helmer_animation::AnimationChannel::Rotation {
                 target: joint_index,
-                interpolation: helmer::animation::Interpolation::Linear,
+                interpolation: helmer_animation::Interpolation::Linear,
                 keyframes: rotation_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
         if !scale_channels[joint_index].is_empty() {
-            channels.push(helmer::animation::AnimationChannel::Scale {
+            channels.push(helmer_animation::AnimationChannel::Scale {
                 target: joint_index,
-                interpolation: helmer::animation::Interpolation::Linear,
+                interpolation: helmer_animation::Interpolation::Linear,
                 keyframes: scale_channels[joint_index]
                     .iter()
-                    .map(|(time, value)| helmer::animation::Keyframe::new(*time, *value))
+                    .map(|(time, value)| helmer_animation::Keyframe::new(*time, *value))
                     .collect(),
             });
         }
@@ -1103,7 +1101,7 @@ pub fn build_pose_track_from_clip_segment<F: FnMut() -> u64>(
     id: u64,
     name: String,
     segment: &ClipSegment,
-    animator: &BevyAnimator,
+    animator: &Animator,
     skeleton: &Skeleton,
     frame_rate: f32,
     alloc_id: &mut F,

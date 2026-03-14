@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
-use bevy_ecs::prelude::World;
-use helmer::provided::components::LightType;
+use helmer_becs::ecs::prelude::World;
 use helmer_becs::systems::scene_system::EntityParent;
 use helmer_becs::{
-    AudioBackendResource, BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer,
-    BevySystemProfiler, BevyTransform,
+    ActiveCamera, AudioBackendResource, BecsSystemProfiler, Camera, Light, MeshRenderer, Transform,
+    components::LightType,
 };
 use helmer_editor_runtime::project::load_project_config;
 
@@ -188,20 +187,20 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
         }
         InspectorPaneAction::OpenAddComponentMenu(_entity) => {}
         InspectorPaneAction::RemoveTransform(entity) => {
-            world.entity_mut(entity).remove::<BevyTransform>();
+            world.entity_mut(entity).remove::<Transform>();
             changed = true;
         }
         InspectorPaneAction::RemoveCamera(entity) => {
-            world.entity_mut(entity).remove::<BevyCamera>();
-            world.entity_mut(entity).remove::<BevyActiveCamera>();
+            world.entity_mut(entity).remove::<Camera>();
+            world.entity_mut(entity).remove::<ActiveCamera>();
             changed = true;
         }
         InspectorPaneAction::RemoveLight(entity) => {
-            world.entity_mut(entity).remove::<BevyLight>();
+            world.entity_mut(entity).remove::<Light>();
             changed = true;
         }
         InspectorPaneAction::RemoveMeshRenderer(entity) => {
-            world.entity_mut(entity).remove::<BevyMeshRenderer>();
+            world.entity_mut(entity).remove::<MeshRenderer>();
             changed = true;
         }
         InspectorPaneAction::AdjustTransform {
@@ -209,14 +208,14 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             delta,
         } => {
-            if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+            if let Some(mut transform) = world.get_mut::<Transform>(entity) {
                 match field {
-                    InspectorTransformField::PositionX => transform.0.position.x += delta,
-                    InspectorTransformField::PositionY => transform.0.position.y += delta,
-                    InspectorTransformField::PositionZ => transform.0.position.z += delta,
+                    InspectorTransformField::PositionX => transform.position.x += delta,
+                    InspectorTransformField::PositionY => transform.position.y += delta,
+                    InspectorTransformField::PositionZ => transform.position.z += delta,
                     InspectorTransformField::RotationX => {
-                        let (x, y, z) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation = glam::Quat::from_euler(
+                        let (x, y, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation = glam::Quat::from_euler(
                             glam::EulerRot::YXZ,
                             (x.to_degrees() + delta).to_radians(),
                             y,
@@ -224,8 +223,8 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
                         );
                     }
                     InspectorTransformField::RotationY => {
-                        let (x, y, z) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation = glam::Quat::from_euler(
+                        let (x, y, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation = glam::Quat::from_euler(
                             glam::EulerRot::YXZ,
                             x,
                             (y.to_degrees() + delta).to_radians(),
@@ -233,8 +232,8 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
                         );
                     }
                     InspectorTransformField::RotationZ => {
-                        let (x, y, z) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation = glam::Quat::from_euler(
+                        let (x, y, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation = glam::Quat::from_euler(
                             glam::EulerRot::YXZ,
                             x,
                             y,
@@ -242,13 +241,13 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
                         );
                     }
                     InspectorTransformField::ScaleX => {
-                        transform.0.scale.x = (transform.0.scale.x + delta).max(0.001)
+                        transform.scale.x = (transform.scale.x + delta).max(0.001)
                     }
                     InspectorTransformField::ScaleY => {
-                        transform.0.scale.y = (transform.0.scale.y + delta).max(0.001)
+                        transform.scale.y = (transform.scale.y + delta).max(0.001)
                     }
                     InspectorTransformField::ScaleZ => {
-                        transform.0.scale.z = (transform.0.scale.z + delta).max(0.001)
+                        transform.scale.z = (transform.scale.z + delta).max(0.001)
                     }
                 }
                 changed = true;
@@ -259,25 +258,25 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             delta,
         } => {
-            if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+            if let Some(mut camera) = world.get_mut::<Camera>(entity) {
                 match field {
                     InspectorCameraField::FovDeg => {
-                        let next = camera.0.fov_y_rad.to_degrees() + delta;
-                        camera.0.fov_y_rad = next.clamp(5.0, 175.0).to_radians();
+                        let next = camera.fov_y_rad.to_degrees() + delta;
+                        camera.fov_y_rad = next.clamp(5.0, 175.0).to_radians();
                     }
                     InspectorCameraField::Aspect => {
-                        camera.0.aspect_ratio = (camera.0.aspect_ratio + delta).clamp(0.1, 8.0);
+                        camera.aspect_ratio = (camera.aspect_ratio + delta).clamp(0.1, 8.0);
                     }
                     InspectorCameraField::Near => {
-                        camera.0.near_plane = (camera.0.near_plane + delta).clamp(0.001, 500.0);
-                        if camera.0.far_plane <= camera.0.near_plane {
-                            camera.0.far_plane = camera.0.near_plane + 0.1;
+                        camera.near_plane = (camera.near_plane + delta).clamp(0.001, 500.0);
+                        if camera.far_plane <= camera.near_plane {
+                            camera.far_plane = camera.near_plane + 0.1;
                         }
                     }
                     InspectorCameraField::Far => {
-                        camera.0.far_plane = (camera.0.far_plane + delta).max(0.01);
-                        if camera.0.far_plane <= camera.0.near_plane {
-                            camera.0.far_plane = camera.0.near_plane + 0.1;
+                        camera.far_plane = (camera.far_plane + delta).max(0.01);
+                        if camera.far_plane <= camera.near_plane {
+                            camera.far_plane = camera.near_plane + 0.1;
                         }
                     }
                 }
@@ -285,12 +284,12 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             }
         }
         InspectorPaneAction::SetLightType { entity, kind } => {
-            if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                light.0.light_type = match kind {
+            if let Some(mut light) = world.get_mut::<Light>(entity) {
+                light.light_type = match kind {
                     InspectorLightKind::Directional => LightType::Directional,
                     InspectorLightKind::Point => LightType::Point,
                     InspectorLightKind::Spot => {
-                        let angle = match light.0.light_type {
+                        let angle = match light.light_type {
                             LightType::Spot { angle } => angle,
                             _ => 45.0_f32.to_radians(),
                         };
@@ -305,17 +304,17 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             delta,
         } => {
-            if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+            if let Some(mut light) = world.get_mut::<Light>(entity) {
                 match field {
                     InspectorLightField::Intensity => {
-                        light.0.intensity = (light.0.intensity + delta).max(0.0);
+                        light.intensity = (light.intensity + delta).max(0.0);
                     }
                     InspectorLightField::SpotAngleDeg => {
-                        let current_deg = match light.0.light_type {
+                        let current_deg = match light.light_type {
                             LightType::Spot { angle } => angle.to_degrees(),
                             _ => 45.0,
                         };
-                        light.0.light_type = LightType::Spot {
+                        light.light_type = LightType::Spot {
                             angle: (current_deg + delta).clamp(1.0, 170.0).to_radians(),
                         };
                     }
@@ -324,14 +323,14 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             }
         }
         InspectorPaneAction::ToggleMeshCastsShadow(entity) => {
-            if let Some(mut mesh) = world.get_mut::<BevyMeshRenderer>(entity) {
-                mesh.0.casts_shadow = !mesh.0.casts_shadow;
+            if let Some(mut mesh) = world.get_mut::<MeshRenderer>(entity) {
+                mesh.casts_shadow = !mesh.casts_shadow;
                 changed = true;
             }
         }
         InspectorPaneAction::ToggleMeshVisible(entity) => {
-            if let Some(mut mesh) = world.get_mut::<BevyMeshRenderer>(entity) {
-                mesh.0.visible = !mesh.0.visible;
+            if let Some(mut mesh) = world.get_mut::<MeshRenderer>(entity) {
+                mesh.visible = !mesh.visible;
                 changed = true;
             }
         }
@@ -340,29 +339,29 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             value,
         } => {
-            if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
+            if let Some(mut transform) = world.get_mut::<Transform>(entity) {
                 match field {
-                    InspectorTransformField::PositionX => transform.0.position.x = value,
-                    InspectorTransformField::PositionY => transform.0.position.y = value,
-                    InspectorTransformField::PositionZ => transform.0.position.z = value,
+                    InspectorTransformField::PositionX => transform.position.x = value,
+                    InspectorTransformField::PositionY => transform.position.y = value,
+                    InspectorTransformField::PositionZ => transform.position.z = value,
                     InspectorTransformField::RotationX => {
-                        let (_, y, z) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation =
+                        let (_, y, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation =
                             glam::Quat::from_euler(glam::EulerRot::YXZ, value.to_radians(), y, z);
                     }
                     InspectorTransformField::RotationY => {
-                        let (x, _, z) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation =
+                        let (x, _, z) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation =
                             glam::Quat::from_euler(glam::EulerRot::YXZ, x, value.to_radians(), z);
                     }
                     InspectorTransformField::RotationZ => {
-                        let (x, y, _) = transform.0.rotation.to_euler(glam::EulerRot::YXZ);
-                        transform.0.rotation =
+                        let (x, y, _) = transform.rotation.to_euler(glam::EulerRot::YXZ);
+                        transform.rotation =
                             glam::Quat::from_euler(glam::EulerRot::YXZ, x, y, value.to_radians());
                     }
-                    InspectorTransformField::ScaleX => transform.0.scale.x = value.max(0.001),
-                    InspectorTransformField::ScaleY => transform.0.scale.y = value.max(0.001),
-                    InspectorTransformField::ScaleZ => transform.0.scale.z = value.max(0.001),
+                    InspectorTransformField::ScaleX => transform.scale.x = value.max(0.001),
+                    InspectorTransformField::ScaleY => transform.scale.y = value.max(0.001),
+                    InspectorTransformField::ScaleZ => transform.scale.z = value.max(0.001),
                 }
                 changed = true;
             }
@@ -372,24 +371,24 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             value,
         } => {
-            if let Some(mut camera) = world.get_mut::<BevyCamera>(entity) {
+            if let Some(mut camera) = world.get_mut::<Camera>(entity) {
                 match field {
                     InspectorCameraField::FovDeg => {
-                        camera.0.fov_y_rad = value.clamp(5.0, 175.0).to_radians();
+                        camera.fov_y_rad = value.clamp(5.0, 175.0).to_radians();
                     }
                     InspectorCameraField::Aspect => {
-                        camera.0.aspect_ratio = value.clamp(0.1, 8.0);
+                        camera.aspect_ratio = value.clamp(0.1, 8.0);
                     }
                     InspectorCameraField::Near => {
-                        camera.0.near_plane = value.clamp(0.001, 500.0);
-                        if camera.0.far_plane <= camera.0.near_plane {
-                            camera.0.far_plane = camera.0.near_plane + 0.1;
+                        camera.near_plane = value.clamp(0.001, 500.0);
+                        if camera.far_plane <= camera.near_plane {
+                            camera.far_plane = camera.near_plane + 0.1;
                         }
                     }
                     InspectorCameraField::Far => {
-                        camera.0.far_plane = value.max(0.01);
-                        if camera.0.far_plane <= camera.0.near_plane {
-                            camera.0.far_plane = camera.0.near_plane + 0.1;
+                        camera.far_plane = value.max(0.01);
+                        if camera.far_plane <= camera.near_plane {
+                            camera.far_plane = camera.near_plane + 0.1;
                         }
                     }
                 }
@@ -401,13 +400,13 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             field,
             value,
         } => {
-            if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
+            if let Some(mut light) = world.get_mut::<Light>(entity) {
                 match field {
                     InspectorLightField::Intensity => {
-                        light.0.intensity = value.max(0.0);
+                        light.intensity = value.max(0.0);
                     }
                     InspectorLightField::SpotAngleDeg => {
-                        light.0.light_type = LightType::Spot {
+                        light.light_type = LightType::Spot {
                             angle: value.clamp(1.0, 170.0).to_radians(),
                         };
                     }
@@ -416,8 +415,8 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
             }
         }
         InspectorPaneAction::SetLightColor { entity, color } => {
-            if let Some(mut light) = world.get_mut::<BevyLight>(entity) {
-                light.0.color = glam::Vec3::new(
+            if let Some(mut light) = world.get_mut::<Light>(entity) {
+                light.color = glam::Vec3::new(
                     color[0].clamp(0.0, 1.0),
                     color[1].clamp(0.0, 1.0),
                     color[2].clamp(0.0, 1.0),
@@ -436,8 +435,8 @@ pub fn apply_inspector_action(world: &mut World, action: InspectorPaneAction) {
 pub fn apply_audio_mixer_action(world: &mut World, action: AudioMixerPaneAction) {
     let _ = action;
     if let Some(audio) = world.get_resource::<AudioBackendResource>() {
-        let next = !audio.0.enabled();
-        audio.0.set_enabled(next);
+        let next = !audio.enabled();
+        audio.set_enabled(next);
         if let Some(mut console) = world.get_resource_mut::<EditorConsoleState>() {
             console.push(
                 EditorConsoleLevel::Info,
@@ -453,15 +452,15 @@ pub fn apply_audio_mixer_action(world: &mut World, action: AudioMixerPaneAction)
 }
 
 pub fn apply_profiler_action(world: &mut World, action: ProfilerPaneAction) {
-    let Some(profiler) = world.get_resource::<BevySystemProfiler>() else {
+    let Some(profiler) = world.get_resource::<BecsSystemProfiler>() else {
         return;
     };
     match action {
         ProfilerPaneAction::ToggleEnabled => {
-            profiler.0.set_enabled(!profiler.0.enabled());
+            profiler.set_enabled(!profiler.enabled());
         }
         ProfilerPaneAction::Reset => {
-            profiler.0.reset_all();
+            profiler.reset_all();
         }
     }
 }
@@ -770,8 +769,8 @@ pub fn apply_hierarchy_action(world: &mut World, action: HierarchyPaneAction) {
 
 pub fn reparent_hierarchy_entity(
     world: &mut World,
-    child: bevy_ecs::entity::Entity,
-    new_parent: Option<bevy_ecs::entity::Entity>,
+    child: helmer_becs::ecs::entity::Entity,
+    new_parent: Option<helmer_becs::ecs::entity::Entity>,
 ) -> bool {
     if world.get_entity(child).is_err() {
         return false;
@@ -793,15 +792,12 @@ pub fn reparent_hierarchy_entity(
         return false;
     }
 
-    let child_transform = world
-        .get::<BevyTransform>(child)
-        .map(|transform| transform.0)
-        .unwrap_or_default();
+    let child_transform = world.get::<Transform>(child).copied().unwrap_or_default();
 
     if let Some(parent) = new_parent {
         let parent_matrix = world
-            .get::<BevyTransform>(parent)
-            .map(|transform| transform.0.to_matrix())
+            .get::<Transform>(parent)
+            .map(|transform| transform.to_matrix())
             .unwrap_or(glam::Mat4::IDENTITY);
         world.entity_mut(child).insert(EntityParent {
             parent,
@@ -834,8 +830,8 @@ pub fn reparent_hierarchy_entity(
 
 fn hierarchy_is_descendant_of(
     world: &World,
-    candidate: bevy_ecs::entity::Entity,
-    ancestor: bevy_ecs::entity::Entity,
+    candidate: helmer_becs::ecs::entity::Entity,
+    ancestor: helmer_becs::ecs::entity::Entity,
 ) -> bool {
     let mut current = Some(candidate);
     let mut visited = std::collections::HashSet::new();

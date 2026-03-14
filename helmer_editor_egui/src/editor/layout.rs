@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, fs, path::PathBuf};
 
-use bevy_ecs::prelude::Resource;
 use egui::{Pos2, Rect, Vec2};
+use helmer_becs::ecs::prelude::Resource;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 

@@ -942,6 +942,7 @@ type DynamicComponentData = {
 }
 
 type RuntimeTuningData = {
+    task_worker_count: number,
     render_message_capacity: number,
     asset_stream_queue_capacity: number,
     asset_worker_queue_capacity: number,
@@ -961,6 +962,7 @@ type RuntimeTuningData = {
 }
 
 type RuntimeTuningPatch = {
+    task_worker_count: number?,
     render_message_capacity: number?,
     asset_stream_queue_capacity: number?,
     asset_worker_queue_capacity: number?,
@@ -2168,7 +2170,7 @@ pub fn default_script_template_full() -> &'static str {
 --   ecs.get_graph_template() -> name
 --   ecs.set_graph_template(name) -> bool
 -- tuning/config:
---   ecs.get_runtime_tuning() -> {render_message_capacity, asset_stream_queue_capacity, asset_worker_queue_capacity, max_pending_asset_uploads, max_pending_asset_bytes, asset_uploads_per_frame, wgpu_poll_interval_frames, wgpu_poll_mode, pixels_per_line, title_update_ms, resize_debounce_ms, max_logic_steps_per_frame, target_tickrate, target_fps, pending_asset_uploads, pending_asset_bytes}
+--   ecs.get_runtime_tuning() -> {task_worker_count, render_message_capacity, asset_stream_queue_capacity, asset_worker_queue_capacity, max_pending_asset_uploads, max_pending_asset_bytes, asset_uploads_per_frame, wgpu_poll_interval_frames, wgpu_poll_mode, pixels_per_line, title_update_ms, resize_debounce_ms, max_logic_steps_per_frame, target_tickrate, target_fps, pending_asset_uploads, pending_asset_bytes}
 --   ecs.set_runtime_tuning(patch) -> bool
 --   ecs.get_runtime_config() -> {egui, wgpu_experimental_features, wgpu_backend, binding_backend, fixed_timestep}
 --   ecs.set_runtime_config(patch) -> bool

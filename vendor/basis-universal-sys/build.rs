@@ -1,3 +1,5 @@
+use std::process::{Command, Stdio};
+
 // args from the basis cmake file
 fn build_with_common_settings() -> cc::Build {
     let mut build = cc::Build::new();
@@ -27,7 +29,21 @@ fn main() {
 
     if is_wasm {
         build
+            .flag_if_supported("-stdlib=libc++")
+            .define("_LIBCPP_HAS_NO_THREADS", "1");
+
+        let mut include_paths = detect_host_cxx_include_paths(true);
+        if include_paths.is_empty() {
+            include_paths = detect_host_cxx_include_paths(false);
+        }
+        for include in include_paths {
+            build.flag("-isystem");
+            build.flag(&include);
+        }
+
+        build
             .cpp_link_stdlib(None)
+            .include("wasm-libcxx")
             .define("BASISU_NO_STD_STRING", "1")
             .flag_if_supported("-fno-exceptions")
             .flag_if_supported("-fno-rtti");
@@ -62,4 +78,73 @@ fn main() {
     build.compile("basisuniversal");
 
     // We regenerate binding code and check it in. (See generate_bindings.sh)
+}
+
+fn detect_host_cxx_include_paths(prefer_libcpp: bool) -> Vec<String> {
+    let compiler = std::env::var("CXX_wasm32_unknown_unknown")
+        .or_else(|_| std::env::var("CXX_wasm32-unknown-unknown"))
+        .or_else(|_| std::env::var("CXX"))
+        .unwrap_or_else(|_| "clang++".to_string());
+
+    let mut command = Command::new(&compiler);
+    if prefer_libcpp {
+        command.arg("-stdlib=libc++");
+    }
+    let output = command
+        .args(["-E", "-x", "c++", "-", "-v"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            println!(
+                "cargo:warning=failed to probe C++ include paths with {}: {}",
+                compiler, err
+            );
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        println!(
+            "cargo:warning=failed to probe C++ include paths with {} (status: {})",
+            compiler, output.status
+        );
+        return Vec::new();
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut include_paths = Vec::new();
+    let mut in_block = false;
+
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#include <...> search starts here:" {
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if trimmed == "End of search list." {
+            break;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let candidate = trimmed
+            .split(" (framework directory)")
+            .next()
+            .unwrap_or(trimmed)
+            .trim();
+        if !candidate.is_empty() {
+            include_paths.push(candidate.to_string());
+        }
+    }
+
+    include_paths
 }

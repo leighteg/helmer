@@ -9,7 +9,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bevy_ecs::prelude::{Resource, World};
 use egui::{Color32, ComboBox, DragValue, RichText, Sense, Stroke, TextEdit, Ui};
 use egui_snarl::ui::{
     AnyPins, BackgroundPattern, Grid, NodeLayout, NodeLayoutKind, PinInfo, PinPlacement, PinShape,
@@ -17,6 +16,7 @@ use egui_snarl::ui::{
 };
 use egui_snarl::{InPin, InPinId, NodeId, OutPin, OutPinId, Snarl};
 use glam::DQuat;
+use helmer_becs::ecs::prelude::{Resource, World};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -6188,7 +6188,7 @@ fn default_literal_for_type(value_type: VisualValueType) -> &'static str {
         }
         VisualValueType::AudioStreamingConfig => "{\"buffer_frames\":8192,\"chunk_frames\":2048}",
         VisualValueType::RuntimeTuning => {
-            "{\"render_message_capacity\":96,\"asset_stream_queue_capacity\":96,\"asset_worker_queue_capacity\":96,\"max_pending_asset_uploads\":48,\"max_pending_asset_bytes\":536870912,\"asset_uploads_per_frame\":8,\"wgpu_poll_interval_frames\":1,\"wgpu_poll_mode\":1,\"pixels_per_line\":38,\"title_update_ms\":200,\"resize_debounce_ms\":500,\"max_logic_steps_per_frame\":4,\"target_tickrate\":120.0,\"target_fps\":0.0}"
+            "{\"task_worker_count\":7,\"render_message_capacity\":96,\"asset_stream_queue_capacity\":96,\"asset_worker_queue_capacity\":96,\"max_pending_asset_uploads\":48,\"max_pending_asset_bytes\":536870912,\"asset_uploads_per_frame\":8,\"wgpu_poll_interval_frames\":1,\"wgpu_poll_mode\":1,\"pixels_per_line\":38,\"title_update_ms\":200,\"resize_debounce_ms\":500,\"max_logic_steps_per_frame\":4,\"target_tickrate\":120.0,\"target_fps\":0.0}"
         }
         VisualValueType::RuntimeConfig => {
             "{\"egui\":true,\"wgpu_experimental_features\":false,\"wgpu_backend\":\"auto\",\"binding_backend\":\"auto\",\"fixed_timestep\":false}"
@@ -24762,6 +24762,7 @@ fn draw_runtime_tuning_editor(ui: &mut Ui, value: &mut String) -> bool {
     object.remove("pending_asset_bytes");
     let mut changed = false;
 
+    let mut task_worker_count = json_object_f64(&object, "task_worker_count", 0.0).max(0.0) as u64;
     let mut render_message_capacity =
         json_object_f64(&object, "render_message_capacity", 96.0).max(0.0) as u64;
     let mut asset_stream_queue_capacity =
@@ -24797,6 +24798,16 @@ fn draw_runtime_tuning_editor(ui: &mut Ui, value: &mut String) -> bool {
         wgpu_poll_mode = 1;
     }
 
+    ui.horizontal(|ui| {
+        ui.label("Task Worker Count");
+        changed |= ui
+            .add(
+                DragValue::new(&mut task_worker_count)
+                    .speed(1.0)
+                    .range(0..=u64::MAX),
+            )
+            .changed();
+    });
     ui.horizontal(|ui| {
         ui.label("Render Message Capacity");
         changed |= ui
@@ -24945,6 +24956,10 @@ fn draw_runtime_tuning_editor(ui: &mut Ui, value: &mut String) -> bool {
     });
 
     if changed {
+        object.insert(
+            "task_worker_count".to_string(),
+            JsonValue::Number(JsonNumber::from(task_worker_count)),
+        );
         object.insert(
             "render_message_capacity".to_string(),
             JsonValue::Number(JsonNumber::from(render_message_capacity)),

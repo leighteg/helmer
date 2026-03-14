@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use bevy_ecs::prelude::Component;
+use helmer_becs::ecs::prelude::Component;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicComponent {

@@ -1,0 +1,23 @@
+[package]
+name = "helmer_window"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helmer = { path = "../helmer" }
+helmer_input = { path = "../helmer_input" }
+glam = "0.30.9"
+parking_lot = "0.12.5"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+web-time = "1.1.0"
+winit = "0.30.12"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2.108"
+web-sys = { version = "0.3.85", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }

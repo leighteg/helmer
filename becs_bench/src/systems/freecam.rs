@@ -1,19 +1,14 @@
 use std::f32::consts::FRAC_PI_2;
 
-use bevy_ecs::{
+use glam::{DVec2, Quat, Vec3};
+use helmer_becs::ecs::{
     prelude::{Query, Res, With},
     system::Local,
 };
-use glam::{DVec2, Quat, Vec3};
 
-use helmer::{
-    provided::components::{Camera, Transform},
-    runtime::input_manager::{Axis, Button},
-};
-use helmer_becs::BevyInputManager;
+use helmer_becs::DeltaTime;
+use helmer_window::runtime::input_manager::{Axis, Button};
 use winit::{event::MouseButton, keyboard::KeyCode};
-
-use helmer_becs::{BevyActiveCamera, BevyCamera, BevyTransform, DeltaTime};
 
 //================================================================================
 // Helper Functions
@@ -49,9 +44,12 @@ pub struct FreecamState {
 
 pub fn freecam_system(
     mut state: Local<FreecamState>,
-    input: Res<BevyInputManager>,
+    input: Res<helmer_becs::InputManagerResource>,
     time: Res<DeltaTime>,
-    mut query: Query<(&mut BevyTransform, &mut BevyCamera), With<BevyActiveCamera>>,
+    mut query: Query<
+        (&mut helmer_becs::Transform, &mut helmer_becs::Camera),
+        With<helmer_becs::ActiveCamera>,
+    >,
 ) {
     // Initialize state if not set
     if state.speed == 0.0 {
@@ -128,8 +126,8 @@ pub fn freecam_system(
     }
 
     for (mut transform, mut camera) in query.iter_mut() {
-        let transform = &mut transform.0;
-        let camera = &mut camera.0;
+        let transform = &mut *transform;
+        let camera = &mut *camera;
 
         // Extract current yaw & pitch from rotation
         let (mut yaw, mut pitch) = extract_yaw_pitch(transform.rotation);

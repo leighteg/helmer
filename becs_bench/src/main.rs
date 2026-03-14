@@ -1,19 +1,18 @@
-use bevy_ecs::{
+use glam::{Quat, Vec3};
+use helmer_becs::ecs::{
     component::Component,
     name::Name,
     query::With,
     system::{Query, Res},
 };
-use glam::{Quat, Vec3};
-use helmer::provided::components::{ActiveCamera, Light, MeshAsset, MeshRenderer, Transform};
-#[cfg(target_arch = "wasm32")]
-use helmer::runtime::wasm_harness::WasmHarnessConfig;
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyLight, BevyMeshRenderer, BevyTransform, DeltaTime,
+    components::{ActiveCamera, Light, MeshAsset, MeshRenderer, Transform},
     helmer_becs_init_with_runtime,
     physics::components::{ColliderShape, DynamicRigidBody, FixedCollider},
     systems::scene_system::SceneRoot,
 };
+#[cfg(target_arch = "wasm32")]
+use helmer_window::runtime::wasm_harness::WasmHarnessConfig;
 
 use crate::systems::{
     config_toggle::config_toggle_system,
@@ -69,27 +68,18 @@ fn main() {
                 asset_server.add_mesh(plane_mesh.vertices.unwrap(), plane_mesh.indices);
 
             let camera_entity = world.spawn((
-                BevyTransform::default(),
-                BevyCamera::default(),
-                BevyActiveCamera { 0: ActiveCamera {} },
+                helmer_becs::Transform::default(),
+                helmer_becs::Camera::default(),
+                helmer_becs::ActiveCamera {},
             ));
 
             let ground_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(0.0, -5.0, 0.0),
-                        rotation: glam::Quat::default(),
-                        scale: glam::Vec3::from([500.0, 0.001, 500.0]),
-                    },
+                helmer_becs::Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::from([500.0, 0.001, 500.0]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer::new(
-                        plane_mesh_handle.id,
-                        basic_material_handle.id,
-                        false,
-                        false,
-                    ),
-                },
+                MeshRenderer::new(plane_mesh_handle.id, basic_material_handle.id, false, false),
                 ColliderShape::Cuboid,
                 FixedCollider {},
                 Name::new("ground plane"),
@@ -97,39 +87,31 @@ fn main() {
 
             let sun_rotation = Quat::from_euler(
                 glam::EulerRot::YXZ,
-                20.0f32.to_radians(),  // Y rotation - very slight side angle
-                -50.0f32.to_radians(), // X rotation - steeper downward angle
-                20.0f32.to_radians(),  // Z rotation - no roll
+                20.0f32.to_radians(),
+                -50.0f32.to_radians(),
+                20.0f32.to_radians(),
             );
 
             let sun_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(0.0, 0.0, 0.0),
-                        rotation: sun_rotation,
-                        scale: glam::Vec3::ONE,
-                    },
+                helmer_becs::Transform {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    rotation: sun_rotation,
+                    scale: glam::Vec3::ONE,
                 },
-                BevyLight {
-                    0: Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
-                },
+                Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
             ));
 
             let spin_cube_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([0.0, -4.5, 0.0]),
-                        rotation: Quat::default(),
-                        scale: Vec3::from_array([5.0, 1.0, 0.5]),
-                    },
+                helmer_becs::Transform {
+                    position: Vec3::from_array([0.0, -4.5, 0.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([5.0, 1.0, 0.5]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 SpinnerObject {},
                 ColliderShape::Cuboid,
@@ -138,20 +120,16 @@ fn main() {
             ));
 
             let l_wall_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([3.0, -4.0, 0.0]),
-                        rotation: Quat::default(),
-                        scale: Vec3::from_array([0.5, 5.0, 6.0]),
-                    },
+                helmer_becs::Transform {
+                    position: Vec3::from_array([3.0, -4.0, 0.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([0.5, 5.0, 6.0]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 ColliderShape::Cuboid,
                 FixedCollider {},
@@ -159,20 +137,16 @@ fn main() {
             ));
 
             let r_wall_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([-3.0, -4.0, 0.0]),
-                        rotation: Quat::default(),
-                        scale: Vec3::from_array([0.5, 5.0, 6.0]),
-                    },
+                helmer_becs::Transform {
+                    position: Vec3::from_array([-3.0, -4.0, 0.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([0.5, 5.0, 6.0]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 ColliderShape::Cuboid,
                 FixedCollider {},
@@ -180,20 +154,16 @@ fn main() {
             ));
 
             let t_wall_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([0.0, -4.0, 3.0]),
-                        rotation: Quat::default(),
-                        scale: Vec3::from_array([6.0, 5.0, 0.5]),
-                    },
+                helmer_becs::Transform {
+                    position: Vec3::from_array([0.0, -4.0, 3.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([6.0, 5.0, 0.5]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 ColliderShape::Cuboid,
                 FixedCollider {},
@@ -201,20 +171,16 @@ fn main() {
             ));
 
             let b_wall_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([0.0, -4.0, -3.0]),
-                        rotation: Quat::default(),
-                        scale: Vec3::from_array([6.0, 5.0, 0.5]),
-                    },
+                helmer_becs::Transform {
+                    position: Vec3::from_array([0.0, -4.0, -3.0]),
+                    rotation: Quat::default(),
+                    scale: Vec3::from_array([6.0, 5.0, 0.5]),
                 },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 ColliderShape::Cuboid,
                 FixedCollider {},
@@ -222,16 +188,12 @@ fn main() {
             ));
 
             let cube_entity = world.spawn((
-                BevyTransform {
-                    0: Transform::from_position([0.0, 0.0, 5.0]),
-                },
-                BevyMeshRenderer {
-                    0: MeshRenderer {
-                        mesh_id: cube_handle.id,
-                        material_id: basic_material_handle.id,
-                        casts_shadow: true,
-                        visible: true,
-                    },
+                Transform::from_position([0.0, 0.0, 5.0]),
+                MeshRenderer {
+                    mesh_id: cube_handle.id,
+                    material_id: basic_material_handle.id,
+                    casts_shadow: true,
+                    visible: true,
                 },
                 ColliderShape::Cuboid,
                 DynamicRigidBody { mass: 1.0 },
@@ -239,36 +201,30 @@ fn main() {
             ));
 
             let city_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(0.0, -5.0, 0.0),
-                        rotation: glam::Quat::default(),
-                        scale: glam::Vec3::from_array([3.0; 3]),
-                    },
+                helmer_becs::Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::from_array([3.0; 3]),
                 },
                 SceneRoot(city_scene_handle),
                 Name::new("city scene root"),
             ));
 
             let sponza_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(25.0, -4.0, 0.0),
-                        rotation: glam::Quat::default(),
-                        scale: glam::Vec3::ONE,
-                    },
+                helmer_becs::Transform {
+                    position: glam::Vec3::new(25.0, -4.0, 0.0),
+                    rotation: glam::Quat::default(),
+                    scale: glam::Vec3::ONE,
                 },
                 SceneRoot(sponza_scene_handle),
                 Name::new("sponza scene root"),
             ));
 
             let raptor_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(0.0, -5.0, 5.0),
-                        rotation: glam::Quat::from_rotation_y(90.0),
-                        scale: glam::Vec3::ONE,
-                    },
+                helmer_becs::Transform {
+                    position: glam::Vec3::new(0.0, -5.0, 5.0),
+                    rotation: glam::Quat::from_rotation_y(90.0),
+                    scale: glam::Vec3::ONE,
                 },
                 SceneRoot(ford_raptor_scene_handle),
                 Name::new("raptor scene root"),

@@ -1,23 +1,20 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use bevy_ecs::{
+use glam::Quat;
+use helmer_becs::ecs::{
     entity::Entity,
     resource::Resource,
     system::{Commands, ParamSet, Query, Res, ResMut},
 };
-use glam::Quat;
-use helmer::provided::components::Transform;
 use helmer_becs::{
-    BevyAssetServerParam, BevyInputManager, BevyTransform, DraggedFile,
+    DraggedFile,
+    components::Transform,
     systems::scene_system::SceneRoot,
     ui_integration::{UiResource, UiWindowSpec},
 };
 use helmer_ui::{DragValue, UiContext, UiTextAlign, UiTextStyle, label};
 use parking_lot::Mutex;
+use web_time::Instant;
 use winit::keyboard::KeyCode;
 
 const SCENE_LOADER_WINDOW_ID: &str = "scene_loader_window";
@@ -140,9 +137,12 @@ pub fn scene_loader_system(
     mut commands: Commands,
     ui_res: Res<UiResource>,
     mut dragged_file_res: ResMut<DraggedFile>,
-    asset_server: BevyAssetServerParam,
-    input_manager: Option<Res<BevyInputManager>>,
-    mut transform_queries: ParamSet<(Query<&BevyTransform>, Query<&mut BevyTransform>)>,
+    asset_server: helmer_becs::AssetServerParam,
+    input_manager: Option<Res<helmer_becs::InputManagerResource>>,
+    mut transform_queries: ParamSet<(
+        Query<&helmer_becs::Transform>,
+        Query<&mut helmer_becs::Transform>,
+    )>,
 ) {
     let mut viewport_width = 1280.0f32;
     let mut tab_pressed = false;
@@ -177,8 +177,8 @@ pub fn scene_loader_system(
                 }
             }
             SceneLoaderUiAction::SetTransform(entity, transform) => {
-                if let Ok(mut bevy_transform) = transform_queries.p1().get_mut(entity) {
-                    bevy_transform.0 = transform;
+                if let Ok(mut transform_component) = transform_queries.p1().get_mut(entity) {
+                    *transform_component = transform;
                 }
             }
             SceneLoaderUiAction::ClosedByChrome => {
@@ -210,7 +210,7 @@ pub fn scene_loader_system(
             let transform = transform_queries
                 .p0()
                 .get(scene.entity)
-                .map(|transform| transform.0)
+                .copied()
                 .unwrap_or_default();
             shared.scenes.push(SceneLoaderUiScene {
                 entity: scene.entity,
@@ -519,18 +519,13 @@ pub fn scene_loader_system(
 
 fn spawn_scene_from_path<'w>(
     commands: &mut Commands,
-    asset_server: &BevyAssetServerParam<'w>,
+    asset_server: &helmer_becs::AssetServerParam<'w>,
     scene_loader_res: &mut SceneLoaderResource,
     path: PathBuf,
 ) {
     let scene_handle = asset_server.0.lock().load_scene(path.clone());
 
-    let scene_root_entity = commands.spawn((
-        BevyTransform {
-            0: Transform::default(),
-        },
-        SceneRoot(scene_handle),
-    ));
+    let scene_root_entity = commands.spawn((Transform::default(), SceneRoot(scene_handle)));
 
     scene_loader_res.spawned_scenes.push(SpawnedScene {
         entity: scene_root_entity.id(),

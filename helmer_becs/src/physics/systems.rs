@@ -1,3 +1,4 @@
+use crate::components::Transform;
 use bevy_ecs::{
     prelude::{Entity, Local, Or, RemovedComponents, With, Without},
     query::Changed,
@@ -5,7 +6,6 @@ use bevy_ecs::{
 };
 use glam::{Quat, Vec3};
 use hashbrown::{HashMap, HashSet};
-use helmer::provided::components::Transform;
 use rapier3d::{
     control::{CharacterAutostep, CharacterLength, KinematicCharacterController},
     math::{Pose, Vector},
@@ -20,8 +20,8 @@ use rapier3d::{
 use tracing::warn;
 
 use crate::{
-    BevyAssetServer, BevyMeshRenderer, BevySkinnedMeshRenderer, BevySystemProfiler, BevyTransform,
-    DeltaTime,
+    BecsAssetServer, BecsAssetServerParam, BecsSystemProfiler, DeltaTime, MeshRenderer,
+    SkinnedMeshRenderer,
     physics::{
         components::{
             CharacterController, CharacterControllerInput, CharacterControllerOutput,
@@ -310,19 +310,19 @@ fn requested_lod_index(
 
 fn resolve_mesh_id(
     explicit_id: Option<usize>,
-    mesh_renderer: Option<&BevyMeshRenderer>,
-    skinned_renderer: Option<&BevySkinnedMeshRenderer>,
+    mesh_renderer: Option<&MeshRenderer>,
+    skinned_renderer: Option<&SkinnedMeshRenderer>,
 ) -> Option<usize> {
     explicit_id
-        .or_else(|| mesh_renderer.map(|renderer| renderer.0.mesh_id))
-        .or_else(|| skinned_renderer.map(|renderer| renderer.0.mesh_id))
+        .or_else(|| mesh_renderer.map(|renderer| renderer.mesh_id))
+        .or_else(|| skinned_renderer.map(|renderer| renderer.mesh_id))
 }
 
 fn mesh_geometry_for_collider(
     mesh_id: usize,
     lod: MeshColliderLod,
     scale: Vec3,
-    asset_server: Option<&BevyAssetServer>,
+    asset_server: Option<&BecsAssetServer>,
 ) -> Option<(Vec<Vector>, Vec<[u32; 3]>)> {
     let asset_server = asset_server?;
     let mesh = asset_server.0.lock().get_mesh(mesh_id)?;
@@ -362,9 +362,9 @@ fn mesh_geometry_for_collider(
 fn build_shared_shape(
     shape: ColliderShape,
     scale: Vec3,
-    mesh_renderer: Option<&BevyMeshRenderer>,
-    skinned_renderer: Option<&BevySkinnedMeshRenderer>,
-    asset_server: Option<&BevyAssetServer>,
+    mesh_renderer: Option<&MeshRenderer>,
+    skinned_renderer: Option<&SkinnedMeshRenderer>,
+    asset_server: Option<&BecsAssetServer>,
 ) -> Option<SharedShape> {
     let scale = sanitize_scale(scale);
 
@@ -427,9 +427,9 @@ fn build_collider(
     shape: ColliderShape,
     transform: Transform,
     collider_props: ColliderProperties,
-    mesh_renderer: Option<&BevyMeshRenderer>,
-    skinned_renderer: Option<&BevySkinnedMeshRenderer>,
-    asset_server: Option<&BevyAssetServer>,
+    mesh_renderer: Option<&MeshRenderer>,
+    skinned_renderer: Option<&SkinnedMeshRenderer>,
+    asset_server: Option<&BecsAssetServer>,
 ) -> Option<ColliderBuilder> {
     let requested_shape = build_shared_shape(
         shape,
@@ -537,9 +537,9 @@ fn insert_physics_for_entity(
     fixed: bool,
     body_props: RigidBodyProperties,
     collider_props: ColliderProperties,
-    mesh_renderer: Option<&BevyMeshRenderer>,
-    skinned_renderer: Option<&BevySkinnedMeshRenderer>,
-    asset_server: Option<&BevyAssetServer>,
+    mesh_renderer: Option<&MeshRenderer>,
+    skinned_renderer: Option<&SkinnedMeshRenderer>,
+    asset_server: Option<&BecsAssetServer>,
 ) -> Option<PhysicsHandle> {
     let body_kind = resolve_body_kind(dynamic, kinematic, fixed)?;
 
@@ -746,12 +746,12 @@ pub fn sync_entities_to_physics_system(
     mut commands: Commands,
     mut phys: ResMut<PhysicsResource>,
     mut previous_defaults: Local<Option<PhysicsWorldDefaults>>,
-    asset_server: Option<Res<BevyAssetServer>>,
+    asset_server: Option<BecsAssetServerParam<'_>>,
     world_defaults_query: Query<(Entity, &PhysicsWorldDefaults)>,
     create_query: Query<
         (
             Entity,
-            &BevyTransform,
+            &Transform,
             &ColliderShape,
             Option<&DynamicRigidBody>,
             Option<&KinematicRigidBody>,
@@ -760,8 +760,8 @@ pub fn sync_entities_to_physics_system(
             Option<&RigidBodyPropertyInheritance>,
             Option<&ColliderProperties>,
             Option<&ColliderPropertyInheritance>,
-            Option<&BevyMeshRenderer>,
-            Option<&BevySkinnedMeshRenderer>,
+            Option<&MeshRenderer>,
+            Option<&SkinnedMeshRenderer>,
         ),
         (
             Without<PhysicsHandle>,
@@ -792,7 +792,7 @@ pub fn sync_entities_to_physics_system(
         Entity,
         (
             With<PhysicsHandle>,
-            Changed<BevyTransform>,
+            Changed<Transform>,
             Or<(With<FixedCollider>, With<KinematicRigidBody>)>,
         ),
     >,
@@ -803,7 +803,7 @@ pub fn sync_entities_to_physics_system(
     handle_query: Query<
         (
             Entity,
-            &BevyTransform,
+            &Transform,
             Option<&ColliderShape>,
             Option<&DynamicRigidBody>,
             Option<&KinematicRigidBody>,
@@ -812,12 +812,12 @@ pub fn sync_entities_to_physics_system(
             Option<&RigidBodyPropertyInheritance>,
             Option<&ColliderProperties>,
             Option<&ColliderPropertyInheritance>,
-            Option<&BevyMeshRenderer>,
-            Option<&BevySkinnedMeshRenderer>,
+            Option<&MeshRenderer>,
+            Option<&SkinnedMeshRenderer>,
         ),
         With<PhysicsHandle>,
     >,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -945,7 +945,7 @@ pub fn sync_entities_to_physics_system(
                 if let Some(handle) = insert_physics_for_entity(
                     &mut phys,
                     entity,
-                    transform.0,
+                    *transform,
                     shape,
                     dynamic.copied(),
                     kinematic.copied(),
@@ -991,7 +991,7 @@ pub fn sync_entities_to_physics_system(
         if let Some(handle) = insert_physics_for_entity(
             &mut phys,
             entity,
-            transform.0,
+            *transform,
             *shape,
             dynamic.copied(),
             kinematic.copied(),
@@ -1010,13 +1010,13 @@ pub fn sync_entities_to_physics_system(
 pub fn sync_transforms_to_physics_system(
     mut phys: ResMut<PhysicsResource>,
     query: Query<
-        (&PhysicsHandle, &BevyTransform, Option<&KinematicRigidBody>),
+        (&PhysicsHandle, &Transform, Option<&KinematicRigidBody>),
         (
-            Changed<BevyTransform>,
+            Changed<Transform>,
             Or<(With<FixedCollider>, With<KinematicRigidBody>)>,
         ),
     >,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1030,7 +1030,7 @@ pub fn sync_transforms_to_physics_system(
 
     for (handle, transform, kinematic) in query.iter() {
         if let Some(rigid_body) = phys.rigid_body_set.get_mut(handle.rigid_body) {
-            let iso = build_isometry(transform.0.position, transform.0.rotation);
+            let iso = build_isometry(transform.position, transform.rotation);
 
             if matches!(kinematic, Some(k) if k.mode == KinematicMode::PositionBased) {
                 rigid_body.set_next_kinematic_position(iso);
@@ -1044,7 +1044,7 @@ pub fn sync_transforms_to_physics_system(
 pub fn apply_persistent_forces_system(
     mut phys: ResMut<PhysicsResource>,
     query: Query<(&PhysicsHandle, &RigidBodyForces)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1090,7 +1090,7 @@ pub fn apply_persistent_forces_system(
 pub fn apply_transient_forces_system(
     mut phys: ResMut<PhysicsResource>,
     mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyTransientForces)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1140,7 +1140,7 @@ pub fn apply_transient_forces_system(
 pub fn apply_queued_impulses_system(
     mut phys: ResMut<PhysicsResource>,
     mut query: Query<(Option<&PhysicsHandle>, &mut RigidBodyImpulseQueue)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1199,7 +1199,7 @@ pub fn sync_joints_to_physics_system(
     mut phys: ResMut<PhysicsResource>,
     changed_query: Query<(Entity, &PhysicsJoint), Changed<PhysicsJoint>>,
     all_query: Query<(Entity, &PhysicsJoint)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1299,7 +1299,7 @@ pub fn character_controller_system(
         &PhysicsHandle,
         &mut CharacterControllerOutput,
     )>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1515,7 +1515,7 @@ pub fn character_controller_system(
 pub fn physics_step_system(
     mut phys: ResMut<PhysicsResource>,
     time: Res<DeltaTime>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1556,8 +1556,8 @@ pub fn physics_step_system(
 
 pub fn sync_physics_to_entities_system(
     phys: Res<PhysicsResource>,
-    mut query: Query<(&PhysicsHandle, &mut BevyTransform)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    mut query: Query<(&PhysicsHandle, &mut Transform)>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1572,7 +1572,7 @@ pub fn sync_physics_to_entities_system(
     for (handle, mut transform) in query.iter_mut() {
         if let Some(rigid_body) = phys.rigid_body_set.get(handle.rigid_body) {
             if rigid_body.is_dynamic() || rigid_body.is_kinematic() {
-                let transform = &mut transform.0;
+                let transform = &mut *transform;
                 let rb_pos = rigid_body.translation();
                 let rb_rot = rigid_body.rotation();
 
@@ -1591,9 +1591,9 @@ pub fn sync_physics_to_entities_system(
 
 pub fn physics_scene_query_system(
     phys: Res<PhysicsResource>,
-    asset_server: Option<Res<BevyAssetServer>>,
-    mesh_query: Query<&BevyMeshRenderer>,
-    skinned_query: Query<&BevySkinnedMeshRenderer>,
+    asset_server: Option<BecsAssetServerParam<'_>>,
+    mesh_query: Query<&MeshRenderer>,
+    skinned_query: Query<&SkinnedMeshRenderer>,
     mut ray_query: Query<(Entity, &PhysicsRayCast, &mut PhysicsRayCastHit)>,
     mut point_query: Query<(
         Entity,
@@ -1601,7 +1601,7 @@ pub fn physics_scene_query_system(
         &mut PhysicsPointProjectionHit,
     )>,
     mut shape_query: Query<(Entity, &PhysicsShapeCast, &mut PhysicsShapeCastHit)>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -1722,7 +1722,7 @@ pub fn cleanup_physics_system(
     mut phys: ResMut<PhysicsResource>,
     query: Query<Entity, With<PhysicsHandle>>,
     mut local_state: Local<CleanupState>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler

@@ -1,14 +1,13 @@
 use std::sync::{Arc, atomic::Ordering};
 
+use crate::components::{ActiveCamera, Camera, Light, LightType, Transform};
 use egui::ComboBox;
-use helmer::{
-    graphics::{
-        common::{config::RenderConfig, renderer::ShaderConstants},
-        render_graphs::{graph_templates, template_for_graph},
-    },
-    provided::components::{ActiveCamera, Camera, Light, LightType, Transform},
-    runtime::{config::RuntimeConfig, runtime::PerformanceMetrics},
+use helmer_render::graphics::{
+    common::{config::RenderConfig, renderer::ShaderConstants},
+    render_graphs::{graph_templates, template_for_graph},
 };
+use helmer_render::runtime::RuntimeConfig;
+use helmer_window::runtime::runtime::PerformanceMetrics;
 
 use crate::{
     ecs::ecs_core::ECSCore, egui_integration::EguiResource,

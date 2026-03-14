@@ -9,8 +9,8 @@ use wasmparser::{MemoryType, Payload, TableType, TypeRef, ValType};
 const DEFAULT_MOUNT_ID: &str = "helmer-root";
 const DEFAULT_CANVAS_ID: &str = "helmer-canvas";
 const TEMPLATE_DIR: &str = "web/template";
-const WORKER_PACKAGE: &str = "helmer";
-const WORKER_BIN: &str = "helmer_asset_worker";
+const WORKER_PACKAGE: &str = "helmer_asset";
+const WORKER_OUTPUT_MODULE: &str = "helmer_asset_worker";
 const WORKER_FEATURE: &str = "asset-worker";
 
 fn main() -> Result<()> {
@@ -100,6 +100,8 @@ fn cmd_web(args: Vec<String>) -> Result<()> {
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 
+    ensure_wasm_bindgen_cli_version(&root)?;
+
     build_wasm(
         &root,
         &package,
@@ -108,11 +110,10 @@ fn cmd_web(args: Vec<String>) -> Result<()> {
         features.clone(),
         no_default_features,
     )?;
-    let worker_features = append_feature(features.clone(), WORKER_FEATURE);
-    build_wasm(
+    let worker_features = append_feature(None, WORKER_FEATURE);
+    build_wasm_lib(
         &root,
         WORKER_PACKAGE,
-        WORKER_BIN,
         &profile,
         worker_features,
         no_default_features,
@@ -123,7 +124,7 @@ fn cmd_web(args: Vec<String>) -> Result<()> {
         bail!("wasm output missing: {}", wasm_path.display());
     }
 
-    let worker_wasm_path = wasm_output_path(&root, WORKER_BIN, &profile);
+    let worker_wasm_path = wasm_lib_output_path(&root, WORKER_PACKAGE, &profile);
     if !worker_wasm_path.exists() {
         bail!("wasm worker output missing: {}", worker_wasm_path.display());
     }
@@ -133,18 +134,17 @@ fn cmd_web(args: Vec<String>) -> Result<()> {
         &root,
         &worker_wasm_path,
         &out_dir,
-        WORKER_BIN,
+        WORKER_OUTPUT_MODULE,
         profile.is_debug(),
     )?;
     patch_env_imports(&out_dir, &bin)?;
-    patch_env_imports(&out_dir, WORKER_BIN)?;
-    patch_worker_bridge_registration(&out_dir, &bin)?;
+    patch_env_imports(&out_dir, WORKER_OUTPUT_MODULE)?;
     write_web_template(
         &root,
         &out_dir,
         title.as_deref().unwrap_or(&bin),
         &bin,
-        WORKER_BIN,
+        WORKER_OUTPUT_MODULE,
     )?;
 
     for asset in assets {
@@ -218,11 +218,59 @@ fn build_wasm(
     Ok(())
 }
 
+fn build_wasm_lib(
+    root: &Path,
+    package: &str,
+    profile: &BuildProfile,
+    features: Option<String>,
+    no_default_features: bool,
+) -> Result<()> {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(root);
+    cmd.arg("build")
+        .arg("-p")
+        .arg(package)
+        .arg("--lib")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown");
+
+    match profile {
+        BuildProfile::Release => {
+            cmd.arg("--release");
+        }
+        BuildProfile::Debug => {}
+        BuildProfile::Custom(name) => {
+            cmd.arg("--profile").arg(name);
+        }
+    }
+
+    if let Some(features) = features {
+        cmd.arg("--features").arg(features);
+    }
+    if no_default_features {
+        cmd.arg("--no-default-features");
+    }
+
+    let status = cmd.status().context("failed to spawn cargo build")?;
+    if !status.success() {
+        bail!("cargo build failed with status {}", status);
+    }
+    Ok(())
+}
+
 fn wasm_output_path(root: &Path, bin: &str, profile: &BuildProfile) -> PathBuf {
     root.join("target")
         .join("wasm32-unknown-unknown")
         .join(profile.dir_name())
         .join(format!("{}.wasm", bin))
+}
+
+fn wasm_lib_output_path(root: &Path, package: &str, profile: &BuildProfile) -> PathBuf {
+    let crate_name = package.replace('-', "_");
+    root.join("target")
+        .join("wasm32-unknown-unknown")
+        .join(profile.dir_name())
+        .join(format!("{}.wasm", crate_name))
 }
 
 fn run_wasm_bindgen(
@@ -257,6 +305,98 @@ fn run_wasm_bindgen(
     Ok(())
 }
 
+fn ensure_wasm_bindgen_cli_version(root: &Path) -> Result<()> {
+    let expected = expected_wasm_bindgen_version(root)?;
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    let installed = installed_wasm_bindgen_version(root)?;
+    let Some(installed) = installed else {
+        bail!(
+            "wasm-bindgen-cli is not installed. install the matching version with: \
+cargo install wasm-bindgen-cli --locked --version {}",
+            expected
+        );
+    };
+
+    if installed != expected {
+        bail!(
+            "wasm-bindgen-cli version {} does not match workspace wasm-bindgen {}. \
+install the matching CLI with: cargo install wasm-bindgen-cli --locked --version {}",
+            installed,
+            expected,
+            expected
+        );
+    }
+
+    Ok(())
+}
+
+fn installed_wasm_bindgen_version(root: &Path) -> Result<Option<String>> {
+    let output = Command::new("wasm-bindgen")
+        .current_dir(root)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("failed to run wasm-bindgen --version"),
+    };
+
+    if !output.status.success() {
+        bail!(
+            "failed to run wasm-bindgen --version (status {})",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout
+        .split_whitespace()
+        .find(|token| token.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+        .map(|token| token.trim().to_string());
+    Ok(version)
+}
+
+fn expected_wasm_bindgen_version(root: &Path) -> Result<Option<String>> {
+    let lock_path = root.join("Cargo.lock");
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+
+    let lock_contents = fs::read_to_string(&lock_path)
+        .with_context(|| format!("failed to read {}", lock_path.display()))?;
+
+    let mut in_package = false;
+    let mut package_name: Option<&str> = None;
+    for line in lock_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[package]]" {
+            in_package = true;
+            package_name = None;
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(name) = trimmed.strip_prefix("name = \"") {
+            package_name = Some(name.trim_end_matches('"'));
+            continue;
+        }
+        if package_name == Some("wasm-bindgen")
+            && let Some(version) = trimmed.strip_prefix("version = \"")
+        {
+            return Ok(Some(version.trim_end_matches('"').to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
 fn patch_env_imports(out_dir: &Path, module: &str) -> Result<()> {
     let js_path = out_dir.join(format!("{}.js", module));
     let wasm_path = out_dir.join(format!("{}_bg.wasm", module));
@@ -269,6 +409,7 @@ fn patch_env_imports(out_dir: &Path, module: &str) -> Result<()> {
     let (patched_js, needs_env) = rewrite_env_import(&js_source);
 
     if needs_env {
+        let patched_js = inject_env_wasm_exports_hook(&patched_js);
         fs::write(&js_path, patched_js)
             .with_context(|| format!("failed to write {}", js_path.display()))?;
         let env_imports = collect_env_imports(&wasm_path)?;
@@ -276,73 +417,6 @@ fn patch_env_imports(out_dir: &Path, module: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn patch_worker_bridge_registration(out_dir: &Path, module: &str) -> Result<()> {
-    let js_path = out_dir.join(format!("{}.js", module));
-    if !js_path.exists() {
-        return Ok(());
-    }
-
-    let source = fs::read_to_string(&js_path)
-        .with_context(|| format!("failed to read {}", js_path.display()))?;
-    let mut patched = source.clone();
-    let mut updated = false;
-
-    if !patched.contains("registerHelmerWorkerBridge") {
-        if let Some(new_source) = inject_worker_bridge_import(&patched) {
-            patched = new_source;
-            updated = true;
-        }
-    }
-
-    let has_register = patched.contains("registerHelmerWorkerBridge");
-    if has_register
-        && patched.contains("wasm.__wbindgen_start();")
-        && !patched.contains("registerHelmerWorkerBridge(wasm);")
-    {
-        patched = patched.replacen(
-            "wasm.__wbindgen_start();",
-            "wasm.__wbindgen_start();\n    registerHelmerWorkerBridge(wasm);",
-            1,
-        );
-        updated = true;
-    }
-
-    if updated {
-        fs::write(&js_path, patched)
-            .with_context(|| format!("failed to write {}", js_path.display()))?;
-    }
-
-    Ok(())
-}
-
-fn inject_worker_bridge_import(source: &str) -> Option<String> {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with("import {") || !line.contains("worker_bridge.js") {
-            continue;
-        }
-        if line.contains("registerHelmerWorkerBridge") {
-            return None;
-        }
-        let start = line.find('{')?;
-        let end = line.find('}')?;
-        let prefix = &line[..start + 1];
-        let suffix = &line[end..];
-        let list = &line[start + 1..end];
-        let mut items: Vec<&str> = list
-            .split(',')
-            .map(|item| item.trim())
-            .filter(|item| !item.is_empty())
-            .collect();
-        items.push("registerHelmerWorkerBridge");
-        let new_list = items.join(", ");
-        let new_line = format!("{} {} {}", prefix, new_list, suffix);
-        let updated = source.replacen(line, &new_line, 1);
-        return Some(updated);
-    }
-    None
 }
 
 fn rewrite_env_import(source: &str) -> (String, bool) {
@@ -382,6 +456,32 @@ fn rewrite_env_import(source: &str) -> (String, bool) {
     }
 
     (output, needs_env)
+}
+
+fn inject_env_wasm_exports_hook(source: &str) -> String {
+    if !source.contains("function __wbg_finalize_init(instance, module)") {
+        return source.to_string();
+    }
+
+    let mut output = source.replace(
+        "function __wbg_finalize_init(instance, module) {",
+        "function __wbg_finalize_init(instance, module, imports) {",
+    );
+
+    if !output.contains("envModule.__set_wasm_exports(wasm);") {
+        output = output.replacen(
+            "    wasmModule = module;\n",
+            "    wasmModule = module;\n    const envModule = imports && imports.env;\n    if (envModule && typeof envModule.__set_wasm_exports === \"function\") {\n        envModule.__set_wasm_exports(wasm);\n    }\n",
+            1,
+        );
+    }
+
+    output = output.replace(
+        "return __wbg_finalize_init(instance, module);",
+        "return __wbg_finalize_init(instance, module, imports);",
+    );
+
+    output
 }
 
 #[derive(Clone, Debug)]
@@ -436,12 +536,23 @@ fn collect_env_imports(wasm_path: &Path) -> Result<Vec<EnvImport>> {
 
 fn write_env_module(out_dir: &Path, imports: &[EnvImport]) -> Result<()> {
     let env_path = out_dir.join("env.js");
-    let mut output = String::from("const env = {\n");
+    let mut output = String::from(include_str!("js/env_prelude.js"));
 
     for import in imports {
         let key = js_string(&import.name);
         let value = match &import.kind {
-            EnvImportKind::Func => "(..._args) => 0".to_string(),
+            EnvImportKind::Func => match import.name.as_str() {
+                "_Znwm" | "malloc" => "env_malloc".to_string(),
+                "_ZdlPv" | "free" => "env_free".to_string(),
+                "realloc" => "env_realloc".to_string(),
+                "abort" => "env_abort".to_string(),
+                "__assert_fail" => "env_assert_fail".to_string(),
+                "fprintf" | "sprintf" => "env_printf".to_string(),
+                "fputs" => "env_fputs".to_string(),
+                "fwrite" => "env_fwrite".to_string(),
+                "basisu_encoder_init" => "basisu_encoder_init".to_string(),
+                _ => "(..._args) => 0".to_string(),
+            },
             EnvImportKind::Global(val_type, mutable) => {
                 let (value_type, init) = js_global_init(*val_type)?;
                 format!(

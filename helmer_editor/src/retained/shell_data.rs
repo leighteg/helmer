@@ -1,9 +1,9 @@
-use bevy_ecs::{entity::Entity, name::Name, prelude::World};
+use helmer_becs::ecs::{entity::Entity, name::Name, prelude::World};
 use helmer_becs::systems::scene_system::{EntityParent, SceneChild, SceneRoot};
 use helmer_becs::{
-    AudioBackendResource, BevyActiveCamera, BevyAudioEmitter, BevyAudioListener, BevyCamera,
-    BevyLight, BevyMeshRenderer, BevySkinnedMeshRenderer, BevySpriteRenderer, BevySystemProfiler,
-    BevyText2d, BevyTransform, provided::ui::inspector::InspectorSelectedEntityResource,
+    ActiveCamera, AudioBackendResource, AudioEmitter, AudioListener, BecsSystemProfiler, Camera,
+    Light, MeshRenderer, SkinnedMeshRenderer, SpriteRenderer, Text2d, Transform,
+    components::LightType, provided::ui::inspector::InspectorSelectedEntityResource,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -123,7 +123,7 @@ pub fn build_viewport_pane_data(
     for entity_ref in world.iter_entities() {
         entity_count += 1;
         let entity = entity_ref.id();
-        if world.get::<BevyCamera>(entity).is_some() {
+        if world.get::<Camera>(entity).is_some() {
             camera_count += 1;
             if world.get::<RetainedEditorViewportCamera>(entity).is_some()
                 && editor_camera_entity.is_none()
@@ -169,12 +169,12 @@ pub fn build_viewport_pane_data(
         .iter_entities()
         .map(|entity_ref| entity_ref.id())
         .filter(|entity| {
-            world.get::<BevyCamera>(*entity).is_some()
-                && world.get::<BevyTransform>(*entity).is_some()
+            world.get::<Camera>(*entity).is_some()
+                && world.get::<Transform>(*entity).is_some()
                 && Some(*entity) != editor_camera_entity
                 && world.get::<RetainedEditorViewportCamera>(*entity).is_none()
         })
-        .max_by_key(|entity| world.get::<BevyActiveCamera>(*entity).is_some() as u8)
+        .max_by_key(|entity| world.get::<ActiveCamera>(*entity).is_some() as u8)
         .map(|entity| entity_display_label(world, entity));
 
     if mode == ViewportPaneMode::Play && play_mode_active {
@@ -191,8 +191,8 @@ pub fn build_viewport_pane_data(
                 .get_resource::<InspectorSelectedEntityResource>()
                 .and_then(|selected| selected.0)
                 .filter(|entity| {
-                    world.get::<BevyCamera>(*entity).is_some()
-                        && world.get::<BevyTransform>(*entity).is_some()
+                    world.get::<Camera>(*entity).is_some()
+                        && world.get::<Transform>(*entity).is_some()
                         && Some(*entity) != editor_camera_entity
                 })
         })
@@ -201,8 +201,8 @@ pub fn build_viewport_pane_data(
     let preview_aspect_ratio = preview_entity
         .and_then(|entity| {
             world
-                .get::<BevyCamera>(entity)
-                .map(|camera| camera.0.aspect_ratio)
+                .get::<Camera>(entity)
+                .map(|camera| camera.aspect_ratio)
         })
         .filter(|aspect| aspect.is_finite() && *aspect > 0.01)
         .unwrap_or(16.0 / 9.0);
@@ -266,17 +266,17 @@ pub fn build_history_pane_data(world: &World) -> HistoryPaneData {
 pub fn build_audio_mixer_pane_data(world: &World) -> AudioMixerPaneData {
     let enabled = world
         .get_resource::<AudioBackendResource>()
-        .map(|audio| audio.0.enabled())
+        .map(|audio| audio.enabled())
         .unwrap_or(false);
 
     let mut emitter_count = 0usize;
     let mut listener_count = 0usize;
     for entity_ref in world.iter_entities() {
         let entity = entity_ref.id();
-        if world.get::<BevyAudioEmitter>(entity).is_some() {
+        if world.get::<AudioEmitter>(entity).is_some() {
             emitter_count += 1;
         }
-        if world.get::<BevyAudioListener>(entity).is_some() {
+        if world.get::<AudioListener>(entity).is_some() {
             listener_count += 1;
         }
     }
@@ -289,11 +289,11 @@ pub fn build_audio_mixer_pane_data(world: &World) -> AudioMixerPaneData {
 }
 
 pub fn build_profiler_pane_data(world: &World) -> ProfilerPaneData {
-    let Some(profiler) = world.get_resource::<BevySystemProfiler>() else {
+    let Some(profiler) = world.get_resource::<BecsSystemProfiler>() else {
         return ProfilerPaneData::default();
     };
 
-    let mut snapshots = profiler.0.snapshots();
+    let mut snapshots = profiler.snapshots();
     snapshots.sort_by(|lhs, rhs| rhs.avg_us.total_cmp(&lhs.avg_us));
 
     let rows = snapshots
@@ -311,7 +311,7 @@ pub fn build_profiler_pane_data(world: &World) -> ProfilerPaneData {
         .collect::<Vec<_>>();
 
     ProfilerPaneData {
-        enabled: profiler.0.enabled(),
+        enabled: profiler.enabled(),
         rows,
     }
 }
@@ -342,7 +342,7 @@ pub fn build_hierarchy_pane_data(world: &World) -> HierarchyPaneData {
     let selected = world
         .get_resource::<InspectorSelectedEntityResource>()
         .and_then(|selected| selected.0);
-    let expanded = world
+    let (expanded_entities, hierarchy_scroll) = world
         .get_resource::<EditorRetainedPaneInteractionState>()
         .map(|state| (state.hierarchy_expanded.clone(), state.hierarchy_scroll))
         .unwrap_or_default();
@@ -387,7 +387,7 @@ pub fn build_hierarchy_pane_data(world: &World) -> HierarchyPaneData {
         let has_children = children
             .get(&entity)
             .is_some_and(|children| !children.is_empty());
-        let is_expanded = expanded.0.contains(&entity);
+        let is_expanded = expanded_entities.contains(&entity);
         entries.push(HierarchyPaneEntry {
             entity,
             label: hierarchy_entity_label(world, entity),
@@ -411,7 +411,7 @@ pub fn build_hierarchy_pane_data(world: &World) -> HierarchyPaneData {
     HierarchyPaneData {
         selected,
         entries,
-        scroll: expanded.1,
+        scroll: hierarchy_scroll,
     }
 }
 
@@ -437,8 +437,8 @@ pub fn build_inspector_pane_data(
         ..InspectorPaneData::default()
     };
 
-    if let Some(transform) = world.get::<BevyTransform>(entity) {
-        let transform = transform.0;
+    if let Some(transform) = world.get::<Transform>(entity) {
+        let transform = *transform;
         data.has_transform = true;
         data.transform_position = [
             transform.position.x,
@@ -449,22 +449,22 @@ pub fn build_inspector_pane_data(
         data.transform_rotation = [rot_x.to_degrees(), rot_y.to_degrees(), rot_z.to_degrees()];
         data.transform_scale = [transform.scale.x, transform.scale.y, transform.scale.z];
     }
-    if let Some(camera) = world.get::<BevyCamera>(entity) {
-        let camera = camera.0;
+    if let Some(camera) = world.get::<Camera>(entity) {
+        let camera = *camera;
         data.has_camera = true;
-        data.camera_active = world.get::<helmer_becs::BevyActiveCamera>(entity).is_some();
+        data.camera_active = world.get::<helmer_becs::ActiveCamera>(entity).is_some();
         data.camera_fov_deg = camera.fov_y_rad.to_degrees();
         data.camera_aspect_ratio = camera.aspect_ratio;
         data.camera_near = camera.near_plane;
         data.camera_far = camera.far_plane;
     }
-    if let Some(light) = world.get::<BevyLight>(entity) {
-        let light = light.0;
+    if let Some(light) = world.get::<Light>(entity) {
+        let light = *light;
         data.has_light = true;
         data.light_kind = match light.light_type {
-            helmer::provided::components::LightType::Directional => InspectorLightKind::Directional,
-            helmer::provided::components::LightType::Point => InspectorLightKind::Point,
-            helmer::provided::components::LightType::Spot { .. } => InspectorLightKind::Spot,
+            LightType::Directional => InspectorLightKind::Directional,
+            LightType::Point => InspectorLightKind::Point,
+            LightType::Spot { .. } => InspectorLightKind::Spot,
         };
         data.light_color = [light.color.x, light.color.y, light.color.z];
         data.light_color_hsv = rgb_to_hsv(data.light_color);
@@ -476,12 +476,12 @@ pub fn build_inspector_pane_data(
         }
         data.light_intensity = light.intensity;
         data.light_spot_angle_deg = match light.light_type {
-            helmer::provided::components::LightType::Spot { angle } => angle.to_degrees(),
+            LightType::Spot { angle } => angle.to_degrees(),
             _ => 45.0,
         };
     }
-    if let Some(mesh_renderer) = world.get::<BevyMeshRenderer>(entity) {
-        let mesh_renderer = mesh_renderer.0;
+    if let Some(mesh_renderer) = world.get::<MeshRenderer>(entity) {
+        let mesh_renderer = *mesh_renderer;
         data.has_mesh_renderer = true;
         data.mesh_id = mesh_renderer.mesh_id;
         data.material_id = mesh_renderer.material_id;
@@ -776,26 +776,26 @@ fn hierarchy_entity_label(world: &World, entity: Entity) -> String {
         .unwrap_or_else(|| format!("Entity {}", entity.to_bits()));
 
     let mut tags = Vec::new();
-    if world.get::<BevyCamera>(entity).is_some() {
-        if world.get::<BevyActiveCamera>(entity).is_some() {
+    if world.get::<Camera>(entity).is_some() {
+        if world.get::<ActiveCamera>(entity).is_some() {
             tags.push("Camera*");
         } else {
             tags.push("Camera");
         }
     }
-    if world.get::<BevyLight>(entity).is_some() {
+    if world.get::<Light>(entity).is_some() {
         tags.push("Light");
     }
-    if world.get::<BevyMeshRenderer>(entity).is_some() {
+    if world.get::<MeshRenderer>(entity).is_some() {
         tags.push("Mesh");
     }
-    if world.get::<BevySkinnedMeshRenderer>(entity).is_some() {
+    if world.get::<SkinnedMeshRenderer>(entity).is_some() {
         tags.push("Skinned");
     }
-    if world.get::<BevySpriteRenderer>(entity).is_some() {
+    if world.get::<SpriteRenderer>(entity).is_some() {
         tags.push("Sprite");
     }
-    if world.get::<BevyText2d>(entity).is_some() {
+    if world.get::<Text2d>(entity).is_some() {
         tags.push("Text2D");
     }
     if world.get::<SceneRoot>(entity).is_some() {

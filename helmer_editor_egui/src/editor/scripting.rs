@@ -12,10 +12,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use bevy_ecs::name::Name;
-use bevy_ecs::prelude::{Component, Entity, Resource, World};
-use bevy_ecs::query::With;
 use glam::{DVec2, Quat, Vec2, Vec3};
+use helmer_becs::ecs::name::Name;
+use helmer_becs::ecs::prelude::{Component, Entity, Resource, World};
+use helmer_becs::ecs::query::With;
 use helmer_editor_runtime::scripting as runtime_scripting;
 use helmer_script_sdk::{
     EntityId as RustScriptEntityId, Quat as RustScriptQuat, SCRIPT_API_ABI_VERSION,
@@ -30,23 +30,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use winit::{event::MouseButton, keyboard::KeyCode};
 
-use helmer::audio::{AudioBus, AudioPlaybackState};
-use helmer::graphics::{
-    backend::binding_backend::BindingBackendChoice,
-    common::renderer::{
-        RenderControl, RenderMessage, SpriteAnimationPlayback, SpriteBlendMode,
-        SpriteSheetAnimation, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle, WgpuBackend,
-    },
-    graph::definition::resource_id::ResourceKind,
-    render_graphs::{graph_templates, template_for_graph},
-};
-use helmer::provided::components::{
-    AudioEmitter, AudioListener, EntityFollower, Light, LightType, LookAt, MeshRenderer, Spline,
-    SplineFollower, SplineMode, SpriteImageSequence, SpriteRenderer, Text2d,
-};
-use helmer::runtime::asset_server::{Handle, Material, Mesh};
-use helmer::runtime::input_manager::InputManager;
-use helmer::runtime::runtime::{RuntimeCursorGrabMode, RuntimeWindowTitleMode};
+use helmer_asset::runtime::asset_server::{Handle, Material, Mesh};
+use helmer_audio::{AudioBus, AudioPlaybackState};
 use helmer_becs::physics::components::{
     CharacterController, CharacterControllerInput, CharacterControllerOutput, ColliderProperties,
     ColliderPropertyInheritance, ColliderShape, DynamicRigidBody, FixedCollider, KinematicMode,
@@ -63,13 +48,24 @@ use helmer_becs::systems::scene_system::{
     EntityParent, SceneChild, SceneRoot, SceneSpawnedChildren,
 };
 use helmer_becs::{
-    AudioBackendResource, BevyActiveCamera, BevyAnimator, BevyAssetServer, BevyAudioEmitter,
-    BevyAudioListener, BevyCamera, BevyEntityFollower, BevyInputManager, BevyLight, BevyLookAt,
-    BevyMeshRenderer, BevyRenderSender, BevyRendererStats, BevyRuntimeConfig, BevyRuntimeTuning,
-    BevyRuntimeWindowControl, BevySpline, BevySplineFollower, BevySpriteImageSequence,
-    BevySpriteRenderer, BevyStreamingTuning, BevySystemProfiler, BevyText2d, BevyTransform,
-    BevyWrapper, DeltaTime,
+    ActiveCamera, Animator, AudioBackendResource, AudioEmitter, AudioListener, BecsAssetServer,
+    BecsInputManager, BecsRenderSender, BecsRendererStats, BecsRuntimeConfig, BecsRuntimeTuning,
+    BecsRuntimeWindowControl, BecsStreamingTuning, BecsSystemProfiler, Camera, DeltaTime,
+    EntityFollower, Light, LookAt, MeshRenderer, Spline, SplineFollower, SpriteImageSequence,
+    SpriteRenderer, Text2d, Transform,
+    components::{LightType, SplineMode},
 };
+use helmer_render::graphics::{
+    backend::binding_backend::BindingBackendChoice,
+    common::renderer::{
+        RenderControl, RenderMessage, SpriteAnimationPlayback, SpriteBlendMode,
+        SpriteSheetAnimation, SpriteSpace, TextAlignH, TextAlignV, TextFontStyle, WgpuBackend,
+    },
+    graph::definition::resource_id::ResourceKind,
+    render_graphs::{graph_templates, template_for_graph},
+};
+use helmer_window::runtime::input_manager::InputManager;
+use helmer_window::runtime::runtime::{RuntimeCursorGrabMode, RuntimeWindowTitleMode};
 
 use crate::editor::{
     EditorPlayCamera, activate_play_camera,
@@ -1242,10 +1238,10 @@ fn collect_input_action_events(world: &World) -> ScriptInputActionEventSnapshot 
     let Some(map) = world.get_resource::<ScriptInputActionMap>() else {
         return ScriptInputActionEventSnapshot::default();
     };
-    let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+    let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
         return ScriptInputActionEventSnapshot::default();
     };
-    let input_manager = input_manager.0.read();
+    let input_manager = input_manager.read();
     let input_state = world.get_resource::<ScriptInputState>();
 
     let context = context_key(Some(map.active_context.as_str()));
@@ -1486,7 +1482,7 @@ fn refresh_script_contact_events(world: &mut World) {
 
 pub fn script_execution_system(world: &mut World) {
     let _system_scope = world
-        .get_resource::<BevySystemProfiler>()
+        .get_resource::<BecsSystemProfiler>()
         .and_then(|profiler| {
             profiler
                 .0
@@ -1507,7 +1503,7 @@ pub fn script_execution_system(world: &mut World) {
         .unwrap_or(true);
     let dt = world
         .get_resource::<DeltaTime>()
-        .map(|time| time.0)
+        .map(|delta| delta.0)
         .unwrap_or(0.0);
 
     if current_state != WorldState::Play {
@@ -1632,7 +1628,7 @@ pub fn script_execution_system(world: &mut World) {
     let is_executing = !desired_active.is_empty();
 
     let input_manager = world
-        .get_resource::<BevyInputManager>()
+        .get_resource::<BecsInputManager>()
         .map(|input| input.0.clone());
 
     if let Some(input_manager) = input_manager.as_ref() {
@@ -3005,7 +3001,7 @@ unsafe extern "C" fn rust_api_spawn_entity(
 
     let mut entity = world.spawn((
         EditorEntity,
-        BevyTransform::default(),
+        Transform::default(),
         ScriptSpawned {
             owner: context.owner,
             script_index: context.script_index,
@@ -3073,15 +3069,15 @@ unsafe extern "C" fn rust_api_get_transform(
     let Some(entity) = lookup_editor_entity(world, entity_id) else {
         return 0;
     };
-    let Some(transform) = world.get::<BevyTransform>(entity) else {
+    let Some(transform) = world.get::<Transform>(entity) else {
         return 0;
     };
 
     unsafe {
         *out_transform = RustScriptTransform {
-            position: rust_vec3_from_glam(transform.0.position),
-            rotation: rust_quat_from_glam(transform.0.rotation),
-            scale: rust_vec3_from_glam(transform.0.scale),
+            position: rust_vec3_from_glam(transform.position),
+            rotation: rust_quat_from_glam(transform.rotation),
+            scale: rust_vec3_from_glam(transform.scale),
         };
     }
     1
@@ -3105,19 +3101,19 @@ unsafe extern "C" fn rust_api_set_transform(
         return 0;
     };
     ensure_transform(world, entity);
-    let Some(mut transform) = world.get_mut::<BevyTransform>(entity) else {
+    let Some(mut transform) = world.get_mut::<Transform>(entity) else {
         return 0;
     };
 
     let patch = unsafe { &*patch };
     if patch.has_position != 0 {
-        transform.0.position = glam_vec3_from_rust(patch.position);
+        transform.position = glam_vec3_from_rust(patch.position);
     }
     if patch.has_rotation != 0 {
-        transform.0.rotation = glam_quat_from_rust(patch.rotation);
+        transform.rotation = glam_quat_from_rust(patch.rotation);
     }
     if patch.has_scale != 0 {
-        transform.0.scale = glam_vec3_from_rust(patch.scale);
+        transform.scale = glam_vec3_from_rust(patch.scale);
     }
     1
 }
@@ -3714,7 +3710,7 @@ fn build_ecs_table(
             };
             let mut entity = world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 ScriptSpawned {
                     owner,
                     script_index,
@@ -3808,24 +3804,24 @@ fn build_ecs_table(
             let component = component.to_ascii_lowercase();
             let has = match component.as_str() {
                 "name" => world.get::<Name>(entity).is_some(),
-                "transform" => world.get::<BevyTransform>(entity).is_some(),
-                "camera" => world.get::<BevyCamera>(entity).is_some(),
-                "light" => world.get::<BevyLight>(entity).is_some(),
-                "mesh" | "mesh_renderer" => world.get::<BevyMeshRenderer>(entity).is_some(),
-                "sprite" | "sprite_renderer" => world.get::<BevySpriteRenderer>(entity).is_some(),
-                "text" | "text2d" | "text_2d" => world.get::<BevyText2d>(entity).is_some(),
-                "spline" => world.get::<BevySpline>(entity).is_some(),
-                "spline_follower" => world.get::<BevySplineFollower>(entity).is_some(),
-                "look_at" => world.get::<BevyLookAt>(entity).is_some(),
-                "entity_follower" => world.get::<BevyEntityFollower>(entity).is_some(),
+                "transform" => world.get::<Transform>(entity).is_some(),
+                "camera" => world.get::<Camera>(entity).is_some(),
+                "light" => world.get::<Light>(entity).is_some(),
+                "mesh" | "mesh_renderer" => world.get::<MeshRenderer>(entity).is_some(),
+                "sprite" | "sprite_renderer" => world.get::<SpriteRenderer>(entity).is_some(),
+                "text" | "text2d" | "text_2d" => world.get::<Text2d>(entity).is_some(),
+                "spline" => world.get::<Spline>(entity).is_some(),
+                "spline_follower" => world.get::<SplineFollower>(entity).is_some(),
+                "look_at" => world.get::<LookAt>(entity).is_some(),
+                "entity_follower" => world.get::<EntityFollower>(entity).is_some(),
                 "animator" => resolve_animator_target_entity(world, entity).is_some(),
                 "scene" => world.get::<SceneRoot>(entity).is_some(),
                 "audio" => {
-                    world.get::<BevyAudioEmitter>(entity).is_some()
-                        || world.get::<BevyAudioListener>(entity).is_some()
+                    world.get::<AudioEmitter>(entity).is_some()
+                        || world.get::<AudioListener>(entity).is_some()
                 }
-                "audio_emitter" => world.get::<BevyAudioEmitter>(entity).is_some(),
-                "audio_listener" => world.get::<BevyAudioListener>(entity).is_some(),
+                "audio_emitter" => world.get::<AudioEmitter>(entity).is_some(),
+                "audio_listener" => world.get::<AudioListener>(entity).is_some(),
                 "script" => world
                     .get::<ScriptComponent>(entity)
                     .map(|scripts| !scripts.scripts.is_empty())
@@ -3882,56 +3878,44 @@ fn build_ecs_table(
                 }
                 "camera" => {
                     ensure_transform(world, entity);
-                    world.entity_mut(entity).insert(BevyCamera::default());
+                    world.entity_mut(entity).insert(Camera::default());
                 }
                 "light" => {
                     ensure_transform(world, entity);
                     world
                         .entity_mut(entity)
-                        .insert(BevyWrapper(Light::point(Vec3::ONE, 10.0)));
+                        .insert(Light::point(Vec3::ONE, 10.0));
                 }
                 "sprite" | "sprite_renderer" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevyWrapper(SpriteRenderer::default()));
+                    world.entity_mut(entity).insert(SpriteRenderer::default());
                     world.entity_mut(entity).insert(EditorSprite::default());
                 }
                 "text" | "text2d" | "text_2d" => {
                     ensure_transform(world, entity);
                     let mut text = Text2d::default();
                     text.text = "Text".to_string();
-                    world.entity_mut(entity).insert(BevyText2d(text));
+                    world.entity_mut(entity).insert(text);
                 }
                 "spline" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevySpline(Spline::default()));
+                    world.entity_mut(entity).insert(Spline::default());
                 }
                 "spline_follower" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevySplineFollower(SplineFollower::default()));
+                    world.entity_mut(entity).insert(SplineFollower::default());
                 }
                 "look_at" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevyLookAt(LookAt::default()));
+                    world.entity_mut(entity).insert(LookAt::default());
                 }
                 "entity_follower" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevyEntityFollower(EntityFollower::default()));
+                    world.entity_mut(entity).insert(EntityFollower::default());
                 }
                 "audio_emitter" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevyWrapper(AudioEmitter::default()));
+                    world.entity_mut(entity).insert(AudioEmitter::default());
                     world.entity_mut(entity).insert(EditorAudio {
                         path: None,
                         streaming: false,
@@ -3939,9 +3923,7 @@ fn build_ecs_table(
                 }
                 "audio_listener" => {
                     ensure_transform(world, entity);
-                    world
-                        .entity_mut(entity)
-                        .insert(BevyWrapper(AudioListener::default()));
+                    world.entity_mut(entity).insert(AudioListener::default());
                 }
                 "dynamic" => {
                     world
@@ -4079,42 +4061,42 @@ fn build_ecs_table(
                     world.entity_mut(entity).remove::<Name>();
                 }
                 "transform" => {
-                    world.entity_mut(entity).remove::<BevyTransform>();
+                    world.entity_mut(entity).remove::<Transform>();
                 }
                 "camera" => {
-                    world.entity_mut(entity).remove::<BevyCamera>();
+                    world.entity_mut(entity).remove::<Camera>();
                     world.entity_mut(entity).remove::<EditorPlayCamera>();
-                    world.entity_mut(entity).remove::<BevyActiveCamera>();
+                    world.entity_mut(entity).remove::<ActiveCamera>();
                 }
                 "light" => {
-                    world.entity_mut(entity).remove::<BevyLight>();
+                    world.entity_mut(entity).remove::<Light>();
                 }
                 "mesh" | "mesh_renderer" => {
-                    world.entity_mut(entity).remove::<BevyMeshRenderer>();
+                    world.entity_mut(entity).remove::<MeshRenderer>();
                     world.entity_mut(entity).remove::<EditorMesh>();
                 }
                 "sprite" | "sprite_renderer" => {
-                    world.entity_mut(entity).remove::<BevySpriteRenderer>();
-                    world.entity_mut(entity).remove::<BevySpriteImageSequence>();
+                    world.entity_mut(entity).remove::<SpriteRenderer>();
+                    world.entity_mut(entity).remove::<SpriteImageSequence>();
                     world.entity_mut(entity).remove::<EditorSprite>();
                 }
                 "text" | "text2d" | "text_2d" => {
-                    world.entity_mut(entity).remove::<BevyText2d>();
+                    world.entity_mut(entity).remove::<Text2d>();
                 }
                 "spline" => {
-                    world.entity_mut(entity).remove::<BevySpline>();
+                    world.entity_mut(entity).remove::<Spline>();
                 }
                 "spline_follower" => {
-                    world.entity_mut(entity).remove::<BevySplineFollower>();
+                    world.entity_mut(entity).remove::<SplineFollower>();
                 }
                 "look_at" => {
-                    world.entity_mut(entity).remove::<BevyLookAt>();
+                    world.entity_mut(entity).remove::<LookAt>();
                 }
                 "entity_follower" => {
-                    world.entity_mut(entity).remove::<BevyEntityFollower>();
+                    world.entity_mut(entity).remove::<EntityFollower>();
                 }
                 "animator" => {
-                    world.entity_mut(entity).remove::<BevyAnimator>();
+                    world.entity_mut(entity).remove::<Animator>();
                 }
                 "scene" => {
                     reset_scene_root_instance(world, entity);
@@ -4122,16 +4104,16 @@ fn build_ecs_table(
                     world.entity_mut(entity).remove::<SceneAssetPath>();
                 }
                 "audio" => {
-                    world.entity_mut(entity).remove::<BevyAudioEmitter>();
+                    world.entity_mut(entity).remove::<AudioEmitter>();
                     world.entity_mut(entity).remove::<EditorAudio>();
-                    world.entity_mut(entity).remove::<BevyAudioListener>();
+                    world.entity_mut(entity).remove::<AudioListener>();
                 }
                 "audio_emitter" => {
-                    world.entity_mut(entity).remove::<BevyAudioEmitter>();
+                    world.entity_mut(entity).remove::<AudioEmitter>();
                     world.entity_mut(entity).remove::<EditorAudio>();
                 }
                 "audio_listener" => {
-                    world.entity_mut(entity).remove::<BevyAudioListener>();
+                    world.entity_mut(entity).remove::<AudioListener>();
                 }
                 "script" => {
                     world.entity_mut(entity).remove::<ScriptComponent>();
@@ -4238,7 +4220,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(transform) = world.get::<BevyTransform>(entity).map(|t| t.0) else {
+            let Some(transform) = world.get::<Transform>(entity).copied() else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
@@ -4257,10 +4239,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return vec3_to_table(lua, Vec3::Z);
             };
-            let Some(transform) = world
-                .get::<BevyTransform>(entity)
-                .map(|component| component.0)
-            else {
+            let Some(transform) = world.get::<Transform>(entity).copied() else {
                 return vec3_to_table(lua, Vec3::Z);
             };
             let mut forward = transform.rotation * Vec3::Z;
@@ -4281,10 +4260,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return vec3_to_table(lua, Vec3::X);
             };
-            let Some(transform) = world
-                .get::<BevyTransform>(entity)
-                .map(|component| component.0)
-            else {
+            let Some(transform) = world.get::<Transform>(entity).copied() else {
                 return vec3_to_table(lua, Vec3::X);
             };
             let mut right = transform.rotation * Vec3::X;
@@ -4305,10 +4281,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return vec3_to_table(lua, Vec3::Y);
             };
-            let Some(transform) = world
-                .get::<BevyTransform>(entity)
-                .map(|component| component.0)
-            else {
+            let Some(transform) = world.get::<Transform>(entity).copied() else {
                 return vec3_to_table(lua, Vec3::Y);
             };
             let mut up = transform.rotation * Vec3::Y;
@@ -4330,10 +4303,7 @@ fn build_ecs_table(
                 return Ok(false);
             };
 
-            let mut transform = world
-                .get::<BevyTransform>(entity)
-                .map(|t| t.0)
-                .unwrap_or_default();
+            let mut transform = world.get::<Transform>(entity).copied().unwrap_or_default();
 
             if let Ok(table) = data.get::<Table>("position") {
                 if let Some(vec) = table_to_vec3(&table) {
@@ -4351,7 +4321,7 @@ fn build_ecs_table(
                 }
             }
 
-            world.entity_mut(entity).insert(BevyWrapper(transform));
+            world.entity_mut(entity).insert(transform);
             Ok(true)
         })?,
     )?;
@@ -4364,18 +4334,18 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(spline) = world.get::<BevySpline>(entity) else {
+            let Some(spline) = world.get::<Spline>(entity) else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
             let points_table = lua.create_table()?;
-            for (index, point) in spline.0.points.iter().enumerate() {
+            for (index, point) in spline.points.iter().enumerate() {
                 points_table.set(index + 1, vec3_to_table(lua, *point)?)?;
             }
             table.set("points", points_table)?;
-            table.set("closed", spline.0.closed)?;
-            table.set("tension", spline.0.tension)?;
-            table.set("mode", spline_mode_to_str(spline.0.mode))?;
+            table.set("closed", spline.closed)?;
+            table.set("tension", spline.tension)?;
+            table.set("mode", spline_mode_to_str(spline.mode))?;
             Ok(Some(table))
         })?,
     )?;
@@ -4388,7 +4358,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+            let Some(mut spline) = world.get_mut::<Spline>(entity) else {
                 return Ok(false);
             };
 
@@ -4402,17 +4372,17 @@ fn build_ecs_table(
                         }
                     }
                 }
-                spline.0.points = parsed;
+                spline.points = parsed;
             }
             if let Ok(closed) = data.get::<bool>("closed") {
-                spline.0.closed = closed;
+                spline.closed = closed;
             }
             if let Ok(tension) = data.get::<f32>("tension") {
-                spline.0.tension = tension;
+                spline.tension = tension;
             }
             if let Ok(mode) = data.get::<String>("mode") {
                 if let Some(parsed) = spline_mode_from_str(&mode) {
-                    spline.0.mode = parsed;
+                    spline.mode = parsed;
                 }
             }
             Ok(true)
@@ -4427,13 +4397,13 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+            let Some(mut spline) = world.get_mut::<Spline>(entity) else {
                 return Ok(false);
             };
             let Some(vec) = table_to_vec3(&point) else {
                 return Ok(false);
             };
-            spline.0.points.push(vec);
+            spline.points.push(vec);
             Ok(true)
         })?,
     )?;
@@ -4446,17 +4416,17 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+            let Some(mut spline) = world.get_mut::<Spline>(entity) else {
                 return Ok(false);
             };
             let Some(vec) = table_to_vec3(&point) else {
                 return Ok(false);
             };
             let idx = index.saturating_sub(1);
-            if idx >= spline.0.points.len() {
+            if idx >= spline.points.len() {
                 return Ok(false);
             }
-            spline.0.points[idx] = vec;
+            spline.points[idx] = vec;
             Ok(true)
         })?,
     )?;
@@ -4469,14 +4439,14 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let Some(mut spline) = world.get_mut::<BevySpline>(entity) else {
+            let Some(mut spline) = world.get_mut::<Spline>(entity) else {
                 return Ok(false);
             };
             let idx = index.saturating_sub(1);
-            if idx >= spline.0.points.len() {
+            if idx >= spline.points.len() {
                 return Ok(false);
             }
-            spline.0.points.remove(idx);
+            spline.points.remove(idx);
             Ok(true)
         })?,
     )?;
@@ -4489,10 +4459,10 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(spline) = world.get::<BevySpline>(entity) else {
+            let Some(spline) = world.get::<Spline>(entity) else {
                 return Ok(None);
             };
-            let pos = spline.0.sample(t);
+            let pos = spline.sample(t);
             Ok(Some(vec3_to_table(lua, pos)?))
         })?,
     )?;
@@ -4505,11 +4475,11 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(spline) = world.get::<BevySpline>(entity) else {
+            let Some(spline) = world.get::<Spline>(entity) else {
                 return Ok(None);
             };
             let samples = samples.unwrap_or(64).max(2) as usize;
-            Ok(Some(spline.0.approx_length(samples)))
+            Ok(Some(spline.approx_length(samples)))
         })?,
     )?;
 
@@ -4529,9 +4499,8 @@ fn build_ecs_table(
                     return Ok(false);
                 };
                 let follower = world
-                    .get::<BevySplineFollower>(entity)
+                    .get::<SplineFollower>(entity)
                     .cloned()
-                    .map(|f| f.0)
                     .unwrap_or_else(SplineFollower::default);
                 let mut follower = follower;
                 follower.spline_entity = spline_id;
@@ -4541,9 +4510,7 @@ fn build_ecs_table(
                 if let Some(value) = looped {
                     follower.looped = value;
                 }
-                world
-                    .entity_mut(entity)
-                    .insert(BevySplineFollower(follower));
+                world.entity_mut(entity).insert(follower);
                 Ok(true)
             },
         )?,
@@ -4557,7 +4524,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(look_at) = world.get::<BevyLookAt>(entity).map(|component| component.0) else {
+            let Some(look_at) = world.get::<LookAt>(entity).copied() else {
                 return Ok(None);
             };
             Ok(Some(look_at_to_table(lua, look_at)?))
@@ -4572,13 +4539,9 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            let mut look_at = world
-                .get::<BevyLookAt>(entity)
-                .cloned()
-                .map(|component| component.0)
-                .unwrap_or_default();
+            let mut look_at = world.get::<LookAt>(entity).cloned().unwrap_or_default();
             patch_look_at(&mut look_at, &data);
-            world.entity_mut(entity).insert(BevyLookAt(look_at));
+            world.entity_mut(entity).insert(look_at);
             Ok(true)
         })?,
     )?;
@@ -4591,10 +4554,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(follower) = world
-                .get::<BevyEntityFollower>(entity)
-                .map(|component| component.0)
-            else {
+            let Some(follower) = world.get::<EntityFollower>(entity).copied() else {
                 return Ok(None);
             };
             Ok(Some(entity_follower_to_table(lua, follower)?))
@@ -4610,14 +4570,11 @@ fn build_ecs_table(
                 return Ok(false);
             };
             let mut follower = world
-                .get::<BevyEntityFollower>(entity)
+                .get::<EntityFollower>(entity)
                 .cloned()
-                .map(|component| component.0)
                 .unwrap_or_default();
             patch_entity_follower(&mut follower, &data);
-            world
-                .entity_mut(entity)
-                .insert(BevyEntityFollower(follower));
+            world.entity_mut(entity).insert(follower);
             Ok(true)
         })?,
     )?;
@@ -4636,10 +4593,10 @@ fn build_ecs_table(
             }
             let mut applied = false;
             for animator_entity in animator_entities {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                     continue;
                 };
-                animator.0.enabled = enabled;
+                animator.enabled = enabled;
                 applied = true;
             }
             Ok(applied)
@@ -4660,10 +4617,10 @@ fn build_ecs_table(
             }
             let mut applied = false;
             for animator_entity in animator_entities {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                     continue;
                 };
-                animator.0.time_scale = time_scale.max(0.0);
+                animator.time_scale = time_scale.max(0.0);
                 applied = true;
             }
             Ok(applied)
@@ -4684,10 +4641,10 @@ fn build_ecs_table(
             }
             let mut applied = false;
             for animator_entity in animator_entities {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                     continue;
                 };
-                animator.0.parameters.set_float(name.clone(), value);
+                animator.parameters.set_float(name.clone(), value);
                 applied = true;
             }
             Ok(applied)
@@ -4708,10 +4665,10 @@ fn build_ecs_table(
             }
             let mut applied = false;
             for animator_entity in animator_entities {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                     continue;
                 };
-                animator.0.parameters.set_bool(name.clone(), value);
+                animator.parameters.set_bool(name.clone(), value);
                 applied = true;
             }
             Ok(applied)
@@ -4732,10 +4689,10 @@ fn build_ecs_table(
             }
             let mut applied = false;
             for animator_entity in animator_entities {
-                let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                     continue;
                 };
-                animator.0.parameters.trigger(name.clone());
+                animator.parameters.trigger(name.clone());
                 applied = true;
             }
             Ok(applied)
@@ -4753,11 +4710,11 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(None);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(None);
             };
             let layer_index = layer_index.unwrap_or(0);
-            let Some(layer) = animator.0.layers.get(layer_index) else {
+            let Some(layer) = animator.layers.get(layer_index) else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
@@ -4779,11 +4736,11 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(None);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(None);
             };
             let layer_index = layer_index.unwrap_or(0);
-            let Some(layer) = animator.0.layers.get(layer_index) else {
+            let Some(layer) = animator.layers.get(layer_index) else {
                 return Ok(None);
             };
 
@@ -4859,11 +4816,11 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(None);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(None);
             };
             let list = lua.create_table()?;
-            for (index, layer) in animator.0.layers.iter().enumerate() {
+            for (index, layer) in animator.layers.iter().enumerate() {
                 let layer_table = lua.create_table()?;
                 layer_table.set("index", index)?;
                 layer_table.set("name", layer.name.clone())?;
@@ -4886,7 +4843,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0.0_f32);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0.0_f32);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -4911,7 +4868,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0.0_f32);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0.0_f32);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -4936,7 +4893,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0_u64);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0_u64);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -4961,7 +4918,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(String::new());
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(String::new());
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -4992,7 +4949,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(false);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(false);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5017,7 +4974,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0_u64);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0_u64);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5043,7 +5000,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0_u64);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0_u64);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5069,7 +5026,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0.0_f32);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0.0_f32);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5095,7 +5052,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0.0_f32);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0.0_f32);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5121,7 +5078,7 @@ fn build_ecs_table(
             let Some(animator_entity) = resolve_animator_target_entity(world, entity) else {
                 return Ok(0.0_f32);
             };
-            let Some(animator) = world.get::<BevyAnimator>(animator_entity) else {
+            let Some(animator) = world.get::<Animator>(animator_entity) else {
                 return Ok(0.0_f32);
             };
             let layer_index = layer_index.unwrap_or(0);
@@ -5152,10 +5109,10 @@ fn build_ecs_table(
                 let layer_index = layer_index.unwrap_or(0);
                 let mut applied = false;
                 for animator_entity in animator_entities {
-                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                         continue;
                     };
-                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    let Some(layer) = animator.layers.get_mut(layer_index) else {
                         continue;
                     };
                     layer.weight = weight.clamp(0.0, 1.0);
@@ -5188,10 +5145,10 @@ fn build_ecs_table(
                 let layer_index = layer_index.unwrap_or(0);
                 let mut applied = false;
                 for animator_entity in animator_entities {
-                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                         continue;
                     };
-                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    let Some(layer) = animator.layers.get_mut(layer_index) else {
                         continue;
                     };
                     let Some(transition) =
@@ -5258,16 +5215,16 @@ fn build_ecs_table(
                 let layer_index = layer_index.unwrap_or(0);
                 let mut applied = false;
                 for animator_entity in animator_entities {
-                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                         continue;
                     };
-                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    let Some(layer) = animator.layers.get_mut(layer_index) else {
                         continue;
                     };
                     let Some(node) = layer.graph.nodes.get_mut(node_index) else {
                         continue;
                     };
-                    let helmer::animation::AnimationNode::Blend(blend_node) = node else {
+                    let helmer_animation::AnimationNode::Blend(blend_node) = node else {
                         continue;
                     };
 
@@ -5277,9 +5234,9 @@ fn build_ecs_table(
                     if let Some(mode) = mode.as_deref() {
                         let normalized = normalize_name(mode);
                         blend_node.mode = if normalized == "additive" || normalized == "add" {
-                            helmer::animation::BlendMode::Additive
+                            helmer_animation::BlendMode::Additive
                         } else {
-                            helmer::animation::BlendMode::Linear
+                            helmer_animation::BlendMode::Linear
                         };
                     };
                     applied = true;
@@ -5324,16 +5281,16 @@ fn build_ecs_table(
                 let layer_index = layer_index.unwrap_or(0);
                 let mut applied = false;
                 for animator_entity in animator_entities {
-                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                         continue;
                     };
-                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    let Some(layer) = animator.layers.get_mut(layer_index) else {
                         continue;
                     };
                     let Some(node) = layer.graph.nodes.get_mut(node_index) else {
                         continue;
                     };
-                    let helmer::animation::AnimationNode::Blend(blend_node) = node else {
+                    let helmer_animation::AnimationNode::Blend(blend_node) = node else {
                         continue;
                     };
                     let Some(child) = blend_node.children.get_mut(child_index) else {
@@ -5384,10 +5341,10 @@ fn build_ecs_table(
                 let layer_index = layer_index.unwrap_or(0);
                 let mut applied = false;
                 for animator_entity in animator_entities {
-                    let Some(mut animator) = world.get_mut::<BevyAnimator>(animator_entity) else {
+                    let Some(mut animator) = world.get_mut::<Animator>(animator_entity) else {
                         continue;
                     };
-                    let Some(layer) = animator.0.layers.get_mut(layer_index) else {
+                    let Some(layer) = animator.layers.get_mut(layer_index) else {
                         continue;
                     };
                     let Some(clip_index) = resolve_clip_index(&layer.graph.library, clip_name)
@@ -5400,7 +5357,7 @@ fn build_ecs_table(
                         .get(layer.state_machine.current_state)
                     {
                         if let Some(node) = layer.graph.nodes.get_mut(state.node) {
-                            if let helmer::animation::AnimationNode::Clip(clip_node) = node {
+                            if let helmer_animation::AnimationNode::Clip(clip_node) = node {
                                 if clip_node.clip_index != clip_index {
                                     clip_node.clip_index = clip_index;
                                     layer.state_machine.state_time = 0.0;
@@ -5423,7 +5380,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(light) = world.get::<BevyLight>(entity).map(|l| l.0) else {
+            let Some(light) = world.get::<Light>(entity).copied() else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
@@ -5447,8 +5404,8 @@ fn build_ecs_table(
             };
 
             let mut light = world
-                .get::<BevyLight>(entity)
-                .map(|l| l.0)
+                .get::<Light>(entity)
+                .copied()
                 .unwrap_or_else(|| Light::point(Vec3::ONE, 10.0));
 
             if let Ok(kind) = data.get::<String>("type") {
@@ -5472,7 +5429,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world.entity_mut(entity).insert(BevyWrapper(light));
+            world.entity_mut(entity).insert(light);
             Ok(true)
         })?,
     )?;
@@ -5485,7 +5442,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(camera) = world.get::<BevyCamera>(entity).map(|c| c.0) else {
+            let Some(camera) = world.get::<Camera>(entity).copied() else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
@@ -5507,10 +5464,7 @@ fn build_ecs_table(
                 return Ok(false);
             };
 
-            let mut camera = world
-                .get::<BevyCamera>(entity)
-                .map(|c| c.0)
-                .unwrap_or_default();
+            let mut camera = world.get::<Camera>(entity).copied().unwrap_or_default();
 
             if let Ok(value) = data.get::<f32>("fov_y_rad") {
                 camera.fov_y_rad = value;
@@ -5526,7 +5480,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world.entity_mut(entity).insert(BevyWrapper(camera));
+            world.entity_mut(entity).insert(camera);
 
             if let Ok(active) = data.get::<bool>("active") {
                 if active {
@@ -5546,7 +5500,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(false);
             };
-            if world.get::<BevyCamera>(entity).is_none() {
+            if world.get::<Camera>(entity).is_none() {
                 return Ok(false);
             }
             set_active_camera(world, entity);
@@ -5609,7 +5563,7 @@ fn build_ecs_table(
                     let Some(entity) = lookup_editor_entity(world, raw_id as u64) else {
                         return Ok(false);
                     };
-                    if world.get::<BevyCamera>(entity).is_none() {
+                    if world.get::<Camera>(entity).is_none() {
                         return Ok(false);
                     }
                     Some(entity)
@@ -5622,7 +5576,7 @@ fn build_ecs_table(
                     let Some(entity) = lookup_editor_entity(world, raw_id) else {
                         return Ok(false);
                     };
-                    if world.get::<BevyCamera>(entity).is_none() {
+                    if world.get::<Camera>(entity).is_none() {
                         return Ok(false);
                     }
                     Some(entity)
@@ -5646,7 +5600,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(mesh_renderer) = world.get::<BevyMeshRenderer>(entity).map(|r| r.0) else {
+            let Some(mesh_renderer) = world.get::<MeshRenderer>(entity).copied() else {
                 return Ok(None);
             };
 
@@ -5716,7 +5670,7 @@ fn build_ecs_table(
 
             let project = world.get_resource::<EditorProject>().cloned();
             let existing_mesh = world.get::<EditorMesh>(entity).cloned();
-            let existing_renderer = world.get::<BevyMeshRenderer>(entity).map(|r| r.0);
+            let existing_renderer = world.get::<MeshRenderer>(entity).copied();
 
             let mut source = existing_mesh
                 .as_ref()
@@ -5780,9 +5734,7 @@ fn build_ecs_table(
             let material_path = world
                 .get::<EditorMesh>(entity)
                 .and_then(|mesh| mesh.material_path.clone());
-            let existing_renderer = world
-                .get::<BevyMeshRenderer>(entity)
-                .map(|renderer| renderer.0);
+            let existing_renderer = world.get::<MeshRenderer>(entity).copied();
             let casts_shadow = existing_renderer
                 .map(|renderer| renderer.casts_shadow)
                 .unwrap_or(true);
@@ -5824,9 +5776,7 @@ fn build_ecs_table(
                     Path::new(path.trim()),
                 ))
             };
-            let existing_renderer = world
-                .get::<BevyMeshRenderer>(entity)
-                .map(|renderer| renderer.0);
+            let existing_renderer = world.get::<MeshRenderer>(entity).copied();
             let casts_shadow = existing_renderer
                 .map(|renderer| renderer.casts_shadow)
                 .unwrap_or(true);
@@ -5855,10 +5805,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(sprite) = world
-                .get::<BevySpriteRenderer>(entity)
-                .map(|component| component.0)
-            else {
+            let Some(sprite) = world.get::<SpriteRenderer>(entity).copied() else {
                 return Ok(None);
             };
             let editor_sprite = world
@@ -5866,8 +5813,8 @@ fn build_ecs_table(
                 .cloned()
                 .unwrap_or_default();
             let sprite_sequence = world
-                .get::<BevySpriteImageSequence>(entity)
-                .map(|component| component.0.clone())
+                .get::<SpriteImageSequence>(entity)
+                .map(|component| component.clone())
                 .unwrap_or_default();
 
             let table = lua.create_table()?;
@@ -5978,19 +5925,18 @@ fn build_ecs_table(
 
             let project = world.get_resource::<EditorProject>().cloned();
             let mut sprite = world
-                .get::<BevySpriteRenderer>(entity)
-                .map(|component| component.0)
+                .get::<SpriteRenderer>(entity)
+                .copied()
                 .unwrap_or_default();
             let mut editor_sprite = world
                 .get::<EditorSprite>(entity)
                 .cloned()
                 .unwrap_or_default();
             let mut sprite_sequence = world
-                .get::<BevySpriteImageSequence>(entity)
-                .map(|component| component.0.clone())
+                .get::<SpriteImageSequence>(entity)
+                .map(|component| component.clone())
                 .unwrap_or_default();
-            let mut sprite_sequence_present =
-                world.get::<BevySpriteImageSequence>(entity).is_some();
+            let mut sprite_sequence_present = world.get::<SpriteImageSequence>(entity).is_some();
 
             if let Ok(color) = data.get::<Table>("color") {
                 if let Some(color) = table_to_vec4(&color) {
@@ -6136,11 +6082,11 @@ fn build_ecs_table(
 
             ensure_transform(world, entity);
             let mut entity_ref = world.entity_mut(entity);
-            entity_ref.insert((BevyWrapper(sprite), editor_sprite));
+            entity_ref.insert((sprite, editor_sprite));
             if sprite_sequence_present {
-                entity_ref.insert(BevySpriteImageSequence(sprite_sequence));
+                entity_ref.insert(sprite_sequence);
             } else {
-                entity_ref.remove::<BevySpriteImageSequence>();
+                entity_ref.remove::<SpriteImageSequence>();
             }
             mark_entity_render_dirty(world, entity);
             Ok(true)
@@ -6158,8 +6104,8 @@ fn build_ecs_table(
 
             let project = world.get_resource::<EditorProject>().cloned();
             let mut sprite = world
-                .get::<BevySpriteRenderer>(entity)
-                .map(|component| component.0)
+                .get::<SpriteRenderer>(entity)
+                .copied()
                 .unwrap_or_default();
             let mut editor_sprite = world
                 .get::<EditorSprite>(entity)
@@ -6180,9 +6126,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert((BevyWrapper(sprite), editor_sprite));
+            world.entity_mut(entity).insert((sprite, editor_sprite));
             mark_entity_render_dirty(world, entity);
             Ok(true)
         })?,
@@ -6197,8 +6141,8 @@ fn build_ecs_table(
                 return Ok(None);
             };
             let Some(text) = world
-                .get::<BevyText2d>(entity)
-                .map(|component| component.0.clone())
+                .get::<Text2d>(entity)
+                .map(|component| component.clone())
             else {
                 return Ok(None);
             };
@@ -6259,8 +6203,8 @@ fn build_ecs_table(
 
             let project = world.get_resource::<EditorProject>().cloned();
             let mut text = world
-                .get::<BevyText2d>(entity)
-                .map(|component| component.0.clone())
+                .get::<Text2d>(entity)
+                .map(|component| component.clone())
                 .unwrap_or_default();
 
             if let Ok(value) = data.get::<String>("text") {
@@ -6385,7 +6329,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world.entity_mut(entity).insert(BevyText2d(text));
+            world.entity_mut(entity).insert(text);
             mark_entity_render_dirty(world, entity);
             Ok(true)
         })?,
@@ -6415,14 +6359,14 @@ fn build_ecs_table(
             };
             let project = world.get_resource::<EditorProject>().cloned();
             let resolved = resolve_project_path(project.as_ref(), Path::new(&path));
-            let asset_server = match world.get_resource::<BevyAssetServer>() {
-                Some(server) => BevyAssetServer(server.0.clone()),
+            let asset_server = match world.get_resource::<BecsAssetServer>() {
+                Some(server) => server.cloned(),
                 None => return Ok(false),
             };
             let handle = if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
                 cached_scene_handle(&mut cache, &asset_server, &resolved)
             } else {
-                asset_server.0.lock().load_scene(&resolved)
+                asset_server.lock().load_scene(&resolved)
             };
             reset_scene_root_instance(world, entity);
             world.entity_mut(entity).insert(SceneRoot(handle));
@@ -7085,10 +7029,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(emitter) = world
-                .get::<BevyAudioEmitter>(entity)
-                .map(|emitter| emitter.0)
-            else {
+            let Some(emitter) = world.get::<AudioEmitter>(entity).copied() else {
                 return Ok(None);
             };
             let editor_audio = world
@@ -7150,8 +7091,8 @@ fn build_ecs_table(
             };
 
             let mut emitter = world
-                .get::<BevyAudioEmitter>(entity)
-                .map(|emitter| emitter.0)
+                .get::<AudioEmitter>(entity)
+                .copied()
                 .unwrap_or_default();
             let mut editor_audio =
                 world
@@ -7233,9 +7174,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert((BevyWrapper(emitter), editor_audio));
+            world.entity_mut(entity).insert((emitter, editor_audio));
             Ok(true)
         })?,
     )?;
@@ -7250,8 +7189,8 @@ fn build_ecs_table(
             };
 
             let mut emitter = world
-                .get::<BevyAudioEmitter>(entity)
-                .map(|emitter| emitter.0)
+                .get::<AudioEmitter>(entity)
+                .copied()
                 .unwrap_or_default();
             let mut editor_audio =
                 world
@@ -7277,9 +7216,7 @@ fn build_ecs_table(
             }
 
             ensure_transform(world, entity);
-            world
-                .entity_mut(entity)
-                .insert((BevyWrapper(emitter), editor_audio));
+            world.entity_mut(entity).insert((emitter, editor_audio));
             Ok(true)
         })?,
     )?;
@@ -7292,10 +7229,7 @@ fn build_ecs_table(
             let Some(entity) = lookup_editor_entity(world, entity_id) else {
                 return Ok(None);
             };
-            let Some(listener) = world
-                .get::<BevyAudioListener>(entity)
-                .map(|listener| listener.0)
-            else {
+            let Some(listener) = world.get::<AudioListener>(entity).copied() else {
                 return Ok(None);
             };
             let table = lua.create_table()?;
@@ -7313,14 +7247,14 @@ fn build_ecs_table(
                 return Ok(false);
             };
             let mut listener = world
-                .get::<BevyAudioListener>(entity)
-                .map(|listener| listener.0)
+                .get::<AudioListener>(entity)
+                .copied()
                 .unwrap_or_default();
             if let Ok(enabled) = data.get::<bool>("enabled") {
                 listener.enabled = enabled;
             }
             ensure_transform(world, entity);
-            world.entity_mut(entity).insert(BevyWrapper(listener));
+            world.entity_mut(entity).insert(listener);
             Ok(true)
         })?,
     )?;
@@ -7333,7 +7267,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.set_enabled(enabled);
+            audio.set_enabled(enabled);
             Ok(true)
         })?,
     )?;
@@ -7345,7 +7279,7 @@ fn build_ecs_table(
             let world = unsafe { &mut *(world_ptr_audio_is_enabled as *mut World) };
             Ok(world
                 .get_resource::<AudioBackendResource>()
-                .map(|audio| audio.0.enabled())
+                .map(|audio| audio.enabled())
                 .unwrap_or(false))
         })?,
     )?;
@@ -7359,9 +7293,9 @@ fn build_ecs_table(
                 return Ok(lua.create_table()?);
             };
             let table = lua.create_table()?;
-            let buses = audio.0.bus_list();
+            let buses = audio.bus_list();
             for (index, bus) in buses.iter().enumerate() {
-                table.set(index + 1, audio.0.bus_name(*bus))?;
+                table.set(index + 1, audio.bus_name(*bus))?;
             }
             Ok(table)
         })?,
@@ -7375,8 +7309,8 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(None);
             };
-            let bus = audio.0.create_custom_bus(name);
-            Ok(Some(audio.0.bus_name(bus)))
+            let bus = audio.create_custom_bus(name);
+            Ok(Some(audio.bus_name(bus)))
         })?,
     )?;
 
@@ -7391,7 +7325,7 @@ fn build_ecs_table(
             let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
                 return Ok(false);
             };
-            audio.0.remove_bus(bus);
+            audio.remove_bus(bus);
             Ok(true)
         })?,
     )?;
@@ -7407,7 +7341,7 @@ fn build_ecs_table(
             let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
                 return Ok(None);
             };
-            Ok(Some(audio.0.bus_name(bus)))
+            Ok(Some(audio.bus_name(bus)))
         })?,
     )?;
 
@@ -7422,7 +7356,7 @@ fn build_ecs_table(
             let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
                 return Ok(false);
             };
-            audio.0.set_bus_name(bus, name);
+            audio.set_bus_name(bus, name);
             Ok(true)
         })?,
     )?;
@@ -7438,7 +7372,7 @@ fn build_ecs_table(
             let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
                 return Ok(false);
             };
-            audio.0.set_bus_volume(bus, volume.max(0.0));
+            audio.set_bus_volume(bus, volume.max(0.0));
             Ok(true)
         })?,
     )?;
@@ -7454,7 +7388,7 @@ fn build_ecs_table(
             let Some(bus) = audio_bus_from_value(bus, Some(audio)) else {
                 return Ok(None);
             };
-            Ok(Some(audio.0.bus_volume(bus)))
+            Ok(Some(audio.bus_volume(bus)))
         })?,
     )?;
 
@@ -7466,7 +7400,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.set_scene_volume(scene_id, volume.max(0.0));
+            audio.set_scene_volume(scene_id, volume.max(0.0));
             Ok(true)
         })?,
     )?;
@@ -7479,7 +7413,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(None);
             };
-            Ok(Some(audio.0.scene_volume(scene_id)))
+            Ok(Some(audio.scene_volume(scene_id)))
         })?,
     )?;
 
@@ -7491,7 +7425,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.clear_emitters();
+            audio.clear_emitters();
             Ok(true)
         })?,
     )?;
@@ -7504,7 +7438,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.set_head_width(width);
+            audio.set_head_width(width);
             Ok(true)
         })?,
     )?;
@@ -7516,7 +7450,7 @@ fn build_ecs_table(
             let world = unsafe { &mut *(world_ptr_audio_get_head_width as *mut World) };
             Ok(world
                 .get_resource::<AudioBackendResource>()
-                .map(|audio| audio.0.head_width()))
+                .map(|audio| audio.head_width()))
         })?,
     )?;
 
@@ -7528,7 +7462,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.set_speed_of_sound(speed);
+            audio.set_speed_of_sound(speed);
             Ok(true)
         })?,
     )?;
@@ -7540,7 +7474,7 @@ fn build_ecs_table(
             let world = unsafe { &mut *(world_ptr_audio_get_speed as *mut World) };
             Ok(world
                 .get_resource::<AudioBackendResource>()
-                .map(|audio| audio.0.speed_of_sound()))
+                .map(|audio| audio.speed_of_sound()))
         })?,
     )?;
 
@@ -7552,7 +7486,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(false);
             };
-            audio.0.set_streaming_config(buffer_frames, chunk_frames);
+            audio.set_streaming_config(buffer_frames, chunk_frames);
             Ok(true)
         })?,
     )?;
@@ -7565,7 +7499,7 @@ fn build_ecs_table(
             let Some(audio) = world.get_resource::<AudioBackendResource>() else {
                 return Ok(None);
             };
-            let (buffer_frames, chunk_frames) = audio.0.streaming_config();
+            let (buffer_frames, chunk_frames) = audio.streaming_config();
             let table = lua.create_table()?;
             table.set("buffer_frames", buffer_frames as u64)?;
             table.set("chunk_frames", chunk_frames as u64)?;
@@ -9205,7 +9139,7 @@ fn build_ecs_table(
         "get_runtime_tuning",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_runtime_tuning as *mut World) };
-            let Some(runtime_tuning) = world.get_resource::<BevyRuntimeTuning>() else {
+            let Some(runtime_tuning) = world.get_resource::<BecsRuntimeTuning>() else {
                 return Err(mlua::Error::external(
                     "Runtime tuning resource is unavailable",
                 ));
@@ -9219,7 +9153,7 @@ fn build_ecs_table(
         "set_runtime_tuning",
         lua.create_function(move |_, data: Table| {
             let world = unsafe { &mut *(world_ptr_set_runtime_tuning as *mut World) };
-            let Some(runtime_tuning) = world.get_resource::<BevyRuntimeTuning>() else {
+            let Some(runtime_tuning) = world.get_resource::<BecsRuntimeTuning>() else {
                 return Ok(false);
             };
             Ok(apply_runtime_tuning_patch(&runtime_tuning.0, &data))
@@ -9231,7 +9165,7 @@ fn build_ecs_table(
         "get_runtime_config",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_runtime_config as *mut World) };
-            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+            let Some(runtime_config) = world.get_resource::<BecsRuntimeConfig>() else {
                 return Err(mlua::Error::external(
                     "Runtime config resource is unavailable",
                 ));
@@ -9249,31 +9183,30 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+            let Some(mut runtime_config) = world.get_resource_mut::<BecsRuntimeConfig>() else {
                 return Ok(false);
             };
-            let previous_backend = runtime_config.0.wgpu_backend;
-            let previous_binding = runtime_config.0.binding_backend;
-            let previous_experimental = runtime_config.0.wgpu_experimental_features;
+            let previous_backend = runtime_config.wgpu_backend;
+            let previous_binding = runtime_config.binding_backend;
+            let previous_experimental = runtime_config.wgpu_experimental_features;
             if !apply_runtime_config_patch(&mut runtime_config.0, &patch) {
                 return Ok(false);
             }
-            let recreate_requested = previous_backend != runtime_config.0.wgpu_backend
-                || previous_binding != runtime_config.0.binding_backend
-                || previous_experimental != runtime_config.0.wgpu_experimental_features;
-            let backend = runtime_config.0.wgpu_backend;
-            let binding_backend = runtime_config.0.binding_backend;
-            let allow_experimental_features = runtime_config.0.wgpu_experimental_features;
+            let recreate_requested = previous_backend != runtime_config.wgpu_backend
+                || previous_binding != runtime_config.binding_backend
+                || previous_experimental != runtime_config.wgpu_experimental_features;
+            let backend = runtime_config.wgpu_backend;
+            let binding_backend = runtime_config.binding_backend;
+            let allow_experimental_features = runtime_config.wgpu_experimental_features;
             drop(runtime_config);
             if recreate_requested {
-                if let Some(render_sender) = world.get_resource::<BevyRenderSender>() {
-                    let _ = render_sender.0.send(RenderMessage::Control(
-                        RenderControl::RecreateDevice {
+                if let Some(render_sender) = world.get_resource::<BecsRenderSender>() {
+                    let _ =
+                        render_sender.send(RenderMessage::Control(RenderControl::RecreateDevice {
                             backend,
                             binding_backend,
                             allow_experimental_features,
-                        },
-                    ));
+                        }));
                 }
             }
             Ok(true)
@@ -9285,12 +9218,12 @@ fn build_ecs_table(
         "get_render_config",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_render_config as *mut World) };
-            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+            let Some(runtime_config) = world.get_resource::<BecsRuntimeConfig>() else {
                 return Err(mlua::Error::external(
                     "Runtime config resource is unavailable",
                 ));
             };
-            serde_struct_to_lua_table(lua, &runtime_config.0.render_config)
+            serde_struct_to_lua_table(lua, &runtime_config.render_config)
         })?,
     )?;
 
@@ -9303,11 +9236,11 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+            let Some(mut runtime_config) = world.get_resource_mut::<BecsRuntimeConfig>() else {
                 return Ok(false);
             };
             Ok(apply_serde_object_patch(
-                &mut runtime_config.0.render_config,
+                &mut runtime_config.render_config,
                 patch,
             ))
         })?,
@@ -9318,12 +9251,12 @@ fn build_ecs_table(
         "get_shader_constants",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_shader_constants as *mut World) };
-            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+            let Some(runtime_config) = world.get_resource::<BecsRuntimeConfig>() else {
                 return Err(mlua::Error::external(
                     "Runtime config resource is unavailable",
                 ));
             };
-            serde_struct_to_lua_table(lua, &runtime_config.0.render_config.shader_constants)
+            serde_struct_to_lua_table(lua, &runtime_config.render_config.shader_constants)
         })?,
     )?;
 
@@ -9336,11 +9269,11 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+            let Some(mut runtime_config) = world.get_resource_mut::<BecsRuntimeConfig>() else {
                 return Ok(false);
             };
             Ok(apply_serde_object_patch(
-                &mut runtime_config.0.render_config.shader_constants,
+                &mut runtime_config.render_config.shader_constants,
                 patch,
             ))
         })?,
@@ -9351,7 +9284,7 @@ fn build_ecs_table(
         "get_streaming_tuning",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_streaming_tuning as *mut World) };
-            let Some(streaming_tuning) = world.get_resource::<BevyStreamingTuning>() else {
+            let Some(streaming_tuning) = world.get_resource::<BecsStreamingTuning>() else {
                 return Err(mlua::Error::external(
                     "Streaming tuning resource is unavailable",
                 ));
@@ -9369,7 +9302,7 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(mut streaming_tuning) = world.get_resource_mut::<BevyStreamingTuning>() else {
+            let Some(mut streaming_tuning) = world.get_resource_mut::<BecsStreamingTuning>() else {
                 return Ok(false);
             };
             Ok(apply_serde_object_patch(&mut streaming_tuning.0, patch))
@@ -9381,12 +9314,12 @@ fn build_ecs_table(
         "get_render_passes",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_render_passes as *mut World) };
-            let Some(runtime_config) = world.get_resource::<BevyRuntimeConfig>() else {
+            let Some(runtime_config) = world.get_resource::<BecsRuntimeConfig>() else {
                 return Err(mlua::Error::external(
                     "Runtime config resource is unavailable",
                 ));
             };
-            render_passes_to_table(lua, &runtime_config.0.render_config)
+            render_passes_to_table(lua, &runtime_config.render_config)
         })?,
     )?;
 
@@ -9399,11 +9332,11 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(mut runtime_config) = world.get_resource_mut::<BevyRuntimeConfig>() else {
+            let Some(mut runtime_config) = world.get_resource_mut::<BecsRuntimeConfig>() else {
                 return Ok(false);
             };
             Ok(apply_render_passes_patch(
-                &mut runtime_config.0.render_config,
+                &mut runtime_config.render_config,
                 &patch,
             ))
         })?,
@@ -9414,7 +9347,7 @@ fn build_ecs_table(
         "get_gpu_budget",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_gpu_budget as *mut World) };
-            let Some(render_stats) = world.get_resource::<BevyRendererStats>() else {
+            let Some(render_stats) = world.get_resource::<BecsRendererStats>() else {
                 return Err(mlua::Error::external(
                     "Renderer stats resource is unavailable",
                 ));
@@ -9441,12 +9374,12 @@ fn build_ecs_table(
         "get_asset_budgets",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_asset_budgets as *mut World) };
-            let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+            let Some(asset_server) = world.get_resource::<BecsAssetServer>() else {
                 return Err(mlua::Error::external(
                     "Asset server resource is unavailable",
                 ));
             };
-            asset_budgets_to_table(lua, &asset_server.0.lock())
+            asset_budgets_to_table(lua, &asset_server.lock())
         })?,
     )?;
 
@@ -9459,10 +9392,10 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+            let Some(asset_server) = world.get_resource::<BecsAssetServer>() else {
                 return Ok(false);
             };
-            Ok(apply_asset_budget_patch(&mut asset_server.0.lock(), &patch))
+            Ok(apply_asset_budget_patch(&mut asset_server.lock(), &patch))
         })?,
     )?;
 
@@ -9471,7 +9404,7 @@ fn build_ecs_table(
         "get_window_settings",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_get_window_settings as *mut World) };
-            let Some(window_control) = world.get_resource::<BevyRuntimeWindowControl>() else {
+            let Some(window_control) = world.get_resource::<BecsRuntimeWindowControl>() else {
                 return Err(mlua::Error::external(
                     "Window control resource is unavailable",
                 ));
@@ -9489,7 +9422,7 @@ fn build_ecs_table(
                 Ok(patch) => patch,
                 Err(_) => return Ok(false),
             };
-            let Some(window_control) = world.get_resource::<BevyRuntimeWindowControl>() else {
+            let Some(window_control) = world.get_resource::<BecsRuntimeWindowControl>() else {
                 return Ok(false);
             };
             Ok(apply_window_settings_patch(&window_control.0, &patch))
@@ -9673,9 +9606,10 @@ fn json_value_to_non_negative_usize(value: &JsonValue) -> Option<usize> {
 
 fn runtime_tuning_to_table(
     lua: &Lua,
-    tuning: &helmer::runtime::runtime::RuntimeTuning,
+    tuning: &helmer_render::runtime::RuntimeTuning,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
+    table.set("task_worker_count", tuning.load_task_worker_count() as u64)?;
     table.set(
         "render_message_capacity",
         tuning
@@ -9766,7 +9700,7 @@ fn runtime_tuning_to_table(
 }
 
 fn apply_runtime_tuning_patch(
-    tuning: &helmer::runtime::runtime::RuntimeTuning,
+    tuning: &helmer_render::runtime::RuntimeTuning,
     patch_table: &Table,
 ) -> bool {
     let Ok(patch) = table_to_json_object(patch_table) else {
@@ -9774,6 +9708,12 @@ fn apply_runtime_tuning_patch(
     };
     for (key, value) in &patch {
         match key.as_str() {
+            "task_worker_count" => {
+                let Some(parsed) = json_value_to_non_negative_usize(value) else {
+                    return false;
+                };
+                tuning.store_task_worker_count(parsed);
+            }
             "render_message_capacity" => {
                 let Some(parsed) = json_value_to_non_negative_usize(value) else {
                     return false;
@@ -9941,7 +9881,7 @@ fn parse_binding_backend_name(value: &str) -> Option<BindingBackendChoice> {
 
 fn runtime_config_to_table(
     lua: &Lua,
-    config: &helmer::runtime::config::RuntimeConfig,
+    config: &helmer_render::runtime::RuntimeConfig,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("egui", config.egui)?;
@@ -9959,7 +9899,7 @@ fn runtime_config_to_table(
 }
 
 fn apply_runtime_config_patch(
-    config: &mut helmer::runtime::config::RuntimeConfig,
+    config: &mut helmer_render::runtime::RuntimeConfig,
     patch: &JsonMap<String, JsonValue>,
 ) -> bool {
     for (key, value) in patch {
@@ -10008,7 +9948,7 @@ fn apply_runtime_config_patch(
 
 fn render_passes_to_table(
     lua: &Lua,
-    config: &helmer::graphics::common::config::RenderConfig,
+    config: &helmer_render::graphics::common::config::RenderConfig,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     table.set("gbuffer", config.gbuffer_pass)?;
@@ -10027,7 +9967,7 @@ fn render_passes_to_table(
 }
 
 fn apply_render_passes_patch(
-    config: &mut helmer::graphics::common::config::RenderConfig,
+    config: &mut helmer_render::graphics::common::config::RenderConfig,
     patch: &JsonMap<String, JsonValue>,
 ) -> bool {
     for (key, value) in patch {
@@ -10083,7 +10023,7 @@ fn is_valid_gpu_budget_patch_key(key: &str) -> bool {
 
 fn gpu_budget_to_table(
     lua: &Lua,
-    stats: &helmer::graphics::common::renderer::RendererStats,
+    stats: &helmer_render::graphics::common::renderer::RendererStats,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     let mut total_kind_soft = 0_u64;
@@ -10140,10 +10080,10 @@ fn set_gpu_budget_from_patch(world: &mut World, patch: &JsonMap<String, JsonValu
         }
     }
 
-    let Some(render_stats) = world.get_resource::<BevyRendererStats>() else {
+    let Some(render_stats) = world.get_resource::<BecsRendererStats>() else {
         return false;
     };
-    let Some(render_sender) = world.get_resource::<BevyRenderSender>() else {
+    let Some(render_sender) = world.get_resource::<BecsRenderSender>() else {
         return false;
     };
     let stats = &render_stats.0;
@@ -10258,7 +10198,7 @@ fn set_gpu_budget_from_patch(world: &mut World, patch: &JsonMap<String, JsonValu
 
 fn asset_budgets_to_table(
     lua: &Lua,
-    asset_server: &helmer::runtime::asset_server::AssetServer,
+    asset_server: &helmer_asset::runtime::asset_server::AssetServer,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
     let (mesh, texture, material) = asset_server.budgets_bytes();
@@ -10277,7 +10217,7 @@ fn asset_budgets_to_table(
 }
 
 fn apply_asset_budget_patch(
-    asset_server: &mut helmer::runtime::asset_server::AssetServer,
+    asset_server: &mut helmer_asset::runtime::asset_server::AssetServer,
     patch: &JsonMap<String, JsonValue>,
 ) -> bool {
     for key in patch.keys() {
@@ -10342,7 +10282,7 @@ fn apply_asset_budget_patch(
 
 fn window_settings_to_table(
     lua: &Lua,
-    window_control: &helmer::runtime::runtime::RuntimeWindowControl,
+    window_control: &helmer_window::runtime::runtime::RuntimeWindowControl,
 ) -> mlua::Result<Table> {
     let snapshot = window_control.snapshot();
     let table = lua.create_table()?;
@@ -10358,7 +10298,7 @@ fn window_settings_to_table(
 }
 
 fn apply_window_settings_patch(
-    window_control: &helmer::runtime::runtime::RuntimeWindowControl,
+    window_control: &helmer_window::runtime::runtime::RuntimeWindowControl,
     patch: &JsonMap<String, JsonValue>,
 ) -> bool {
     for (key, value) in patch {
@@ -10482,7 +10422,7 @@ fn has_physics_component(world: &World, entity: Entity) -> bool {
 }
 
 fn resolve_animator_target_entity(world: &mut World, entity: Entity) -> Option<Entity> {
-    if world.get::<BevyAnimator>(entity).is_some() {
+    if world.get::<Animator>(entity).is_some() {
         return Some(entity);
     }
 
@@ -10496,7 +10436,7 @@ fn resolve_animator_target_entity(world: &mut World, entity: Entity) -> Option<E
         .and_then(|spawned| spawned.spawned_scenes.get(&scene_root))
     {
         for candidate in children.iter().copied() {
-            if world.get::<BevyAnimator>(candidate).is_some() {
+            if world.get::<Animator>(candidate).is_some() {
                 return Some(candidate);
             }
         }
@@ -10504,7 +10444,7 @@ fn resolve_animator_target_entity(world: &mut World, entity: Entity) -> Option<E
 
     let mut scene_child_query = world.query::<(Entity, &SceneChild)>();
     for (candidate, child) in scene_child_query.iter(world) {
-        if child.scene_root == scene_root && world.get::<BevyAnimator>(candidate).is_some() {
+        if child.scene_root == scene_root && world.get::<Animator>(candidate).is_some() {
             return Some(candidate);
         }
     }
@@ -10531,7 +10471,7 @@ fn resolve_animator_target_entity(world: &mut World, entity: Entity) -> Option<E
         if !visited.insert(current) {
             continue;
         }
-        if world.get::<BevyAnimator>(current).is_some() {
+        if world.get::<Animator>(current).is_some() {
             return Some(current);
         }
 
@@ -10583,7 +10523,7 @@ fn resolve_animator_target_entities(world: &mut World, entity: Entity) -> Vec<En
         .and_then(|spawned| spawned.spawned_scenes.get(&scene_root))
     {
         for candidate in children.iter().copied() {
-            if seen.contains(&candidate) || world.get::<BevyAnimator>(candidate).is_none() {
+            if seen.contains(&candidate) || world.get::<Animator>(candidate).is_none() {
                 continue;
             }
             seen.insert(candidate);
@@ -10596,7 +10536,7 @@ fn resolve_animator_target_entities(world: &mut World, entity: Entity) -> Vec<En
         if child.scene_root != scene_root {
             continue;
         }
-        if seen.contains(&candidate) || world.get::<BevyAnimator>(candidate).is_none() {
+        if seen.contains(&candidate) || world.get::<Animator>(candidate).is_none() {
             continue;
         }
         seen.insert(candidate);
@@ -10618,7 +10558,7 @@ fn resolve_animator_target_entities(world: &mut World, entity: Entity) -> Vec<En
         if !visited.insert(current) {
             continue;
         }
-        if !seen.contains(&current) && world.get::<BevyAnimator>(current).is_some() {
+        if !seen.contains(&current) && world.get::<Animator>(current).is_some() {
             seen.insert(current);
             targets.push(current);
         }
@@ -10641,7 +10581,7 @@ fn normalized_clip_lookup_key(value: &str) -> String {
 }
 
 fn resolve_clip_index(
-    library: &helmer::animation::AnimationLibrary,
+    library: &helmer_animation::AnimationLibrary,
     clip_name: &str,
 ) -> Option<usize> {
     let clip_name = clip_name.trim();
@@ -10800,8 +10740,8 @@ fn audio_bus_from_value(value: Value, backend: Option<&AudioBackendResource>) ->
             }
             if let Some(audio) = backend {
                 let candidate = normalize_name(&raw);
-                for bus in audio.0.bus_list() {
-                    let name = audio.0.bus_name(bus);
+                for bus in audio.bus_list() {
+                    let name = audio.bus_name(bus);
                     if normalize_name(&name) == candidate {
                         return Some(bus);
                     }
@@ -10856,7 +10796,7 @@ fn apply_audio_emitter_asset(
     let resolved = resolve_project_path(project, Path::new(path));
     let mut loaded_id = None;
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
-        let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+        let Some(asset_server) = world.get_resource::<BecsAssetServer>() else {
             return;
         };
         let handle =
@@ -12729,7 +12669,7 @@ fn queue_physics_impulse_at_point(
 }
 
 fn cursor_policy_requests_capture(
-    policy: helmer::runtime::runtime::RuntimeCursorStateSnapshot,
+    policy: helmer_window::runtime::runtime::RuntimeCursorStateSnapshot,
 ) -> bool {
     policy.grab_mode != RuntimeCursorGrabMode::None || !policy.visible
 }
@@ -12773,8 +12713,8 @@ fn gameplay_input_capture_allowed(world: &World) -> bool {
 
     if let Some(runtime) = world.get_resource::<EditorViewportRuntime>() {
         if !runtime.pane_requests.is_empty() {
-            let cursor_position = world.get_resource::<BevyInputManager>().map(|input| {
-                let input = input.0.read();
+            let cursor_position = world.get_resource::<BecsInputManager>().map(|input| {
+                let input = input.read();
                 input.cursor_position
             });
             let pointer_over_play_viewport = runtime.pane_requests.iter().any(|pane| {
@@ -12990,10 +12930,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(0.0f32);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(0.0f32);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let value = action_value_for_name(
                 &input_manager,
                 world.get_resource::<ScriptInputState>(),
@@ -13012,10 +12952,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             Ok(action_down_for_name(
                 &input_manager,
                 world.get_resource::<ScriptInputState>(),
@@ -13033,10 +12973,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             Ok(action_pressed_for_name(
                 &input_manager,
                 world.get_resource::<ScriptInputState>(),
@@ -13054,10 +12994,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             Ok(action_released_for_name(
                 &input_manager,
                 world.get_resource::<ScriptInputState>(),
@@ -13075,10 +13015,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13097,10 +13037,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13119,10 +13059,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_key && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13144,10 +13084,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13166,10 +13106,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13193,10 +13133,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(false);
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13220,10 +13160,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
@@ -13243,10 +13183,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
@@ -13270,10 +13210,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
             if !gameplay_input_capture_allowed(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if input_manager.egui_wants_pointer && !script_cursor_capture_active(world) {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             }
@@ -13286,10 +13226,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "window_size",
         lua.create_function(move |lua, ()| {
             let world = unsafe { &mut *(world_ptr_window as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(vec2_to_table(lua, Vec2::ZERO)?));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let size = Vec2::new(
                 input_manager.window_size.x as f32,
                 input_manager.window_size.y as f32,
@@ -13303,10 +13243,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "scale_factor",
         lua.create_function(move |_, ()| {
             let world = unsafe { &mut *(world_ptr_scale as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(1.0f64));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             Ok(Some(input_manager.scale_factor))
         })?,
     )?;
@@ -13324,10 +13264,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
                 table.set("super", false)?;
                 Ok(table)
             };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(Some(default_table()?));
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if !gameplay_input_capture_allowed(world) {
                 return Ok(Some(default_table()?));
             }
@@ -13358,10 +13298,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "wants_keyboard",
         lua.create_function(move |_, ()| {
             let world = unsafe { &mut *(world_ptr_wants_keyboard as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13374,10 +13314,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "wants_pointer",
         lua.create_function(move |_, ()| {
             let world = unsafe { &mut *(world_ptr_wants_pointer as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             if script_cursor_capture_active(world) {
                 return Ok(false);
             }
@@ -13486,10 +13426,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "gamepad_axis",
         lua.create_function(move |_, (axis, id): (Value, Option<u64>)| {
             let world = unsafe { &mut *(world_ptr_gamepad_axis as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(0.0);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let Some(axis) = lua_gamepad_axis_from_value(axis) else {
                 return Ok(0.0);
             };
@@ -13507,10 +13447,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "gamepad_button_down",
         lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
             let world = unsafe { &mut *(world_ptr_gamepad_down as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let Some(button) = lua_gamepad_button_from_value(button) else {
                 return Ok(false);
             };
@@ -13528,10 +13468,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "gamepad_button_pressed",
         lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
             let world = unsafe { &mut *(world_ptr_gamepad_pressed as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let Some(button) = lua_gamepad_button_from_value(button) else {
                 return Ok(false);
             };
@@ -13560,10 +13500,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "gamepad_button_released",
         lua.create_function(move |_, (button, id): (Value, Option<u64>)| {
             let world = unsafe { &mut *(world_ptr_gamepad_released as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(false);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let Some(button) = lua_gamepad_button_from_value(button) else {
                 return Ok(false);
             };
@@ -13592,10 +13532,10 @@ fn build_input_table(lua: &Lua, world_ptr: usize) -> mlua::Result<Table> {
         "gamepad_trigger",
         lua.create_function(move |_, (side, id): (Value, Option<u64>)| {
             let world = unsafe { &mut *(world_ptr_trigger as *mut World) };
-            let Some(input_manager) = world.get_resource::<BevyInputManager>() else {
+            let Some(input_manager) = world.get_resource::<BecsInputManager>() else {
                 return Ok(0.0);
             };
-            let input_manager = input_manager.0.read();
+            let input_manager = input_manager.read();
             let Some(side) = parse_trigger_side(side) else {
                 return Ok(0.0);
             };
@@ -14826,8 +14766,8 @@ fn has_script_owned_entities(world: &mut World, owner: Entity, script_index: usi
 }
 
 fn ensure_transform(world: &mut World, entity: Entity) {
-    if world.get::<BevyTransform>(entity).is_none() {
-        world.entity_mut(entity).insert(BevyTransform::default());
+    if world.get::<Transform>(entity).is_none() {
+        world.entity_mut(entity).insert(Transform::default());
     }
 }
 
@@ -15496,8 +15436,8 @@ fn load_texture_id(
 ) -> Option<usize> {
     let full_path = resolve_project_path(project, Path::new(path));
     let asset_server = world
-        .get_resource::<BevyAssetServer>()
-        .map(|server| BevyAssetServer(server.0.clone()))?;
+        .get_resource::<BecsAssetServer>()
+        .map(BecsAssetServer::cloned)?;
 
     if let Some(mut cache) = world.get_resource_mut::<EditorAssetCache>() {
         let handle = cached_texture_handle(&mut cache, &asset_server, &full_path);
@@ -15507,15 +15447,18 @@ fn load_texture_id(
         asset_server
             .0
             .lock()
-            .load_texture(full_path, helmer::runtime::asset_server::AssetKind::Albedo)
+            .load_texture(
+                full_path,
+                helmer_asset::runtime::asset_server::AssetKind::Albedo,
+            )
             .id,
     )
 }
 
 fn mark_entity_render_dirty(world: &mut World, entity: Entity) {
-    if let Some(mut transform) = world.get_mut::<BevyTransform>(entity) {
-        let current = transform.0;
-        transform.0 = current;
+    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+        let current = *transform;
+        *transform = current;
     }
 }
 
@@ -15530,7 +15473,7 @@ fn apply_mesh_renderer(
 ) -> bool {
     let mut applied = false;
     world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
-        let Some(asset_server) = world.get_resource::<BevyAssetServer>() else {
+        let Some(asset_server) = world.get_resource::<BecsAssetServer>() else {
             return;
         };
 
@@ -15560,12 +15503,7 @@ fn apply_mesh_renderer(
         };
 
         world.entity_mut(entity).insert((
-            BevyWrapper(MeshRenderer::new(
-                mesh_handle.id,
-                material_handle.id,
-                casts_shadow,
-                visible,
-            )),
+            MeshRenderer::new(mesh_handle.id, material_handle.id, casts_shadow, visible),
             EditorMesh {
                 source,
                 material_path,
@@ -15581,7 +15519,7 @@ fn apply_mesh_renderer(
 fn ensure_default_material(
     project: &EditorProject,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
 ) -> Option<Handle<Material>> {
     if let Some(handle) = cache.default_material {
         return Some(handle);
@@ -15590,7 +15528,7 @@ fn ensure_default_material(
     let root = project.root.as_ref()?;
     let config = project.config.as_ref()?;
     let default_path = config.materials_root(root).join("default.ron");
-    let handle = asset_server.0.lock().load_material(&default_path);
+    let handle = asset_server.lock().load_material(&default_path);
 
     let relative = default_path
         .strip_prefix(root)
@@ -15608,7 +15546,7 @@ fn ensure_default_material(
 fn load_material_handle(
     path: &str,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     project: Option<&EditorProject>,
 ) -> Option<Handle<Material>> {
     if let Some(handle) = cache.material_handles.get(path).copied() {
@@ -15616,7 +15554,7 @@ fn load_material_handle(
     }
 
     let full_path = resolve_project_path(project, Path::new(path));
-    let handle = asset_server.0.lock().load_material(full_path);
+    let handle = asset_server.lock().load_material(full_path);
     cache.material_handles.insert(path.to_string(), handle);
     Some(handle)
 }
@@ -15624,7 +15562,7 @@ fn load_material_handle(
 fn load_mesh_asset(
     path: &str,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
     project: Option<&EditorProject>,
 ) -> Handle<Mesh> {
     if let Some(handle) = cache.mesh_handles.get(path).copied() {
@@ -15632,7 +15570,7 @@ fn load_mesh_asset(
     }
 
     let full_path = resolve_project_path(project, Path::new(path));
-    let handle = asset_server.0.lock().load_mesh(full_path);
+    let handle = asset_server.lock().load_mesh(full_path);
     cache.mesh_handles.insert(path.to_string(), handle);
     handle
 }
@@ -15640,7 +15578,7 @@ fn load_mesh_asset(
 fn load_primitive_mesh(
     kind: PrimitiveKind,
     cache: &mut EditorAssetCache,
-    asset_server: &BevyAssetServer,
+    asset_server: &BecsAssetServer,
 ) -> Handle<Mesh> {
     if let Some(handle) = cache.primitive_meshes.get(&kind).copied() {
         return handle;

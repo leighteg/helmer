@@ -7,15 +7,15 @@ use std::{
     sync::OnceLock,
 };
 
-use bevy_ecs::{
+use helmer_asset::runtime::asset_server::AssetServer;
+use helmer_becs::ecs::{
     entity::Entity,
     prelude::{With, Without},
     schedule::{IntoScheduleConfigs, Schedule},
     world::World,
 };
-use helmer::runtime::asset_server::AssetServer;
 use helmer_becs::{
-    BevyAssetServer, BevyCamera, BevyInputManager, BevyLight, BevyTransform, helmer_becs_init,
+    BecsAssetServer, BecsInputManager, Camera, Light, Transform, helmer_becs_init,
     physics::systems::{
         apply_persistent_forces_system, apply_queued_impulses_system, apply_transient_forces_system,
     },
@@ -199,7 +199,7 @@ fn insert_player_resources(world: &mut World, bootstrap: &PlayerBootstrap) {
 
 fn player_viewport_runtime_system(world: &mut World) {
     let (window_width, window_height) = world
-        .get_resource::<BevyInputManager>()
+        .get_resource::<BecsInputManager>()
         .map(|input| {
             let input = input.0.read();
             (input.window_size.x.max(1), input.window_size.y.max(1))
@@ -267,9 +267,9 @@ fn load_runtime_scene(world: &mut World, path: &Path) -> Result<(), String> {
         reset_editor_scene(world);
         let created_entities = world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
             let asset_server = world
-                .get_resource::<BevyAssetServer>()
-                .expect("BevyAssetServer resource is missing");
-            let asset_server = BevyAssetServer(asset_server.0.clone());
+                .get_resource::<BecsAssetServer>()
+                .expect("BecsAssetServer resource is missing");
+            let asset_server = BecsAssetServer(asset_server.0.clone());
             spawn_scene_from_document(
                 world,
                 &document,
@@ -284,13 +284,13 @@ fn load_runtime_scene(world: &mut World, path: &Path) -> Result<(), String> {
         let scene_path = path.to_path_buf();
         world.resource_scope::<EditorAssetCache, _>(|world, mut cache| {
             let asset_server = world
-                .get_resource::<BevyAssetServer>()
-                .expect("BevyAssetServer resource is missing");
-            let asset_server = BevyAssetServer(asset_server.0.clone());
+                .get_resource::<BecsAssetServer>()
+                .expect("BecsAssetServer resource is missing");
+            let asset_server = BecsAssetServer(asset_server.0.clone());
             let handle = cached_scene_handle(&mut cache, &asset_server, &scene_path);
             world.spawn((
                 EditorEntity,
-                BevyTransform::default(),
+                Transform::default(),
                 SceneRoot(handle),
                 SceneAssetPath {
                     path: scene_path.clone(),
@@ -320,7 +320,7 @@ fn load_runtime_scene(world: &mut World, path: &Path) -> Result<(), String> {
 fn ensure_runtime_scene_defaults(world: &mut World) {
     let has_scene_camera = world
         .query_filtered::<Entity, (
-            With<BevyCamera>,
+            With<Camera>,
             Without<helmer_editor_egui::editor::EditorViewportCamera>,
         )>()
         .iter(world)
@@ -330,7 +330,7 @@ fn ensure_runtime_scene_defaults(world: &mut World) {
         spawn_default_camera(world);
     }
 
-    let has_light = world.query::<&BevyLight>().iter(world).next().is_some();
+    let has_light = world.query::<&Light>().iter(world).next().is_some();
     if !has_light {
         spawn_default_light(world);
     }

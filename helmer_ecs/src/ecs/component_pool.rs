@@ -1,4 +1,5 @@
 use hashbrown::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::any::TypeId;
 
@@ -112,23 +113,49 @@ impl ComponentPool {
     }
 
     pub fn get_all_for_entity(&self, entity: Entity) -> Vec<&dyn Component> {
-        self.components
-            .par_values()
-            .filter_map(|map| {
-                map.get(&entity)
-                    .map(|boxed| boxed.as_ref() as &dyn Component)
-            })
-            .collect()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .par_values()
+                .filter_map(|map| {
+                    map.get(&entity)
+                        .map(|boxed| boxed.as_ref() as &dyn Component)
+                })
+                .collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .values()
+                .filter_map(|map| {
+                    map.get(&entity)
+                        .map(|boxed| boxed.as_ref() as &dyn Component)
+                })
+                .collect()
+        }
     }
 
     pub fn get_all_for_entity_mut(&mut self, entity: Entity) -> Vec<&mut dyn Component> {
-        self.components
-            .par_values_mut()
-            .filter_map(|map| {
-                map.get_mut(&entity)
-                    .map(|boxed| boxed.as_mut() as &mut dyn Component)
-            })
-            .collect()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .par_values_mut()
+                .filter_map(|map| {
+                    map.get_mut(&entity)
+                        .map(|boxed| boxed.as_mut() as &mut dyn Component)
+                })
+                .collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .values_mut()
+                .filter_map(|map| {
+                    map.get_mut(&entity)
+                        .map(|boxed| boxed.as_mut() as &mut dyn Component)
+                })
+                .collect()
+        }
     }
 
     pub fn remove<T: Component + 'static>(&mut self, entity: Entity) {
@@ -138,63 +165,138 @@ impl ComponentPool {
     }
 
     pub fn get_all<T: Component + 'static>(&self) -> Vec<&T> {
-        self.components
-            .get(&TypeId::of::<T>())
-            .map(|map| {
-                map.par_values()
-                    .filter_map(|boxed| boxed.as_any().downcast_ref::<T>())
-                    .collect()
-            })
-            .unwrap_or_default()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .get(&TypeId::of::<T>())
+                .map(|map| {
+                    map.par_values()
+                        .filter_map(|boxed| boxed.as_any().downcast_ref::<T>())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .get(&TypeId::of::<T>())
+                .map(|map| {
+                    map.values()
+                        .filter_map(|boxed| boxed.as_any().downcast_ref::<T>())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
     }
 
     pub fn get_all_mut<T: Component + 'static>(&mut self) -> Vec<&mut T> {
-        self.components
-            .get_mut(&TypeId::of::<T>())
-            .map(|map| {
-                map.par_values_mut()
-                    .filter_map(|boxed| boxed.as_any_mut().downcast_mut::<T>())
-                    .collect()
-            })
-            .unwrap_or_default()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .map(|map| {
+                    map.par_values_mut()
+                        .filter_map(|boxed| boxed.as_any_mut().downcast_mut::<T>())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .map(|map| {
+                    map.values_mut()
+                        .filter_map(|boxed| boxed.as_any_mut().downcast_mut::<T>())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
     }
 
     pub fn get_all_with_entities<T: Component + 'static>(&self) -> Vec<(Entity, &T)> {
-        self.components
-            .get(&TypeId::of::<T>())
-            .map(|map| {
-                map.par_iter()
-                    .filter_map(|(entity, boxed)| {
-                        boxed
-                            .as_any()
-                            .downcast_ref::<T>()
-                            .map(|component| (*entity, component))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .get(&TypeId::of::<T>())
+                .map(|map| {
+                    map.par_iter()
+                        .filter_map(|(entity, boxed)| {
+                            boxed
+                                .as_any()
+                                .downcast_ref::<T>()
+                                .map(|component| (*entity, component))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .get(&TypeId::of::<T>())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(entity, boxed)| {
+                            boxed
+                                .as_any()
+                                .downcast_ref::<T>()
+                                .map(|component| (*entity, component))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
     }
 
     pub fn get_all_with_entities_mut<T: Component + 'static>(&mut self) -> Vec<(Entity, &mut T)> {
-        self.components
-            .get_mut(&TypeId::of::<T>())
-            .map(|map| {
-                map.par_iter_mut()
-                    .filter_map(|(entity, boxed)| {
-                        boxed
-                            .as_any_mut()
-                            .downcast_mut::<T>()
-                            .map(|component| (*entity, component))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .map(|map| {
+                    map.par_iter_mut()
+                        .filter_map(|(entity, boxed)| {
+                            boxed
+                                .as_any_mut()
+                                .downcast_mut::<T>()
+                                .map(|component| (*entity, component))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .map(|map| {
+                    map.iter_mut()
+                        .filter_map(|(entity, boxed)| {
+                            boxed
+                                .as_any_mut()
+                                .downcast_mut::<T>()
+                                .map(|component| (*entity, component))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
     }
 
     pub fn remove_entity(&mut self, entity: Entity) {
-        self.components.par_values_mut().for_each(|map| {
-            map.remove(&entity);
-        })
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.components.par_values_mut().for_each(|map| {
+                map.remove(&entity);
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.components.values_mut().for_each(|map| {
+                map.remove(&entity);
+            });
+        }
     }
 }
 

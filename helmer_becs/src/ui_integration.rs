@@ -1,27 +1,25 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use arboard::Clipboard;
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use glam::Vec2;
 use hashbrown::{HashMap, HashSet};
-use helmer::{
-    graphics::common::renderer::{
-        TextAlignH, TextAlignV, UiRenderCommand, UiRenderData, UiRenderImage, UiRenderRect,
-        UiRenderText,
-    },
-    runtime::input_manager::InputManager,
-    runtime::runtime::RuntimeCursorGrabMode,
+use helmer_render::graphics::common::renderer::{
+    TextAlignH, TextAlignV, UiRenderCommand, UiRenderData, UiRenderImage, UiRenderRect,
+    UiRenderText,
 };
 use helmer_ui::{
     UiContext, UiDragInputSnapshot, UiDrawCommand, UiId, UiInputSnapshot, UiKeyInput, UiTextAlign,
     UiWindowOptions,
 };
+use helmer_window::runtime::{input_manager::InputManager, runtime::RuntimeCursorGrabMode};
 use parking_lot::RwLock;
+use web_time::Instant;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::{
-    BevyInputManager, BevyRuntimeCursorState, BevyRuntimeProfiling,
+    BecsInputManager, BecsRuntimeCursorState, BecsRuntimeProfiling,
     egui_integration::EguiInputPassthrough,
 };
 
@@ -476,14 +474,14 @@ fn collect_drag_input(
 }
 
 pub fn ui_system(
-    input: Option<Res<BevyInputManager>>,
-    runtime_cursor_state: Option<Res<BevyRuntimeCursorState>>,
+    input: Option<Res<BecsInputManager>>,
+    runtime_cursor_state: Option<Res<BecsRuntimeCursorState>>,
     egui_passthrough: Option<Res<EguiInputPassthrough>>,
     mut ui_runtime_state: ResMut<UiRuntimeState>,
     ui_res: Res<UiResource>,
     mut ui_render_state: ResMut<UiRenderFrameOutput>,
     mut ui_perf: ResMut<UiPerfStats>,
-    runtime_profiling: Option<Res<BevyRuntimeProfiling>>,
+    runtime_profiling: Option<Res<BecsRuntimeProfiling>>,
     mut clipboard: Option<ResMut<UiClipboard>>,
 ) {
     let profiling_enabled = runtime_profiling

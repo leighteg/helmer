@@ -1,10 +1,10 @@
-use bevy_ecs::system::{Res, ResMut};
-use helmer_becs::{BevyInputManager, BevyRuntimeConfig};
+use helmer_becs::ecs::system::{Res, ResMut};
+use helmer_becs::{InputManagerResource, RuntimeConfigResource};
 use winit::keyboard::KeyCode;
 
 pub fn config_toggle_system(
-    input_manager: Res<BevyInputManager>,
-    mut runtime_config: ResMut<BevyRuntimeConfig>,
+    input_manager: Res<InputManagerResource>,
+    mut runtime_config: ResMut<RuntimeConfigResource>,
 ) {
     let input_manager = input_manager.0.read();
     let runtime_config = &mut runtime_config.0;

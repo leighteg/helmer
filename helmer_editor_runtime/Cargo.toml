@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy_ecs = "0.17.2"
+helmer_becs = { path = "../helmer_becs" }
 helmer = { path = "../helmer" }
 notify = "8.2.0"
 ron = "0.12.0"

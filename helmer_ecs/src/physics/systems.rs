@@ -1,6 +1,6 @@
+use crate::components::Transform;
 use glam::{Quat, Vec3};
-use helmer::provided::components::Transform;
-use helmer::runtime::input_manager::InputManager;
+use helmer_window::runtime::input_manager::InputManager;
 use rapier3d::{
     math::Pose,
     prelude::{ColliderBuilder, RigidBodyBuilder},

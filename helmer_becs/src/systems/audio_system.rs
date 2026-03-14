@@ -1,33 +1,28 @@
 use bevy_ecs::prelude::{Entity, Query, Res, Without};
 use std::collections::HashSet;
 
-use helmer::audio::{
+use crate::components::{ActiveCamera, AudioEmitter, AudioListener, Transform};
+use helmer_audio::{
     AudioEmitterSettings, AudioEmitterSnapshot, AudioListenerSettings, AudioPlaybackState,
 };
-use helmer::provided::components::{ActiveCamera, AudioEmitter, AudioListener, Transform};
 
 use crate::systems::scene_system::{SceneChild, SceneRoot};
-use crate::{
-    AudioBackendResource, BevyAssetServerParam, BevySystemProfiler, BevyWrapper, DeltaTime,
-};
+use crate::{AudioBackendResource, BecsAssetServerParam, BecsSystemProfiler, DeltaTime};
 
 pub fn audio_system(
     _dt: Res<DeltaTime>,
-    asset_server: BevyAssetServerParam<'_>,
+    asset_server: BecsAssetServerParam<'_>,
     audio_backend: Res<AudioBackendResource>,
-    listeners: Query<(&BevyWrapper<Transform>, &BevyWrapper<AudioListener>)>,
-    cameras: Query<
-        (&BevyWrapper<Transform>, &BevyWrapper<ActiveCamera>),
-        Without<BevyWrapper<AudioListener>>,
-    >,
+    listeners: Query<(&Transform, &AudioListener)>,
+    cameras: Query<(&Transform, &ActiveCamera), Without<AudioListener>>,
     mut emitters: Query<(
         Entity,
-        &BevyWrapper<Transform>,
-        &mut BevyWrapper<AudioEmitter>,
+        &Transform,
+        &mut AudioEmitter,
         Option<&SceneChild>,
         Option<&SceneRoot>,
     )>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler
         .as_ref()
@@ -46,9 +41,9 @@ pub fn audio_system(
 
     let listener_transform = listeners
         .iter()
-        .find(|(_, listener)| listener.0.enabled)
-        .map(|(transform, _)| transform.0)
-        .or_else(|| cameras.iter().next().map(|(transform, _)| transform.0));
+        .find(|(_, listener)| listener.enabled)
+        .map(|(transform, _)| *transform)
+        .or_else(|| cameras.iter().next().map(|(transform, _)| *transform));
 
     let listener_settings = listener_transform.map(|listener| AudioListenerSettings {
         position: listener.position,
@@ -62,16 +57,16 @@ pub fn audio_system(
     for (entity, transform, mut emitter, scene_child, scene_root) in emitters.iter_mut() {
         if let Some(finished_set) = finished_set.as_ref() {
             if finished_set.contains(&entity.to_bits()) {
-                emitter.0.playback_state = AudioPlaybackState::Stopped;
-                emitter.0.play_on_spawn = false;
+                emitter.playback_state = AudioPlaybackState::Stopped;
+                emitter.play_on_spawn = false;
             }
         }
-        if emitter.0.play_on_spawn {
-            emitter.0.play_on_spawn = false;
-            emitter.0.playback_state = AudioPlaybackState::Playing;
+        if emitter.play_on_spawn {
+            emitter.play_on_spawn = false;
+            emitter.playback_state = AudioPlaybackState::Playing;
         }
 
-        let Some(clip_id) = emitter.0.clip_id else {
+        let Some(clip_id) = emitter.clip_id else {
             continue;
         };
 
@@ -83,17 +78,17 @@ pub fn audio_system(
             .map(|child| child.scene_root.to_bits())
             .or_else(|| scene_root.map(|_| entity.to_bits()));
         let settings = AudioEmitterSettings {
-            bus: emitter.0.bus,
-            volume: emitter.0.volume,
-            pitch: emitter.0.pitch,
-            looping: emitter.0.looping,
-            spatial: emitter.0.spatial,
-            min_distance: emitter.0.min_distance,
-            max_distance: emitter.0.max_distance,
-            rolloff: emitter.0.rolloff,
-            spatial_blend: emitter.0.spatial_blend,
-            playback_state: emitter.0.playback_state,
-            play_on_spawn: emitter.0.play_on_spawn,
+            bus: emitter.bus,
+            volume: emitter.volume,
+            pitch: emitter.pitch,
+            looping: emitter.looping,
+            spatial: emitter.spatial,
+            min_distance: emitter.min_distance,
+            max_distance: emitter.max_distance,
+            rolloff: emitter.rolloff,
+            spatial_blend: emitter.spatial_blend,
+            playback_state: emitter.playback_state,
+            play_on_spawn: emitter.play_on_spawn,
             scene_id,
         };
 
@@ -101,7 +96,7 @@ pub fn audio_system(
             entity_id: entity.to_bits(),
             clip: Some(clip),
             settings,
-            position: transform.0.position,
+            position: transform.position,
         });
     }
 

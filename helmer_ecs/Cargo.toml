@@ -6,12 +6,26 @@ edition = "2024"
 [dependencies]
 proc = { path = "proc" }
 helmer = { path = "../helmer" }
-hashbrown = { version = "0.16.1", features = ["rayon"] }
-rayon = "1.11.0"
+helmer_animation = { path = "../helmer_animation" }
+helmer_audio = { path = "../helmer_audio" }
+helmer_render = { path = "../helmer_render" }
+helmer_asset = { path = "../helmer_asset" }
+helmer_window = { path = "../helmer_window" }
+helmer_input = { path = "../helmer_input" }
+hashbrown = "0.16.1"
 tracing = "0.1.44"
 parking_lot = "0.12.5"
 glam = "0.30.9"
 egui = "0.33.3"
 egui-wgpu = "0.33.3"
 winit = "0.30.12"
+web-time = "1.1.0"
+crossbeam-channel = "0.5.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hashbrown = { version = "0.16.1", features = ["rayon"] }
+rayon = "1.11.0"
 rapier3d = { version = "0.32.0", features = ["simd-stable", "parallel"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rapier3d = { version = "0.32.0", default-features = false, features = ["dim3", "f32", "simd-stable"] }

@@ -1,15 +1,12 @@
 use bevy_ecs::prelude::{Entity, Query, Res, ResMut, Resource};
 use glam::{Mat3, Mat4, Vec3, Vec4};
 use hashbrown::{HashMap, HashSet};
-use helmer::{
-    animation::{Pose, write_skin_palette},
-    graphics::common::config::SkinningMode,
-    graphics::common::renderer::Vertex,
-};
+use helmer_animation::{Pose, write_skin_palette};
+use helmer_render::graphics::common::{config::SkinningMode, renderer::Vertex};
 
 use crate::{
-    BevyAnimator, BevyAssetServerParam, BevyPoseOverride, BevyRuntimeConfig,
-    BevySkinnedMeshRenderer, BevySystemProfiler, DeltaTime,
+    Animator, BecsAssetServerParam, BecsRuntimeConfig, BecsSystemProfiler, DeltaTime, PoseOverride,
+    SkinnedMeshRenderer,
 };
 
 #[derive(Clone)]
@@ -269,15 +266,15 @@ fn skin_vertices_cpu(vertices: &[Vertex], palette: &[Mat4]) -> Vec<Vertex> {
 pub fn skinning_system(
     mut skinning: ResMut<SkinningResource>,
     time: Res<DeltaTime>,
-    runtime_config: Res<BevyRuntimeConfig>,
-    asset_server: Option<BevyAssetServerParam<'_>>,
+    runtime_config: Res<BecsRuntimeConfig>,
+    asset_server: Option<BecsAssetServerParam<'_>>,
     mut query: Query<(
         Entity,
-        &BevySkinnedMeshRenderer,
-        Option<&mut BevyAnimator>,
-        Option<&BevyPoseOverride>,
+        &SkinnedMeshRenderer,
+        Option<&mut Animator>,
+        Option<&PoseOverride>,
     )>,
-    system_profiler: Option<Res<BevySystemProfiler>>,
+    system_profiler: Option<Res<BecsSystemProfiler>>,
 ) {
     let _system_scope = system_profiler.as_ref().and_then(|profiler| {
         profiler
@@ -298,7 +295,7 @@ pub fn skinning_system(
         let entity_id = entity.to_bits() as usize;
         seen.insert(entity_id);
 
-        let skin = &skinned.0.skin;
+        let skin = &skinned.skin;
         let skeleton = &skin.skeleton;
         let joint_count = skeleton.joint_count();
         if joint_count == 0 {
@@ -325,8 +322,8 @@ pub fn skinning_system(
                 let entry = entries
                     .get_mut(&entity_id)
                     .expect("skinning entry must exist");
-                if let Some(override_pose) = pose_override.filter(|pose| pose.0.enabled) {
-                    let override_locals = &override_pose.0.pose.locals;
+                if let Some(override_pose) = pose_override.filter(|pose| pose.enabled) {
+                    let override_locals = &override_pose.pose.locals;
                     if entry.pose.locals.len() != override_locals.len() {
                         entry.pose.locals = override_locals.clone();
                     } else {
@@ -352,7 +349,7 @@ pub fn skinning_system(
                     Some(server) => server,
                     None => continue,
                 };
-                let base_mesh_id = skinned.0.mesh_id;
+                let base_mesh_id = skinned.mesh_id;
                 let palette_slice = &palette[offset..(offset + count)];
                 let cpu_entry = cpu_meshes.entry(entity_id).or_insert_with(|| {
                     *full_sync_requested = true;

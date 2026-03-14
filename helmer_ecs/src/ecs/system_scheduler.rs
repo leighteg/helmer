@@ -1,5 +1,4 @@
-use helmer::runtime::input_manager::InputManager;
-use rayon::prelude::*;
+use helmer_window::runtime::input_manager::InputManager;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

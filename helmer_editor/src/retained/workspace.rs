@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EditorPaneKind {

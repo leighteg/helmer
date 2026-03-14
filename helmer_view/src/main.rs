@@ -3,12 +3,12 @@ use std::env;
 
 use becs_bench::systems::{config_toggle::config_toggle_system, freecam::freecam_system};
 use glam::{Quat, Vec3};
-use helmer::provided::components::{ActiveCamera, Light, Transform};
-#[cfg(target_arch = "wasm32")]
-use helmer::runtime::wasm_harness::WasmHarnessConfig;
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyLight, BevyTransform, helmer_becs_init_with_runtime,
+    components::{ActiveCamera, Light, Transform},
+    helmer_becs_init_with_runtime,
 };
+#[cfg(target_arch = "wasm32")]
+use helmer_window::runtime::wasm_harness::WasmHarnessConfig;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -28,35 +28,29 @@ fn run() {
             let camera_forward = (Vec3::ZERO - camera_pos).normalize_or_zero();
             let camera_rot = Quat::from_rotation_arc(Vec3::Z, camera_forward);
             let camera_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: camera_pos,
-                        rotation: camera_rot,
-                        scale: Vec3::ONE,
-                    },
+                Transform {
+                    position: camera_pos,
+                    rotation: camera_rot,
+                    scale: Vec3::ONE,
                 },
-                BevyCamera::default(),
-                BevyActiveCamera { 0: ActiveCamera {} },
+                helmer_becs::Camera::default(),
+                ActiveCamera,
             ));
 
             let sun_rotation = Quat::from_euler(
                 glam::EulerRot::YXZ,
-                20.0f32.to_radians(),  // Y rotation - very slight side angle
-                -50.0f32.to_radians(), // X rotation - steeper downward angle
-                20.0f32.to_radians(),  // Z rotation - no roll
+                20.0f32.to_radians(),
+                -50.0f32.to_radians(),
+                20.0f32.to_radians(),
             );
 
             let sun_entity = world.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: glam::Vec3::new(0.0, 0.0, 0.0),
-                        rotation: sun_rotation,
-                        scale: glam::Vec3::ONE,
-                    },
+                Transform {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    rotation: sun_rotation,
+                    scale: glam::Vec3::ONE,
                 },
-                BevyLight {
-                    0: Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
-                },
+                Light::directional(glam::vec3(1.0, 1.0, 1.0), 50.0),
             ));
 
             // resources init

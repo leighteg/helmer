@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use bevy_ecs::prelude::Resource;
+use helmer_becs::ecs::prelude::Resource;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::project::ProjectConfig;

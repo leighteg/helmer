@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use bevy_ecs::prelude::{Resource, World};
-use helmer::runtime::runtime::{
+use helmer_becs::ecs::prelude::{Resource, World};
+use helmer_window::runtime::runtime::{
     RuntimeLogEntry, RuntimeLogLevel, RuntimeLogListener, set_runtime_log_listener,
 };
 

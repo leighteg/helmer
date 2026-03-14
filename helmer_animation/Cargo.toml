@@ -1,0 +1,9 @@
+[package]
+name = "helmer_animation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = "0.30.9"
+serde = { version = "1.0.228", features = ["derive"] }
+helmer_render = { path = "../helmer_render" }

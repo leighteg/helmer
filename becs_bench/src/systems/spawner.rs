@@ -3,16 +3,15 @@ use std::{
     ops::Range,
 };
 
-use bevy_ecs::{
+use glam::Vec3;
+use helmer_becs::ecs::{
     entity::Entity,
     name::Name,
     resource::Resource,
     system::{Commands, Res, ResMut},
 };
-use glam::Vec3;
-use helmer::provided::components::{MeshRenderer, Transform};
 use helmer_becs::{
-    BevyMeshRenderer, BevyTransform, DeltaTime,
+    components::{MeshRenderer, Transform},
     egui_integration::{EguiResource, EguiWindowSpec},
     physics::components::{ColliderShape, DynamicRigidBody},
 };
@@ -173,14 +172,12 @@ pub fn spawner_system(
             };
 
             let new_entity = commands.spawn((
-                BevyTransform {
-                    0: Transform {
-                        position: Vec3::from_array([x, y, z]),
-                        scale: Vec3::from_array([spawner_system_resource.mesh_scale; 3]),
-                        ..Default::default()
-                    },
+                Transform {
+                    position: Vec3::from_array([x, y, z]),
+                    scale: Vec3::from_array([spawner_system_resource.mesh_scale; 3]),
+                    ..Default::default()
                 },
-                BevyMeshRenderer { 0: *mesh_renderer },
+                *mesh_renderer,
                 collider,
                 DynamicRigidBody {
                     mass: spawner_system_resource.mesh_scale * 10.0,

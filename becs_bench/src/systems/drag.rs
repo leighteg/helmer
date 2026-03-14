@@ -1,14 +1,10 @@
-use bevy_ecs::{
-    prelude::{Entity, Query, Res, ResMut, Resource, With, Without},
+use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
+use helmer_becs::ecs::{
+    prelude::{Entity, Query, Res, ResMut, With, Without},
     system::Local,
 };
-use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 use helmer_becs::{
-    BevyActiveCamera, BevyCamera, BevyInputManager, BevyTransform,
-    physics::{
-        components::{FixedCollider, PhysicsHandle},
-        physics_resource::PhysicsResource,
-    },
+    physics::{components::PhysicsHandle, physics_resource::PhysicsResource},
     provided::ui::inspector::InspectorSelectedEntityResource,
 };
 use rapier3d::{
@@ -16,7 +12,6 @@ use rapier3d::{
     parry::query::ShapeCastOptions,
     prelude::{QueryFilter, RigidBodyType, Vector},
 };
-use std::f32::consts::PI;
 use winit::event::MouseButton;
 
 // --- Ray Struct ---
@@ -40,15 +35,18 @@ pub struct DragState {
 
 /// Creates a ray from the camera through the cursor's position on the screen.
 fn screen_point_to_ray(
-    camera_query: &Query<(&BevyCamera, &BevyTransform), With<BevyActiveCamera>>,
-    input: &BevyInputManager,
+    camera_query: &Query<
+        (&helmer_becs::Camera, &helmer_becs::Transform),
+        With<helmer_becs::ActiveCamera>,
+    >,
+    input: &helmer_becs::InputManagerResource,
 ) -> Option<Ray> {
     let input = input.0.read();
 
     // Get the active camera's components
     let (camera, transform) = camera_query.single().ok()?;
-    let camera = camera.0; // unwrap
-    let transform = transform.0; // unwrap
+    let camera = *camera;
+    let transform = *transform;
 
     // Convert cursor position to NDC
     let x = (2.0 * input.cursor_position.x as f32) / input.window_size.x as f32 - 1.0;
@@ -111,18 +109,21 @@ pub fn drag_system(
     mut state: Local<DragState>,
 
     // Resources
-    input_res: Option<Res<BevyInputManager>>,
+    input_res: Option<Res<helmer_becs::InputManagerResource>>,
     physics_res: Option<ResMut<PhysicsResource>>,
 
     // Queries
-    camera_query: Query<(&BevyCamera, &BevyTransform), With<BevyActiveCamera>>,
+    camera_query: Query<
+        (&helmer_becs::Camera, &helmer_becs::Transform),
+        With<helmer_becs::ActiveCamera>,
+    >,
     // Query for all entities that can be dragged:
     // - Must have a Transform (to move)
     // - Must have a PhysicsHandle (to interact with physics)
     // - Must NOT have a FixedCollider (so we don't drag the ground)
     mut draggable_query: Query<
-        (Entity, &mut BevyTransform, &PhysicsHandle),
-        Without<BevyActiveCamera>,
+        (Entity, &mut helmer_becs::Transform, &PhysicsHandle),
+        Without<helmer_becs::ActiveCamera>,
     >,
 
     mut inspector_selected_entity_res: ResMut<InspectorSelectedEntityResource>,
@@ -149,9 +150,8 @@ pub fn drag_system(
             // Iterate over all entities that are draggable
             for (entity, transform, _handle) in draggable_query.iter() {
                 // Use a simple sphere intersection for picking
-                let radius = 0.5 * transform.0.scale.max_element();
-                if let Some(distance) = ray_sphere_intersection(&ray, transform.0.position, radius)
-                {
+                let radius = 0.5 * transform.scale.max_element();
+                if let Some(distance) = ray_sphere_intersection(&ray, transform.position, radius) {
                     if closest_hit.is_none() || distance < closest_hit.unwrap().1 {
                         closest_hit = Some((entity, distance));
                     }
@@ -190,7 +190,7 @@ pub fn drag_system(
                 // Get the mutable components for the dragged entity
                 if let Ok((_, mut transform, handle)) = draggable_query.get_mut(dragged_id) {
                     // Update engine transform
-                    transform.0.position = new_pos;
+                    transform.position = new_pos;
 
                     // Update physics rigid body
                     if let Some(rb) = physics.rigid_body_set.get_mut(handle.rigid_body) {
@@ -212,14 +212,13 @@ pub fn drag_system(
 
             // We use get_mut because we will write to transform at the end.
             if let Ok((_, mut transform, physics_handle)) = draggable_query.get_mut(dragged_id) {
-                final_pos = Some(transform.0.position); // Default final pos is current pos
+                final_pos = Some(transform.position); // Default final pos is current pos
 
                 // --- Optional: Shape Cast Logic to snap to ground ---
                 // (This logic is complex and depends heavily on the collider setup)
                 if let Some(collider) = physics.collider_set.get(physics_handle.collider) {
                     let shape = collider.shape();
-                    let shape_isometry =
-                        Pose::from_parts(transform.0.position, transform.0.rotation);
+                    let shape_isometry = Pose::from_parts(transform.position, transform.rotation);
 
                     let shape_vel = Vector::new(0.0, -1.0, 0.0); // Cast downwards
                     let filter = QueryFilter::new().exclude_collider(physics_handle.collider);
@@ -243,18 +242,18 @@ pub fn drag_system(
                         },
                     ) {
                         // Snap the position to the hit point
-                        let snapped_y = transform.0.position.y - hit.time_of_impact;
+                        let snapped_y = transform.position.y - hit.time_of_impact;
                         final_pos = Some(Vec3::new(
-                            transform.0.position.x,
+                            transform.position.x,
                             snapped_y,
-                            transform.0.position.z,
+                            transform.position.z,
                         ));
                     }
                 }
 
                 // --- Apply Final Position ---
                 if let Some(pos) = final_pos {
-                    transform.0.position = pos;
+                    transform.position = pos;
                 }
 
                 // --- Update Physics Body ---

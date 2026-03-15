@@ -51,6 +51,10 @@ Massively scalable runtime/collection of tooling masquerading as a game engine
 
 ## Ways to use helmer
 
+#### **Attention Windows users:** ensure the `C++ ATL for x64/x86 (Latest MSVC)` individual component is installed from Visual Studio Installer when depending on `helmer_render` (or disable `wgpu`'s `static-dxc` feature)
+
+---
+
 - ### `helmer_editor_egui`
   ![helmer_editor_egui screenshot](assets/screenshots/editor.png)
   - `cargo run -p helmer_editor_egui --release`

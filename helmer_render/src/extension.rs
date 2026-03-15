@@ -1,5 +1,5 @@
 use crate::graphics::common::renderer::{
-    AssetStreamingRequest, NativeRenderInit, RenderMessage, RendererStats,
+    AssetStreamingRequest, NativeRenderInit, RenderControl, RenderMessage, RendererStats,
     render_message_payload_bytes,
 };
 use crate::runtime::{RuntimeConfig as RenderRuntimeConfig, RuntimeProfiling, RuntimeTuning};
@@ -264,6 +264,7 @@ enum NativeRendererBootstrap {
         size: PhysicalSize<u32>,
     },
     Init {
+        window: Arc<Window>,
         render_init: NativeRenderInit,
         size: PhysicalSize<u32>,
     },
@@ -271,7 +272,8 @@ enum NativeRendererBootstrap {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeInlineRenderState {
-    renderer: crate::graphics::renderer::GraphRenderer,
+    renderer: Option<crate::graphics::renderer::GraphRenderer>,
+    window: Option<Arc<Window>>,
     surface_size: PhysicalSize<u32>,
     last_render: Instant,
     fps_window_start: Instant,
@@ -288,11 +290,13 @@ struct NativeInlineRenderState {
 impl NativeInlineRenderState {
     fn new(
         renderer: crate::graphics::renderer::GraphRenderer,
+        window: Option<Arc<Window>>,
         surface_size: PhysicalSize<u32>,
     ) -> Self {
         let now = Instant::now();
         Self {
-            renderer,
+            renderer: Some(renderer),
+            window,
             surface_size,
             last_render: now,
             fps_window_start: now,
@@ -321,7 +325,7 @@ impl NativeInlineRenderState {
         stream_request_sender: &Sender<AssetStreamingRequest>,
         stats: &Arc<RendererStats>,
         tuning: &Arc<RuntimeTuning>,
-        config: RenderRuntimeConfig,
+        config: &mut RenderRuntimeConfig,
     ) -> bool {
         match message {
             RenderMessage::CreateMesh { .. }
@@ -340,7 +344,12 @@ impl NativeInlineRenderState {
                 true
             }
             RenderMessage::WindowRecreated { window, size } => {
-                let snapshot = self.renderer.take_snapshot();
+                self.window = Some(Arc::clone(&window));
+                let Some(renderer_ref) = self.renderer.as_mut() else {
+                    warn!("window recreation requested without an active renderer");
+                    return true;
+                };
+                let snapshot = renderer_ref.take_snapshot();
                 self.surface_size = size;
                 match create_renderer_for_window(
                     &window,
@@ -348,22 +357,31 @@ impl NativeInlineRenderState {
                     stream_request_sender,
                     stats,
                     tuning,
-                    config,
+                    *config,
                 ) {
                     Ok(mut renderer) => {
                         renderer.restore_snapshot(snapshot);
-                        self.renderer = renderer;
+                        self.renderer = Some(renderer);
                         *should_render = true;
                     }
                     Err(err) => {
                         warn!("failed to recreate renderer: {err}");
-                        self.renderer.restore_snapshot(snapshot);
+                        renderer_ref.restore_snapshot(snapshot);
                     }
                 }
                 true
             }
-            RenderMessage::WindowRecreatedWithInit { size, render_init } => {
-                let snapshot = self.renderer.take_snapshot();
+            RenderMessage::WindowRecreatedWithInit {
+                window,
+                size,
+                render_init,
+            } => {
+                self.window = Some(Arc::clone(&window));
+                let Some(renderer_ref) = self.renderer.as_mut() else {
+                    warn!("window recreation requested without an active renderer");
+                    return true;
+                };
+                let snapshot = renderer_ref.take_snapshot();
                 self.surface_size = size;
                 match create_renderer_from_init(
                     render_init,
@@ -371,27 +389,115 @@ impl NativeInlineRenderState {
                     stream_request_sender,
                     stats,
                     tuning,
-                    config,
+                    *config,
                 ) {
                     Ok(mut renderer) => {
                         renderer.restore_snapshot(snapshot);
-                        self.renderer = renderer;
+                        self.renderer = Some(renderer);
                         *should_render = true;
                     }
                     Err(err) => {
                         warn!("failed to recreate renderer: {err}");
-                        self.renderer.restore_snapshot(snapshot);
+                        renderer_ref.restore_snapshot(snapshot);
+                    }
+                }
+                true
+            }
+            RenderMessage::Resize(size) => {
+                self.surface_size = PhysicalSize::new(size.width.max(1), size.height.max(1));
+                *should_render = true;
+                if let Some(renderer_ref) = self.renderer.as_mut() {
+                    renderer_ref.process_message(RenderMessage::Resize(self.surface_size));
+                }
+                true
+            }
+            RenderMessage::Control(RenderControl::RecreateDevice {
+                backend,
+                binding_backend,
+                allow_experimental_features,
+            }) => {
+                let Some(window) = self.window.as_ref().map(Arc::clone) else {
+                    warn!("failed to recreate renderer: no window handle available");
+                    return true;
+                };
+                let current_size = window.inner_size();
+                let recreate_size =
+                    PhysicalSize::new(current_size.width.max(1), current_size.height.max(1));
+                self.surface_size = recreate_size;
+
+                let previous_config = *config;
+                let mut recreate_config = previous_config;
+                recreate_config.wgpu_backend = backend;
+                recreate_config.binding_backend = binding_backend;
+                recreate_config.wgpu_experimental_features = allow_experimental_features;
+
+                let Some(mut old_renderer) = self.renderer.take() else {
+                    warn!("failed to recreate renderer: no active renderer available");
+                    return true;
+                };
+                let mut snapshot = Some(old_renderer.take_device_recreate_snapshot());
+                old_renderer.poll_device(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                });
+                drop(old_renderer);
+
+                match create_renderer_for_window(
+                    &window,
+                    recreate_size,
+                    stream_request_sender,
+                    stats,
+                    tuning,
+                    recreate_config,
+                ) {
+                    Ok(mut new_renderer) => {
+                        new_renderer.restore_snapshot(snapshot.take().expect("snapshot available"));
+                        self.renderer = Some(new_renderer);
+                        *config = recreate_config;
+                        *should_render = true;
+                    }
+                    Err(primary_err) => {
+                        warn!(
+                            "failed to recreate renderer with {} + {}: {primary_err}; restoring previous config",
+                            backend.label(),
+                            binding_backend.label()
+                        );
+                        match create_renderer_for_window(
+                            &window,
+                            recreate_size,
+                            stream_request_sender,
+                            stats,
+                            tuning,
+                            previous_config,
+                        ) {
+                            Ok(mut fallback_renderer) => {
+                                fallback_renderer
+                                    .restore_snapshot(snapshot.take().expect("snapshot available"));
+                                self.renderer = Some(fallback_renderer);
+                                *config = previous_config;
+                                *should_render = true;
+                            }
+                            Err(fallback_err) => {
+                                warn!(
+                                    "failed to restore previous renderer config after recreate failure: {fallback_err}"
+                                );
+                            }
+                        }
                     }
                 }
                 true
             }
             RenderMessage::Shutdown => {
-                self.renderer.process_message(RenderMessage::Shutdown);
+                if let Some(renderer_ref) = self.renderer.as_mut() {
+                    renderer_ref.process_message(RenderMessage::Shutdown);
+                }
                 false
             }
             other => {
                 *should_render = true;
-                self.renderer.process_message(other);
+                if let Some(renderer_ref) = self.renderer.as_mut() {
+                    renderer_ref.process_message(other);
+                }
                 true
             }
         }
@@ -409,7 +515,7 @@ impl NativeInlineRenderState {
         metrics: Option<&Arc<PerformanceMetrics>>,
         tuning: &Arc<RuntimeTuning>,
         profiling: &Arc<RuntimeProfiling>,
-        config: RenderRuntimeConfig,
+        config: &mut RenderRuntimeConfig,
     ) -> bool {
         let profiling_enabled = profiling.enabled.load(Ordering::Relaxed);
         let messages_start = if profiling_enabled {
@@ -519,6 +625,12 @@ impl NativeInlineRenderState {
             }
         }
 
+        let Some(renderer) = self.renderer.as_mut() else {
+            warn!("renderer unavailable on native main thread");
+            self.release_pending_uploads(tuning);
+            return false;
+        };
+
         let uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
         let upload_start = if profiling_enabled {
             Some(Instant::now())
@@ -546,7 +658,7 @@ impl NativeInlineRenderState {
             break;
         }
         if !self.upload_batch.is_empty() {
-            self.renderer.process_asset_batch(&mut self.upload_batch);
+            renderer.process_asset_batch(&mut self.upload_batch);
             for bytes in self.upload_bytes.drain(..) {
                 tuning.release_asset_upload(bytes);
             }
@@ -573,7 +685,7 @@ impl NativeInlineRenderState {
                 } else {
                     None
                 };
-                let render_result = self.renderer.render();
+                let render_result = renderer.render();
                 if let Err(err) = render_result {
                     warn!("render error: {err}");
                 } else {
@@ -597,7 +709,7 @@ impl NativeInlineRenderState {
             } else {
                 None
             };
-            let render_result = self.renderer.render();
+            let render_result = renderer.render();
             if let Err(err) = render_result {
                 warn!("render error: {err}");
             } else {
@@ -626,7 +738,7 @@ impl NativeInlineRenderState {
                 },
                 _ => wgpu::PollType::Poll,
             };
-            self.renderer.poll_device(poll_type);
+            renderer.poll_device(poll_type);
         }
         self.poll_frame = self.poll_frame.wrapping_add(1);
 
@@ -1203,9 +1315,16 @@ impl RenderExtension {
                     self.native_pending_bootstrap =
                         Some(NativeRendererBootstrap::Window { window, size });
                 }
-                Ok(RenderMessage::WindowRecreatedWithInit { size, render_init }) => {
-                    self.native_pending_bootstrap =
-                        Some(NativeRendererBootstrap::Init { render_init, size });
+                Ok(RenderMessage::WindowRecreatedWithInit {
+                    window,
+                    size,
+                    render_init,
+                }) => {
+                    self.native_pending_bootstrap = Some(NativeRendererBootstrap::Init {
+                        window,
+                        render_init,
+                        size,
+                    });
                 }
                 Ok(RenderMessage::Shutdown) => {
                     self.running.store(false, Ordering::Release);
@@ -1263,8 +1382,11 @@ impl RenderExtension {
                             self.config,
                         ) {
                             Ok(renderer) => {
-                                self.native_render_state =
-                                    Some(NativeInlineRenderState::new(renderer, size));
+                                self.native_render_state = Some(NativeInlineRenderState::new(
+                                    renderer,
+                                    Some(window),
+                                    size,
+                                ));
                             }
                             Err(err) => {
                                 warn!("failed to initialize renderer: {err}");
@@ -1273,7 +1395,11 @@ impl RenderExtension {
                             }
                         }
                     }
-                    NativeRendererBootstrap::Init { render_init, size } => {
+                    NativeRendererBootstrap::Init {
+                        window,
+                        render_init,
+                        size,
+                    } => {
                         let size = PhysicalSize::new(size.width.max(1), size.height.max(1));
                         match create_renderer_from_init(
                             render_init,
@@ -1284,8 +1410,11 @@ impl RenderExtension {
                             self.config,
                         ) {
                             Ok(renderer) => {
-                                self.native_render_state =
-                                    Some(NativeInlineRenderState::new(renderer, size));
+                                self.native_render_state = Some(NativeInlineRenderState::new(
+                                    renderer,
+                                    Some(window),
+                                    size,
+                                ));
                             }
                             Err(err) => {
                                 warn!("failed to initialize renderer: {err}");
@@ -1298,7 +1427,7 @@ impl RenderExtension {
         }
 
         let frame_start = Instant::now();
-        let keep_alive = self.native_render_state.as_mut().is_some_and(|state| {
+        let keep_alive = if let Some(state) = self.native_render_state.as_mut() {
             state.render_frame(
                 frame_start,
                 &mut self.native_pending_render_messages,
@@ -1310,9 +1439,11 @@ impl RenderExtension {
                 self.metrics.as_ref(),
                 &self.tuning,
                 &self.profiling,
-                self.config,
+                &mut self.config,
             )
-        });
+        } else {
+            false
+        };
 
         if !keep_alive {
             self.running.store(false, Ordering::Release);
@@ -1362,6 +1493,8 @@ fn run_render_thread(
     config: RenderRuntimeConfig,
 ) {
     let mut renderer: Option<crate::graphics::renderer::GraphRenderer> = None;
+    let mut active_window: Option<Arc<Window>> = None;
+    let mut active_config = config;
     let mut surface_size = PhysicalSize::new(1, 1);
     let mut last_render = Instant::now();
     let mut fps_window_start = Instant::now();
@@ -1386,6 +1519,7 @@ fn run_render_thread(
             };
             match bootstrap {
                 NativeRendererBootstrap::Window { window, size } => {
+                    active_window = Some(Arc::clone(&window));
                     surface_size = size;
                     match create_renderer_for_window(
                         &window,
@@ -1393,7 +1527,7 @@ fn run_render_thread(
                         &stream_request_sender,
                         &stats,
                         &tuning,
-                        config,
+                        active_config,
                     ) {
                         Ok(new_renderer) => {
                             renderer = Some(new_renderer);
@@ -1408,7 +1542,12 @@ fn run_render_thread(
                         }
                     }
                 }
-                NativeRendererBootstrap::Init { render_init, size } => {
+                NativeRendererBootstrap::Init {
+                    window,
+                    render_init,
+                    size,
+                } => {
+                    active_window = Some(window);
                     surface_size = size;
                     match create_renderer_from_init(
                         render_init,
@@ -1416,7 +1555,7 @@ fn run_render_thread(
                         &stream_request_sender,
                         &stats,
                         &tuning,
-                        config,
+                        active_config,
                     ) {
                         Ok(new_renderer) => {
                             renderer = Some(new_renderer);
@@ -1435,7 +1574,6 @@ fn run_render_thread(
             continue;
         }
 
-        let renderer = renderer.as_mut().expect("renderer checked");
         let frame_start = Instant::now();
         let profiling_enabled = profiling.enabled.load(Ordering::Relaxed);
         let messages_start = if profiling_enabled {
@@ -1490,57 +1628,164 @@ fn run_render_thread(
                     should_render = true;
                 }
                 RenderMessage::WindowRecreated { window, size } => {
-                    let snapshot = renderer.take_snapshot();
-                    surface_size = size;
-                    match create_renderer_for_window(
-                        &window,
-                        surface_size,
-                        &stream_request_sender,
-                        &stats,
-                        &tuning,
-                        config,
-                    ) {
-                        Ok(mut new_renderer) => {
-                            new_renderer.restore_snapshot(snapshot);
-                            *renderer = new_renderer;
-                            should_render = true;
+                    if let Some(renderer_ref) = renderer.as_mut() {
+                        active_window = Some(Arc::clone(&window));
+                        let snapshot = renderer_ref.take_snapshot();
+                        surface_size = size;
+                        match create_renderer_for_window(
+                            &window,
+                            surface_size,
+                            &stream_request_sender,
+                            &stats,
+                            &tuning,
+                            active_config,
+                        ) {
+                            Ok(mut new_renderer) => {
+                                new_renderer.restore_snapshot(snapshot);
+                                *renderer_ref = new_renderer;
+                                should_render = true;
+                            }
+                            Err(err) => {
+                                warn!("failed to recreate renderer: {err}");
+                                renderer_ref.restore_snapshot(snapshot);
+                            }
                         }
-                        Err(err) => {
-                            warn!("failed to recreate renderer: {err}");
-                            renderer.restore_snapshot(snapshot);
-                        }
+                    } else {
+                        warn!("window recreation requested without an active renderer");
                     }
                 }
-                RenderMessage::WindowRecreatedWithInit { size, render_init } => {
-                    let snapshot = renderer.take_snapshot();
-                    surface_size = size;
-                    match create_renderer_from_init(
-                        render_init,
-                        surface_size,
+                RenderMessage::WindowRecreatedWithInit {
+                    window,
+                    size,
+                    render_init,
+                } => {
+                    if let Some(renderer_ref) = renderer.as_mut() {
+                        active_window = Some(window);
+                        let snapshot = renderer_ref.take_snapshot();
+                        surface_size = size;
+                        match create_renderer_from_init(
+                            render_init,
+                            surface_size,
+                            &stream_request_sender,
+                            &stats,
+                            &tuning,
+                            active_config,
+                        ) {
+                            Ok(mut new_renderer) => {
+                                new_renderer.restore_snapshot(snapshot);
+                                *renderer_ref = new_renderer;
+                                should_render = true;
+                            }
+                            Err(err) => {
+                                warn!("failed to recreate renderer: {err}");
+                                renderer_ref.restore_snapshot(snapshot);
+                            }
+                        }
+                    } else {
+                        warn!("window recreation requested without an active renderer");
+                    }
+                }
+                RenderMessage::Resize(size) => {
+                    surface_size = PhysicalSize::new(size.width.max(1), size.height.max(1));
+                    should_render = true;
+                    if let Some(renderer_ref) = renderer.as_mut() {
+                        renderer_ref.process_message(RenderMessage::Resize(surface_size));
+                    }
+                }
+                RenderMessage::Control(RenderControl::RecreateDevice {
+                    backend,
+                    binding_backend,
+                    allow_experimental_features,
+                }) => {
+                    let Some(window) = active_window.as_ref().map(Arc::clone) else {
+                        warn!("failed to recreate renderer: no window handle available");
+                        continue;
+                    };
+                    let current_size = window.inner_size();
+                    let recreate_size =
+                        PhysicalSize::new(current_size.width.max(1), current_size.height.max(1));
+
+                    let previous_config = active_config;
+                    let mut recreate_config = previous_config;
+                    recreate_config.wgpu_backend = backend;
+                    recreate_config.binding_backend = binding_backend;
+                    recreate_config.wgpu_experimental_features = allow_experimental_features;
+
+                    let Some(mut old_renderer) = renderer.take() else {
+                        warn!("failed to recreate renderer: no active renderer available");
+                        continue;
+                    };
+                    let mut snapshot = Some(old_renderer.take_device_recreate_snapshot());
+                    old_renderer.poll_device(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    });
+                    drop(old_renderer);
+
+                    match create_renderer_for_window(
+                        &window,
+                        recreate_size,
                         &stream_request_sender,
                         &stats,
                         &tuning,
-                        config,
+                        recreate_config,
                     ) {
                         Ok(mut new_renderer) => {
-                            new_renderer.restore_snapshot(snapshot);
-                            *renderer = new_renderer;
+                            new_renderer
+                                .restore_snapshot(snapshot.take().expect("snapshot available"));
+                            renderer = Some(new_renderer);
+                            active_config = recreate_config;
                             should_render = true;
                         }
-                        Err(err) => {
-                            warn!("failed to recreate renderer: {err}");
-                            renderer.restore_snapshot(snapshot);
+                        Err(primary_err) => {
+                            warn!(
+                                "failed to recreate renderer with {} + {}: {primary_err}; restoring previous config",
+                                backend.label(),
+                                binding_backend.label()
+                            );
+                            match create_renderer_for_window(
+                                &window,
+                                recreate_size,
+                                &stream_request_sender,
+                                &stats,
+                                &tuning,
+                                previous_config,
+                            ) {
+                                Ok(mut fallback_renderer) => {
+                                    fallback_renderer.restore_snapshot(
+                                        snapshot.take().expect("snapshot available"),
+                                    );
+                                    renderer = Some(fallback_renderer);
+                                    active_config = previous_config;
+                                    should_render = true;
+                                }
+                                Err(fallback_err) => {
+                                    warn!(
+                                        "failed to restore previous renderer config after recreate failure: {fallback_err}; shutting down render thread"
+                                    );
+                                    release_pending_uploads(
+                                        &tuning,
+                                        &mut asset_backlog,
+                                        &mut immediate_backlog,
+                                    );
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
                 RenderMessage::Shutdown => {
-                    renderer.process_message(RenderMessage::Shutdown);
+                    if let Some(renderer_ref) = renderer.as_mut() {
+                        renderer_ref.process_message(RenderMessage::Shutdown);
+                    }
                     release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
                     return;
                 }
                 other => {
                     should_render = true;
-                    renderer.process_message(other);
+                    if let Some(renderer_ref) = renderer.as_mut() {
+                        renderer_ref.process_message(other);
+                    }
                 }
             }
         }
@@ -1567,7 +1812,9 @@ fn run_render_thread(
                         should_render = true;
                     }
                     RenderMessage::Shutdown => {
-                        renderer.process_message(RenderMessage::Shutdown);
+                        if let Some(renderer_ref) = renderer.as_mut() {
+                            renderer_ref.process_message(RenderMessage::Shutdown);
+                        }
                         release_pending_uploads(
                             &tuning,
                             &mut asset_backlog,
@@ -1577,13 +1824,21 @@ fn run_render_thread(
                     }
                     other => {
                         should_render = true;
-                        renderer.process_message(other);
+                        if let Some(renderer_ref) = renderer.as_mut() {
+                            renderer_ref.process_message(other);
+                        }
                     }
                 },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
         }
+
+        let Some(renderer) = renderer.as_mut() else {
+            warn!("renderer unavailable on render thread; shutting down");
+            release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
+            return;
+        };
 
         let uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
         let upload_start = if profiling_enabled {
@@ -1721,8 +1976,16 @@ fn wait_for_renderer_bootstrap(
             Ok(RenderMessage::WindowRecreated { window, size }) => {
                 return Some(NativeRendererBootstrap::Window { window, size });
             }
-            Ok(RenderMessage::WindowRecreatedWithInit { size, render_init }) => {
-                return Some(NativeRendererBootstrap::Init { render_init, size });
+            Ok(RenderMessage::WindowRecreatedWithInit {
+                window,
+                size,
+                render_init,
+            }) => {
+                return Some(NativeRendererBootstrap::Init {
+                    window,
+                    render_init,
+                    size,
+                });
             }
             Ok(RenderMessage::Shutdown) => return None,
             Ok(message) => pending_messages.push_back(message),
@@ -1773,6 +2036,7 @@ pub fn create_native_render_bootstrap_message(
 ) -> Result<RenderMessage, String> {
     let render_init = create_native_render_init(&window)?;
     Ok(RenderMessage::WindowRecreatedWithInit {
+        window,
         size: PhysicalSize::new(size.width.max(1), size.height.max(1)),
         render_init,
     })

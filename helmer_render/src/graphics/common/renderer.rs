@@ -1942,6 +1942,7 @@ pub enum RenderMessage {
     },
     #[cfg(not(target_arch = "wasm32"))]
     WindowRecreatedWithInit {
+        window: Arc<Window>,
         size: PhysicalSize<u32>,
         render_init: NativeRenderInit,
     },

@@ -4739,6 +4739,14 @@ impl GraphRenderer {
         }
     }
 
+    pub fn take_device_recreate_snapshot(&mut self) -> RendererSnapshot {
+        let mut snapshot = self.take_snapshot();
+        // Device recreation must not carry over old GPU handles into the new renderer.
+        // Keep logical residency/index state but drop all concrete GPU objects.
+        snapshot.pool.evict_all();
+        snapshot
+    }
+
     pub fn restore_snapshot(&mut self, snapshot: RendererSnapshot) {
         let RendererSnapshot {
             pool,

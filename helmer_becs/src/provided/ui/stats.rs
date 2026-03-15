@@ -24,6 +24,7 @@ use helmer_render::graphics::{
 };
 use helmer_window::runtime::input_manager::InputManager;
 use parking_lot::RwLock;
+use tracing::warn;
 
 use crate::{
     ActiveCamera, AudioBackendResource, BecsAssetServer, BecsLodTuning, BecsPerformanceMetrics,
@@ -2755,13 +2756,18 @@ impl StatsUI {
                     runtime_cfg.0.binding_backend = binding_backend;
                     if request_recreate {
                         if let Some(sender) = sender.as_ref() {
-                            let _ = sender.try_send(RenderMessage::Control(
-                                RenderControl::RecreateDevice {
+                            if sender
+                                .try_send(RenderMessage::Control(RenderControl::RecreateDevice {
                                     backend: wgpu_backend,
                                     binding_backend,
                                     allow_experimental_features: wgpu_experimental,
-                                },
-                            ));
+                                }))
+                                .is_err()
+                            {
+                                warn!("failed to queue RecreateDevice control message");
+                            }
+                        } else {
+                            warn!("recreate device requested but render sender unavailable");
                         }
                     }
                 }

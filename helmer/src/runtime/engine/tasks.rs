@@ -81,6 +81,8 @@ impl TaskPool {
         let worker_running = Arc::clone(&running);
         let builder = thread::Builder::new().name(format!("helmer-task-{worker_id}"));
         let join = builder.spawn(move || {
+            let _high_resolution_timer = crate::runtime::HighResolutionTimerGuard::new(1);
+
             while worker_running.load(Ordering::Acquire) {
                 let message = {
                     let Ok(guard) = receiver.lock() else {

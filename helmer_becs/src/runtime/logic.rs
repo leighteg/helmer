@@ -348,6 +348,8 @@ pub(super) fn run_becs_logic_thread(
     mut state: BecsLogicState,
     receiver: mpsc::Receiver<BecsLogicEvent>,
 ) {
+    let _high_resolution_timer = helmer::runtime::HighResolutionTimerGuard::new(1);
+
     let mut last_tick = web_time::Instant::now();
     let mut next_tick_deadline = last_tick;
     loop {

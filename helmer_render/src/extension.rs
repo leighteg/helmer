@@ -1492,6 +1492,8 @@ fn run_render_thread(
     profiling: Arc<RuntimeProfiling>,
     config: RenderRuntimeConfig,
 ) {
+    let _high_resolution_timer = helmer::runtime::HighResolutionTimerGuard::new(1);
+
     let mut renderer: Option<crate::graphics::renderer::GraphRenderer> = None;
     let mut active_window: Option<Arc<Window>> = None;
     let mut active_config = config;

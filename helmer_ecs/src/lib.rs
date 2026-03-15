@@ -135,7 +135,6 @@ pub mod systems;
 enum EcsLogicEvent {
     CloseRequested(Option<mpsc::Sender<()>>),
     Started {
-        window: Arc<winit::window::Window>,
         state: helmer_window::event::WindowState,
     },
     Resized(helmer_window::event::WindowState),
@@ -206,11 +205,14 @@ impl EcsLogicState {
             .query_mut_for_each::<(Camera, ActiveCamera), _>(|_, (camera, _)| {
                 camera.aspect_ratio = state.width as f32 / state.height as f32;
             });
-        let _ = self.render_sender.try_send(
-            helmer_render::graphics::common::renderer::RenderMessage::Resize(
-                winit::dpi::PhysicalSize::new(state.width, state.height),
-            ),
+        let resize = helmer_render::graphics::common::renderer::RenderMessage::Resize(
+            winit::dpi::PhysicalSize::new(state.width, state.height),
         );
+        if self.runtime.context().is_single_threaded() {
+            let _ = self.render_sender.try_send(resize);
+        } else {
+            let _ = self.render_sender.send(resize);
+        }
         self.last_window_state = Some(state);
     }
 
@@ -400,20 +402,15 @@ impl EcsLogicState {
                     let _ = done.send(());
                 }
             }
-            EcsLogicEvent::Started { window, state } => {
+            EcsLogicEvent::Started { state } => {
                 self.pending_resize = None;
                 self.last_window_state = Some(state);
-                let _ = self.render_sender.try_send(
-                    helmer_render::graphics::common::renderer::RenderMessage::WindowRecreated {
-                        window,
-                        size: winit::dpi::PhysicalSize::new(state.width, state.height),
-                    },
-                );
             }
             EcsLogicEvent::Resized(state) => {
                 if self.should_debounce_resize(state) {
                     self.pending_resize = Some((state, web_time::Instant::now()));
                 } else {
+                    self.pending_resize = None;
                     self.apply_window_resize(state);
                 }
             }
@@ -587,6 +584,8 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
     );
 
     init_callback(&mut ecs_core, &mut scheduler, &asset_server.lock());
+    #[cfg(not(target_arch = "wasm32"))]
+    let render_sender_for_window_events = render_sender.clone();
 
     let logic_state = EcsLogicState::new(
         ecs_core,
@@ -614,6 +613,13 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
     };
     #[cfg(not(target_arch = "wasm32"))]
     let logic_sender_for_events = logic_sender.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut pending_render_bootstrap: Option<(
+        Arc<winit::window::Window>,
+        helmer_window::event::WindowState,
+    )> = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut next_render_bootstrap_retry_at: Option<web_time::Instant> = None;
 
     #[cfg(target_arch = "wasm32")]
     let mut inline_logic_state = Some(logic_state);
@@ -625,12 +631,20 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                     Some(EcsLogicEvent::CloseRequested(None))
                 }
                 helmer_window::event::WindowRuntimeEventKind::Started { window, state } => {
-                    Some(EcsLogicEvent::Started {
-                        window: window.clone(),
-                        state: *state,
-                    })
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        pending_render_bootstrap = Some((window.clone(), *state));
+                        next_render_bootstrap_retry_at = None;
+                    }
+                    Some(EcsLogicEvent::Started { state: *state })
                 }
                 helmer_window::event::WindowRuntimeEventKind::Resized(state) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some((_, pending_state)) = pending_render_bootstrap.as_mut() {
+                            *pending_state = *state;
+                        }
+                    }
                     Some(EcsLogicEvent::Resized(*state))
                 }
                 helmer_window::event::WindowRuntimeEventKind::Tick { dt } => {
@@ -638,6 +652,47 @@ pub fn helmer_ecs_init(init_callback: fn(&mut ECSCore, &mut SystemScheduler, &As
                 }
                 _ => None,
             };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let now = web_time::Instant::now();
+                let retry_allowed = match next_render_bootstrap_retry_at {
+                    Some(deadline) => now >= deadline,
+                    None => true,
+                };
+                if retry_allowed && let Some((window, state)) = pending_render_bootstrap.as_ref() {
+                    match helmer_render::extension::create_native_render_bootstrap_message(
+                        window.clone(),
+                        winit::dpi::PhysicalSize::new(state.width, state.height),
+                    ) {
+                        Ok(message) => match render_sender_for_window_events.send(message) {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    width = state.width,
+                                    height = state.height,
+                                    scale = state.scale_factor,
+                                    "sent main-thread render bootstrap message"
+                                );
+                                pending_render_bootstrap = None;
+                                next_render_bootstrap_retry_at = None;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    "failed to send main-thread render bootstrap message: {err}"
+                                );
+                                pending_render_bootstrap = None;
+                                next_render_bootstrap_retry_at = None;
+                            }
+                        },
+                        Err(err) => {
+                            let backoff_ms = 50u64;
+                            next_render_bootstrap_retry_at =
+                                Some(now + Duration::from_millis(backoff_ms));
+                            tracing::warn!("failed to create main-thread render bootstrap: {err}");
+                        }
+                    }
+                }
+            }
 
             if let Some(logic_event) = logic_event {
                 #[cfg(not(target_arch = "wasm32"))]

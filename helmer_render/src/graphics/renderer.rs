@@ -2634,41 +2634,95 @@ impl GraphRenderer {
         let mut sprite_font_ctx = ParleyFontContext::new();
         let sprite_layout_ctx = ParleyLayoutContext::new();
         let sprite_scale_ctx = SwashScaleContext::new();
-        let mut sprite_font_db = fontdb::Database::new();
-        sprite_font_db.load_system_fonts();
         let mut sprite_registered_sources = HashSet::new();
         let mut sprite_default_font_family: Option<String> = None;
         let mut sprite_first_font_family: Option<String> = None;
         let mut sprite_available_families: HashSet<String> = HashSet::new();
-        for face in sprite_font_db.faces() {
-            let Some(bytes) = sprite_font_db.with_face_data(face.id, |data, _| data.to_vec())
-            else {
+        // Fast path: register a single known system font file to avoid scanning/parsing
+        // every installed font during renderer startup.
+        for (fast_path, fast_family) in [
+            ("/System/Library/Fonts/Supplemental/Arial.ttf", "Arial"),
+            (
+                "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+                "Helvetica",
+            ),
+            (
+                "/System/Library/Fonts/Supplemental/Helvetica Neue.ttc",
+                "Helvetica Neue",
+            ),
+            ("/System/Library/Fonts/SFNS.ttf", "San Francisco"),
+            (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "DejaVu Sans",
+            ),
+            ("/usr/share/fonts/dejavu/DejaVuSans.ttf", "DejaVu Sans"),
+            (
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                "Liberation Sans",
+            ),
+            ("C:\\Windows\\Fonts\\arial.ttf", "Arial"),
+        ] {
+            let Ok(bytes) = std::fs::read(fast_path) else {
                 continue;
             };
+            if bytes.is_empty() {
+                continue;
+            }
             let mut hasher = DefaultHasher::new();
             bytes.hash(&mut hasher);
             let source_hash = hasher.finish();
             if !sprite_registered_sources.insert(source_hash) {
                 continue;
             }
-            let registered = sprite_font_ctx
+            let family_name = fast_family.to_string();
+            let override_info = FontInfoOverride {
+                family_name: Some(family_name.as_str()),
+                ..Default::default()
+            };
+            if sprite_font_ctx
                 .collection
-                .register_fonts(FontBlob::from(bytes), None);
-            if registered.is_empty() {
+                .register_fonts(FontBlob::from(bytes), Some(override_info))
+                .is_empty()
+            {
                 continue;
             }
-            for (family, _lang) in face.families.iter() {
-                let family = family.trim();
-                if family.is_empty() {
+            sprite_available_families.insert(family_name.clone());
+            sprite_first_font_family = Some(family_name.clone());
+            sprite_default_font_family = Some(family_name);
+            break;
+        }
+
+        if sprite_default_font_family.is_none() {
+            let mut sprite_font_db = fontdb::Database::new();
+            sprite_font_db.load_system_fonts();
+            for face in sprite_font_db.faces() {
+                let Some(bytes) = sprite_font_db.with_face_data(face.id, |data, _| data.to_vec())
+                else {
+                    continue;
+                };
+                let mut hasher = DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                let source_hash = hasher.finish();
+                if !sprite_registered_sources.insert(source_hash) {
                     continue;
                 }
-                sprite_available_families.insert(family.to_string());
-                if sprite_first_font_family.is_none() {
-                    sprite_first_font_family = Some(family.to_string());
+                let registered = sprite_font_ctx
+                    .collection
+                    .register_fonts(FontBlob::from(bytes), None);
+                if registered.is_empty() {
+                    continue;
+                }
+                for (family, _lang) in face.families.iter() {
+                    let family = family.trim();
+                    if family.is_empty() {
+                        continue;
+                    }
+                    sprite_available_families.insert(family.to_string());
+                    if sprite_first_font_family.is_none() {
+                        sprite_first_font_family = Some(family.to_string());
+                    }
                 }
             }
-        }
-        if sprite_default_font_family.is_none() {
             for preferred_family in [
                 "Inter",
                 "Roboto",
@@ -2687,15 +2741,15 @@ impl GraphRenderer {
                     break;
                 }
             }
-        }
-        if sprite_default_font_family.is_none() {
-            sprite_default_font_family = sprite_first_font_family;
-        }
-        if sprite_default_font_family.is_none() {
-            for family in sprite_available_families.iter() {
-                if !family.trim().is_empty() {
-                    sprite_default_font_family = Some(family.to_string());
-                    break;
+            if sprite_default_font_family.is_none() {
+                sprite_default_font_family = sprite_first_font_family;
+            }
+            if sprite_default_font_family.is_none() {
+                for family in sprite_available_families.iter() {
+                    if !family.trim().is_empty() {
+                        sprite_default_font_family = Some(family.to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -4158,6 +4212,7 @@ impl GraphRenderer {
             }
             RenderMessage::Resize(size) => self.handle_resize(size),
             RenderMessage::WindowRecreated { .. } => {}
+            RenderMessage::WindowRecreatedWithInit { .. } => {}
             RenderMessage::Shutdown => {}
         }
         self.drain_pool_evictions();

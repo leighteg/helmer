@@ -27,7 +27,6 @@ use crate::{
 pub(super) enum BecsLogicEvent {
     CloseRequested(Option<mpsc::Sender<()>>),
     Started {
-        window: Arc<winit::window::Window>,
         state: helmer_window::event::WindowState,
     },
     Resized(helmer_window::event::WindowState),
@@ -101,12 +100,13 @@ impl BecsLogicState {
         {
             camera.aspect_ratio = state.width as f32 / state.height as f32;
         }
-        let _ = self
-            .render_sender
-            .try_send(RenderMessage::Resize(winit::dpi::PhysicalSize::new(
-                state.width,
-                state.height,
-            )));
+        let resize =
+            RenderMessage::Resize(winit::dpi::PhysicalSize::new(state.width, state.height));
+        if self.runtime.context().is_single_threaded() {
+            let _ = self.render_sender.try_send(resize);
+        } else {
+            let _ = self.render_sender.send(resize);
+        }
         self.last_window_state = Some(state);
     }
 
@@ -321,18 +321,15 @@ impl BecsLogicState {
                     let _ = done.send(());
                 }
             }
-            BecsLogicEvent::Started { window, state } => {
+            BecsLogicEvent::Started { state } => {
                 self.pending_resize = None;
                 self.last_window_state = Some(state);
-                let _ = self.render_sender.try_send(RenderMessage::WindowRecreated {
-                    window,
-                    size: winit::dpi::PhysicalSize::new(state.width, state.height),
-                });
             }
             BecsLogicEvent::Resized(state) => {
                 if self.should_debounce_resize(state) {
                     self.pending_resize = Some((state, web_time::Instant::now()));
                 } else {
+                    self.pending_resize = None;
                     self.apply_window_resize(state);
                 }
             }

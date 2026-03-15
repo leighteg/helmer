@@ -36,6 +36,7 @@ hashbrown = { version = "0.16.1", features = ["rayon"] }
 wgpu = { version = "28.0.0", features = ["static-dxc"] }
 pollster = "0.4.0"
 egui-winit = "0.33.3"
+raw-window-handle = "0.6.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "28.0.0", features = ["webgl"] }

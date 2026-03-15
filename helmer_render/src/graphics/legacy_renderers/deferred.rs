@@ -3318,6 +3318,7 @@ impl RenderTrait for DeferredRenderer {
             RenderMessage::Control(_) => {}
             RenderMessage::Resize(size) => self.resize(size),
             RenderMessage::WindowRecreated { .. } => {}
+            RenderMessage::WindowRecreatedWithInit { .. } => {}
             RenderMessage::Shutdown => {}
         }
     }

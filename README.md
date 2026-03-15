@@ -1,6 +1,6 @@
 # [helmer](http://helmer.leighteg.dev) &nbsp; ![Status: Pre-Alpha](https://img.shields.io/badge/status-Pre--Alpha-orange)
 
-A performant, flexible, extensible, scalable foundation for creation - featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
+A performant, flexible, extensible, scalable foundation for creation; featuring a robust render graph and thoughtful architecture, allowing completely custom logic integrations. multiple logic integrations are provided.
 
 Massively scalable runtime/collection of tooling masquerading as a game engine
 
@@ -68,7 +68,7 @@ Massively scalable runtime/collection of tooling masquerading as a game engine
 - **[helmer_view](/helmer_view)**: a simple GLTF scene viewer tool, using `helmer_ui`'s immediate APIs
 
 #### helmer_ecs examples
-- **[test_game](/test_game)**: was the sandbox for spearheading features early on. bevy's ecs is objectively better in every possible way and for that reason i have been using `helmer_becs` for everything since implementing it (which condescends my more recent decisions like the introduction of the graph, audio engine, etc.. so i really do wonder if there is any point in putting actual effort into a proper helmer ecs but the same question can be asked for helmers entire existance. why not i guess)
+- **[test_game](/test_game)**: was the sandbox for spearheading features early on. bevy's ecs is better in every possible way and for that reason i have been using `helmer_becs` for everything since implementing it (i do wonder if there is any point in putting actual effort into a proper helmer ecs?)
 
 ## Troubleshooting
 - **assets popping in/out, flickering**: the default vram budgets are incredibly low - combined with the aggressive nature of the default streaming tuning this results in the churning of render/vram resources. hit `ctrl+g` to bring up the `render graph` window and increase the gpu budgets, then hit `evict gpu only`. **helmer currently lacks the ability to agnostically probe avail/total vram**

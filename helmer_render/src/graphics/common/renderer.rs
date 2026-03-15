@@ -1926,6 +1926,12 @@ pub struct ShadowPipeline {
     pub bind_group: wgpu::BindGroup,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub struct NativeRenderInit {
+    pub instance: wgpu::Instance,
+    pub surface: wgpu::Surface<'static>,
+}
+
 pub enum RenderMessage {
     RenderData(Arc<RenderData>),
     RenderDelta(RenderDelta),
@@ -1933,6 +1939,11 @@ pub enum RenderMessage {
     WindowRecreated {
         window: Arc<Window>,
         size: PhysicalSize<u32>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    WindowRecreatedWithInit {
+        size: PhysicalSize<u32>,
+        render_init: NativeRenderInit,
     },
     Shutdown,
     Control(RenderControl),

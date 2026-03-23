@@ -342,15 +342,15 @@ fn ms_main(
     if (local_id.x < mesh_vert_count) {
         let global_index = meshlet_vertices[meshlet_vertex_offset + local_id.x];
         let safe_index = min(global_index, mesh_max_vertex - 1u);
-        let base = safe_index * 20u;
+        let base = safe_index * 24u;
         let position = load_vec3(base);
         let tex_coord = load_vec2(base + 6u);
-        let joints = load_uvec4(base + 12u);
+        let joints = load_uvec4(base + 16u);
         let weights = vec4<f32>(
-            load_f32(base + 16u),
-            load_f32(base + 17u),
-            load_f32(base + 18u),
-            load_f32(base + 19u)
+            load_f32(base + 20u),
+            load_f32(base + 21u),
+            load_f32(base + 22u),
+            load_f32(base + 23u)
         );
         let skinned_pos = apply_skinning_position(
             position,

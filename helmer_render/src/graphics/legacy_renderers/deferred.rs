@@ -3279,9 +3279,11 @@ impl RenderTrait for DeferredRenderer {
                 total_lods: _,
                 lods,
                 bounds,
+                pinned: _,
             } => {
                 self.add_mesh(id, &lods, bounds).unwrap();
             }
+            RenderMessage::RemoveMesh { .. } => {}
             RenderMessage::CreateTexture {
                 id,
                 name: _,
@@ -3318,6 +3320,7 @@ impl RenderTrait for DeferredRenderer {
             RenderMessage::Control(_) => {}
             RenderMessage::Resize(size) => self.resize(size),
             RenderMessage::WindowRecreated { .. } => {}
+            #[cfg(not(target_arch = "wasm32"))]
             RenderMessage::WindowRecreatedWithInit { .. } => {}
             RenderMessage::Shutdown => {}
         }

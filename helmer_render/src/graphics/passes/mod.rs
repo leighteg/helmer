@@ -142,6 +142,8 @@ pub struct FrameGlobals {
     pub render_config: RenderConfig,
     pub clear_swapchain_before_egui: bool,
     pub occlusion_camera_stable: bool,
+    pub gbuffer_render_bundles: bool,
+    pub shadow_render_bundles: bool,
     pub gbuffer_bundle_key: GBufferBundleKey,
     pub shadow_bundle_key: ShadowBundleKey,
 }

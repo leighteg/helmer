@@ -1,14 +1,16 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::graphics::common::renderer::NativeRenderInit;
 use crate::graphics::common::renderer::{
-    AssetStreamingRequest, NativeRenderInit, RenderControl, RenderMessage, RendererStats,
+    AssetStreamingRequest, RenderControl, RenderMessage, RendererStats,
     render_message_payload_bytes,
 };
 use crate::runtime::{RuntimeConfig as RenderRuntimeConfig, RuntimeProfiling, RuntimeTuning};
-use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded, unbounded};
 use helmer::runtime::{
     PerformanceMetrics, RuntimeContext, RuntimeError, RuntimeExtension,
     RuntimePerformanceMetricsResource,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -31,6 +33,9 @@ pub struct RenderMessageSender(pub Sender<RenderMessage>);
 pub struct RenderAssetMessageSender(pub Sender<RenderMessage>);
 
 #[derive(Clone)]
+pub struct RenderControlMessageSender(pub Sender<RenderMessage>);
+
+#[derive(Clone)]
 pub struct RenderStreamRequestReceiver(pub Receiver<AssetStreamingRequest>);
 
 #[derive(Clone)]
@@ -45,6 +50,8 @@ pub struct RenderRuntimeProfilingResource(pub Arc<RuntimeProfiling>);
 pub struct RenderExtension {
     render_sender: Sender<RenderMessage>,
     render_receiver: Receiver<RenderMessage>,
+    control_sender: Sender<RenderMessage>,
+    control_receiver: Receiver<RenderMessage>,
     asset_sender: Sender<RenderMessage>,
     asset_receiver: Receiver<RenderMessage>,
     stream_request_sender: Sender<AssetStreamingRequest>,
@@ -89,7 +96,9 @@ impl Default for RenderExtension {
             .load(Ordering::Relaxed)
             .max(1);
         let (render_sender, render_receiver) = bounded(capacity);
-        let (asset_sender, asset_receiver) = bounded(capacity);
+        let (control_sender, control_receiver) = unbounded();
+        let asset_capacity = tuning.asset_message_capacity.load(Ordering::Relaxed).max(1);
+        let (asset_sender, asset_receiver) = bounded(asset_capacity);
         let stream_capacity = tuning
             .asset_stream_queue_capacity
             .load(Ordering::Relaxed)
@@ -98,6 +107,8 @@ impl Default for RenderExtension {
         Self {
             render_sender,
             render_receiver,
+            control_sender,
+            control_receiver,
             asset_sender,
             asset_receiver,
             stream_request_sender: stream_sender,
@@ -158,6 +169,8 @@ impl RuntimeExtension for RenderExtension {
         ctx.resources()
             .insert(RenderMessageSender(self.render_sender.clone()));
         ctx.resources()
+            .insert(RenderControlMessageSender(self.control_sender.clone()));
+        ctx.resources()
             .insert(RenderAssetMessageSender(self.asset_sender.clone()));
         ctx.resources().insert(RenderStreamRequestReceiver(
             self.stream_request_receiver.clone(),
@@ -175,6 +188,7 @@ impl RuntimeExtension for RenderExtension {
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        while self.control_receiver.try_recv().is_ok() {}
         self.metrics = _ctx
             .resources()
             .get::<RuntimePerformanceMetricsResource>()
@@ -213,8 +227,8 @@ impl RuntimeExtension for RenderExtension {
 
     fn on_stop(&mut self, _ctx: &RuntimeContext) -> Result<(), RuntimeError> {
         self.running.store(false, Ordering::Release);
-        let _ = self.render_sender.send(RenderMessage::Shutdown);
-        let _ = self.asset_sender.send(RenderMessage::Shutdown);
+        let _ = self.control_sender.send(RenderMessage::Shutdown);
+        let _ = self.asset_sender.try_send(RenderMessage::Shutdown);
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.release_queued_messages_native();
@@ -270,6 +284,180 @@ enum NativeRendererBootstrap {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PendingAssetUploadKey {
+    Mesh(usize),
+    Texture(usize),
+    Material(usize),
+}
+
+struct PendingAssetUpload {
+    sequence: u64,
+    message: RenderMessage,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct PendingAssetUploadQueue {
+    next_sequence: u64,
+    order: VecDeque<(u64, PendingAssetUploadKey)>,
+    entries: HashMap<PendingAssetUploadKey, PendingAssetUpload>,
+    total_bytes: usize,
+}
+
+impl PendingAssetUploadQueue {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    fn push(&mut self, message: RenderMessage, bytes: usize) {
+        let Some(key) = pending_asset_upload_key(&message) else {
+            return;
+        };
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let replaced = self.entries.insert(
+            key,
+            PendingAssetUpload {
+                sequence,
+                message,
+                bytes,
+            },
+        );
+        if let Some(existing) = replaced {
+            self.total_bytes = self.total_bytes.saturating_sub(existing.bytes);
+        }
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.order.push_back((sequence, key));
+    }
+
+    fn pop_front(&mut self) -> Option<(RenderMessage, usize)> {
+        while let Some((sequence, key)) = self.order.pop_front() {
+            let is_current = self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| entry.sequence == sequence);
+            if !is_current {
+                continue;
+            }
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                return Some((entry.message, entry.bytes));
+            }
+        }
+        None
+    }
+
+    fn remove(&mut self, key: PendingAssetUploadKey) -> Option<usize> {
+        let removed = self.entries.remove(&key)?;
+        self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+        Some(removed.bytes)
+    }
+
+    fn drain_release(&mut self, tuning: &Arc<RuntimeTuning>) {
+        for entry in self.entries.drain().map(|(_, entry)| entry) {
+            tuning.release_asset_upload(entry.bytes);
+        }
+        self.order.clear();
+        self.total_bytes = 0;
+    }
+}
+
+fn pending_asset_upload_key(message: &RenderMessage) -> Option<PendingAssetUploadKey> {
+    match message {
+        RenderMessage::CreateMesh { id, .. } | RenderMessage::RemoveMesh { id } => {
+            Some(PendingAssetUploadKey::Mesh(*id))
+        }
+        RenderMessage::CreateTexture { id, .. } => Some(PendingAssetUploadKey::Texture(*id)),
+        RenderMessage::CreateMaterial(mat) => Some(PendingAssetUploadKey::Material(mat.id)),
+        _ => None,
+    }
+}
+
+fn enqueue_asset_upload(
+    asset_backlog: &mut PendingAssetUploadQueue,
+    immediate_backlog: &mut PendingAssetUploadQueue,
+    message: RenderMessage,
+    backlog_enabled: bool,
+    max_pending: usize,
+    max_pending_bytes: usize,
+) -> usize {
+    let Some(key) = pending_asset_upload_key(&message) else {
+        return 0;
+    };
+    let bytes = render_message_payload_bytes(&message);
+    let released_bytes = asset_backlog
+        .remove(key)
+        .unwrap_or(0)
+        .saturating_add(immediate_backlog.remove(key).unwrap_or(0));
+    let fits_bytes = asset_backlog.total_bytes().saturating_add(bytes) <= max_pending_bytes;
+    if backlog_enabled && asset_backlog.len() < max_pending && fits_bytes {
+        asset_backlog.push(message, bytes);
+    } else {
+        immediate_backlog.push(message, bytes);
+    }
+    released_bytes
+}
+
+fn asset_message_collection_budget(tuning: &Arc<RuntimeTuning>) -> usize {
+    const MIN_ASSET_MESSAGES_PER_FRAME: usize = 32;
+    const MAX_ASSET_MESSAGES_PER_FRAME: usize = 256;
+
+    tuning
+        .asset_uploads_per_frame
+        .load(Ordering::Relaxed)
+        .max(1)
+        .saturating_mul(32)
+        .clamp(MIN_ASSET_MESSAGES_PER_FRAME, MAX_ASSET_MESSAGES_PER_FRAME)
+}
+
+fn asset_work_budgets_for_frame(
+    base_messages: usize,
+    base_uploads: usize,
+    prioritize_render: bool,
+) -> (usize, usize) {
+    if !prioritize_render {
+        return (base_messages, base_uploads.max(1));
+    }
+
+    (base_messages.min(32), base_uploads.max(1).min(2))
+}
+
+fn render_due_for_frame(
+    frame_start: Instant,
+    last_render: Instant,
+    tuning: &Arc<RuntimeTuning>,
+) -> bool {
+    match tuning.load_target_fps() {
+        Some(target_fps) if target_fps.is_finite() && target_fps > 0.0 => {
+            let frame_duration = Duration::from_secs_f32(1.0 / target_fps);
+            frame_start.duration_since(last_render) >= frame_duration
+        }
+        _ => true,
+    }
+}
+
+fn drain_control_messages(
+    control_receiver: &Receiver<RenderMessage>,
+    pending_render_messages: &mut VecDeque<RenderMessage>,
+) -> bool {
+    loop {
+        match control_receiver.try_recv() {
+            Ok(message) => pending_render_messages.push_back(message),
+            Err(TryRecvError::Empty) => return true,
+            Err(TryRecvError::Disconnected) => return false,
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct NativeInlineRenderState {
     renderer: Option<crate::graphics::renderer::GraphRenderer>,
@@ -279,9 +467,8 @@ struct NativeInlineRenderState {
     fps_window_start: Instant,
     fps_frames: u32,
     poll_frame: u32,
-    asset_backlog: VecDeque<RenderMessage>,
-    asset_backlog_bytes: usize,
-    immediate_backlog: VecDeque<(RenderMessage, usize)>,
+    asset_backlog: PendingAssetUploadQueue,
+    immediate_backlog: PendingAssetUploadQueue,
     upload_batch: Vec<RenderMessage>,
     upload_bytes: Vec<usize>,
 }
@@ -302,9 +489,8 @@ impl NativeInlineRenderState {
             fps_window_start: now,
             fps_frames: 0,
             poll_frame: 0,
-            asset_backlog: VecDeque::new(),
-            asset_backlog_bytes: 0,
-            immediate_backlog: VecDeque::new(),
+            asset_backlog: PendingAssetUploadQueue::default(),
+            immediate_backlog: PendingAssetUploadQueue::default(),
             upload_batch: Vec::new(),
             upload_bytes: Vec::new(),
         }
@@ -312,7 +498,6 @@ impl NativeInlineRenderState {
 
     fn release_pending_uploads(&mut self, tuning: &Arc<RuntimeTuning>) {
         release_pending_uploads(tuning, &mut self.asset_backlog, &mut self.immediate_backlog);
-        self.asset_backlog_bytes = 0;
     }
 
     fn collect_message(
@@ -329,16 +514,19 @@ impl NativeInlineRenderState {
     ) -> bool {
         match message {
             RenderMessage::CreateMesh { .. }
+            | RenderMessage::RemoveMesh { .. }
             | RenderMessage::CreateTexture { .. }
             | RenderMessage::CreateMaterial(_) => {
-                let bytes = render_message_payload_bytes(&message);
-                let fits_bytes =
-                    self.asset_backlog_bytes.saturating_add(bytes) <= max_pending_bytes;
-                if backlog_enabled && self.asset_backlog.len() < max_pending && fits_bytes {
-                    self.asset_backlog_bytes = self.asset_backlog_bytes.saturating_add(bytes);
-                    self.asset_backlog.push_back(message);
-                } else {
-                    self.immediate_backlog.push_back((message, bytes));
+                let released_bytes = enqueue_asset_upload(
+                    &mut self.asset_backlog,
+                    &mut self.immediate_backlog,
+                    message,
+                    backlog_enabled,
+                    max_pending,
+                    max_pending_bytes,
+                );
+                if released_bytes > 0 {
+                    tuning.release_asset_upload(released_bytes);
                 }
                 *should_render = true;
                 true
@@ -371,6 +559,7 @@ impl NativeInlineRenderState {
                 }
                 true
             }
+            #[cfg(not(target_arch = "wasm32"))]
             RenderMessage::WindowRecreatedWithInit {
                 window,
                 size,
@@ -508,6 +697,7 @@ impl NativeInlineRenderState {
         frame_start: Instant,
         pending_render_messages: &mut VecDeque<RenderMessage>,
         pending_asset_messages: &mut VecDeque<RenderMessage>,
+        control_receiver: &Receiver<RenderMessage>,
         render_receiver: &Receiver<RenderMessage>,
         asset_receiver: &Receiver<RenderMessage>,
         stream_request_sender: &Sender<AssetStreamingRequest>,
@@ -529,11 +719,10 @@ impl NativeInlineRenderState {
         let max_pending_bytes = tuning.max_pending_asset_bytes.load(Ordering::Relaxed);
         let backlog_enabled = max_pending > 0 && max_pending_bytes > 0;
         if !backlog_enabled && !self.asset_backlog.is_empty() {
-            for message in self.asset_backlog.drain(..) {
-                tuning.release_asset_upload(render_message_payload_bytes(&message));
-            }
-            self.asset_backlog_bytes = 0;
+            self.asset_backlog.drain_release(tuning);
         }
+        let base_asset_message_budget = asset_message_collection_budget(tuning);
+        let mut processed_asset_messages = 0usize;
 
         while let Some(message) = pending_render_messages.pop_front() {
             if !self.collect_message(
@@ -549,6 +738,32 @@ impl NativeInlineRenderState {
             ) {
                 self.release_pending_uploads(tuning);
                 return false;
+            }
+        }
+
+        loop {
+            match control_receiver.try_recv() {
+                Ok(message) => {
+                    if !self.collect_message(
+                        message,
+                        backlog_enabled,
+                        max_pending,
+                        max_pending_bytes,
+                        &mut should_render,
+                        stream_request_sender,
+                        stats,
+                        tuning,
+                        config,
+                    ) {
+                        self.release_pending_uploads(tuning);
+                        return false;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.release_pending_uploads(tuning);
+                    return false;
+                }
             }
         }
 
@@ -578,11 +793,24 @@ impl NativeInlineRenderState {
             }
         }
 
+        let render_due = render_due_for_frame(frame_start, self.last_render, tuning);
+        let base_uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
+        let (asset_message_budget, uploads_per_frame) = asset_work_budgets_for_frame(
+            base_asset_message_budget,
+            base_uploads_per_frame,
+            should_render || render_due,
+        );
+
         while let Some(message) = pending_asset_messages.pop_front() {
+            if processed_asset_messages >= asset_message_budget {
+                pending_asset_messages.push_front(message);
+                break;
+            }
             if backlog_enabled && self.asset_backlog.len() >= max_pending {
                 pending_asset_messages.push_front(message);
                 break;
             }
+            processed_asset_messages = processed_asset_messages.saturating_add(1);
             if !self.collect_message(
                 message,
                 backlog_enabled,
@@ -600,11 +828,15 @@ impl NativeInlineRenderState {
         }
 
         loop {
+            if processed_asset_messages >= asset_message_budget {
+                break;
+            }
             if backlog_enabled && self.asset_backlog.len() >= max_pending {
                 break;
             }
             match asset_receiver.try_recv() {
                 Ok(message) => {
+                    processed_asset_messages = processed_asset_messages.saturating_add(1);
                     if !self.collect_message(
                         message,
                         backlog_enabled,
@@ -631,7 +863,6 @@ impl NativeInlineRenderState {
             return false;
         };
 
-        let uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
         let upload_start = if profiling_enabled {
             Some(Instant::now())
         } else {
@@ -647,9 +878,7 @@ impl NativeInlineRenderState {
                 uploads_this_frame += 1;
                 continue;
             }
-            if let Some(message) = self.asset_backlog.pop_front() {
-                let bytes = render_message_payload_bytes(&message);
-                self.asset_backlog_bytes = self.asset_backlog_bytes.saturating_sub(bytes);
+            if let Some((message, bytes)) = self.asset_backlog.pop_front() {
                 self.upload_batch.push(message);
                 self.upload_bytes.push(bytes);
                 uploads_this_frame += 1;
@@ -763,9 +992,8 @@ struct WebRenderState {
     fps_window_start: Instant,
     fps_frames: u32,
     poll_frame: u32,
-    asset_backlog: VecDeque<RenderMessage>,
-    asset_backlog_bytes: usize,
-    immediate_backlog: VecDeque<(RenderMessage, usize)>,
+    asset_backlog: PendingAssetUploadQueue,
+    immediate_backlog: PendingAssetUploadQueue,
     upload_batch: Vec<RenderMessage>,
     upload_bytes: Vec<usize>,
 }
@@ -784,9 +1012,8 @@ impl WebRenderState {
             fps_window_start: now,
             fps_frames: 0,
             poll_frame: 0,
-            asset_backlog: VecDeque::new(),
-            asset_backlog_bytes: 0,
-            immediate_backlog: VecDeque::new(),
+            asset_backlog: PendingAssetUploadQueue::default(),
+            immediate_backlog: PendingAssetUploadQueue::default(),
             upload_batch: Vec::new(),
             upload_bytes: Vec::new(),
         }
@@ -799,19 +1026,23 @@ impl WebRenderState {
         max_pending: usize,
         max_pending_bytes: usize,
         should_render: &mut bool,
+        tuning: &Arc<RuntimeTuning>,
     ) -> bool {
         match message {
             RenderMessage::CreateMesh { .. }
+            | RenderMessage::RemoveMesh { .. }
             | RenderMessage::CreateTexture { .. }
             | RenderMessage::CreateMaterial(_) => {
-                let bytes = render_message_payload_bytes(&message);
-                let fits_bytes =
-                    self.asset_backlog_bytes.saturating_add(bytes) <= max_pending_bytes;
-                if backlog_enabled && self.asset_backlog.len() < max_pending && fits_bytes {
-                    self.asset_backlog_bytes = self.asset_backlog_bytes.saturating_add(bytes);
-                    self.asset_backlog.push_back(message);
-                } else {
-                    self.immediate_backlog.push_back((message, bytes));
+                let released_bytes = enqueue_asset_upload(
+                    &mut self.asset_backlog,
+                    &mut self.immediate_backlog,
+                    message,
+                    backlog_enabled,
+                    max_pending,
+                    max_pending_bytes,
+                );
+                if released_bytes > 0 {
+                    tuning.release_asset_upload(released_bytes);
                 }
                 *should_render = true;
                 true
@@ -839,6 +1070,7 @@ impl WebRenderState {
         frame_start: Instant,
         pending_render_messages: &mut VecDeque<RenderMessage>,
         pending_asset_messages: &mut VecDeque<RenderMessage>,
+        control_receiver: &Receiver<RenderMessage>,
         render_receiver: &Receiver<RenderMessage>,
         asset_receiver: &Receiver<RenderMessage>,
         metrics: Option<&Arc<PerformanceMetrics>>,
@@ -857,10 +1089,7 @@ impl WebRenderState {
         let max_pending_bytes = tuning.max_pending_asset_bytes.load(Ordering::Relaxed);
         let backlog_enabled = max_pending > 0 && max_pending_bytes > 0;
         if !backlog_enabled && !self.asset_backlog.is_empty() {
-            for message in self.asset_backlog.drain(..) {
-                tuning.release_asset_upload(render_message_payload_bytes(&message));
-            }
-            self.asset_backlog_bytes = 0;
+            self.asset_backlog.drain_release(tuning);
         }
 
         while let Some(message) = pending_render_messages.pop_front() {
@@ -870,6 +1099,7 @@ impl WebRenderState {
                 max_pending,
                 max_pending_bytes,
                 &mut should_render,
+                tuning,
             ) {
                 release_pending_uploads(
                     tuning,
@@ -877,6 +1107,37 @@ impl WebRenderState {
                     &mut self.immediate_backlog,
                 );
                 return false;
+            }
+        }
+
+        loop {
+            match control_receiver.try_recv() {
+                Ok(message) => {
+                    if !self.collect_message(
+                        message,
+                        backlog_enabled,
+                        max_pending,
+                        max_pending_bytes,
+                        &mut should_render,
+                        tuning,
+                    ) {
+                        release_pending_uploads(
+                            tuning,
+                            &mut self.asset_backlog,
+                            &mut self.immediate_backlog,
+                        );
+                        return false;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    release_pending_uploads(
+                        tuning,
+                        &mut self.asset_backlog,
+                        &mut self.immediate_backlog,
+                    );
+                    return false;
+                }
             }
         }
 
@@ -889,6 +1150,7 @@ impl WebRenderState {
                         max_pending,
                         max_pending_bytes,
                         &mut should_render,
+                        tuning,
                     ) {
                         release_pending_uploads(
                             tuning,
@@ -923,6 +1185,7 @@ impl WebRenderState {
                 max_pending,
                 max_pending_bytes,
                 &mut should_render,
+                tuning,
             ) {
                 release_pending_uploads(
                     tuning,
@@ -945,6 +1208,7 @@ impl WebRenderState {
                         max_pending,
                         max_pending_bytes,
                         &mut should_render,
+                        tuning,
                     ) {
                         release_pending_uploads(
                             tuning,
@@ -975,9 +1239,7 @@ impl WebRenderState {
                 uploads_this_frame += 1;
                 continue;
             }
-            if let Some(message) = self.asset_backlog.pop_front() {
-                let bytes = render_message_payload_bytes(&message);
-                self.asset_backlog_bytes = self.asset_backlog_bytes.saturating_sub(bytes);
+            if let Some((message, bytes)) = self.asset_backlog.pop_front() {
                 self.upload_batch.push(message);
                 self.upload_bytes.push(bytes);
                 uploads_this_frame += 1;
@@ -1115,6 +1377,7 @@ impl RenderExtension {
                 frame_start,
                 &mut self.pending_render_messages,
                 &mut self.pending_asset_messages,
+                &self.control_receiver,
                 &self.render_receiver,
                 &self.asset_receiver,
                 self.metrics.as_ref(),
@@ -1133,6 +1396,29 @@ impl RenderExtension {
     }
 
     fn collect_messages_before_renderer_ready(&mut self) {
+        loop {
+            match self.control_receiver.try_recv() {
+                Ok(RenderMessage::WindowRecreated { window, size }) => {
+                    self.pending_bootstrap = Some((window, size));
+                    self.next_renderer_init_retry_at = None;
+                }
+                Ok(RenderMessage::Shutdown) => {
+                    self.running.store(false, Ordering::Release);
+                    self.release_queued_messages();
+                    return;
+                }
+                Ok(message) => {
+                    self.pending_render_messages.push_back(message);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.running.store(false, Ordering::Release);
+                    self.release_queued_messages();
+                    return;
+                }
+            }
+        }
+
         loop {
             match self.render_receiver.try_recv() {
                 Ok(RenderMessage::WindowRecreated { window, size }) => {
@@ -1310,6 +1596,40 @@ impl RenderExtension {
 
     fn collect_messages_before_renderer_ready_native(&mut self) {
         loop {
+            match self.control_receiver.try_recv() {
+                Ok(RenderMessage::WindowRecreated { window, size }) => {
+                    self.native_pending_bootstrap =
+                        Some(NativeRendererBootstrap::Window { window, size });
+                }
+                Ok(RenderMessage::WindowRecreatedWithInit {
+                    window,
+                    size,
+                    render_init,
+                }) => {
+                    self.native_pending_bootstrap = Some(NativeRendererBootstrap::Init {
+                        window,
+                        render_init,
+                        size,
+                    });
+                }
+                Ok(RenderMessage::Shutdown) => {
+                    self.running.store(false, Ordering::Release);
+                    self.release_queued_messages_native();
+                    return;
+                }
+                Ok(message) => {
+                    self.native_pending_render_messages.push_back(message);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.running.store(false, Ordering::Release);
+                    self.release_queued_messages_native();
+                    return;
+                }
+            }
+        }
+
+        loop {
             match self.render_receiver.try_recv() {
                 Ok(RenderMessage::WindowRecreated { window, size }) => {
                     self.native_pending_bootstrap =
@@ -1432,6 +1752,7 @@ impl RenderExtension {
                 frame_start,
                 &mut self.native_pending_render_messages,
                 &mut self.native_pending_asset_messages,
+                &self.control_receiver,
                 &self.render_receiver,
                 &self.asset_receiver,
                 &self.stream_request_sender,
@@ -1455,6 +1776,7 @@ impl RenderExtension {
 
     fn spawn_render_thread(&self, ctx: &RuntimeContext) -> Result<(), RuntimeError> {
         let running = Arc::clone(&self.running);
+        let control_receiver = self.control_receiver.clone();
         let render_receiver = self.render_receiver.clone();
         let asset_receiver = self.asset_receiver.clone();
         let stream_request_sender = self.stream_request_sender.clone();
@@ -1467,6 +1789,7 @@ impl RenderExtension {
         ctx.threads().spawn_named("helmer-render", move || {
             run_render_thread(
                 running,
+                control_receiver,
                 render_receiver,
                 asset_receiver,
                 stream_request_sender,
@@ -1483,6 +1806,7 @@ impl RenderExtension {
 #[cfg(not(target_arch = "wasm32"))]
 fn run_render_thread(
     running: Arc<AtomicBool>,
+    control_receiver: Receiver<RenderMessage>,
     render_receiver: Receiver<RenderMessage>,
     asset_receiver: Receiver<RenderMessage>,
     stream_request_sender: Sender<AssetStreamingRequest>,
@@ -1503,17 +1827,17 @@ fn run_render_thread(
     let mut fps_frames: u32 = 0;
     let mut poll_frame: u32 = 0;
 
-    let mut asset_backlog: VecDeque<RenderMessage> = VecDeque::new();
-    let mut asset_backlog_bytes: usize = 0;
-    let mut immediate_backlog: VecDeque<(RenderMessage, usize)> = VecDeque::new();
+    let mut asset_backlog = PendingAssetUploadQueue::default();
+    let mut immediate_backlog = PendingAssetUploadQueue::default();
     let mut upload_batch: Vec<RenderMessage> = Vec::new();
     let mut upload_bytes: Vec<usize> = Vec::new();
     let mut pending_bootstrap_render_messages: VecDeque<RenderMessage> = VecDeque::new();
 
-    while running.load(Ordering::Relaxed) {
+    'render_loop: while running.load(Ordering::Relaxed) {
         if renderer.is_none() {
             let Some(bootstrap) = wait_for_renderer_bootstrap(
                 &running,
+                &control_receiver,
                 &render_receiver,
                 &mut pending_bootstrap_render_messages,
             ) else {
@@ -1589,10 +1913,14 @@ fn run_render_thread(
         let max_pending_bytes = tuning.max_pending_asset_bytes.load(Ordering::Relaxed);
         let backlog_enabled = max_pending > 0 && max_pending_bytes > 0;
         if !backlog_enabled && !asset_backlog.is_empty() {
-            for message in asset_backlog.drain(..) {
-                tuning.release_asset_upload(render_message_payload_bytes(&message));
-            }
-            asset_backlog_bytes = 0;
+            asset_backlog.drain_release(&tuning);
+        }
+        let base_asset_message_budget = asset_message_collection_budget(&tuning);
+        let mut processed_asset_messages = 0usize;
+
+        if !drain_control_messages(&control_receiver, &mut pending_bootstrap_render_messages) {
+            release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
+            return;
         }
 
         loop {
@@ -1617,15 +1945,19 @@ fn run_render_thread(
             };
             match message {
                 RenderMessage::CreateMesh { .. }
+                | RenderMessage::RemoveMesh { .. }
                 | RenderMessage::CreateTexture { .. }
                 | RenderMessage::CreateMaterial(_) => {
-                    let bytes = render_message_payload_bytes(&message);
-                    let fits_bytes = asset_backlog_bytes.saturating_add(bytes) <= max_pending_bytes;
-                    if backlog_enabled && asset_backlog.len() < max_pending && fits_bytes {
-                        asset_backlog.push_back(message);
-                        asset_backlog_bytes = asset_backlog_bytes.saturating_add(bytes);
-                    } else {
-                        immediate_backlog.push_back((message, bytes));
+                    let released_bytes = enqueue_asset_upload(
+                        &mut asset_backlog,
+                        &mut immediate_backlog,
+                        message,
+                        backlog_enabled,
+                        max_pending,
+                        max_pending_bytes,
+                    );
+                    if released_bytes > 0 {
+                        tuning.release_asset_upload(released_bytes);
                     }
                     should_render = true;
                 }
@@ -1656,6 +1988,7 @@ fn run_render_thread(
                         warn!("window recreation requested without an active renderer");
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
                 RenderMessage::WindowRecreatedWithInit {
                     window,
                     size,
@@ -1790,9 +2123,24 @@ fn run_render_thread(
                     }
                 }
             }
+            if !drain_control_messages(&control_receiver, &mut pending_bootstrap_render_messages) {
+                release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
+                return;
+            }
         }
 
+        let render_due = render_due_for_frame(frame_start, last_render, &tuning);
+        let base_uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
+        let (asset_message_budget, uploads_per_frame) = asset_work_budgets_for_frame(
+            base_asset_message_budget,
+            base_uploads_per_frame,
+            should_render || render_due,
+        );
+
         loop {
+            if processed_asset_messages >= asset_message_budget {
+                break;
+            }
             if backlog_enabled && asset_backlog.len() >= max_pending {
                 break;
             }
@@ -1800,16 +2148,20 @@ fn run_render_thread(
             match asset_receiver.try_recv() {
                 Ok(message) => match message {
                     RenderMessage::CreateMesh { .. }
+                    | RenderMessage::RemoveMesh { .. }
                     | RenderMessage::CreateTexture { .. }
                     | RenderMessage::CreateMaterial(_) => {
-                        let bytes = render_message_payload_bytes(&message);
-                        let fits_bytes =
-                            asset_backlog_bytes.saturating_add(bytes) <= max_pending_bytes;
-                        if backlog_enabled && fits_bytes {
-                            asset_backlog.push_back(message);
-                            asset_backlog_bytes = asset_backlog_bytes.saturating_add(bytes);
-                        } else {
-                            immediate_backlog.push_back((message, bytes));
+                        processed_asset_messages = processed_asset_messages.saturating_add(1);
+                        let released_bytes = enqueue_asset_upload(
+                            &mut asset_backlog,
+                            &mut immediate_backlog,
+                            message,
+                            backlog_enabled,
+                            max_pending,
+                            max_pending_bytes,
+                        );
+                        if released_bytes > 0 {
+                            tuning.release_asset_upload(released_bytes);
                         }
                         should_render = true;
                     }
@@ -1834,6 +2186,18 @@ fn run_render_thread(
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
+            if !drain_control_messages(&control_receiver, &mut pending_bootstrap_render_messages) {
+                release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
+                return;
+            }
+            if !pending_bootstrap_render_messages.is_empty() {
+                if let Some(start) = messages_start {
+                    profiling
+                        .render_thread_messages_us
+                        .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                }
+                continue 'render_loop;
+            }
         }
 
         let Some(renderer) = renderer.as_mut() else {
@@ -1842,7 +2206,6 @@ fn run_render_thread(
             return;
         };
 
-        let uploads_per_frame = tuning.asset_uploads_per_frame.load(Ordering::Relaxed);
         let upload_start = if profiling_enabled {
             Some(Instant::now())
         } else {
@@ -1858,9 +2221,7 @@ fn run_render_thread(
                 uploads_this_frame += 1;
                 continue;
             }
-            if let Some(message) = asset_backlog.pop_front() {
-                let bytes = render_message_payload_bytes(&message);
-                asset_backlog_bytes = asset_backlog_bytes.saturating_sub(bytes);
+            if let Some((message, bytes)) = asset_backlog.pop_front() {
                 upload_batch.push(message);
                 upload_bytes.push(bytes);
                 uploads_this_frame += 1;
@@ -1879,6 +2240,19 @@ fn run_render_thread(
             profiling
                 .render_thread_upload_us
                 .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+
+        if !drain_control_messages(&control_receiver, &mut pending_bootstrap_render_messages) {
+            release_pending_uploads(&tuning, &mut asset_backlog, &mut immediate_backlog);
+            return;
+        }
+        if !pending_bootstrap_render_messages.is_empty() {
+            if let Some(start) = messages_start {
+                profiling
+                    .render_thread_messages_us
+                    .store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+            }
+            continue;
         }
 
         if let Some(start) = messages_start {
@@ -1970,11 +2344,35 @@ fn run_render_thread(
 #[cfg(not(target_arch = "wasm32"))]
 fn wait_for_renderer_bootstrap(
     running: &Arc<AtomicBool>,
+    control_receiver: &Receiver<RenderMessage>,
     render_receiver: &Receiver<RenderMessage>,
     pending_messages: &mut VecDeque<RenderMessage>,
 ) -> Option<NativeRendererBootstrap> {
     while running.load(Ordering::Relaxed) {
-        match render_receiver.recv_timeout(Duration::from_millis(16)) {
+        loop {
+            match control_receiver.try_recv() {
+                Ok(RenderMessage::WindowRecreated { window, size }) => {
+                    return Some(NativeRendererBootstrap::Window { window, size });
+                }
+                Ok(RenderMessage::WindowRecreatedWithInit {
+                    window,
+                    size,
+                    render_init,
+                }) => {
+                    return Some(NativeRendererBootstrap::Init {
+                        window,
+                        render_init,
+                        size,
+                    });
+                }
+                Ok(RenderMessage::Shutdown) => return None,
+                Ok(message) => pending_messages.push_back(message),
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => return None,
+            }
+        }
+
+        match control_receiver.recv_timeout(Duration::from_millis(16)) {
             Ok(RenderMessage::WindowRecreated { window, size }) => {
                 return Some(NativeRendererBootstrap::Window { window, size });
             }
@@ -1994,21 +2392,21 @@ fn wait_for_renderer_bootstrap(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
         }
+
+        while let Ok(message) = render_receiver.try_recv() {
+            pending_messages.push_back(message);
+        }
     }
     None
 }
 
 fn release_pending_uploads(
     tuning: &Arc<RuntimeTuning>,
-    asset_backlog: &mut VecDeque<RenderMessage>,
-    immediate_backlog: &mut VecDeque<(RenderMessage, usize)>,
+    asset_backlog: &mut PendingAssetUploadQueue,
+    immediate_backlog: &mut PendingAssetUploadQueue,
 ) {
-    for message in asset_backlog.drain(..) {
-        tuning.release_asset_upload(render_message_payload_bytes(&message));
-    }
-    for (_, bytes) in immediate_backlog.drain(..) {
-        tuning.release_asset_upload(bytes);
-    }
+    asset_backlog.drain_release(tuning);
+    immediate_backlog.drain_release(tuning);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2140,5 +2538,125 @@ fn create_surface(
         instance
             .create_surface(window.clone())
             .map_err(|err| err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::{PendingAssetUploadQueue, enqueue_asset_upload};
+    use crate::graphics::common::renderer::{Aabb, MeshLodPayload, RenderMessage, Vertex};
+    use crate::runtime::RuntimeTuning;
+    use glam::Vec3;
+
+    fn mesh_message(id: usize, vertex_count: usize) -> RenderMessage {
+        RenderMessage::CreateMesh {
+            id,
+            total_lods: 1,
+            lods: vec![MeshLodPayload {
+                lod_index: 0,
+                vertices: vec![
+                    Vertex::new(
+                        [0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0],
+                        [1.0, 0.0, 0.0, 1.0],
+                    );
+                    vertex_count.max(1)
+                ]
+                .into(),
+                indices: Vec::<u32>::new().into(),
+                meshlets: Default::default(),
+            }],
+            bounds: Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            },
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn enqueue_asset_upload_replaces_superseded_mesh_payloads() {
+        let mut backlog = PendingAssetUploadQueue::default();
+        let mut immediate = PendingAssetUploadQueue::default();
+
+        let released = enqueue_asset_upload(
+            &mut backlog,
+            &mut immediate,
+            mesh_message(9, 4),
+            true,
+            8,
+            usize::MAX,
+        );
+        assert_eq!(released, 0);
+        assert_eq!(backlog.len(), 1);
+
+        let first_bytes =
+            crate::graphics::common::renderer::render_message_payload_bytes(&mesh_message(9, 4));
+        let second_bytes =
+            crate::graphics::common::renderer::render_message_payload_bytes(&mesh_message(9, 8));
+        let released = enqueue_asset_upload(
+            &mut backlog,
+            &mut immediate,
+            mesh_message(9, 8),
+            true,
+            8,
+            usize::MAX,
+        );
+        assert_eq!(released, first_bytes);
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog.total_bytes(), second_bytes);
+
+        let (_, queued_bytes) = backlog.pop_front().expect("latest mesh upload queued");
+        assert_eq!(queued_bytes, second_bytes);
+    }
+
+    #[test]
+    fn enqueue_asset_upload_coalesces_across_backlog_and_immediate_queues() {
+        let mut backlog = PendingAssetUploadQueue::default();
+        let mut immediate = PendingAssetUploadQueue::default();
+
+        let first = mesh_message(5, 4);
+        let first_bytes = crate::graphics::common::renderer::render_message_payload_bytes(&first);
+        let released =
+            enqueue_asset_upload(&mut backlog, &mut immediate, first, true, 1, usize::MAX);
+        assert_eq!(released, 0);
+        assert_eq!(backlog.len(), 1);
+
+        let second = mesh_message(5, 6);
+        let second_bytes = crate::graphics::common::renderer::render_message_payload_bytes(&second);
+        let released = enqueue_asset_upload(&mut backlog, &mut immediate, second, false, 0, 0);
+        assert_eq!(released, first_bytes);
+        assert_eq!(backlog.len(), 0);
+        assert_eq!(immediate.len(), 1);
+
+        let (_, queued_bytes) = immediate
+            .pop_front()
+            .expect("latest immediate upload queued");
+        assert_eq!(queued_bytes, second_bytes);
+    }
+
+    #[test]
+    fn asset_message_collection_budget_scales_with_uploads_but_stays_bounded() {
+        let tuning = Arc::new(RuntimeTuning::default());
+
+        tuning.asset_uploads_per_frame.store(1, Ordering::Relaxed);
+        assert_eq!(super::asset_message_collection_budget(&tuning), 32);
+
+        tuning.asset_uploads_per_frame.store(4, Ordering::Relaxed);
+        assert_eq!(super::asset_message_collection_budget(&tuning), 128);
+
+        tuning.asset_uploads_per_frame.store(64, Ordering::Relaxed);
+        assert_eq!(super::asset_message_collection_budget(&tuning), 256);
+    }
+
+    #[test]
+    fn interactive_asset_work_budget_caps_message_and_upload_work() {
+        assert_eq!(super::asset_work_budgets_for_frame(128, 8, false), (128, 8));
+        assert_eq!(super::asset_work_budgets_for_frame(128, 8, true), (32, 2));
+        assert_eq!(super::asset_work_budgets_for_frame(16, 1, true), (16, 1));
     }
 }

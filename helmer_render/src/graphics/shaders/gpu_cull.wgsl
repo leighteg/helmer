@@ -56,6 +56,7 @@ struct MeshMeta {
     base_draw: u32,
     instance_capacity: u32,
     base_instance: u32,
+    lod_slot_map: array<u32, 4>,
 }
 
 struct DrawIndexedIndirect {
@@ -279,12 +280,13 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         lod_index = mesh.lod_count - 1u;
     }
 
-    let draw_index = mesh.base_draw + lod_index;
+    let draw_slot = mesh.lod_slot_map[lod_index];
+    let draw_index = mesh.base_draw + draw_slot;
     if (draw_index >= params.draw_count) {
         return;
     }
     let capacity = mesh.instance_capacity;
-    let base = mesh.base_instance + lod_index * capacity;
+    let base = mesh.base_instance + draw_slot * capacity;
     if (base >= params.output_capacity) {
         return;
     }

@@ -21,15 +21,13 @@ use helmer_animation::{
 };
 use helmer_audio::{AudioClip, AudioLoadMode};
 pub use helmer_render::graphics::common::renderer::AssetKind;
-#[cfg(target_arch = "wasm32")]
-use helmer_render::graphics::common::renderer::MeshletLodData;
 use helmer_render::graphics::common::renderer::Transform;
 use helmer_render::graphics::common::{
     meshlets::{build_meshlet_lod, meshlet_lod_size_bytes},
     renderer::{
         Aabb, AlphaMode, AssetStreamKind, AssetStreamingRequest, MaterialGpuData, MeshLodPayload,
-        RenderMessage, Vertex, build_mip_uploads, calc_mip_level_count, mip_level_data_size,
-        render_message_payload_bytes,
+        MeshletLodData, RenderMessage, Vertex, build_mip_uploads, calc_mip_level_count,
+        mip_level_data_size, render_message_payload_bytes,
     },
 };
 use helmer_render::runtime::RuntimeTuning;
@@ -1491,10 +1489,18 @@ struct MaterialSource {
 }
 
 #[derive(Clone)]
+struct ProceduralMeshSource {
+    vertices: Arc<[Vertex]>,
+    indices: Arc<[u32]>,
+}
+
+#[derive(Clone)]
 struct AudioSource {
     path: PathBuf,
     mode: AudioLoadMode,
 }
+
+const RECENTLY_REMOVED_MESH_TOMBSTONE_CAP: usize = 4096;
 
 // --- ASSET SERVER ---
 
@@ -1523,8 +1529,18 @@ pub struct AssetServer {
     scene_buffer_bytes: AtomicUsize,
     scene_buffer_inflight: RwLock<HashSet<usize>>,
     texture_sources: RwLock<HashMap<usize, TextureSource>>,
+    pending_texture_loads: RwLock<HashSet<usize>>,
     mesh_sources: RwLock<HashMap<usize, MeshSource>>,
+    procedural_mesh_sources: RwLock<HashMap<usize, ProceduralMeshSource>>,
+    pending_procedural_mesh_loads: RwLock<HashSet<usize>>,
+    recently_removed_meshes: RwLock<HashSet<usize>>,
+    recently_removed_mesh_order: RwLock<VecDeque<usize>>,
+    runtime_mesh_ids: RwLock<HashSet<usize>>,
+    transient_runtime_mesh_ids: RwLock<HashSet<usize>>,
+    runtime_mesh_restream_senders: RwLock<HashMap<usize, Sender<usize>>>,
+    pending_runtime_mesh_restream_requests: RwLock<HashSet<usize>>,
     material_sources: RwLock<HashMap<usize, MaterialSource>>,
+    registered_material_sources: RwLock<HashMap<usize, MaterialGpuData>>,
     audio_sources: RwLock<HashMap<usize, AudioSource>>,
     mesh_cache: RwLock<HashMap<usize, Arc<Mesh>>>,
     texture_cache: RwLock<HashMap<usize, Arc<CachedTexture>>>,
@@ -1902,10 +1918,10 @@ impl AssetServer {
                                 id,
                                 vertices,
                                 indices,
-                                tuning,
+                                ..
                             } => {
                                 let bounds = Aabb::calculate(&vertices);
-                                build_mesh_payload(vertices, indices, bounds, &tuning).map(
+                                build_procedural_mesh_payload(vertices, indices, bounds).map(
                                     |payload| AssetLoadResult::Mesh {
                                         id,
                                         scene_id: None,
@@ -2203,8 +2219,18 @@ impl AssetServer {
             scene_buffer_bytes: AtomicUsize::new(0),
             scene_buffer_inflight: RwLock::new(HashSet::new()),
             texture_sources: RwLock::new(HashMap::new()),
+            pending_texture_loads: RwLock::new(HashSet::new()),
             mesh_sources: RwLock::new(HashMap::new()),
+            procedural_mesh_sources: RwLock::new(HashMap::new()),
+            pending_procedural_mesh_loads: RwLock::new(HashSet::new()),
+            recently_removed_meshes: RwLock::new(HashSet::new()),
+            recently_removed_mesh_order: RwLock::new(VecDeque::new()),
+            runtime_mesh_ids: RwLock::new(HashSet::new()),
+            transient_runtime_mesh_ids: RwLock::new(HashSet::new()),
+            runtime_mesh_restream_senders: RwLock::new(HashMap::new()),
+            pending_runtime_mesh_restream_requests: RwLock::new(HashSet::new()),
             material_sources: RwLock::new(HashMap::new()),
+            registered_material_sources: RwLock::new(HashMap::new()),
             audio_sources: RwLock::new(HashMap::new()),
             mesh_cache: RwLock::new(HashMap::new()),
             texture_cache: RwLock::new(HashMap::new()),
@@ -2453,6 +2479,14 @@ impl AssetServer {
                 data.emission_texture_id,
             ]);
         }
+        if let Some(mat) = self.registered_material_sources.read().get(&material_id) {
+            return Some([
+                mat.albedo_texture_id,
+                mat.normal_texture_id,
+                mat.metallic_roughness_texture_id,
+                mat.emission_texture_id,
+            ]);
+        }
         None
     }
 
@@ -2469,8 +2503,14 @@ impl AssetServer {
 
     fn has_stream_source(&self, kind: AssetStreamKind, id: usize) -> bool {
         match kind {
-            AssetStreamKind::Mesh => self.mesh_sources.read().contains_key(&id),
-            AssetStreamKind::Material => self.material_sources.read().contains_key(&id),
+            AssetStreamKind::Mesh => {
+                self.mesh_sources.read().contains_key(&id)
+                    || self.procedural_mesh_sources.read().contains_key(&id)
+            }
+            AssetStreamKind::Material => {
+                self.material_sources.read().contains_key(&id)
+                    || self.registered_material_sources.read().contains_key(&id)
+            }
             AssetStreamKind::Texture => self.texture_sources.read().contains_key(&id),
         }
     }
@@ -2900,6 +2940,16 @@ impl AssetServer {
 
     pub fn add_mesh(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Handle<Mesh> {
         let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.clear_removed_mesh_tombstone(id);
+        self.runtime_mesh_ids.write().remove(&id);
+        self.procedural_mesh_sources.write().insert(
+            id,
+            ProceduralMeshSource {
+                vertices: Arc::from(vertices.as_slice()),
+                indices: Arc::from(indices.as_slice()),
+            },
+        );
+        self.pending_procedural_mesh_loads.write().insert(id);
 
         let request = AssetLoadRequest::ProceduralMesh {
             id,
@@ -2916,6 +2966,16 @@ impl AssetServer {
     }
 
     pub fn update_mesh(&self, id: usize, vertices: Vec<Vertex>, indices: Vec<u32>) {
+        self.clear_removed_mesh_tombstone(id);
+        self.runtime_mesh_ids.write().remove(&id);
+        self.procedural_mesh_sources.write().insert(
+            id,
+            ProceduralMeshSource {
+                vertices: Arc::from(vertices.as_slice()),
+                indices: Arc::from(indices.as_slice()),
+            },
+        );
+        self.pending_procedural_mesh_loads.write().insert(id);
         let request = AssetLoadRequest::ProceduralMesh {
             id,
             vertices,
@@ -2930,8 +2990,286 @@ impl AssetServer {
         }
     }
 
+    pub fn add_runtime_mesh(&self, vertices: Vec<Vertex>, indices: Vec<u32>) -> Handle<Mesh> {
+        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.transient_runtime_mesh_ids.write().remove(&id);
+        self.store_runtime_mesh_source(id, vertices, indices);
+        self.try_send_retained_runtime_mesh(id);
+        Handle::new(id)
+    }
+
+    pub fn update_runtime_mesh(&self, id: usize, vertices: Vec<Vertex>, indices: Vec<u32>) {
+        self.transient_runtime_mesh_ids.write().remove(&id);
+        self.store_runtime_mesh_source(id, vertices, indices);
+        self.try_send_retained_runtime_mesh(id);
+    }
+
+    pub fn add_rebuildable_runtime_mesh(
+        &self,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+        restream_sender: Sender<usize>,
+    ) -> Handle<Mesh> {
+        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.update_rebuildable_runtime_mesh(id, vertices, indices, restream_sender);
+        Handle::new(id)
+    }
+
+    pub fn update_rebuildable_runtime_mesh(
+        &self,
+        id: usize,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+        restream_sender: Sender<usize>,
+    ) {
+        self.clear_removed_mesh_tombstone(id);
+        self.transient_runtime_mesh_ids.write().remove(&id);
+        self.runtime_mesh_ids.write().insert(id);
+        self.runtime_mesh_restream_senders
+            .write()
+            .insert(id, restream_sender);
+        self.pending_runtime_mesh_restream_requests
+            .write()
+            .remove(&id);
+        self.mesh_aabb_map
+            .write()
+            .0
+            .insert(id, Aabb::calculate(&vertices));
+        if !self.try_send_runtime_mesh_message(id, &vertices, &indices, false) {
+            self.store_runtime_mesh_source(id, vertices, indices);
+            self.try_send_retained_runtime_mesh(id);
+        } else {
+            self.discard_runtime_mesh_source(id);
+        }
+    }
+
+    pub fn unregister_runtime_mesh_restream_sender(&self, id: usize) {
+        self.runtime_mesh_restream_senders.write().remove(&id);
+        self.pending_runtime_mesh_restream_requests
+            .write()
+            .remove(&id);
+    }
+
+    pub fn add_transient_runtime_mesh(
+        &self,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+    ) -> Handle<Mesh> {
+        let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.clear_removed_mesh_tombstone(id);
+        // avoid retaining a second CPU-side geometry copy when the direct upload succeeds
+        if !self.try_send_runtime_mesh_message(id, &vertices, &indices, true) {
+            self.transient_runtime_mesh_ids.write().remove(&id);
+            self.store_runtime_mesh_source(id, vertices, indices);
+            self.try_send_retained_runtime_mesh(id);
+        } else {
+            self.transient_runtime_mesh_ids.write().insert(id);
+            self.drop_runtime_mesh_source(id);
+        }
+        Handle::new(id)
+    }
+
+    pub fn update_transient_runtime_mesh(
+        &self,
+        id: usize,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+    ) {
+        self.clear_removed_mesh_tombstone(id);
+        if !self.try_send_runtime_mesh_message(id, &vertices, &indices, true) {
+            self.transient_runtime_mesh_ids.write().remove(&id);
+            self.store_runtime_mesh_source(id, vertices, indices);
+            self.try_send_retained_runtime_mesh(id);
+        } else {
+            self.transient_runtime_mesh_ids.write().insert(id);
+            self.drop_runtime_mesh_source(id);
+        }
+    }
+
+    fn store_runtime_mesh_source(&self, id: usize, vertices: Vec<Vertex>, indices: Vec<u32>) {
+        let bounds = Aabb::calculate(&vertices);
+        let retained_vertices: Arc<[Vertex]> = Arc::from(vertices);
+        let retained_indices: Arc<[u32]> = Arc::from(indices);
+        self.clear_removed_mesh_tombstone(id);
+        self.runtime_mesh_ids.write().insert(id);
+        self.pending_runtime_mesh_restream_requests
+            .write()
+            .remove(&id);
+        self.mesh_aabb_map.write().0.insert(id, bounds);
+        self.procedural_mesh_sources.write().insert(
+            id,
+            ProceduralMeshSource {
+                vertices: retained_vertices,
+                indices: retained_indices,
+            },
+        );
+        self.pending_procedural_mesh_loads.write().remove(&id);
+    }
+
+    fn try_send_retained_runtime_mesh(&self, id: usize) {
+        let Some(source) = self.procedural_mesh_sources.read().get(&id).cloned() else {
+            return;
+        };
+        if !self.try_send_runtime_mesh_message(
+            id,
+            source.vertices.as_ref(),
+            source.indices.as_ref(),
+            false,
+        ) {
+            self.requeue_runtime_mesh_stream_request(id);
+        } else if self.runtime_mesh_restream_senders.read().contains_key(&id) {
+            self.discard_runtime_mesh_source(id);
+        }
+    }
+
+    fn discard_runtime_mesh_source(&self, id: usize) {
+        self.procedural_mesh_sources.write().remove(&id);
+        self.pending_procedural_mesh_loads.write().remove(&id);
+    }
+
+    fn drop_runtime_mesh_source(&self, id: usize) {
+        self.discard_runtime_mesh_source(id);
+        self.runtime_mesh_ids.write().remove(&id);
+    }
+
+    fn try_send_runtime_mesh_message(
+        &self,
+        id: usize,
+        vertices: &[Vertex],
+        indices: &[u32],
+        pinned: bool,
+    ) -> bool {
+        let bounds = Aabb::calculate(vertices);
+        let Some(payload) = build_runtime_mesh_payload(vertices, indices, bounds) else {
+            return false;
+        };
+        match self.try_send_asset_message(RenderMessage::CreateMesh {
+            id,
+            total_lods: payload.total_lods,
+            lods: payload.lods,
+            bounds: payload.bounds,
+            pinned,
+        }) {
+            Ok(()) => {
+                self.mesh_aabb_map.write().0.insert(id, payload.bounds);
+                self.pending_runtime_mesh_restream_requests
+                    .write()
+                    .remove(&id);
+                true
+            }
+            Err(AssetSendError::Budget) | Err(AssetSendError::Full) => false,
+            Err(AssetSendError::Disconnected) => {
+                warn!("Failed to send runtime mesh {}; render thread offline", id);
+                false
+            }
+        }
+    }
+
+    fn requeue_runtime_mesh_stream_request(&self, id: usize) {
+        self.requeue_stream_request(AssetStreamingRequest {
+            id,
+            kind: AssetStreamKind::Mesh,
+            priority: 1.0,
+            max_lod: Some(0),
+            force_low_res: false,
+        });
+    }
+
+    pub fn remove_mesh(&self, id: usize) {
+        self.procedural_mesh_sources.write().remove(&id);
+        self.pending_procedural_mesh_loads.write().remove(&id);
+        self.mesh_cache.write().remove(&id);
+        self.mesh_meta.write().remove(&id);
+        self.mesh_aabb_map.write().0.remove(&id);
+        self.runtime_mesh_ids.write().remove(&id);
+        self.transient_runtime_mesh_ids.write().remove(&id);
+        self.runtime_mesh_restream_senders.write().remove(&id);
+        self.pending_runtime_mesh_restream_requests
+            .write()
+            .remove(&id);
+        self.mark_mesh_removed(id);
+        self.streaming_inflight
+            .write()
+            .retain(|(kind, asset_id), _| !(*kind == AssetStreamKind::Mesh && *asset_id == id));
+        self.streaming_backlog
+            .write()
+            .retain(|request| !(request.kind == AssetStreamKind::Mesh && request.id == id));
+        self.reupload_queue
+            .write()
+            .retain(|request| !(request.kind == AssetStreamKind::Mesh && request.id == id));
+        self.latest_streaming_plan
+            .write()
+            .retain(|(kind, asset_id), _| !(*kind == AssetStreamKind::Mesh && *asset_id == id));
+        let _ = self.try_send_asset_message(RenderMessage::RemoveMesh { id });
+    }
+
     pub fn get_mesh(&self, id: usize) -> Option<Arc<Mesh>> {
         self.mesh_cache.read().get(&id).cloned()
+    }
+
+    fn clear_removed_mesh_tombstone(&self, id: usize) {
+        self.recently_removed_meshes.write().remove(&id);
+    }
+
+    fn mark_mesh_removed(&self, id: usize) {
+        if self.recently_removed_meshes.write().insert(id) {
+            let mut order = self.recently_removed_mesh_order.write();
+            order.push_back(id);
+            while order.len() > RECENTLY_REMOVED_MESH_TOMBSTONE_CAP {
+                if let Some(expired) = order.pop_front() {
+                    self.recently_removed_meshes.write().remove(&expired);
+                }
+            }
+        }
+    }
+
+    pub fn register_material(&self, data: MaterialGpuData) -> Handle<Material> {
+        let id = data.id;
+        self.registered_material_sources
+            .write()
+            .insert(id, data.clone());
+        if self.material_budget > 0 {
+            let size_bytes = std::mem::size_of_val(&data);
+            self.material_cache
+                .write()
+                .insert(id, Arc::new(data.clone()));
+            self.record_cache_entry(AssetStreamKind::Material, id, size_bytes);
+            self.enforce_cache_budget(AssetStreamKind::Material);
+        }
+
+        match self.try_send_asset_message(RenderMessage::CreateMaterial(data)) {
+            Ok(()) => {
+                if self.material_budget > 0 {
+                    self.touch_cache_entry(AssetStreamKind::Material, id);
+                }
+            }
+            Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                self.requeue_stream_request(AssetStreamingRequest {
+                    id,
+                    kind: AssetStreamKind::Material,
+                    priority: 0.0,
+                    max_lod: None,
+                    force_low_res: false,
+                });
+            }
+            Err(AssetSendError::Disconnected) => {
+                warn!(
+                    "Failed to send registered material {}; render thread offline",
+                    id
+                );
+            }
+        }
+
+        Handle::new(id)
+    }
+
+    pub fn add_material(&self, mut data: MaterialGpuData) -> Handle<Material> {
+        data.id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.register_material(data)
+    }
+
+    pub fn update_material(&self, data: MaterialGpuData) {
+        let _ = self.register_material(data);
     }
 
     pub fn get_audio(&self, id: usize) -> Option<Arc<AudioClip>> {
@@ -3526,12 +3864,14 @@ impl AssetServer {
     pub fn load_texture<P: AsRef<Path>>(&self, path: P, kind: AssetKind) -> Handle<Texture> {
         let id = self.next_id.fetch_add(1, AtomicOrdering::Relaxed);
         let resolved_path = self.resolve_asset_path(path.as_ref());
+        self.pending_texture_loads.write().insert(id);
         let request = AssetLoadRequest::Texture {
             id,
             path: resolved_path,
             kind,
         };
         if !self.enqueue_worker_request(request) {
+            self.pending_texture_loads.write().remove(&id);
             warn!(
                 "Failed to queue texture request {}; worker thread offline",
                 id
@@ -3634,13 +3974,22 @@ impl AssetServer {
                 total_lods,
                 bounds,
             } => {
+                self.pending_procedural_mesh_loads.write().remove(&id);
+                let is_procedural = self.procedural_mesh_sources.read().contains_key(&id);
+                if scene_id.is_none() && !is_procedural {
+                    self.mesh_cache.write().remove(&id);
+                    self.mesh_meta.write().remove(&id);
+                    self.mesh_aabb_map.write().0.remove(&id);
+                    let _ = self.take_streaming_inflight(AssetStreamKind::Mesh, id);
+                    return;
+                }
                 let mesh_arc = Arc::new(Mesh {
                     lods: RwLock::new(lods.clone()),
                     bounds,
                     total_lods,
                 });
 
-                let cached = self.mesh_budget > 0;
+                let cached = self.mesh_budget > 0 && !is_procedural;
                 if cached {
                     let size_bytes = mesh_size_bytes(&mesh_arc);
                     self.mesh_cache.write().insert(id, mesh_arc.clone());
@@ -3676,6 +4025,7 @@ impl AssetServer {
                     total_lods: mesh_arc.total_lods,
                     lods: lods_to_send,
                     bounds,
+                    pinned: false,
                 }) {
                     Ok(()) => {
                         if cached {
@@ -3697,6 +4047,7 @@ impl AssetServer {
                 kind,
                 data,
             } => {
+                self.pending_texture_loads.write().remove(&id);
                 let (texture_data, format, (width, height)) = data;
                 let texture_data: Arc<[u8]> = Arc::from(texture_data);
                 let cached = self.texture_budget > 0;
@@ -3942,6 +4293,9 @@ impl AssetServer {
                 }
             }
             AssetLoadResult::StreamFailure { kind, id, scene_id } => {
+                if matches!(kind, AssetStreamKind::Texture) {
+                    self.pending_texture_loads.write().remove(&id);
+                }
                 self.take_streaming_inflight(kind, id);
                 self.mark_scene_asset_complete(scene_id);
             }
@@ -5040,6 +5394,7 @@ impl AssetServer {
                         total_lods: mesh.total_lods,
                         lods,
                         bounds: mesh.bounds,
+                        pinned: false,
                     }) {
                         Ok(()) => {
                             self.mesh_aabb_map.write().0.insert(request.id, mesh.bounds);
@@ -5057,6 +5412,78 @@ impl AssetServer {
                     }
                 }
 
+                if self.runtime_mesh_ids.read().contains(&request.id) {
+                    let source = self
+                        .procedural_mesh_sources
+                        .read()
+                        .get(&request.id)
+                        .cloned();
+                    if let Some(source) = source {
+                        let bounds = Aabb::calculate(source.vertices.as_ref());
+                        let Some(payload) = build_runtime_mesh_payload(
+                            source.vertices.as_ref(),
+                            source.indices.as_ref(),
+                            bounds,
+                        ) else {
+                            return false;
+                        };
+                        match self.try_send_asset_message(RenderMessage::CreateMesh {
+                            id: request.id,
+                            total_lods: payload.total_lods,
+                            lods: payload.lods,
+                            bounds: payload.bounds,
+                            pinned: false,
+                        }) {
+                            Ok(()) => {
+                                self.mesh_aabb_map
+                                    .write()
+                                    .0
+                                    .insert(request.id, payload.bounds);
+                                self.pending_runtime_mesh_restream_requests
+                                    .write()
+                                    .remove(&request.id);
+                                if self
+                                    .runtime_mesh_restream_senders
+                                    .read()
+                                    .contains_key(&request.id)
+                                {
+                                    self.discard_runtime_mesh_source(request.id);
+                                }
+                                return true;
+                            }
+                            Err(AssetSendError::Budget) | Err(AssetSendError::Full) => {
+                                return false;
+                            }
+                            Err(AssetSendError::Disconnected) => {
+                                warn!(
+                                    "Failed to send runtime stream mesh {}; render thread offline",
+                                    request.id
+                                );
+                                return false;
+                            }
+                        }
+                    }
+
+                    if let Some(sender) = self
+                        .runtime_mesh_restream_senders
+                        .read()
+                        .get(&request.id)
+                        .cloned()
+                    {
+                        let mut pending = self.pending_runtime_mesh_restream_requests.write();
+                        if pending.insert(request.id) && sender.send(request.id).is_err() {
+                            pending.remove(&request.id);
+                            self.runtime_mesh_restream_senders
+                                .write()
+                                .remove(&request.id);
+                            return false;
+                        }
+                        return true;
+                    }
+
+                    return false;
+                }
+
                 if *creation_budget == 0 {
                     return false;
                 }
@@ -5066,9 +5493,47 @@ impl AssetServer {
                     return true;
                 }
 
+                if self
+                    .pending_procedural_mesh_loads
+                    .read()
+                    .contains(&request.id)
+                {
+                    return false;
+                }
+
+                if let Some(source) = self
+                    .procedural_mesh_sources
+                    .read()
+                    .get(&request.id)
+                    .cloned()
+                {
+                    self.update_streaming_inflight(request);
+                    let queued = self.enqueue_worker_request(AssetLoadRequest::ProceduralMesh {
+                        id: request.id,
+                        vertices: source.vertices.as_ref().to_vec(),
+                        indices: source.indices.as_ref().to_vec(),
+                        tuning: self.asset_streaming_tuning,
+                    });
+                    if !queued {
+                        self.take_streaming_inflight(AssetStreamKind::Mesh, request.id);
+                        return false;
+                    }
+                    self.pending_procedural_mesh_loads
+                        .write()
+                        .insert(request.id);
+                    Self::consume_budget(creation_budget);
+                    return true;
+                }
+
                 let pending = match self.mesh_sources.read().get(&request.id).copied() {
                     Some(p) => p,
                     None => {
+                        if self.recently_removed_meshes.read().contains(&request.id) {
+                            return false;
+                        }
+                        if self.transient_runtime_mesh_ids.read().contains(&request.id) {
+                            return false;
+                        }
                         warn!(
                             "Streaming request for mesh {} ignored; mesh not available",
                             request.id
@@ -5145,6 +5610,35 @@ impl AssetServer {
                             return false;
                         }
                     }
+                }
+
+                if let Some(material) = self
+                    .registered_material_sources
+                    .read()
+                    .get(&request.id)
+                    .cloned()
+                {
+                    if self.material_budget > 0 {
+                        let size_bytes = std::mem::size_of_val(&material);
+                        self.material_cache
+                            .write()
+                            .insert(request.id, Arc::new(material.clone()));
+                        self.record_cache_entry(AssetStreamKind::Material, request.id, size_bytes);
+                        self.enforce_cache_budget(AssetStreamKind::Material);
+                    }
+                    return match self
+                        .try_send_asset_message(RenderMessage::CreateMaterial(material))
+                    {
+                        Ok(()) => true,
+                        Err(AssetSendError::Budget) | Err(AssetSendError::Full) => false,
+                        Err(AssetSendError::Disconnected) => {
+                            warn!(
+                                "Failed to send registered material {}; render thread offline",
+                                request.id
+                            );
+                            false
+                        }
+                    };
                 }
 
                 let pending = match self.material_sources.read().get(&request.id).cloned() {
@@ -5258,6 +5752,9 @@ impl AssetServer {
                 let pending = match self.texture_sources.read().get(&request.id).copied() {
                     Some(p) => p,
                     None => {
+                        if self.pending_texture_loads.read().contains(&request.id) {
+                            return false;
+                        }
                         warn!(
                             "Streaming request for texture {} ignored; texture not available",
                             request.id
@@ -6911,6 +7408,7 @@ fn compact_mesh_lod(
     vertices: &[Vertex],
     indices: &[u32],
     lod_index: usize,
+    include_meshlets: bool,
 ) -> Option<MeshLodPayload> {
     if vertices.is_empty() || indices.is_empty() {
         return None;
@@ -6941,7 +7439,11 @@ fn compact_mesh_lod(
         return None;
     }
 
-    let meshlets = build_meshlet_lod(&compact_vertices, &compact_indices);
+    let meshlets = if include_meshlets {
+        build_meshlet_lod(&compact_vertices, &compact_indices)
+    } else {
+        MeshletLodData::default()
+    };
     Some(MeshLodPayload {
         lod_index,
         vertices: Arc::from(compact_vertices),
@@ -6965,13 +7467,13 @@ pub(crate) fn build_mesh_payload(
     }
     let mut lods = Vec::with_capacity(lod_indices.len());
     for (lod_index, lod_indices) in lod_indices.iter().enumerate() {
-        if let Some(lod) = compact_mesh_lod(&vertices, lod_indices, lod_index) {
+        if let Some(lod) = compact_mesh_lod(&vertices, lod_indices, lod_index, true) {
             lods.push(lod);
         }
     }
     if lods.is_empty() {
         warn!("meshopt produced no valid LODs; falling back to original mesh");
-        if let Some(lod) = compact_mesh_lod(&vertices, &indices, 0) {
+        if let Some(lod) = compact_mesh_lod(&vertices, &indices, 0, true) {
             lods.push(lod);
         }
     }
@@ -6981,6 +7483,44 @@ pub(crate) fn build_mesh_payload(
     Some(MeshPayload {
         total_lods: lods.len(),
         lods,
+        bounds,
+    })
+}
+
+pub(crate) fn build_procedural_mesh_payload(
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+    bounds: Aabb,
+) -> Option<MeshPayload> {
+    if vertices.is_empty() || indices.is_empty() {
+        return None;
+    }
+    let indices = fallback_render_indices(vertices.len(), &indices)?;
+    let lod = compact_mesh_lod(&vertices, &indices, 0, false)?;
+    Some(MeshPayload {
+        lods: vec![lod],
+        total_lods: 1,
+        bounds,
+    })
+}
+
+fn build_runtime_mesh_payload(
+    vertices: &[Vertex],
+    indices: &[u32],
+    bounds: Aabb,
+) -> Option<MeshPayload> {
+    if vertices.is_empty() || indices.is_empty() {
+        return None;
+    }
+    let indices = fallback_render_indices(vertices.len(), &indices)?;
+    Some(MeshPayload {
+        lods: vec![MeshLodPayload {
+            lod_index: 0,
+            vertices: Arc::from(vertices),
+            indices: Arc::from(indices),
+            meshlets: MeshletLodData::default(),
+        }],
+        total_lods: 1,
         bounds,
     })
 }
@@ -7295,7 +7835,7 @@ fn generate_tangents_safe(vertices: &mut [Vertex], indices: &[u32]) {
     for (i, v) in vertices.iter_mut().enumerate() {
         let n = Vec3::from(v.normal);
         let t = Vec3::from(tan1[i]);
-        let mut tangent = (t - n * n.dot(t));
+        let mut tangent = t - n * n.dot(t);
         if tangent.length_squared() > 0.0 {
             tangent = tangent.normalize();
         } else {
@@ -7750,10 +8290,10 @@ async fn handle_request_web(request: AssetLoadRequest, io: WebAssetIo) -> Option
             id,
             vertices,
             indices,
-            tuning,
+            ..
         } => {
             let bounds = Aabb::calculate(&vertices);
-            build_mesh_payload(vertices, indices, bounds, &tuning).map(|payload| {
+            build_procedural_mesh_payload(vertices, indices, bounds).map(|payload| {
                 AssetLoadResult::Mesh {
                     id,
                     scene_id: None,
@@ -7980,5 +8520,412 @@ async fn handle_request_web(request: AssetLoadRequest, io: WebAssetIo) -> Option
                 data: low,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+    use std::sync::Arc;
+
+    use crossbeam_channel::bounded;
+    use helmer_render::runtime::RuntimeTuning;
+
+    use super::{
+        Aabb, AssetLoadResult, AssetServer, AssetStreamKind, AssetStreamingRequest,
+        ProceduralMeshSource, RenderMessage, Vertex, build_procedural_mesh_payload,
+        build_runtime_mesh_payload,
+    };
+
+    #[test]
+    fn procedural_mesh_payload_stays_single_lod_and_meshlet_free() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let payload = build_procedural_mesh_payload(
+            vertices,
+            vec![0, 1, 2],
+            Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            },
+        )
+        .expect("procedural mesh payload");
+
+        assert_eq!(payload.total_lods, 1);
+        assert_eq!(payload.lods.len(), 1);
+        let lod = &payload.lods[0];
+        assert_eq!(lod.lod_index, 0);
+        assert_eq!(lod.indices.as_ref(), &[0, 1, 2]);
+        assert!(lod.meshlets.is_empty());
+    }
+
+    #[test]
+    fn runtime_mesh_payload_keeps_existing_geometry_without_recompaction() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let indices = vec![0, 1, 2, 1, 3, 2];
+        let payload = build_runtime_mesh_payload(
+            &vertices,
+            &indices,
+            Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            },
+        )
+        .expect("runtime mesh payload");
+
+        assert_eq!(payload.total_lods, 1);
+        assert_eq!(payload.lods.len(), 1);
+        let lod = &payload.lods[0];
+        assert_eq!(lod.vertices.len(), vertices.len());
+        assert_eq!(lod.vertices[0].position, vertices[0].position);
+        assert_eq!(lod.vertices[1].position, vertices[1].position);
+        assert_eq!(lod.vertices[2].position, vertices[2].position);
+        assert_eq!(lod.vertices[3].position, vertices[3].position);
+        assert_eq!(lod.indices.as_ref(), indices.as_slice());
+        assert!(lod.meshlets.is_empty());
+    }
+
+    #[test]
+    fn runtime_mesh_stream_requests_reuse_retained_source_without_worker_reload() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let indices = vec![0, 1, 2];
+        let (asset_sender, asset_receiver) = bounded(16);
+        let (_stream_sender, stream_receiver) = bounded(16);
+        let asset_server = AssetServer::new(
+            asset_sender,
+            stream_receiver,
+            1,
+            Arc::new(RuntimeTuning::default()),
+        );
+
+        let handle = asset_server.add_runtime_mesh(vertices.clone(), indices.clone());
+        let initial = asset_receiver
+            .try_recv()
+            .expect("initial runtime mesh upload");
+        match initial {
+            RenderMessage::CreateMesh { id, pinned, .. } => {
+                assert_eq!(id, handle.id);
+                assert!(!pinned);
+            }
+            _ => panic!("expected create mesh message"),
+        }
+
+        assert!(asset_server.runtime_mesh_ids.read().contains(&handle.id));
+        assert!(
+            asset_server
+                .procedural_mesh_sources
+                .read()
+                .contains_key(&handle.id)
+        );
+        assert!(
+            !asset_server
+                .pending_procedural_mesh_loads
+                .read()
+                .contains(&handle.id)
+        );
+
+        let mut creation_budget = 0usize;
+        assert!(asset_server.dispatch_stream_request(
+            &AssetStreamingRequest {
+                id: handle.id,
+                kind: AssetStreamKind::Mesh,
+                priority: 1.0,
+                max_lod: Some(0),
+                force_low_res: false,
+            },
+            &mut creation_budget,
+        ));
+        assert_eq!(creation_budget, 0);
+
+        let restream = asset_receiver
+            .try_recv()
+            .expect("restreamed runtime mesh upload");
+        match restream {
+            RenderMessage::CreateMesh {
+                id, pinned, lods, ..
+            } => {
+                assert_eq!(id, handle.id);
+                assert!(!pinned);
+                assert_eq!(lods.len(), 1);
+                assert_eq!(lods[0].indices.as_ref(), indices.as_slice());
+            }
+            _ => panic!("expected create mesh message"),
+        }
+    }
+
+    #[test]
+    fn transient_runtime_mesh_uploads_do_not_retain_cpu_stream_source() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let indices = vec![0, 1, 2];
+        let (asset_sender, asset_receiver) = bounded(16);
+        let (_stream_sender, stream_receiver) = bounded(16);
+        let asset_server = AssetServer::new(
+            asset_sender,
+            stream_receiver,
+            1,
+            Arc::new(RuntimeTuning::default()),
+        );
+
+        let handle = asset_server.add_transient_runtime_mesh(vertices, indices);
+        let initial = asset_receiver
+            .try_recv()
+            .expect("initial transient runtime mesh upload");
+        match initial {
+            RenderMessage::CreateMesh { id, pinned, .. } => {
+                assert_eq!(id, handle.id);
+                assert!(pinned);
+            }
+            _ => panic!("expected create mesh message"),
+        }
+
+        assert!(!asset_server.runtime_mesh_ids.read().contains(&handle.id));
+        assert!(
+            !asset_server
+                .procedural_mesh_sources
+                .read()
+                .contains_key(&handle.id)
+        );
+    }
+
+    #[test]
+    fn rebuildable_runtime_mesh_stream_requests_notify_owner_without_retained_source() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let indices = vec![0, 1, 2];
+        let (asset_sender, asset_receiver) = bounded(16);
+        let (_stream_sender, stream_receiver) = bounded(16);
+        let (restream_sender, restream_receiver) = bounded(16);
+        let asset_server = AssetServer::new(
+            asset_sender,
+            stream_receiver,
+            1,
+            Arc::new(RuntimeTuning::default()),
+        );
+
+        let handle =
+            asset_server.add_rebuildable_runtime_mesh(vertices, indices, restream_sender.clone());
+        let initial = asset_receiver
+            .try_recv()
+            .expect("initial rebuildable runtime upload");
+        match initial {
+            RenderMessage::CreateMesh { id, pinned, .. } => {
+                assert_eq!(id, handle.id);
+                assert!(!pinned);
+            }
+            _ => panic!("expected create mesh message"),
+        }
+
+        assert!(asset_server.runtime_mesh_ids.read().contains(&handle.id));
+        assert!(
+            !asset_server
+                .procedural_mesh_sources
+                .read()
+                .contains_key(&handle.id)
+        );
+
+        let mut creation_budget = 0usize;
+        assert!(asset_server.dispatch_stream_request(
+            &AssetStreamingRequest {
+                id: handle.id,
+                kind: AssetStreamKind::Mesh,
+                priority: 1.0,
+                max_lod: Some(0),
+                force_low_res: false,
+            },
+            &mut creation_budget,
+        ));
+
+        assert_eq!(
+            restream_receiver.try_recv().expect("restream callback id"),
+            handle.id
+        );
+        assert!(asset_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_results_do_not_duplicate_entries_in_mesh_cache() {
+        let vertices = vec![
+            Vertex::new_colored(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+            Vertex::new_colored(
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0, 1.0],
+                [1.0; 4],
+            ),
+        ];
+        let indices = vec![0, 1, 2];
+        let bounds = Aabb {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        };
+        let payload = build_procedural_mesh_payload(vertices.clone(), indices.clone(), bounds)
+            .expect("procedural mesh payload");
+
+        let (asset_sender, _asset_receiver) = bounded(16);
+        let (_stream_sender, stream_receiver) = bounded(16);
+        let asset_server = AssetServer::new(
+            asset_sender,
+            stream_receiver,
+            1,
+            Arc::new(RuntimeTuning::default()),
+        );
+        let id = 7;
+        asset_server.procedural_mesh_sources.write().insert(
+            id,
+            ProceduralMeshSource {
+                vertices: Arc::from(vertices),
+                indices: Arc::from(indices),
+            },
+        );
+        asset_server
+            .pending_procedural_mesh_loads
+            .write()
+            .insert(id);
+
+        asset_server.handle_asset_result(AssetLoadResult::Mesh {
+            id,
+            scene_id: None,
+            lods: payload.lods,
+            total_lods: payload.total_lods,
+            bounds: payload.bounds,
+        });
+
+        assert!(!asset_server.mesh_cache.read().contains_key(&id));
+        assert!(asset_server.mesh_aabb_map.read().0.contains_key(&id));
+        assert!(
+            !asset_server
+                .pending_procedural_mesh_loads
+                .read()
+                .contains(&id)
+        );
     }
 }

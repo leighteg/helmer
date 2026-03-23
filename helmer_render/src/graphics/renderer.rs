@@ -12,6 +12,7 @@ use parley::{
 };
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::hash_map::DefaultHasher,
     env,
     hash::{Hash, Hasher},
@@ -25,7 +26,7 @@ use swash::scale::{
 use swash::zeno::Format as SwashFormat;
 use swash::{CacheKey as SwashCacheKey, FontRef as SwashFontRef};
 use tracing::{info, warn};
-use web_time::Instant;
+use web_time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 
@@ -64,11 +65,12 @@ use crate::graphics::{
             OCCLUSION_STATUS_DISABLED, OCCLUSION_STATUS_NO_GBUFFER, OCCLUSION_STATUS_NO_HIZ,
             OCCLUSION_STATUS_NO_INSTANCES, OCCLUSION_STATUS_RAN, RenderControl, RenderData,
             RenderDelta, RenderDeviceCaps, RenderLight, RenderLightDelta, RenderMessage,
-            RenderObject, RenderObjectDelta, RenderPassTiming, RenderText2d,
+            RenderObject, RenderObjectDelta, RenderPassTiming, RenderSprite, RenderText2d,
             RenderViewportGizmoOptions, RenderViewportRequest, RendererStats, ShaderConstants,
             ShadowInstanceRaw, ShadowUniforms, SkyUniforms, SpriteAnimationPlayback,
             SpriteBlendMode, SpriteSheetAnimation, SpriteSpace, StreamingTuning, UiRenderCommand,
             Vertex, apply_egui_delta, build_mip_uploads, calc_mip_level_count, mesh_task_tiling,
+            render_message_payload_bytes,
         },
     },
     graph::{
@@ -98,6 +100,10 @@ const FALLBACK_MESH_KEY: usize = usize::MAX;
 const GPU_FALLBACK_MESH_INDEX: u32 = 0;
 const SPRITE_FLAG_CLIP_ENABLED: u32 = 1u32;
 const SPRITE_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
+const SPRITE_FLAG_WORLD_SPACE: u32 = 1u32 << 2;
+const SPRITE_FLAG_DEPTH_WRITE: u32 = 1u32 << 3;
+const SPRITE_FLAG_QUAD_CORRECTION: u32 = 1u32 << 4;
+const SPRITE_WORLD_CULL_PAD_FACTOR: f32 = 0.05;
 const UI_FLAG_CLIP_ENABLED: u32 = 1u32;
 const UI_FLAG_TEXT_ALPHA: u32 = 1u32 << 1;
 const SPRITE_SHEET_MAX_UV_INSET: f32 = 0.49;
@@ -314,6 +320,246 @@ fn resolve_sprite_uv_rect(
     [frame_min.x, frame_min.y, frame_max.x, frame_max.y]
 }
 
+#[inline]
+fn sprite_space_sort_rank(instance: &SpriteInstanceRaw) -> u8 {
+    if instance.origin_mode[3] > 0.5 { 0 } else { 1 }
+}
+
+#[inline]
+fn sprite_blend_sort_rank(instance: &SpriteInstanceRaw) -> u8 {
+    match instance.meta[3] {
+        2 => 1,
+        _ => 0,
+    }
+}
+
+#[inline]
+fn sprite_depth_write_enabled(instance: &SpriteInstanceRaw) -> bool {
+    (instance.meta[1] & SPRITE_FLAG_DEPTH_WRITE) != 0
+}
+
+#[inline]
+fn sprite_quad_correction(instance: &SpriteInstanceRaw) -> Vec3 {
+    if (instance.meta[1] & SPRITE_FLAG_QUAD_CORRECTION) != 0 {
+        Vec3::new(
+            instance.pivot_clip_min[2],
+            instance.pivot_clip_min[3],
+            instance.clip_max_layer[0],
+        )
+    } else {
+        Vec3::ZERO
+    }
+}
+
+#[inline]
+fn sprite_has_time_varying_state(sprite: &RenderSprite) -> bool {
+    sprite.billboard
+        || sprite
+            .image_sequence
+            .as_ref()
+            .is_some_and(|sequence| sequence.enabled)
+        || sprite.sheet_animation.enabled
+}
+
+#[inline]
+fn sprite_is_cacheable_static_opaque(sprite: &RenderSprite) -> bool {
+    matches!(sprite.space, SpriteSpace::World)
+        && matches!(sprite.blend_mode, SpriteBlendMode::Alpha)
+        && sprite.color[3] >= 0.999
+        && sprite.size.x > f32::EPSILON
+        && sprite.size.y > f32::EPSILON
+        && !sprite_has_time_varying_state(sprite)
+}
+
+#[inline]
+fn sprite_world_visible(
+    position: Vec3,
+    right: Vec3,
+    up: Vec3,
+    size: Vec2,
+    pivot: [f32; 2],
+    quad_correction: Vec3,
+    view_proj: Mat4,
+) -> bool {
+    let mut outside_left = true;
+    let mut outside_right = true;
+    let mut outside_bottom = true;
+    let mut outside_top = true;
+    let mut outside_near = true;
+    let mut any_positive_w = false;
+    let mut any_non_positive_w = false;
+    let x0 = -pivot[0] * size.x;
+    let x1 = (1.0 - pivot[0]) * size.x;
+    let y0 = -pivot[1] * size.y;
+    let y1 = (1.0 - pivot[1]) * size.y;
+
+    for world in [
+        position + right * x0 + up * y0,
+        position + right * x1 + up * y0,
+        position + right * x0 + up * y1,
+        position + right * x1 + up * y1 + quad_correction,
+    ] {
+        let clip = view_proj * world.extend(1.0);
+        if clip.w <= 0.0 {
+            any_non_positive_w = true;
+            continue;
+        }
+
+        any_positive_w = true;
+        let pad = clip.w * SPRITE_WORLD_CULL_PAD_FACTOR;
+        outside_left &= clip.x < -clip.w - pad;
+        outside_right &= clip.x > clip.w + pad;
+        outside_bottom &= clip.y < -clip.w - pad;
+        outside_top &= clip.y > clip.w + pad;
+        outside_near &= clip.z < 0.0;
+    }
+
+    if !any_positive_w {
+        return false;
+    }
+    if any_non_positive_w {
+        return true;
+    }
+
+    !(outside_left || outside_right || outside_bottom || outside_top || outside_near)
+}
+
+#[inline]
+fn sprite_instance_world_visible(instance: &SpriteInstanceRaw, view_proj: Mat4) -> bool {
+    sprite_world_visible(
+        Vec3::new(
+            instance.origin_mode[0],
+            instance.origin_mode[1],
+            instance.origin_mode[2],
+        ),
+        Vec3::new(
+            instance.right_size_x[0],
+            instance.right_size_x[1],
+            instance.right_size_x[2],
+        ),
+        Vec3::new(
+            instance.up_size_y[0],
+            instance.up_size_y[1],
+            instance.up_size_y[2],
+        ),
+        Vec2::new(instance.right_size_x[3], instance.up_size_y[3]),
+        [instance.pivot_clip_min[0], instance.pivot_clip_min[1]],
+        sprite_quad_correction(instance),
+        view_proj,
+    )
+}
+
+#[inline]
+fn sprite_instance_world_center(instance: &SpriteInstanceRaw) -> Vec3 {
+    if (instance.meta[1] & SPRITE_FLAG_QUAD_CORRECTION) == 0 {
+        return Vec3::new(
+            instance.origin_mode[0],
+            instance.origin_mode[1],
+            instance.origin_mode[2],
+        );
+    }
+
+    let origin = Vec3::new(
+        instance.origin_mode[0],
+        instance.origin_mode[1],
+        instance.origin_mode[2],
+    );
+    let right = Vec3::new(
+        instance.right_size_x[0],
+        instance.right_size_x[1],
+        instance.right_size_x[2],
+    );
+    let up = Vec3::new(
+        instance.up_size_y[0],
+        instance.up_size_y[1],
+        instance.up_size_y[2],
+    );
+    let size = Vec2::new(instance.right_size_x[3], instance.up_size_y[3]);
+    let pivot = [instance.pivot_clip_min[0], instance.pivot_clip_min[1]];
+    let correction = sprite_quad_correction(instance);
+    let x0 = -pivot[0] * size.x;
+    let x1 = (1.0 - pivot[0]) * size.x;
+    let y0 = -pivot[1] * size.y;
+    let y1 = (1.0 - pivot[1]) * size.y;
+    let corners = [
+        origin + right * x0 + up * y0,
+        origin + right * x1 + up * y0,
+        origin + right * x0 + up * y1,
+        origin + right * x1 + up * y1 + correction,
+    ];
+    (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25
+}
+
+fn compare_sprite_instances(
+    left_order: usize,
+    left: &SpriteInstanceRaw,
+    right_order: usize,
+    right: &SpriteInstanceRaw,
+    camera_pos: Vec3,
+    camera_forward: Vec3,
+) -> Ordering {
+    let space_order = sprite_space_sort_rank(left).cmp(&sprite_space_sort_rank(right));
+    if space_order != Ordering::Equal {
+        return space_order;
+    }
+
+    let left_world = left.origin_mode[3] > 0.5;
+    if left_world {
+        let depth_write_order =
+            sprite_depth_write_enabled(right).cmp(&sprite_depth_write_enabled(left));
+        if depth_write_order != Ordering::Equal {
+            return depth_write_order;
+        }
+
+        let blend_order = sprite_blend_sort_rank(left).cmp(&sprite_blend_sort_rank(right));
+        if blend_order != Ordering::Equal {
+            return blend_order;
+        }
+
+        let left_pos = sprite_instance_world_center(left);
+        let right_pos = sprite_instance_world_center(right);
+        let left_depth = (left_pos - camera_pos).dot(camera_forward);
+        let right_depth = (right_pos - camera_pos).dot(camera_forward);
+        let depth_order = if sprite_depth_write_enabled(left) {
+            left_depth.total_cmp(&right_depth)
+        } else {
+            right_depth.total_cmp(&left_depth)
+        };
+        if depth_order != Ordering::Equal {
+            return depth_order;
+        }
+
+        if !sprite_depth_write_enabled(left) {
+            let layer_order = left.clip_max_layer[2].total_cmp(&right.clip_max_layer[2]);
+            if layer_order != Ordering::Equal {
+                return layer_order;
+            }
+        }
+    } else {
+        let layer_order = left.clip_max_layer[2].total_cmp(&right.clip_max_layer[2]);
+        if layer_order != Ordering::Equal {
+            return layer_order;
+        }
+
+        let blend_order = sprite_blend_sort_rank(left).cmp(&sprite_blend_sort_rank(right));
+        if blend_order != Ordering::Equal {
+            return blend_order;
+        }
+    }
+
+    let texture_order = left.meta[0].cmp(&right.meta[0]);
+    if texture_order != Ordering::Equal {
+        return texture_order;
+    }
+
+    let flag_order = left.meta[1].cmp(&right.meta[1]);
+    if flag_order != Ordering::Equal {
+        return flag_order;
+    }
+
+    left_order.cmp(&right_order)
+}
+
 fn format_supports_usage(
     adapter: &wgpu::Adapter,
     format: wgpu::TextureFormat,
@@ -405,8 +651,8 @@ fn select_atmosphere_lut_format(
 
 fn select_shadow_format(adapter: &wgpu::Adapter) -> (wgpu::TextureFormat, bool) {
     let candidates = [
-        wgpu::TextureFormat::Rg32Float,
         wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rg32Float,
         wgpu::TextureFormat::Rgba16Float,
         wgpu::TextureFormat::Rgba8Unorm,
     ];
@@ -461,6 +707,19 @@ struct MeshGpu {
     lods: Vec<MeshLodResource>,
     bounds: Aabb,
     available_lods: usize,
+    streamable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MeshDrawLodSelection {
+    lod_index: usize,
+    index_count: u32,
+    vertex: ResourceId,
+    index: ResourceId,
+    meshlet_descs: ResourceId,
+    meshlet_vertices: ResourceId,
+    meshlet_indices: ResourceId,
+    meshlet_count: u32,
 }
 
 struct ResolvedDrawMesh {
@@ -511,6 +770,7 @@ struct GpuMeshMeta {
     base_draw: u32,
     instance_capacity: u32,
     base_instance: u32,
+    lod_slot_map: [u32; GPU_LOD_BAND_COUNT],
 }
 
 #[repr(C)]
@@ -621,12 +881,7 @@ impl ReusableBuffer {
         let slot_idx = (frame_index as usize) % self.slots.len();
         let (buffer, size, prev_usage) = &mut self.slots[slot_idx];
 
-        // Allocate with some headroom to reduce re-allocations.
-        let mut target_size = needed.max(256).next_power_of_two();
-        let max_size = device.limits().max_buffer_size;
-        if max_size > 0 && target_size > max_size {
-            target_size = needed.max(256).min(max_size);
-        }
+        let target_size = target_upload_buffer_size(needed, device.limits().max_buffer_size);
         let needs_realloc = buffer
             .as_ref()
             .map_or(true, |_| *size < target_size || *prev_usage != usage);
@@ -644,6 +899,453 @@ impl ReusableBuffer {
 
         (buffer.as_ref().expect("buffer must exist"), needs_realloc)
     }
+}
+
+fn target_upload_buffer_size(needed: u64, max_size: u64) -> u64 {
+    let base = needed.max(256);
+    if base <= 256 {
+        return if max_size > 0 {
+            base.min(max_size)
+        } else {
+            base
+        };
+    }
+    let mut target_size = base.saturating_add((base / 8).max(32)).saturating_add(127) & !127;
+    if max_size > 0 && target_size > max_size {
+        target_size = base.min(max_size);
+    }
+    target_size
+}
+
+fn bundle_cache_is_stable(frame_index: u32, last_change_frame: u32, stable_frames: u32) -> bool {
+    stable_frames == 0 || frame_index.saturating_sub(last_change_frame) >= stable_frames
+}
+
+const GPU_LOD_BAND_COUNT: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BundleInvalidationMask {
+    any: bool,
+    gbuffer: bool,
+    shadow: bool,
+}
+
+fn stable_lod_slot_selection(available_lods: usize, resident_lods: &[usize]) -> Vec<usize> {
+    if available_lods == 0 || resident_lods.is_empty() {
+        return Vec::new();
+    }
+
+    let slot_count = available_lods.min(GPU_LOD_BAND_COUNT);
+    let mut slots = Vec::with_capacity(slot_count);
+    for desired in 0..slot_count {
+        let mut best_higher = None;
+        let mut best_lower = None;
+        for &lod_index in resident_lods {
+            if lod_index >= desired {
+                if best_higher.map_or(true, |best| lod_index < best) {
+                    best_higher = Some(lod_index);
+                }
+            } else if best_lower.map_or(true, |best| lod_index > best) {
+                best_lower = Some(lod_index);
+            }
+        }
+
+        if let Some(lod_index) = best_higher.or(best_lower) {
+            slots.push(lod_index);
+        }
+    }
+
+    slots
+}
+
+fn compress_lod_draw_selections(
+    logical_selections: &[MeshDrawLodSelection],
+) -> (Vec<MeshDrawLodSelection>, [u32; GPU_LOD_BAND_COUNT], u32) {
+    let logical_count = logical_selections.len().min(GPU_LOD_BAND_COUNT);
+    let mut unique = Vec::with_capacity(logical_count);
+    let mut slot_map = [0u32; GPU_LOD_BAND_COUNT];
+
+    for (band, selection) in logical_selections.iter().take(logical_count).enumerate() {
+        if let Some(existing) = unique.iter().position(|candidate| candidate == selection) {
+            slot_map[band] = existing as u32;
+        } else {
+            slot_map[band] = unique.len() as u32;
+            unique.push(*selection);
+        }
+    }
+
+    (unique, slot_map, logical_count as u32)
+}
+
+fn single_resident_lod_draw_selections(
+    selection: MeshDrawLodSelection,
+    available_lods: usize,
+) -> Vec<MeshDrawLodSelection> {
+    vec![selection; available_lods.max(1).min(GPU_LOD_BAND_COUNT)]
+}
+
+fn should_reclaim_lower_mesh_lods(pressure: MemoryPressure, pinned: bool) -> bool {
+    !pinned && !matches!(pressure, MemoryPressure::None)
+}
+
+fn changed_mesh_ids_from_mapping(
+    previous_mesh_indices: &HashMap<usize, u32>,
+    mesh_indices: &HashMap<usize, u32>,
+) -> Vec<usize> {
+    let mut changed_mesh_ids = Vec::new();
+    for (&mesh_id, &previous_index) in previous_mesh_indices {
+        if mesh_indices.get(&mesh_id).copied() != Some(previous_index) {
+            changed_mesh_ids.push(mesh_id);
+        }
+    }
+    for &mesh_id in mesh_indices.keys() {
+        if !previous_mesh_indices.contains_key(&mesh_id) {
+            changed_mesh_ids.push(mesh_id);
+        }
+    }
+    changed_mesh_ids.sort_unstable();
+    changed_mesh_ids.dedup();
+    changed_mesh_ids
+}
+
+fn assign_stable_sparse_indices<K: Copy + Eq + Hash>(
+    previous_indices: &HashMap<K, u32>,
+    active_keys: &[K],
+    first_index: u32,
+) -> HashMap<K, u32> {
+    if active_keys.is_empty() {
+        return HashMap::new();
+    }
+
+    let active_key_set: HashSet<K> = active_keys.iter().copied().collect();
+    let mut free_indices: Vec<u32> = previous_indices
+        .iter()
+        .filter_map(|(key, &index)| {
+            if index >= first_index && !active_key_set.contains(key) {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect();
+    free_indices.sort_unstable();
+    free_indices.reverse();
+
+    let mut next_index = previous_indices
+        .values()
+        .copied()
+        .max()
+        .map(|index| index.saturating_add(1).max(first_index))
+        .unwrap_or(first_index);
+
+    let mut indices = HashMap::with_capacity(active_keys.len());
+    for &key in active_keys {
+        let index = previous_indices.get(&key).copied().unwrap_or_else(|| {
+            free_indices.pop().unwrap_or_else(|| {
+                let index = next_index;
+                next_index = next_index.saturating_add(1);
+                index
+            })
+        });
+        indices.insert(key, index);
+    }
+    indices
+}
+
+fn changed_mesh_ids_from_material_mapping(
+    previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
+    mesh_material_indices: &HashMap<(usize, u32), u32>,
+) -> Option<Vec<usize>> {
+    let mut changed_mesh_ids = Vec::new();
+
+    for (&(mesh_id, material_id), &previous_index) in previous_mesh_material_indices {
+        let next_index = mesh_material_indices.get(&(mesh_id, material_id)).copied();
+        if mesh_id == FALLBACK_MESH_KEY {
+            if next_index != Some(previous_index) {
+                return None;
+            }
+            continue;
+        }
+        if next_index != Some(previous_index) {
+            changed_mesh_ids.push(mesh_id);
+        }
+    }
+
+    for (&(mesh_id, material_id), _) in mesh_material_indices {
+        if mesh_id == FALLBACK_MESH_KEY {
+            if !previous_mesh_material_indices.contains_key(&(mesh_id, material_id)) {
+                return None;
+            }
+            continue;
+        }
+        if !previous_mesh_material_indices.contains_key(&(mesh_id, material_id)) {
+            changed_mesh_ids.push(mesh_id);
+        }
+    }
+
+    changed_mesh_ids.sort_unstable();
+    changed_mesh_ids.dedup();
+    Some(changed_mesh_ids)
+}
+
+fn can_reuse_uploaded_buffer(
+    entry: &crate::graphics::graph::logic::residency::GpuResourceEntry,
+    usage: wgpu::BufferUsages,
+    needed: u64,
+) -> bool {
+    entry.residency == Residency::Resident
+        && entry.buffer.is_some()
+        && matches!(
+            entry.desc,
+            ResourceDesc::Buffer {
+                size,
+                usage: existing_usage,
+            } if existing_usage == usage && size >= needed
+        )
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::{
+        FALLBACK_MESH_KEY, GPU_FALLBACK_MESH_INDEX, GraphRenderer, MeshDrawLodSelection, SlotVec,
+        StreamRequestScratch, assign_stable_sparse_indices, changed_mesh_ids_from_mapping,
+        changed_mesh_ids_from_material_mapping, compress_lod_draw_selections,
+        should_reclaim_lower_mesh_lods, single_resident_lod_draw_selections,
+        stable_lod_slot_selection, target_upload_buffer_size,
+    };
+    use crate::graphics::{
+        common::renderer::AssetStreamKind,
+        graph::definition::resource_id::{ResourceId, ResourceKind},
+    };
+    use hashbrown::HashMap;
+
+    #[test]
+    fn upload_buffer_size_rounds_up_with_headroom() {
+        assert_eq!(target_upload_buffer_size(300, 0), 384);
+        assert_eq!(target_upload_buffer_size(1, 0), 256);
+        assert_eq!(target_upload_buffer_size(300, 384), 384);
+    }
+
+    #[test]
+    fn bundle_cache_stability_waits_for_configured_quiet_frames() {
+        assert!(super::bundle_cache_is_stable(12, 12, 0));
+        assert!(!super::bundle_cache_is_stable(12, 12, 3));
+        assert!(!super::bundle_cache_is_stable(13, 12, 3));
+        assert!(!super::bundle_cache_is_stable(14, 12, 3));
+        assert!(super::bundle_cache_is_stable(15, 12, 3));
+    }
+
+    #[test]
+    fn stable_lod_slot_selection_keeps_slot_count_constant_across_residency_changes() {
+        assert_eq!(stable_lod_slot_selection(4, &[2]), vec![2, 2, 2, 2]);
+        assert_eq!(stable_lod_slot_selection(4, &[1, 3]), vec![1, 1, 3, 3]);
+        assert_eq!(stable_lod_slot_selection(4, &[0, 2, 3]), vec![0, 2, 2, 3]);
+    }
+
+    #[test]
+    fn compress_lod_draw_selections_reuses_duplicate_resident_draws() {
+        let selection_a = MeshDrawLodSelection {
+            lod_index: 1,
+            index_count: 12,
+            vertex: ResourceId::new(ResourceKind::Buffer, 1, 0),
+            index: ResourceId::new(ResourceKind::Buffer, 2, 0),
+            meshlet_descs: ResourceId::new(ResourceKind::Buffer, 3, 0),
+            meshlet_vertices: ResourceId::new(ResourceKind::Buffer, 4, 0),
+            meshlet_indices: ResourceId::new(ResourceKind::Buffer, 5, 0),
+            meshlet_count: 6,
+        };
+        let selection_b = MeshDrawLodSelection {
+            lod_index: 3,
+            index_count: 24,
+            vertex: ResourceId::new(ResourceKind::Buffer, 6, 0),
+            index: ResourceId::new(ResourceKind::Buffer, 7, 0),
+            meshlet_descs: ResourceId::new(ResourceKind::Buffer, 8, 0),
+            meshlet_vertices: ResourceId::new(ResourceKind::Buffer, 9, 0),
+            meshlet_indices: ResourceId::new(ResourceKind::Buffer, 10, 0),
+            meshlet_count: 11,
+        };
+
+        let (compressed, slot_map, logical_count) =
+            compress_lod_draw_selections(&[selection_a, selection_a, selection_b, selection_b]);
+        assert_eq!(logical_count, 4);
+        assert_eq!(compressed, vec![selection_a, selection_b]);
+        assert_eq!(slot_map, [0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn single_resident_lod_draw_selections_repeat_one_lod_across_all_logical_slots() {
+        let selection = MeshDrawLodSelection {
+            lod_index: 1,
+            index_count: 12,
+            vertex: ResourceId::new(ResourceKind::Buffer, 1, 0),
+            index: ResourceId::new(ResourceKind::Buffer, 2, 0),
+            meshlet_descs: ResourceId::new(ResourceKind::Buffer, 3, 0),
+            meshlet_vertices: ResourceId::new(ResourceKind::Buffer, 4, 0),
+            meshlet_indices: ResourceId::new(ResourceKind::Buffer, 5, 0),
+            meshlet_count: 6,
+        };
+
+        let logical = single_resident_lod_draw_selections(selection, 4);
+        assert_eq!(logical, vec![selection; 4]);
+
+        let (compressed, slot_map, logical_count) = compress_lod_draw_selections(&logical);
+        assert_eq!(logical_count, 4);
+        assert_eq!(compressed, vec![selection]);
+        assert_eq!(slot_map, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn stable_sparse_indices_preserve_existing_mesh_slots() {
+        let previous = HashMap::from([(10usize, 1u32), (20usize, 2u32)]);
+        let next = assign_stable_sparse_indices(&previous, &[5usize, 10usize, 20usize], 1);
+        assert_eq!(next.get(&10), Some(&1));
+        assert_eq!(next.get(&20), Some(&2));
+        assert_eq!(next.get(&5), Some(&3));
+    }
+
+    #[test]
+    fn stable_sparse_indices_reuse_holes_without_renumbering_live_meshes() {
+        let previous = HashMap::from([(10usize, 1u32), (20usize, 2u32), (30usize, 3u32)]);
+        let next = assign_stable_sparse_indices(&previous, &[10usize, 30usize, 40usize], 1);
+        assert_eq!(next.get(&10), Some(&1));
+        assert_eq!(next.get(&30), Some(&3));
+        assert_eq!(next.get(&40), Some(&2));
+    }
+
+    #[test]
+    fn lower_mesh_lods_are_only_reclaimed_under_pressure_for_streamable_meshes() {
+        assert!(!should_reclaim_lower_mesh_lods(
+            super::MemoryPressure::None,
+            false
+        ));
+        assert!(should_reclaim_lower_mesh_lods(
+            super::MemoryPressure::Soft,
+            false
+        ));
+        assert!(should_reclaim_lower_mesh_lods(
+            super::MemoryPressure::Hard,
+            false
+        ));
+        assert!(!should_reclaim_lower_mesh_lods(
+            super::MemoryPressure::Hard,
+            true
+        ));
+    }
+
+    #[test]
+    fn mesh_material_mapping_uses_fallback_mesh_entry() {
+        let mut mapping = HashMap::new();
+        mapping.insert((FALLBACK_MESH_KEY, 4), 27);
+        assert_eq!(
+            GraphRenderer::gpu_mesh_material_index_from_mapping(8, 4, &mapping),
+            27
+        );
+    }
+
+    #[test]
+    fn mesh_index_mapping_uses_fallback_when_missing() {
+        let mapping = HashMap::new();
+        assert_eq!(
+            GraphRenderer::gpu_mesh_index_from_mapping(42, &mapping),
+            GPU_FALLBACK_MESH_INDEX
+        );
+    }
+
+    #[test]
+    fn sparse_slot_vec_len_tracks_live_entries_not_highest_id() {
+        let mut slots = SlotVec::new();
+        slots.insert(12, ());
+        slots.insert(65_536, ());
+        slots.remove(12);
+
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots.keys_sorted(), vec![65_536]);
+    }
+
+    #[test]
+    fn changed_mesh_ids_only_include_mappings_that_actually_shifted() {
+        let previous = HashMap::from([(3usize, 1u32), (9, 2)]);
+        let next = HashMap::from([(3usize, 1u32), (9, 4), (12, 5)]);
+
+        assert_eq!(changed_mesh_ids_from_mapping(&previous, &next), vec![9, 12]);
+    }
+
+    #[test]
+    fn material_mapping_change_tracks_meshes_without_full_scan_when_fallback_is_stable() {
+        let previous = HashMap::from([
+            ((4usize, 2u32), 9u32),
+            ((11, 3), 12),
+            ((FALLBACK_MESH_KEY, 7), 19),
+        ]);
+        let next = HashMap::from([
+            ((4usize, 2u32), 9u32),
+            ((11, 3), 15),
+            ((15, 8), 21),
+            ((FALLBACK_MESH_KEY, 7), 19),
+        ]);
+
+        assert_eq!(
+            changed_mesh_ids_from_material_mapping(&previous, &next),
+            Some(vec![11, 15])
+        );
+    }
+
+    #[test]
+    fn material_mapping_change_falls_back_to_full_scan_when_fallback_mapping_shifts() {
+        let previous = HashMap::from([((FALLBACK_MESH_KEY, 7u32), 19u32)]);
+        let next = HashMap::from([((FALLBACK_MESH_KEY, 7u32), 25u32)]);
+
+        assert_eq!(
+            changed_mesh_ids_from_material_mapping(&previous, &next),
+            None
+        );
+    }
+
+    #[test]
+    fn stream_request_scratch_merges_priority_and_low_res_across_contributors() {
+        let mut scratch = StreamRequestScratch::new();
+        let resource = ResourceId::from_asset(ResourceKind::Buffer, 7);
+        scratch.upsert(
+            7,
+            resource,
+            AssetStreamKind::Material,
+            None,
+            1.0,
+            64,
+            true,
+            false,
+        );
+        scratch.upsert(
+            7,
+            resource,
+            AssetStreamKind::Material,
+            None,
+            3.0,
+            96,
+            false,
+            true,
+        );
+
+        let mut requests = Vec::new();
+        scratch.drain_into(&mut requests);
+
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.asset_id, 7);
+        assert_eq!(request.priority, 3.0);
+        assert_eq!(request.estimated_bytes, 96);
+        assert!(!request.force_low_res);
+        assert!(request.critical);
+    }
+}
+
+fn material_texture_ids(material: &MaterialGpuData) -> [Option<usize>; 4] {
+    [
+        material.albedo_texture_id,
+        material.normal_texture_id,
+        material.metallic_roughness_texture_id,
+        material.emission_texture_id,
+    ]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1404,6 +2106,14 @@ struct UiTextLayoutCacheEntry {
     last_used_frame: u32,
 }
 
+#[derive(Clone, Default)]
+struct CachedStaticSpriteDrawData {
+    source: Option<Arc<Vec<RenderSprite>>>,
+    opaque_instances: Arc<Vec<SpriteInstanceRaw>>,
+    texture_slots: Arc<Vec<Option<usize>>>,
+    stream_texture_ids: Arc<Vec<usize>>,
+}
+
 struct BufferCache {
     camera: ReusableBuffer,
     skin_palette: ReusableBuffer,
@@ -1510,43 +2220,46 @@ impl BufferCache {
     }
 }
 
-/// Dense slot storage keyed by asset id. Avoids hash lookups in hot paths.
+/// Sparse slot storage keyed by asset id.
 struct SlotVec<T> {
-    entries: Vec<Option<T>>,
+    entries: HashMap<usize, T>,
 }
 
 impl<T> SlotVec<T> {
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: HashMap::new(),
         }
     }
 
     fn insert(&mut self, id: usize, value: T) {
-        if id >= self.entries.len() {
-            self.entries.resize_with(id + 1, || None);
-        }
-        self.entries[id] = Some(value);
+        self.entries.insert(id, value);
     }
 
     fn get(&self, id: usize) -> Option<&T> {
-        self.entries.get(id).and_then(|v| v.as_ref())
+        self.entries.get(&id)
     }
 
     fn get_mut(&mut self, id: usize) -> Option<&mut T> {
-        self.entries.get_mut(id).and_then(|v| v.as_mut())
+        self.entries.get_mut(&id)
     }
 
     fn remove(&mut self, id: usize) -> Option<T> {
-        if id >= self.entries.len() {
-            None
-        } else {
-            self.entries[id].take()
-        }
+        self.entries.remove(&id)
     }
 
     fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.entries.values_mut()
+    }
+
+    fn keys_sorted(&self) -> Vec<usize> {
+        let mut keys: Vec<_> = self.entries.keys().copied().collect();
+        keys.sort_unstable();
+        keys
     }
 }
 
@@ -1623,6 +2336,15 @@ where
     }
 }
 
+struct CpuOpaquePassBuild {
+    gbuffer_instances: Option<crate::graphics::passes::InstanceBuffer>,
+    gbuffer_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    shadow_instances: Option<crate::graphics::passes::InstanceBuffer>,
+    shadow_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    shadow_uniforms_buffer: Option<wgpu::Buffer>,
+    shadow_matrices_buffer: Option<wgpu::Buffer>,
+}
+
 #[derive(Clone, Copy)]
 struct StreamingState {
     priority: f32,
@@ -1670,6 +2392,7 @@ struct PendingResize {
 struct RenderSceneState {
     data: RenderData,
     object_indices: HashMap<usize, usize>,
+    mesh_indices: HashMap<usize, HashSet<usize>>,
     light_indices: HashMap<usize, usize>,
     material_use_counts: Vec<u32>,
     material_active: Vec<bool>,
@@ -1713,8 +2436,13 @@ impl RenderSceneState {
     fn new(data: RenderData) -> Self {
         let mut object_indices = HashMap::new();
         object_indices.reserve(data.objects.len());
+        let mut mesh_indices = HashMap::new();
         for (idx, obj) in data.objects.iter().enumerate() {
             object_indices.insert(obj.id, idx);
+            mesh_indices
+                .entry(obj.mesh_id)
+                .or_insert_with(HashSet::new)
+                .insert(idx);
         }
         let mut light_indices = HashMap::new();
         light_indices.reserve(data.lights.len());
@@ -1724,6 +2452,7 @@ impl RenderSceneState {
         let mut state = Self {
             data,
             object_indices,
+            mesh_indices,
             light_indices,
             material_use_counts: Vec::new(),
             material_active: Vec::new(),
@@ -1736,12 +2465,14 @@ impl RenderSceneState {
     }
 
     fn begin_frame(&mut self) {
-        self.data.previous_camera_transform = self.data.current_camera_transform;
+        // Keep previous/current camera state pinned to logic updates so render interpolation
+        // can span the full logic frame instead of collapsing every render frame.
     }
 
     fn clear_objects(&mut self) {
         self.data.objects.clear();
         self.object_indices.clear();
+        self.mesh_indices.clear();
         self.material_use_counts.clear();
         self.material_active.clear();
         self.active_materials.clear();
@@ -1786,6 +2517,10 @@ impl RenderSceneState {
             entry.lod_index = obj.lod_index;
             entry.skin_offset = obj.skin_offset;
             entry.skin_count = obj.skin_count;
+            if mesh_changed {
+                self.remove_mesh_object_index(prev_mesh_id, idx);
+                self.add_mesh_object_index(obj.mesh_id, idx);
+            }
             if material_changed {
                 self.drop_material_usage(prev_material_id);
                 self.bump_material_usage(obj.material_id);
@@ -1813,6 +2548,7 @@ impl RenderSceneState {
                 skin_count: obj.skin_count,
             });
             self.object_indices.insert(obj.id, idx);
+            self.add_mesh_object_index(obj.mesh_id, idx);
             self.bump_material_usage(obj.material_id);
             ObjectUpdateResult::Inserted {
                 index: idx,
@@ -1825,9 +2561,13 @@ impl RenderSceneState {
         let idx = self.object_indices.remove(&id)?;
         let last_idx = self.data.objects.len().saturating_sub(1);
         let removed = self.data.objects.swap_remove(idx);
+        self.remove_mesh_object_index(removed.mesh_id, idx);
         let moved_idx = if idx < last_idx {
             let moved_id = self.data.objects[idx].id;
+            let moved_mesh_id = self.data.objects[idx].mesh_id;
             self.object_indices.insert(moved_id, idx);
+            self.remove_mesh_object_index(moved_mesh_id, last_idx);
+            self.add_mesh_object_index(moved_mesh_id, idx);
             Some(idx)
         } else {
             None
@@ -1858,6 +2598,21 @@ impl RenderSceneState {
             .iter()
             .copied()
             .filter(|id| self.material_active.get(*id).copied().unwrap_or(false))
+    }
+
+    fn active_mesh_ids_sorted(&self) -> Vec<usize> {
+        let mut mesh_ids = Vec::with_capacity(self.mesh_indices.len());
+        for (&mesh_id, indices) in &self.mesh_indices {
+            if !indices.is_empty() {
+                mesh_ids.push(mesh_id);
+            }
+        }
+        mesh_ids.sort_unstable();
+        mesh_ids
+    }
+
+    fn mesh_object_indices(&self, mesh_id: usize) -> Option<&HashSet<usize>> {
+        self.mesh_indices.get(&mesh_id)
     }
 
     fn take_material_usage_dirty(&mut self) -> bool {
@@ -1901,6 +2656,25 @@ impl RenderSceneState {
         if *count == 0 {
             self.material_active[material_id] = false;
             self.material_usage_dirty = true;
+        }
+    }
+
+    fn add_mesh_object_index(&mut self, mesh_id: usize, index: usize) {
+        self.mesh_indices
+            .entry(mesh_id)
+            .or_insert_with(HashSet::new)
+            .insert(index);
+    }
+
+    fn remove_mesh_object_index(&mut self, mesh_id: usize, index: usize) {
+        let should_remove = if let Some(indices) = self.mesh_indices.get_mut(&mesh_id) {
+            indices.remove(&index);
+            indices.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            self.mesh_indices.remove(&mesh_id);
         }
     }
 
@@ -2004,6 +2778,7 @@ pub struct GraphRenderer {
     pending_graph_surface_resize: Option<PendingResize>,
 
     surface_size: PhysicalSize<u32>,
+    logic_frame_duration: Duration,
     prev_view_proj: Mat4,
     fallback_view: wgpu::TextureView,
     fallback_albedo_view: wgpu::TextureView,
@@ -2063,8 +2838,10 @@ pub struct GraphRenderer {
     gpu_mesh_meta_buffer: Option<wgpu::Buffer>,
     gpu_mesh_meta_len: usize,
     gpu_mesh_meta_capacity: usize,
-    gpu_mesh_indices: Vec<u32>,
+    gpu_mesh_indices: HashMap<usize, u32>,
     gpu_mesh_material_indices: HashMap<(usize, u32), u32>,
+    gpu_mesh_draw_selections: HashMap<usize, Vec<MeshDrawLodSelection>>,
+    empty_meshlets: Option<MeshletGpu>,
     gpu_indirect_capacity: usize,
     gpu_draws: Arc<Vec<IndirectDrawBatch>>,
     gpu_draw_count: u32,
@@ -2105,6 +2882,7 @@ pub struct GraphRenderer {
     streaming_request_cursor: usize,
     streaming_scan_cursor: usize,
     streaming_sprite_scan_cursor: usize,
+    asset_upload_batch_active: bool,
     egui_texture_cache: EguiTextureCache,
     sprite_font_ctx: ParleyFontContext,
     sprite_layout_ctx: ParleyLayoutContext<[u8; 4]>,
@@ -2116,6 +2894,9 @@ pub struct GraphRenderer {
     sprite_animation_epoch: Instant,
     prev_idle_frames_before_evict: Option<u32>,
     pending_render_delta: Option<RenderDelta>,
+    pending_pool_binding_changes: Vec<ResourceId>,
+    pending_mesh_binding_changes: Vec<usize>,
+    last_mesh_binding_apply_frame: u32,
     material_version: u64,
     material_bindings_version: u64,
     materials_dirty: bool,
@@ -2131,6 +2912,8 @@ pub struct GraphRenderer {
     gpu_bundle_version: u64,
     bundle_resource_epoch: u64,
     bundle_resource_change_frame: u32,
+    gbuffer_bundle_change_frame: u32,
+    shadow_bundle_change_frame: u32,
     shadow_matrices_version: u64,
     bundle_invalidate_pending: bool,
     cached_material_buffer: Option<wgpu::Buffer>,
@@ -2141,11 +2924,13 @@ pub struct GraphRenderer {
     cached_material_signature: u64,
     cached_texture_overflow: bool,
     cached_material_textures: Option<Arc<Vec<MaterialTextureSet>>>,
+    cached_material_binding_indices: Arc<Vec<u32>>,
     cached_material_textures_signature: u64,
     cached_gbuffer_instances: Option<crate::graphics::passes::InstanceBuffer>,
     cached_gbuffer_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
     cached_shadow_instances: Option<crate::graphics::passes::InstanceBuffer>,
     cached_shadow_batches: Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    cached_static_sprite_draw_data: CachedStaticSpriteDrawData,
     cached_ui_instances: Option<crate::graphics::passes::InstanceBuffer>,
     cached_ui_batches: Arc<Vec<crate::graphics::passes::UiDrawBatch>>,
     cached_ui_textures: Arc<Vec<wgpu::TextureView>>,
@@ -2192,6 +2977,7 @@ struct MaterialBuildResult {
 
 struct MaterialTextureBuildResult {
     textures: Arc<Vec<MaterialTextureSet>>,
+    binding_indices: Arc<Vec<u32>>,
     signature: u64,
     changed: bool,
 }
@@ -2202,7 +2988,7 @@ impl GraphRenderer {
         surface: wgpu::Surface<'static>,
         adapter: &wgpu::Adapter,
         size: PhysicalSize<u32>,
-        _target_tickrate: f32,
+        target_tickrate: f32,
         asset_stream_sender: Sender<AssetStreamingRequest>,
         shared_stats: Arc<RendererStats>,
         allow_experimental_features: bool,
@@ -3309,6 +4095,7 @@ impl GraphRenderer {
             pending_graph_surface_resize: None,
 
             surface_size: size,
+            logic_frame_duration: Duration::from_secs_f32(1.0 / target_tickrate.max(1.0)),
             prev_view_proj: Mat4::IDENTITY,
             fallback_view,
             fallback_albedo_view: fallback_albedo_view.clone(),
@@ -3368,8 +4155,10 @@ impl GraphRenderer {
             gpu_mesh_meta_buffer: None,
             gpu_mesh_meta_len: 0,
             gpu_mesh_meta_capacity: 0,
-            gpu_mesh_indices: Vec::new(),
+            gpu_mesh_indices: HashMap::new(),
             gpu_mesh_material_indices: HashMap::new(),
+            gpu_mesh_draw_selections: HashMap::new(),
+            empty_meshlets: None,
             gpu_indirect_capacity: 0,
             gpu_draws: Arc::new(Vec::new()),
             gpu_draw_count: 0,
@@ -3410,6 +4199,7 @@ impl GraphRenderer {
             streaming_request_cursor: 0,
             streaming_scan_cursor: 0,
             streaming_sprite_scan_cursor: 0,
+            asset_upload_batch_active: false,
             egui_texture_cache: EguiTextureCache::default(),
             sprite_font_ctx,
             sprite_layout_ctx,
@@ -3421,6 +4211,9 @@ impl GraphRenderer {
             sprite_animation_epoch: Instant::now(),
             prev_idle_frames_before_evict: None,
             pending_render_delta: None,
+            pending_pool_binding_changes: Vec::new(),
+            pending_mesh_binding_changes: Vec::new(),
+            last_mesh_binding_apply_frame: u32::MAX,
             material_version: 0,
             material_bindings_version: 0,
             materials_dirty: true,
@@ -3436,6 +4229,8 @@ impl GraphRenderer {
             gpu_bundle_version: 0,
             bundle_resource_epoch: 0,
             bundle_resource_change_frame: 0,
+            gbuffer_bundle_change_frame: 0,
+            shadow_bundle_change_frame: 0,
             shadow_matrices_version: 0,
             bundle_invalidate_pending: false,
             cached_material_buffer: None,
@@ -3446,11 +4241,13 @@ impl GraphRenderer {
             cached_material_signature: 0,
             cached_texture_overflow: false,
             cached_material_textures: None,
+            cached_material_binding_indices: Arc::new(vec![0]),
             cached_material_textures_signature: 0,
             cached_gbuffer_instances: None,
             cached_gbuffer_batches: Arc::new(Vec::new()),
             cached_shadow_instances: None,
             cached_shadow_batches: Arc::new(Vec::new()),
+            cached_static_sprite_draw_data: CachedStaticSpriteDrawData::default(),
             cached_ui_instances: None,
             cached_ui_batches: Arc::new(Vec::new()),
             cached_ui_textures: Arc::new(vec![fallback_albedo_view.clone()]),
@@ -3505,10 +4302,32 @@ impl GraphRenderer {
         }
         let output_view = output_frame.texture.create_view(&Default::default());
 
+        if profiling_enabled {
+            self.shared_stats
+                .render_scene_update_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_graph_setup_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_backend_begin_frame_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let scene_update_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.begin_frame();
         self.apply_pending_render_delta();
         self.drain_pool_evictions();
         self.drain_pool_binding_changes();
+        if let Some(start) = scene_update_start {
+            self.shared_stats.render_scene_update_us.store(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         let mut scene = if let Some(scene) = self.current_render_data.take() {
             scene
@@ -3521,13 +4340,14 @@ impl GraphRenderer {
 
         let main_graph_spec = scene.data.render_graph.clone();
         let main_gizmo = scene.data.gizmo.clone();
+        let mut graph_setup_us = 0u64;
 
         let streaming_start = if profiling_enabled {
             Some(Instant::now())
         } else {
             None
         };
-        self.refresh_streaming_plan(&scene.data);
+        self.refresh_streaming_plan(&scene);
         if let Some(start) = streaming_start {
             self.shared_stats.render_streaming_plan_us.store(
                 start.elapsed().as_micros() as u64,
@@ -3535,6 +4355,7 @@ impl GraphRenderer {
             );
         }
 
+        let binding_changes = self.take_pending_pool_binding_changes();
         let main_render_config = self.apply_runtime_feature_fallbacks(scene.data.render_config);
         scene.data.render_config = main_render_config;
         let max_texture_dimension = self.device_caps.limits.max_texture_dimension_2d.max(1);
@@ -3557,13 +4378,46 @@ impl GraphRenderer {
                 || (graph_name == "hybrid-graph" && (config.ddgi_pass || config.rt_reflections))
         };
 
+        let graph_setup_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Err(err) = self.ensure_graph_ready(&main_graph_spec, graph_sig, graph_surface_size) {
+            if let Some(start) = graph_setup_start {
+                graph_setup_us = graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+                self.shared_stats
+                    .render_graph_setup_us
+                    .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
+            }
             self.current_render_data = Some(scene);
             return Err(err);
         }
+        if let Some(start) = graph_setup_start {
+            graph_setup_us = graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+            self.shared_stats
+                .render_graph_setup_us
+                .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
+        }
 
-        self.backend
-            .begin_frame(&self.device, &self.queue, &self.pool, self.frame_index);
+        let backend_begin_frame_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        self.backend.begin_frame(
+            &self.device,
+            &self.queue,
+            &self.pool,
+            self.frame_index,
+            &binding_changes,
+        );
+        if let Some(start) = backend_begin_frame_start {
+            self.shared_stats.render_backend_begin_frame_us.store(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         let pressure = self.update_streaming_pressure();
         if self.active_graph.is_none() {
@@ -3583,11 +4437,24 @@ impl GraphRenderer {
         let cached_egui_textures = self.frame_inputs.get::<EguiTextureCache>();
         self.frame_inputs.remove::<EguiRenderData>();
         self.frame_inputs.remove::<EguiTextureCache>();
+        if profiling_enabled {
+            self.shared_stats
+                .render_viewports_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared_stats
+                .render_pre_graph_misc_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let main_camera_transform = scene.data.current_camera_transform;
         let main_prev_camera_transform = scene.data.previous_camera_transform;
         let main_camera_component = scene.data.camera_component;
         let has_offscreen_viewports = !scene.data.viewports.is_empty();
+        let viewport_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         for viewport in scene.data.viewports.clone() {
             active_offscreen_ids.insert(viewport.id);
@@ -3648,13 +4515,31 @@ impl GraphRenderer {
                 .resolve_viewport_graph_spec(&main_graph_spec, viewport.graph_template.as_deref());
             let viewport_graph_sig =
                 RenderGraphConfigSignature::from_render_config(&viewport_render_config);
+            let graph_setup_start = if profiling_enabled {
+                Some(Instant::now())
+            } else {
+                None
+            };
             if let Err(err) = self.ensure_graph_ready(
                 &viewport_graph_spec,
                 viewport_graph_sig,
                 viewport_surface_size,
             ) {
+                if let Some(start) = graph_setup_start {
+                    graph_setup_us =
+                        graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+                    self.shared_stats
+                        .render_graph_setup_us
+                        .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.current_render_data = Some(scene);
                 return Err(err);
+            }
+            if let Some(start) = graph_setup_start {
+                graph_setup_us = graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+                self.shared_stats
+                    .render_graph_setup_us
+                    .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
             }
             let viewport_swapchain_id = match self.active_graph.as_ref() {
                 Some(active) => active.swapchain_id,
@@ -3748,6 +4633,12 @@ impl GraphRenderer {
             self.needs_atmosphere_precompute = saved_needs_atmosphere_precompute;
             self.occlusion_stable_frames = saved_occlusion_stable_frames;
         }
+        if let Some(start) = viewport_start {
+            self.shared_stats.render_viewports_us.store(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         self.prune_offscreen_viewports(&active_offscreen_ids);
         scene.data.render_graph = main_graph_spec.clone();
         scene.data.gizmo = main_gizmo.clone();
@@ -3772,12 +4663,29 @@ impl GraphRenderer {
         scene.data.gizmo = main_gizmo.clone();
         let main_graph_sig =
             RenderGraphConfigSignature::from_render_config(&scene.data.render_config);
+        let graph_setup_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if let Err(err) =
             self.ensure_graph_ready(&main_graph_spec, main_graph_sig, graph_surface_size)
         {
+            if let Some(start) = graph_setup_start {
+                graph_setup_us = graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+                self.shared_stats
+                    .render_graph_setup_us
+                    .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
+            }
             scene.data.render_config = main_saved_render_config;
             self.current_render_data = Some(scene);
             return Err(err);
+        }
+        if let Some(start) = graph_setup_start {
+            graph_setup_us = graph_setup_us.saturating_add(start.elapsed().as_micros() as u64);
+            self.shared_stats
+                .render_graph_setup_us
+                .store(graph_setup_us, std::sync::atomic::Ordering::Relaxed);
         }
         let swapchain_id = match self.active_graph.as_ref() {
             Some(active) => active.swapchain_id,
@@ -3830,6 +4738,11 @@ impl GraphRenderer {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
+        let pre_graph_misc_start = if profiling_enabled {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.run_atmosphere_precompute(&globals);
         let tracing_active_for_main = scene.data.render_main_scene_to_swapchain
             && tracing_active_for_config(main_graph_spec.name, &globals.render_config);
@@ -3870,6 +4783,12 @@ impl GraphRenderer {
             self.prev_idle_frames_before_evict = Some(self.pool.idle_frames_before_evict);
             self.pool.idle_frames_before_evict =
                 self.streaming_tuning.hard_idle_frames_before_evict;
+        }
+        if let Some(start) = pre_graph_misc_start {
+            self.shared_stats.render_pre_graph_misc_us.store(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         let mut graph_exec_stats = RenderGraphExecutionStats::default();
@@ -4088,8 +5007,6 @@ impl GraphRenderer {
                 self.streaming_last_frame = 0;
                 self.instances_dirty = true;
                 self.shadow_instances_dirty = true;
-                self.shadow_uniforms_dirty = true;
-                self.shadow_bounds_dirty = true;
                 self.gbuffer_draws_dirty = true;
                 self.shadow_draws_dirty = true;
             }
@@ -4136,7 +5053,7 @@ impl GraphRenderer {
                 }
                 if restream_assets {
                     if let Some(state) = self.current_render_data.take() {
-                        self.refresh_streaming_plan(&state.data);
+                        self.refresh_streaming_plan(&state);
                         self.current_render_data = Some(state);
                     }
                 }
@@ -4187,6 +5104,7 @@ impl GraphRenderer {
     pub fn process_message(&mut self, message: RenderMessage) {
         match message {
             RenderMessage::CreateMesh { .. }
+            | RenderMessage::RemoveMesh { .. }
             | RenderMessage::CreateTexture { .. }
             | RenderMessage::CreateMaterial(_) => {
                 let mut resolve_materials = false;
@@ -4212,6 +5130,7 @@ impl GraphRenderer {
             }
             RenderMessage::Resize(size) => self.handle_resize(size),
             RenderMessage::WindowRecreated { .. } => {}
+            #[cfg(not(target_arch = "wasm32"))]
             RenderMessage::WindowRecreatedWithInit { .. } => {}
             RenderMessage::Shutdown => {}
         }
@@ -4223,11 +5142,19 @@ impl GraphRenderer {
         if batch.is_empty() {
             return;
         }
+        // Coalesce budget-based pool eviction once per asset batch instead of
+        // rescanning the residency pool for every mesh/texture/material upload.
+        let pre_evict_bytes = batch.iter().fold(0_u64, |bytes, message| {
+            bytes.saturating_add(render_message_payload_bytes(message) as u64)
+        });
+        self.pre_evict_for_upload(pre_evict_bytes);
+        self.asset_upload_batch_active = true;
         let mut resolve_materials = false;
         let mut mip_encoder: Option<wgpu::CommandEncoder> = None;
         for message in batch.drain(..) {
             self.process_asset_message(message, &mut resolve_materials, &mut mip_encoder);
         }
+        self.asset_upload_batch_active = false;
         self.finish_asset_batch(resolve_materials, mip_encoder);
     }
 
@@ -4243,10 +5170,14 @@ impl GraphRenderer {
                 total_lods,
                 lods,
                 bounds,
+                pinned,
             } => {
-                if let Err(err) = self.upload_mesh(id, total_lods, &lods, bounds) {
+                if let Err(err) = self.upload_mesh(id, total_lods, &lods, bounds, pinned) {
                     warn!("Failed to upload mesh {id}: {err:?}");
                 }
+            }
+            RenderMessage::RemoveMesh { id } => {
+                self.remove_mesh(id);
             }
             RenderMessage::CreateTexture {
                 id,
@@ -4327,6 +5258,7 @@ impl GraphRenderer {
             objects_remove,
             lights_upsert,
             lights_remove,
+            static_sprites,
             sprites,
             text_2d,
             ui,
@@ -4346,6 +5278,9 @@ impl GraphRenderer {
         let config_changed = render_config.is_some();
         let mut materials_needed = false;
         let material_version = self.material_version;
+        let static_sprites_value = static_sprites
+            .clone()
+            .unwrap_or_else(|| Arc::new(Vec::new()));
         let sprites_value = sprites.clone().unwrap_or_default();
         let text_value = text_2d.clone().unwrap_or_default();
         let ui_value = ui.clone().unwrap_or_default();
@@ -4364,6 +5299,7 @@ impl GraphRenderer {
             let data = RenderData {
                 objects: Vec::new(),
                 lights: Vec::new(),
+                static_sprites: static_sprites_value.clone(),
                 sprites: sprites_value.clone(),
                 text_2d: text_value.clone(),
                 ui: ui_value.clone(),
@@ -4391,6 +5327,7 @@ impl GraphRenderer {
         if full {
             state.clear_objects();
             state.clear_lights();
+            state.data.static_sprites = static_sprites_value;
             state.data.sprites = sprites_value;
             state.data.text_2d = text_value;
             state.data.ui = ui_value;
@@ -4428,6 +5365,9 @@ impl GraphRenderer {
         }
         if let Some(graph) = render_graph {
             state.data.render_graph = graph;
+        }
+        if let Some(static_sprites) = static_sprites {
+            state.data.static_sprites = static_sprites;
         }
         if let Some(sprites) = sprites {
             state.data.sprites = sprites;
@@ -4559,7 +5499,12 @@ impl GraphRenderer {
             }
         }
 
-        state.data.timestamp = Instant::now();
+        let now = Instant::now();
+        let logic_frame_duration = now.saturating_duration_since(state.data.timestamp);
+        if logic_frame_duration > Duration::from_micros(500) {
+            self.logic_frame_duration = logic_frame_duration;
+        }
+        state.data.timestamp = now;
         if objects_changed {
             self.instances_dirty = true;
             self.shadow_instances_dirty = true;
@@ -4588,6 +5533,16 @@ impl GraphRenderer {
                 self.shadow_uniforms_dirty = true;
                 self.shadow_bounds_dirty = true;
             }
+            if next.single_resident_lod_per_mesh != prev_config.single_resident_lod_per_mesh {
+                self.streaming_dirty = true;
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+                self.gpu_draws_dirty = true;
+                self.gpu_cull_dirty = true;
+                self.gpu_instance_updates.clear();
+            }
         }
         if let Some(requests) = streaming_requests {
             self.streaming_requests = Some(requests);
@@ -4598,11 +5553,13 @@ impl GraphRenderer {
         }
     }
 
-    fn refresh_streaming_plan(&mut self, data: &RenderData) {
+    fn refresh_streaming_plan(&mut self, scene: &RenderSceneState) {
+        let data = &scene.data;
         self.resolve_pending_materials();
         if self.current_pressure() != self.streaming_pressure {
             self.streaming_dirty = true;
         }
+        self.mark_active_scene_usage(scene);
         let interval = data.render_config.streaming_interval_frames;
         let interval_elapsed =
             interval > 0 && self.frame_index.saturating_sub(self.streaming_last_frame) >= interval;
@@ -4775,6 +5732,10 @@ impl GraphRenderer {
 
         self.current_render_data = current_render_data;
         self.pending_render_delta = pending_render_delta;
+        self.pending_pool_binding_changes.clear();
+        self.pending_mesh_binding_changes.clear();
+        self.last_mesh_binding_apply_frame = u32::MAX;
+        self.gpu_mesh_draw_selections.clear();
         self.meshes = meshes;
         self.materials = materials;
         self.material_index_map = material_index_map;
@@ -4830,6 +5791,7 @@ impl GraphRenderer {
         self.cached_material_signature = 0;
         self.cached_texture_overflow = false;
         self.cached_material_textures = None;
+        self.cached_material_binding_indices = Arc::new(vec![0]);
         self.cached_material_textures_signature = 0;
         self.cached_gbuffer_instances = None;
         self.cached_gbuffer_batches = Arc::new(Vec::new());
@@ -4866,6 +5828,7 @@ impl GraphRenderer {
         self.gpu_mesh_meta_capacity = 0;
         self.gpu_mesh_indices.clear();
         self.gpu_mesh_material_indices.clear();
+        self.gpu_mesh_draw_selections.clear();
         self.gpu_indirect_capacity = 0;
         self.gpu_draws = Arc::new(Vec::new());
         self.gpu_draw_count = 0;
@@ -4874,9 +5837,12 @@ impl GraphRenderer {
 
         self.bundle_resource_epoch = 0;
         self.bundle_resource_change_frame = 0;
+        self.gbuffer_bundle_change_frame = 0;
+        self.shadow_bundle_change_frame = 0;
         self.bundle_invalidate_pending = true;
 
         self.needs_atmosphere_precompute = true;
+        self.empty_meshlets = None;
         self.fallback_mesh = None;
         self.init_fallback_mesh();
         self.bump_egui_epoch();
@@ -4944,10 +5910,12 @@ impl GraphRenderer {
         if changes.is_empty() {
             return;
         }
-        self.invalidate_bundles_for_resources(&changes);
+        self.pending_pool_binding_changes
+            .extend(changes.iter().copied());
+        let invalidation = self.invalidate_bundles_for_resources(&changes);
+        self.record_bundle_invalidation(invalidation);
 
         let mut texture_changed = false;
-        let mut mesh_buffer_changed = false;
         let mut material_buffer_changed = false;
         for id in &changes {
             match id.kind() {
@@ -4956,7 +5924,7 @@ impl GraphRenderer {
                     if let Some(entry) = self.pool.entry(*id) {
                         if let Some(asset_id) = entry.asset_stream_id.map(|v| v as usize) {
                             if self.meshes.get(asset_id).is_some() {
-                                mesh_buffer_changed = true;
+                                self.pending_mesh_binding_changes.push(asset_id);
                             } else if self.materials.get(asset_id).is_some()
                                 || self.pending_materials.contains_key(&asset_id)
                             {
@@ -4973,25 +5941,62 @@ impl GraphRenderer {
             self.cached_texture_views.clear();
             self.cached_texture_array_size = 0;
             self.cached_material_textures = None;
+            self.cached_material_binding_indices = Arc::new(vec![0]);
             self.cached_material_textures_signature = 0;
         }
         if texture_changed || material_buffer_changed {
             self.materials_dirty = true;
         }
-        if mesh_buffer_changed {
-            self.instances_dirty = true;
-            self.shadow_instances_dirty = true;
-            self.shadow_uniforms_dirty = true;
-            self.shadow_bounds_dirty = true;
-            self.gbuffer_draws_dirty = true;
-            self.shadow_draws_dirty = true;
-            self.gpu_draws_dirty = true;
+    }
+
+    fn take_pending_pool_binding_changes(&mut self) -> Vec<ResourceId> {
+        let mut changes = std::mem::take(&mut self.pending_pool_binding_changes);
+        if changes.len() > 1 {
+            changes.sort_unstable();
+            changes.dedup();
         }
+        changes
+    }
+
+    fn record_bundle_invalidation(&mut self, mask: BundleInvalidationMask) {
+        if !mask.any {
+            return;
+        }
+        self.bundle_resource_change_frame = self.frame_index;
+        if mask.gbuffer {
+            self.gbuffer_bundle_change_frame = self.frame_index;
+        }
+        if mask.shadow {
+            self.shadow_bundle_change_frame = self.frame_index;
+        }
+    }
+
+    fn record_bundle_layout_change(&mut self, mask: BundleInvalidationMask) {
+        if !mask.any {
+            return;
+        }
+        if mask.gbuffer {
+            self.gbuffer_bundle_change_frame = self.frame_index;
+        }
+        if mask.shadow {
+            self.shadow_bundle_change_frame = self.frame_index;
+        }
+    }
+
+    fn bump_material_bindings_version(&mut self) {
+        self.material_bindings_version = self.material_bindings_version.wrapping_add(1);
+        self.record_bundle_layout_change(BundleInvalidationMask {
+            any: true,
+            gbuffer: true,
+            shadow: true,
+        });
     }
 
     fn note_bundle_resource_change(&mut self) {
         self.bundle_resource_epoch = self.bundle_resource_epoch.wrapping_add(1);
         self.bundle_resource_change_frame = self.frame_index;
+        self.gbuffer_bundle_change_frame = self.frame_index;
+        self.shadow_bundle_change_frame = self.frame_index;
         self.bundle_invalidate_pending = true;
         self.invalidate_render_bundles();
     }
@@ -5005,13 +6010,26 @@ impl GraphRenderer {
         }
     }
 
-    fn invalidate_bundles_for_resources(&mut self, evicted: &[ResourceId]) {
+    fn invalidate_bundles_for_resources(
+        &mut self,
+        evicted: &[ResourceId],
+    ) -> BundleInvalidationMask {
         let Some(active) = self.active_graph.as_ref() else {
-            return;
+            return BundleInvalidationMask::default();
         };
+        let mut mask = BundleInvalidationMask::default();
         for node in active.graph.nodes() {
-            node.pass.invalidate_cached_bundles_for_resources(evicted);
+            if !node.pass.invalidate_cached_bundles_for_resources(evicted) {
+                continue;
+            }
+            mask.any = true;
+            match node.pass.name() {
+                "GBuffer" => mask.gbuffer = true,
+                "ShadowPass" => mask.shadow = true,
+                _ => {}
+            }
         }
+        mask
     }
 
     fn track_evicted_resources(&mut self, evicted: Vec<ResourceId>) {
@@ -5019,10 +6037,11 @@ impl GraphRenderer {
             return;
         }
 
-        self.invalidate_bundles_for_resources(&evicted);
+        let invalidation = self.invalidate_bundles_for_resources(&evicted);
+        self.record_bundle_invalidation(invalidation);
 
         let mut texture_evicted = false;
-        let mut mesh_buffer_evicted = false;
+        let mut mesh_buffer_evicted = Vec::new();
         let mut material_buffer_evicted = false;
         for id in evicted {
             match id.kind() {
@@ -5031,7 +6050,7 @@ impl GraphRenderer {
                     if let Some(entry) = self.pool.entry(id) {
                         if let Some(asset_id) = entry.asset_stream_id.map(|v| v as usize) {
                             if self.meshes.get(asset_id).is_some() {
-                                mesh_buffer_evicted = true;
+                                mesh_buffer_evicted.push(asset_id);
                             } else if self.materials.get(asset_id).is_some()
                                 || self.pending_materials.contains_key(&asset_id)
                             {
@@ -5057,24 +6076,76 @@ impl GraphRenderer {
             self.cached_texture_views.clear();
             self.cached_texture_array_size = 0;
             self.cached_material_textures = None;
+            self.cached_material_binding_indices = Arc::new(vec![0]);
             self.cached_material_textures_signature = 0;
         }
         if texture_evicted || material_buffer_evicted {
             self.materials_dirty = true;
         }
-        if mesh_buffer_evicted {
-            self.instances_dirty = true;
-            self.shadow_instances_dirty = true;
-            self.shadow_uniforms_dirty = true;
-            self.shadow_bounds_dirty = true;
-            self.gbuffer_draws_dirty = true;
-            self.shadow_draws_dirty = true;
-            self.gpu_draws_dirty = true;
+        if !mesh_buffer_evicted.is_empty() {
+            let active_mesh_evicted = self.current_render_data.as_ref().map_or(true, |scene| {
+                mesh_buffer_evicted.iter().any(|mesh_id| {
+                    scene
+                        .mesh_object_indices(*mesh_id)
+                        .is_some_and(|indices| !indices.is_empty())
+                        && self.mesh_draw_selection_changed(*mesh_id, false)
+                })
+            });
+            if active_mesh_evicted {
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+                self.gpu_draws_dirty = true;
+                self.gpu_cull_dirty = true;
+            } else {
+                self.pending_mesh_binding_changes
+                    .extend(mesh_buffer_evicted);
+            }
         }
     }
 
+    fn apply_pending_mesh_binding_changes(&mut self, scene: &RenderSceneState, stable_frames: u32) {
+        if self.pending_mesh_binding_changes.is_empty() {
+            return;
+        }
+        if self.pending_mesh_binding_changes.len() > 1 {
+            self.pending_mesh_binding_changes.sort_unstable();
+            self.pending_mesh_binding_changes.dedup();
+        }
+
+        let interval = stable_frames.max(1);
+        if self.last_mesh_binding_apply_frame != u32::MAX
+            && self
+                .frame_index
+                .saturating_sub(self.last_mesh_binding_apply_frame)
+                < interval
+        {
+            return;
+        }
+
+        let active_mesh_changed = self.pending_mesh_binding_changes.iter().any(|mesh_id| {
+            scene
+                .mesh_object_indices(*mesh_id)
+                .is_some_and(|indices| !indices.is_empty())
+                && self.mesh_draw_selection_changed(*mesh_id, false)
+        });
+        self.pending_mesh_binding_changes.clear();
+        if !active_mesh_changed {
+            return;
+        }
+
+        self.last_mesh_binding_apply_frame = self.frame_index;
+        self.instances_dirty = true;
+        self.shadow_instances_dirty = true;
+        self.gbuffer_draws_dirty = true;
+        self.shadow_draws_dirty = true;
+        self.gpu_draws_dirty = true;
+        self.gpu_cull_dirty = true;
+    }
+
     fn pre_evict_for_upload(&mut self, additional_bytes: u64) {
-        if additional_bytes == 0 {
+        if self.asset_upload_batch_active || additional_bytes == 0 {
             return;
         }
         let budget = self.pool.vram_budget().global.clone();
@@ -5143,11 +6214,9 @@ impl GraphRenderer {
                 lod.rt_blas_index = fallback_blas_index;
             }
         }
-        for entry in &mut self.meshes.entries {
-            if let Some(mesh) = entry.as_mut() {
-                for lod in &mut mesh.lods {
-                    lod.rt_blas_index = fallback_blas_index;
-                }
+        for mesh in self.meshes.values_mut() {
+            for lod in &mut mesh.lods {
+                lod.rt_blas_index = fallback_blas_index;
             }
         }
 
@@ -5307,11 +6376,9 @@ impl GraphRenderer {
         self.fallback_mesh = None;
         self.init_fallback_mesh();
         let fallback_blas = self.rt_state.fallback_blas_index();
-        for entry in &mut self.meshes.entries {
-            if let Some(mesh) = entry.as_mut() {
-                for lod in &mut mesh.lods {
-                    lod.rt_blas_index = fallback_blas;
-                }
+        for mesh in self.meshes.values_mut() {
+            for lod in &mut mesh.lods {
+                lod.rt_blas_index = fallback_blas;
             }
         }
         self.configure_rt_blas_budget();
@@ -5424,7 +6491,6 @@ impl GraphRenderer {
             })
             .unwrap_or(false);
         if active_matches {
-            self.apply_active_graph_aliases();
             return Ok(());
         }
 
@@ -6139,6 +7205,7 @@ impl GraphRenderer {
                 max: Vec3::splat(p),
             },
             available_lods: 1,
+            streamable: false,
         });
     }
 
@@ -6148,10 +7215,15 @@ impl GraphRenderer {
         total_lods: usize,
         lods: &[MeshLodPayload],
         bounds: Aabb,
+        pinned: bool,
     ) -> Result<(), RendererError> {
         if lods.is_empty() {
             return Ok(());
         }
+        let mesh_had_gpu_resources = self
+            .meshes
+            .get(id)
+            .is_some_and(|mesh| !mesh.lods.is_empty());
 
         let vertex_usage =
             wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
@@ -6244,28 +7316,17 @@ impl GraphRenderer {
             self.streaming_inflight.remove(id);
             return Ok(());
         }
-        let lods = filtered_lods;
-
-        let new_bytes: u64 = lods
-            .iter()
-            .map(|lod| {
-                let verts = (lod.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-                let indices = (lod.indices.len() * std::mem::size_of::<u32>()) as u64;
-                let meshlets = {
-                    let descs =
-                        lod.meshlets.descs.len() as u64 * std::mem::size_of::<MeshletDesc>() as u64;
-                    let verts =
-                        lod.meshlets.vertices.len() as u64 * std::mem::size_of::<u32>() as u64;
-                    let inds =
-                        lod.meshlets.indices.len() as u64 * std::mem::size_of::<u32>() as u64;
-                    descs + verts + inds
-                };
-                verts + indices + meshlets
-            })
-            .sum();
+        let single_resident_lod_per_mesh = self.single_resident_lod_per_mesh_enabled();
+        let mut lods = filtered_lods;
+        if single_resident_lod_per_mesh {
+            let target_lod = lods.iter().map(|lod| lod.lod_index).min().unwrap_or(0);
+            lods.retain(|lod| lod.lod_index == target_lod);
+        }
 
         let payload_lods: HashSet<usize> = lods.iter().map(|lod| lod.lod_index).collect();
         let min_requested = payload_lods.iter().copied().min().unwrap_or(0);
+        let reclaim_lower_lods = single_resident_lod_per_mesh
+            || should_reclaim_lower_mesh_lods(self.current_pressure(), pinned);
         let existing_available_lods = self
             .meshes
             .get(id)
@@ -6291,10 +7352,82 @@ impl GraphRenderer {
             .map(|lod| lod.rt_blas_index)
             .find(|idx| *idx != self.rt_state.fallback_blas_index);
 
+        let planned_allocation_bytes =
+            |resource: Option<ResourceId>,
+             usage: wgpu::BufferUsages,
+             bytes_len: usize,
+             pool: &GpuResourcePool,
+             max_buffer_size: u64| {
+                let needed = bytes_len as u64;
+                resource
+                    .and_then(|resource_id| {
+                        pool.entry(resource_id)
+                            .filter(|entry| can_reuse_uploaded_buffer(entry, usage, needed))
+                    })
+                    .map_or_else(|| target_upload_buffer_size(needed, max_buffer_size), |_| 0)
+            };
+
+        let max_buffer_size = self.device_caps.limits.max_buffer_size;
+        let new_bytes: u64 = lods
+            .iter()
+            .map(|lod| {
+                let existing = existing_lods.get(&lod.lod_index).copied();
+                let vertex_id = if lod.lod_index == 0 {
+                    Some(primary_vertex)
+                } else {
+                    existing.map(|entry| entry.vertex)
+                };
+                let index_id = existing.map(|entry| entry.buffer);
+                let vertex_bytes = planned_allocation_bytes(
+                    vertex_id,
+                    vertex_usage,
+                    lod.vertices.len() * std::mem::size_of::<Vertex>(),
+                    &self.pool,
+                    max_buffer_size,
+                );
+                let index_bytes = planned_allocation_bytes(
+                    index_id,
+                    index_usage,
+                    lod.indices.len() * std::mem::size_of::<u32>(),
+                    &self.pool,
+                    max_buffer_size,
+                );
+                let meshlet_bytes = if lod.meshlets.is_empty() {
+                    0
+                } else {
+                    let meshlets = existing.map(|entry| entry.meshlets);
+                    planned_allocation_bytes(
+                        meshlets.map(|entry| entry.descs),
+                        meshlet_usage,
+                        lod.meshlets.descs.len() * std::mem::size_of::<MeshletDesc>(),
+                        &self.pool,
+                        max_buffer_size,
+                    ) + planned_allocation_bytes(
+                        meshlets.map(|entry| entry.vertices),
+                        meshlet_usage,
+                        lod.meshlets.vertices.len() * std::mem::size_of::<u32>(),
+                        &self.pool,
+                        max_buffer_size,
+                    ) + planned_allocation_bytes(
+                        meshlets.map(|entry| entry.indices),
+                        meshlet_usage,
+                        lod.meshlets.indices.len() * std::mem::size_of::<u32>(),
+                        &self.pool,
+                        max_buffer_size,
+                    )
+                };
+                vertex_bytes + index_bytes + meshlet_bytes
+            })
+            .sum();
+
         let mut reclaimed_bytes = 0u64;
-        if !existing_lods.is_empty() {
+        if reclaim_lower_lods && !existing_lods.is_empty() {
             let should_evict = |lod: &MeshLodResource| {
-                payload_lods.contains(&lod.lod_index) || lod.lod_index < min_requested
+                if single_resident_lod_per_mesh {
+                    lod.lod_index != min_requested
+                } else {
+                    lod.lod_index < min_requested
+                }
             };
             for lod in existing_lods.values().filter(|lod| should_evict(lod)) {
                 if let Some(entry) = self.pool.entry(lod.vertex) {
@@ -6323,9 +7456,13 @@ impl GraphRenderer {
         let net_bytes = new_bytes.saturating_sub(reclaimed_bytes);
         self.pre_evict_for_upload(net_bytes);
 
-        if !existing_lods.is_empty() {
+        if reclaim_lower_lods && !existing_lods.is_empty() {
             let should_evict = |lod: &MeshLodResource| {
-                payload_lods.contains(&lod.lod_index) || lod.lod_index < min_requested
+                if single_resident_lod_per_mesh {
+                    lod.lod_index != min_requested
+                } else {
+                    lod.lod_index < min_requested
+                }
             };
             for lod in existing_lods.values().filter(|lod| should_evict(lod)) {
                 self.pool.evict(lod.vertex);
@@ -6373,13 +7510,6 @@ impl GraphRenderer {
                 } else {
                     (None, None, None)
                 };
-            let vertex_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-vbo-{}-lod{}", id, lod.lod_index)),
-                    contents: bytemuck::cast_slice(lod.vertices.as_ref()),
-                    usage: vertex_usage,
-                });
             let vertex_desc = ResourceDesc::Buffer {
                 size: (lod.vertices.len() * std::mem::size_of::<Vertex>()) as u64,
                 usage: vertex_usage,
@@ -6388,8 +7518,13 @@ impl GraphRenderer {
                 flags: ResourceFlags::PREFER_RESIDENT,
                 estimated_size_bytes: vertex_desc.estimate_size_bytes(),
             };
+            if pinned {
+                vertex_hints.flags |= ResourceFlags::PINNED;
+            }
             vertex_hints.flags |= ResourceFlags::FREQUENT_UPDATE;
-            vertex_hints.flags |= ResourceFlags::STREAMING;
+            if !pinned {
+                vertex_hints.flags |= ResourceFlags::STREAMING;
+            }
             vertex_hints.flags |= ResourceFlags::STABLE_ID;
             let vertex_id = if lod.lod_index == 0 {
                 primary_vertex
@@ -6403,29 +7538,28 @@ impl GraphRenderer {
                     None,
                 )
             };
-            self.insert_buffer_entry(
+            self.upload_buffer_entry(
                 vertex_id,
-                vertex_desc,
-                vertex_buffer,
-                vertex_hints,
+                bytemuck::cast_slice(lod.vertices.as_ref()),
+                vertex_usage,
+                vertex_hints.flags,
                 Some(id),
+                &format!("mesh-vbo-{}-lod{}", id, lod.lod_index),
             );
 
-            let index_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-ibo-{}-lod{}", id, lod.lod_index)),
-                    contents: bytemuck::cast_slice(lod.indices.as_ref()),
-                    usage: index_usage,
-                });
             let desc = ResourceDesc::Buffer {
                 size: (lod.indices.len() * std::mem::size_of::<u32>()) as u64,
                 usage: index_usage,
             };
             let mut hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STREAMING,
+                flags: ResourceFlags::PREFER_RESIDENT,
                 estimated_size_bytes: desc.estimate_size_bytes(),
             };
+            if pinned {
+                hints.flags |= ResourceFlags::PINNED;
+            } else {
+                hints.flags |= ResourceFlags::STREAMING;
+            }
             hints.flags |= ResourceFlags::STABLE_ID;
             let index_id = if let Some(existing) = existing_index {
                 existing
@@ -6433,133 +7567,150 @@ impl GraphRenderer {
                 self.pool
                     .create_logical(desc.clone(), Some(hints), self.frame_index, None)
             };
-            let mut entry = crate::graphics::graph::logic::residency::GpuResourceEntry::new(
+            self.upload_buffer_entry(
                 index_id,
-                desc.kind(),
-                hints.estimated_size_bytes,
-                hints,
-                self.frame_index,
-                desc,
+                bytemuck::cast_slice(lod.indices.as_ref()),
+                index_usage,
+                hints.flags,
+                Some(id),
+                &format!("mesh-ibo-{}-lod{}", id, lod.lod_index),
             );
-            entry.buffer = Some(index_buffer);
-            entry.asset_stream_id = Some(id as u32);
-            self.pool.insert_entry(entry);
-            self.pool.mark_used(index_id, self.frame_index);
 
-            let meshlet_count = lod.meshlets.meshlet_count();
-            let empty_desc = MeshletDesc {
-                vertex_offset: 0,
-                vertex_count: 0,
-                index_offset: 0,
-                index_count: 0,
-                bounds_center: [0.0; 3],
-                bounds_radius: 0.0,
-            };
-            let descs_bytes = if lod.meshlets.descs.is_empty() {
-                bytemuck::bytes_of(&empty_desc)
+            let meshlets = if lod.meshlets.is_empty() {
+                let shared = self.ensure_empty_meshlets();
+                if let Some(existing_meshlets) = existing_meshlets {
+                    let existing_is_shared = existing_meshlets.descs == shared.descs
+                        && existing_meshlets.vertices == shared.vertices
+                        && existing_meshlets.indices == shared.indices;
+                    if !existing_is_shared {
+                        self.pool.evict(existing_meshlets.descs);
+                        self.pool.evict(existing_meshlets.vertices);
+                        self.pool.evict(existing_meshlets.indices);
+                    }
+                }
+                shared
             } else {
-                bytemuck::cast_slice(lod.meshlets.descs.as_ref())
-            };
-            let verts_bytes = if lod.meshlets.vertices.is_empty() {
-                bytemuck::cast_slice(&[0u32])
-            } else {
-                bytemuck::cast_slice(lod.meshlets.vertices.as_ref())
-            };
-            let inds_bytes = if lod.meshlets.indices.is_empty() {
-                bytemuck::cast_slice(&[0u32])
-            } else {
-                bytemuck::cast_slice(lod.meshlets.indices.as_ref())
-            };
-
-            let descs_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-meshlets-{}-lod{}-descs", id, lod.lod_index)),
-                    contents: descs_bytes,
+                let descs_desc = ResourceDesc::Buffer {
+                    size: (lod.meshlets.descs.len() * std::mem::size_of::<MeshletDesc>()) as u64,
                     usage: meshlet_usage,
-                });
-            let descs_desc = ResourceDesc::Buffer {
-                size: descs_bytes.len() as u64,
-                usage: meshlet_usage,
-            };
-            let descs_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT
-                    | ResourceFlags::STREAMING
-                    | ResourceFlags::STABLE_ID,
-                estimated_size_bytes: descs_desc.estimate_size_bytes(),
-            };
-            let descs_id = existing_meshlets
-                .map(|meshlets| meshlets.descs)
-                .unwrap_or_else(|| {
-                    self.pool.create_logical(
-                        descs_desc.clone(),
-                        Some(descs_hints),
-                        self.frame_index,
-                        None,
-                    )
-                });
-            self.insert_buffer_entry(descs_id, descs_desc, descs_buffer, descs_hints, Some(id));
+                };
+                let descs_hints = ResourceUsageHints {
+                    flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STABLE_ID,
+                    estimated_size_bytes: descs_desc.estimate_size_bytes(),
+                };
+                let descs_hints = if pinned {
+                    ResourceUsageHints {
+                        flags: descs_hints.flags | ResourceFlags::PINNED,
+                        estimated_size_bytes: descs_hints.estimated_size_bytes,
+                    }
+                } else {
+                    ResourceUsageHints {
+                        flags: descs_hints.flags | ResourceFlags::STREAMING,
+                        estimated_size_bytes: descs_hints.estimated_size_bytes,
+                    }
+                };
+                let descs_id = existing_meshlets
+                    .map(|meshlets| meshlets.descs)
+                    .unwrap_or_else(|| {
+                        self.pool.create_logical(
+                            descs_desc.clone(),
+                            Some(descs_hints),
+                            self.frame_index,
+                            None,
+                        )
+                    });
+                self.upload_buffer_entry(
+                    descs_id,
+                    bytemuck::cast_slice(lod.meshlets.descs.as_ref()),
+                    meshlet_usage,
+                    descs_hints.flags,
+                    Some(id),
+                    &format!("mesh-meshlets-{}-lod{}-descs", id, lod.lod_index),
+                );
 
-            let verts_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!("mesh-meshlets-{}-lod{}-verts", id, lod.lod_index)),
-                    contents: verts_bytes,
+                let verts_desc = ResourceDesc::Buffer {
+                    size: (lod.meshlets.vertices.len() * std::mem::size_of::<u32>()) as u64,
                     usage: meshlet_usage,
-                });
-            let verts_desc = ResourceDesc::Buffer {
-                size: verts_bytes.len() as u64,
-                usage: meshlet_usage,
-            };
-            let verts_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT
-                    | ResourceFlags::STREAMING
-                    | ResourceFlags::STABLE_ID,
-                estimated_size_bytes: verts_desc.estimate_size_bytes(),
-            };
-            let verts_id = existing_meshlets
-                .map(|meshlets| meshlets.vertices)
-                .unwrap_or_else(|| {
-                    self.pool.create_logical(
-                        verts_desc.clone(),
-                        Some(verts_hints),
-                        self.frame_index,
-                        None,
-                    )
-                });
-            self.insert_buffer_entry(verts_id, verts_desc, verts_buffer, verts_hints, Some(id));
+                };
+                let verts_hints = ResourceUsageHints {
+                    flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STABLE_ID,
+                    estimated_size_bytes: verts_desc.estimate_size_bytes(),
+                };
+                let verts_hints = if pinned {
+                    ResourceUsageHints {
+                        flags: verts_hints.flags | ResourceFlags::PINNED,
+                        estimated_size_bytes: verts_hints.estimated_size_bytes,
+                    }
+                } else {
+                    ResourceUsageHints {
+                        flags: verts_hints.flags | ResourceFlags::STREAMING,
+                        estimated_size_bytes: verts_hints.estimated_size_bytes,
+                    }
+                };
+                let verts_id = existing_meshlets
+                    .map(|meshlets| meshlets.vertices)
+                    .unwrap_or_else(|| {
+                        self.pool.create_logical(
+                            verts_desc.clone(),
+                            Some(verts_hints),
+                            self.frame_index,
+                            None,
+                        )
+                    });
+                self.upload_buffer_entry(
+                    verts_id,
+                    bytemuck::cast_slice(lod.meshlets.vertices.as_ref()),
+                    meshlet_usage,
+                    verts_hints.flags,
+                    Some(id),
+                    &format!("mesh-meshlets-{}-lod{}-verts", id, lod.lod_index),
+                );
 
-            let inds_buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(&format!(
-                        "mesh-meshlets-{}-lod{}-indices",
-                        id, lod.lod_index
-                    )),
-                    contents: inds_bytes,
+                let inds_desc = ResourceDesc::Buffer {
+                    size: (lod.meshlets.indices.len() * std::mem::size_of::<u32>()) as u64,
                     usage: meshlet_usage,
-                });
-            let inds_desc = ResourceDesc::Buffer {
-                size: inds_bytes.len() as u64,
-                usage: meshlet_usage,
+                };
+                let inds_hints = ResourceUsageHints {
+                    flags: ResourceFlags::PREFER_RESIDENT | ResourceFlags::STABLE_ID,
+                    estimated_size_bytes: inds_desc.estimate_size_bytes(),
+                };
+                let inds_hints = if pinned {
+                    ResourceUsageHints {
+                        flags: inds_hints.flags | ResourceFlags::PINNED,
+                        estimated_size_bytes: inds_hints.estimated_size_bytes,
+                    }
+                } else {
+                    ResourceUsageHints {
+                        flags: inds_hints.flags | ResourceFlags::STREAMING,
+                        estimated_size_bytes: inds_hints.estimated_size_bytes,
+                    }
+                };
+                let inds_id = existing_meshlets
+                    .map(|meshlets| meshlets.indices)
+                    .unwrap_or_else(|| {
+                        self.pool.create_logical(
+                            inds_desc.clone(),
+                            Some(inds_hints),
+                            self.frame_index,
+                            None,
+                        )
+                    });
+                self.upload_buffer_entry(
+                    inds_id,
+                    bytemuck::cast_slice(lod.meshlets.indices.as_ref()),
+                    meshlet_usage,
+                    inds_hints.flags,
+                    Some(id),
+                    &format!("mesh-meshlets-{}-lod{}-indices", id, lod.lod_index),
+                );
+
+                MeshletGpu {
+                    descs: descs_id,
+                    vertices: verts_id,
+                    indices: inds_id,
+                    count: lod.meshlets.meshlet_count(),
+                }
             };
-            let inds_hints = ResourceUsageHints {
-                flags: ResourceFlags::PREFER_RESIDENT
-                    | ResourceFlags::STREAMING
-                    | ResourceFlags::STABLE_ID,
-                estimated_size_bytes: inds_desc.estimate_size_bytes(),
-            };
-            let inds_id = existing_meshlets
-                .map(|meshlets| meshlets.indices)
-                .unwrap_or_else(|| {
-                    self.pool.create_logical(
-                        inds_desc.clone(),
-                        Some(inds_hints),
-                        self.frame_index,
-                        None,
-                    )
-                });
-            self.insert_buffer_entry(inds_id, inds_desc, inds_buffer, inds_hints, Some(id));
 
             gpu_lods.push(MeshLodResource {
                 lod_index: lod.lod_index,
@@ -6567,12 +7718,7 @@ impl GraphRenderer {
                 buffer: index_id,
                 index_count: lod.indices.len() as u32,
                 estimated_bytes: lod_estimated_bytes,
-                meshlets: MeshletGpu {
-                    descs: descs_id,
-                    vertices: verts_id,
-                    indices: inds_id,
-                    count: meshlet_count,
-                },
+                meshlets,
                 rt_blas_index,
             });
         }
@@ -6591,6 +7737,7 @@ impl GraphRenderer {
                 lods: gpu_lods,
                 bounds,
                 available_lods,
+                streamable: !pinned,
             },
         );
         let requested_lod = self
@@ -6600,16 +7747,72 @@ impl GraphRenderer {
             .unwrap_or(0);
         self.mesh_lod_state.insert(id, requested_lod);
         self.streaming_inflight.remove(id);
-        self.instances_dirty = true;
-        self.shadow_instances_dirty = true;
-        self.shadow_uniforms_dirty = true;
-        self.shadow_bounds_dirty = true;
-        self.gbuffer_draws_dirty = true;
-        self.shadow_draws_dirty = true;
-        self.gpu_instances_dirty = true;
-        self.gpu_draws_dirty = true;
+        let active_mesh_in_scene = self.current_render_data.as_ref().is_some_and(|state| {
+            state
+                .mesh_object_indices(id)
+                .is_some_and(|indices| !indices.is_empty())
+        });
+        if active_mesh_in_scene {
+            if self.gpu_driven_active {
+                if !mesh_had_gpu_resources || self.mesh_draw_selection_changed(id, false) {
+                    self.pending_mesh_binding_changes.push(id);
+                }
+            } else {
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+            }
+        }
 
         Ok(())
+    }
+
+    fn remove_mesh(&mut self, id: usize) {
+        let Some(mesh) = self.meshes.remove(id) else {
+            self.mesh_lod_state.remove(id);
+            self.mesh_lod_min.remove(id);
+            self.streaming_inflight.remove(id);
+            self.rt_blas_targets.remove(&id);
+            return;
+        };
+
+        let shared_empty_meshlets = self.empty_meshlets;
+        for lod in mesh.lods {
+            self.pool.evict(lod.vertex);
+            self.pool.evict(lod.buffer);
+            let uses_shared_empty = shared_empty_meshlets.is_some_and(|shared| {
+                lod.meshlets.descs == shared.descs
+                    && lod.meshlets.vertices == shared.vertices
+                    && lod.meshlets.indices == shared.indices
+            });
+            if !uses_shared_empty {
+                self.pool.evict(lod.meshlets.descs);
+                self.pool.evict(lod.meshlets.vertices);
+                self.pool.evict(lod.meshlets.indices);
+            }
+        }
+        self.mesh_lod_state.remove(id);
+        self.mesh_lod_min.remove(id);
+        self.streaming_inflight.remove(id);
+        self.rt_blas_targets.remove(&id);
+
+        let active_mesh_in_scene = self.current_render_data.as_ref().is_some_and(|state| {
+            state
+                .mesh_object_indices(id)
+                .is_some_and(|indices| !indices.is_empty())
+        });
+        if active_mesh_in_scene {
+            if self.gpu_driven_active {
+                self.gpu_draws_dirty = true;
+                self.gpu_cull_dirty = true;
+            } else {
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+            }
+        }
     }
 
     fn upload_texture(
@@ -6874,6 +8077,41 @@ impl GraphRenderer {
             .or_else(|| self.pending_materials.get(&id))
     }
 
+    fn accumulate_texture_streaming_for_material_request(
+        &mut self,
+        material_id: usize,
+        priority: f32,
+        force_low_res: bool,
+        critical: bool,
+    ) {
+        let Some(texture_ids) = self.material_meta(material_id).map(material_texture_ids) else {
+            return;
+        };
+        for texture_id in texture_ids.into_iter().flatten() {
+            let texture_resource = self
+                .pool
+                .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+            let texture_priority =
+                self.adjust_request_priority(texture_resource, texture_id, priority);
+            let texture_estimated_bytes = self.estimate_stream_request_bytes(
+                AssetStreamKind::Texture,
+                texture_id,
+                None,
+                force_low_res,
+            );
+            self.streaming_texture_scratch.upsert(
+                texture_id,
+                texture_resource,
+                AssetStreamKind::Texture,
+                None,
+                texture_priority,
+                texture_estimated_bytes,
+                force_low_res,
+                critical,
+            );
+        }
+    }
+
     fn material_alpha_mode(&self, id: usize) -> AlphaMode {
         self.material_meta(id)
             .map(|meta| meta.alpha_mode)
@@ -6909,6 +8147,142 @@ impl GraphRenderer {
         self.pool.mark_used(id, self.frame_index);
     }
 
+    fn upload_buffer_entry(
+        &mut self,
+        id: ResourceId,
+        bytes: &[u8],
+        usage: wgpu::BufferUsages,
+        flags: ResourceFlags,
+        asset_stream_id: Option<usize>,
+        label: &str,
+    ) {
+        let needed = bytes.len() as u64;
+        if let Some(buffer) = self.pool.entry(id).and_then(|entry| {
+            can_reuse_uploaded_buffer(entry, usage, needed)
+                .then(|| entry.buffer.as_ref().expect("resident buffer").clone())
+        }) {
+            if !bytes.is_empty() {
+                self.queue.write_buffer(&buffer, 0, bytes);
+            }
+            if let Some(entry) = self.pool.entry_mut(id) {
+                entry.asset_stream_id = asset_stream_id.map(|value| value as u32);
+                entry.last_used_frame = self.frame_index;
+                entry.hints.flags = flags;
+            }
+            self.pool.mark_used(id, self.frame_index);
+            return;
+        }
+
+        self.pool.evict(id);
+        let size = target_upload_buffer_size(needed, self.device_caps.limits.max_buffer_size);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: true,
+        });
+        if !bytes.is_empty() {
+            let mut mapped = buffer.slice(..needed).get_mapped_range_mut();
+            mapped.copy_from_slice(bytes);
+        }
+        buffer.unmap();
+        let desc = ResourceDesc::Buffer { size, usage };
+        let hints = ResourceUsageHints {
+            flags,
+            estimated_size_bytes: size,
+        };
+        self.insert_buffer_entry(id, desc, buffer, hints, asset_stream_id);
+    }
+
+    fn ensure_empty_meshlets(&mut self) -> MeshletGpu {
+        if let Some(meshlets) = self.empty_meshlets {
+            return meshlets;
+        }
+
+        let meshlet_usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let flags =
+            ResourceFlags::PINNED | ResourceFlags::PREFER_RESIDENT | ResourceFlags::STABLE_ID;
+        let empty_desc = MeshletDesc {
+            vertex_offset: 0,
+            vertex_count: 0,
+            index_offset: 0,
+            index_count: 0,
+            bounds_center: [0.0; 3],
+            bounds_radius: 0.0,
+        };
+        let descs_id = self.pool.create_logical(
+            ResourceDesc::Buffer {
+                size: std::mem::size_of::<MeshletDesc>() as u64,
+                usage: meshlet_usage,
+            },
+            Some(ResourceUsageHints {
+                flags,
+                estimated_size_bytes: std::mem::size_of::<MeshletDesc>() as u64,
+            }),
+            self.frame_index,
+            None,
+        );
+        self.upload_buffer_entry(
+            descs_id,
+            bytemuck::bytes_of(&empty_desc),
+            meshlet_usage,
+            flags,
+            None,
+            "Mesh/EmptyMeshletDescs",
+        );
+
+        let verts_id = self.pool.create_logical(
+            ResourceDesc::Buffer {
+                size: std::mem::size_of::<u32>() as u64,
+                usage: meshlet_usage,
+            },
+            Some(ResourceUsageHints {
+                flags,
+                estimated_size_bytes: std::mem::size_of::<u32>() as u64,
+            }),
+            self.frame_index,
+            None,
+        );
+        self.upload_buffer_entry(
+            verts_id,
+            bytemuck::cast_slice(&[0u32]),
+            meshlet_usage,
+            flags,
+            None,
+            "Mesh/EmptyMeshletVerts",
+        );
+
+        let inds_id = self.pool.create_logical(
+            ResourceDesc::Buffer {
+                size: std::mem::size_of::<u32>() as u64,
+                usage: meshlet_usage,
+            },
+            Some(ResourceUsageHints {
+                flags,
+                estimated_size_bytes: std::mem::size_of::<u32>() as u64,
+            }),
+            self.frame_index,
+            None,
+        );
+        self.upload_buffer_entry(
+            inds_id,
+            bytemuck::cast_slice(&[0u32]),
+            meshlet_usage,
+            flags,
+            None,
+            "Mesh/EmptyMeshletIndices",
+        );
+
+        let meshlets = MeshletGpu {
+            descs: descs_id,
+            vertices: verts_id,
+            indices: inds_id,
+            count: 0,
+        };
+        self.empty_meshlets = Some(meshlets);
+        meshlets
+    }
+
     fn ingest_render_data(&mut self, data: Arc<RenderData>) {
         let reset_scan_cursor = self.current_render_data.is_none();
         self.pending_render_delta = None;
@@ -6928,8 +8302,9 @@ impl GraphRenderer {
         self.gpu_instances_dirty = true;
         self.gpu_draws_dirty = true;
         let data = (*data).clone();
-        self.refresh_streaming_plan(&data);
-        self.current_render_data = Some(RenderSceneState::new(data));
+        let state = RenderSceneState::new(data);
+        self.refresh_streaming_plan(&state);
+        self.current_render_data = Some(state);
     }
 
     fn mark_streaming_plan_usage(&mut self, plan: &StreamingPlan) {
@@ -6940,23 +8315,40 @@ impl GraphRenderer {
                     let Some(mesh) = self.meshes.get(req.asset_id) else {
                         continue;
                     };
-                    if mesh.lods.is_empty() {
+                    let selections =
+                        self.stable_draw_lod_selections(req.asset_id, mesh, require_meshlets);
+                    if selections.is_empty() && require_meshlets {
+                        for selection in self.stable_draw_lod_selections(req.asset_id, mesh, false)
+                        {
+                            self.pool.mark_used(selection.vertex, self.frame_index);
+                            self.pool.mark_used(selection.index, self.frame_index);
+                            if self.buffer_resident(selection.meshlet_descs)
+                                && self.buffer_resident(selection.meshlet_vertices)
+                                && self.buffer_resident(selection.meshlet_indices)
+                            {
+                                self.pool
+                                    .mark_used(selection.meshlet_descs, self.frame_index);
+                                self.pool
+                                    .mark_used(selection.meshlet_vertices, self.frame_index);
+                                self.pool
+                                    .mark_used(selection.meshlet_indices, self.frame_index);
+                            }
+                        }
                         continue;
                     }
-                    let desired = req.max_lod.unwrap_or(0);
-                    let mut lod_index = self.select_resident_lod(mesh, desired, require_meshlets);
-                    if lod_index.is_none() && require_meshlets {
-                        lod_index = self.select_resident_lod(mesh, desired, false);
-                    }
-                    if let Some(lod_index) = lod_index {
-                        if let Some(lod) = mesh.lods.get(lod_index) {
-                            self.pool.mark_used(lod.vertex, self.frame_index);
-                            self.pool.mark_used(lod.buffer, self.frame_index);
-                            if self.meshlet_resident(lod) {
-                                self.pool.mark_used(lod.meshlets.descs, self.frame_index);
-                                self.pool.mark_used(lod.meshlets.vertices, self.frame_index);
-                                self.pool.mark_used(lod.meshlets.indices, self.frame_index);
-                            }
+                    for selection in selections {
+                        self.pool.mark_used(selection.vertex, self.frame_index);
+                        self.pool.mark_used(selection.index, self.frame_index);
+                        if self.buffer_resident(selection.meshlet_descs)
+                            && self.buffer_resident(selection.meshlet_vertices)
+                            && self.buffer_resident(selection.meshlet_indices)
+                        {
+                            self.pool
+                                .mark_used(selection.meshlet_descs, self.frame_index);
+                            self.pool
+                                .mark_used(selection.meshlet_vertices, self.frame_index);
+                            self.pool
+                                .mark_used(selection.meshlet_indices, self.frame_index);
                         }
                     }
                 }
@@ -6975,6 +8367,75 @@ impl GraphRenderer {
                         .asset_id_to_resource(ResourceKind::Texture, req.asset_id as u32);
                     self.pool.mark_used(rid, self.frame_index);
                 }
+            }
+        }
+    }
+
+    fn mark_active_scene_usage(&mut self, scene: &RenderSceneState) {
+        let require_meshlets = scene.data.render_config.use_mesh_shaders
+            && self.device_caps.supports_mesh_pipeline()
+            && !scene.data.render_config.gpu_driven;
+
+        for mesh_id in scene.active_mesh_ids_sorted() {
+            let Some(mesh) = self.meshes.get(mesh_id) else {
+                continue;
+            };
+            let selections = self.stable_draw_lod_selections(mesh_id, mesh, require_meshlets);
+            if selections.is_empty() && require_meshlets {
+                for selection in self.stable_draw_lod_selections(mesh_id, mesh, false) {
+                    self.pool.mark_used(selection.vertex, self.frame_index);
+                    self.pool.mark_used(selection.index, self.frame_index);
+                    if self.buffer_resident(selection.meshlet_descs)
+                        && self.buffer_resident(selection.meshlet_vertices)
+                        && self.buffer_resident(selection.meshlet_indices)
+                    {
+                        self.pool
+                            .mark_used(selection.meshlet_descs, self.frame_index);
+                        self.pool
+                            .mark_used(selection.meshlet_vertices, self.frame_index);
+                        self.pool
+                            .mark_used(selection.meshlet_indices, self.frame_index);
+                    }
+                }
+                continue;
+            }
+            for selection in selections {
+                self.pool.mark_used(selection.vertex, self.frame_index);
+                self.pool.mark_used(selection.index, self.frame_index);
+                if self.buffer_resident(selection.meshlet_descs)
+                    && self.buffer_resident(selection.meshlet_vertices)
+                    && self.buffer_resident(selection.meshlet_indices)
+                {
+                    self.pool
+                        .mark_used(selection.meshlet_descs, self.frame_index);
+                    self.pool
+                        .mark_used(selection.meshlet_vertices, self.frame_index);
+                    self.pool
+                        .mark_used(selection.meshlet_indices, self.frame_index);
+                }
+            }
+        }
+
+        for material_id in scene.active_material_ids() {
+            let rid = self
+                .pool
+                .asset_id_to_resource(ResourceKind::Buffer, material_id as u32);
+            self.pool.mark_used(rid, self.frame_index);
+
+            let Some(entry) = self.materials.get(material_id) else {
+                continue;
+            };
+            let texture_ids = [
+                entry.meta.albedo_texture_id,
+                entry.meta.normal_texture_id,
+                entry.meta.metallic_roughness_texture_id,
+                entry.meta.emission_texture_id,
+            ];
+            for texture_id in texture_ids.into_iter().flatten() {
+                let rid = self
+                    .pool
+                    .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
+                self.pool.mark_used(rid, self.frame_index);
             }
         }
     }
@@ -7280,10 +8741,12 @@ impl GraphRenderer {
         let dist_pred = (world_center - predicted_cam).length();
         let distance = dist_now.min(dist_pred);
 
-        let mesh_radius = self
-            .meshes
-            .get(obj.mesh_id)
-            .map(|m| m.bounds.extents().length())
+        let mesh = self.meshes.get(obj.mesh_id);
+        if mesh.is_some_and(|resident| !resident.streamable) {
+            return;
+        }
+        let mesh_radius = mesh
+            .map(|resident| resident.bounds.extents().length())
             .unwrap_or(1.0);
         let size_bias = self.streaming_tuning.priority_size_bias.max(0.0);
         let distance_bias = self.streaming_tuning.priority_distance_bias.max(0.0);
@@ -7315,18 +8778,13 @@ impl GraphRenderer {
         if matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard {
             desired_lod = usize::MAX;
         }
-        let max_idx = self
-            .meshes
-            .get(obj.mesh_id)
-            .map(|mesh| mesh.available_lods.saturating_sub(1));
+        let max_idx = mesh.map(|resident| resident.available_lods.saturating_sub(1));
         let Some(desired_lod) = self.clamp_mesh_lod(obj.mesh_id, desired_lod, max_idx) else {
             return;
         };
 
-        let mesh_resident = self
-            .meshes
-            .get(obj.mesh_id)
-            .and_then(|mesh| self.select_resident_lod(mesh, desired_lod, require_meshlets))
+        let mesh_resident = mesh
+            .and_then(|resident| self.select_resident_lod(resident, desired_lod, require_meshlets))
             .is_some();
         if !mesh_resident {
             critical = true;
@@ -7384,41 +8842,9 @@ impl GraphRenderer {
             None,
             material_priority,
             material_estimated_bytes,
-            false,
+            force_low_res,
             critical,
         );
-
-        if let Some(mat) = self.material_meta(obj.material_id) {
-            let tex_ids = [
-                mat.albedo_texture_id,
-                mat.normal_texture_id,
-                mat.metallic_roughness_texture_id,
-                mat.emission_texture_id,
-            ];
-            for tex in tex_ids.iter().flatten() {
-                let texture_resource = self
-                    .pool
-                    .asset_id_to_resource(ResourceKind::Texture, *tex as u32);
-                let texture_priority =
-                    self.adjust_request_priority(texture_resource, *tex, priority);
-                let texture_estimated_bytes = self.estimate_stream_request_bytes(
-                    AssetStreamKind::Texture,
-                    *tex,
-                    None,
-                    force_low_res,
-                );
-                self.streaming_texture_scratch.upsert(
-                    *tex,
-                    texture_resource,
-                    AssetStreamKind::Texture,
-                    None,
-                    texture_priority,
-                    texture_estimated_bytes,
-                    force_low_res,
-                    critical,
-                );
-            }
-        }
     }
 
     fn build_streaming_plan(
@@ -7461,11 +8887,23 @@ impl GraphRenderer {
 
         let critical_threshold = self.streaming_tuning.priority_critical;
         let sprite_animation_time_sec = self.sprite_animation_epoch.elapsed().as_secs_f32();
+        self.ensure_cached_static_sprite_draw_data(data);
+        let cached_static_texture_ids: Option<Arc<Vec<usize>>> = self
+            .cached_static_sprite_draw_data
+            .source
+            .as_ref()
+            .filter(|cached| Arc::ptr_eq(cached, &data.static_sprites))
+            .map(|_| Arc::clone(&self.cached_static_sprite_draw_data.stream_texture_ids));
 
         let do_full_scan = allow_full_scan;
         let scan_budget = data.render_config.streaming_scan_budget as usize;
         let object_count = data.objects.len();
-        let sprite_count = data.sprites.len();
+        let static_sprite_count = cached_static_texture_ids
+            .as_ref()
+            .map(|ids| ids.len())
+            .unwrap_or_else(|| data.static_sprites.len());
+        let dynamic_sprite_count = data.sprites.len();
+        let sprite_count = static_sprite_count.saturating_add(dynamic_sprite_count);
         let total_scan_count = object_count.saturating_add(sprite_count);
         if do_full_scan || scan_budget == 0 || total_scan_count <= scan_budget {
             for obj in &data.objects {
@@ -7480,7 +8918,29 @@ impl GraphRenderer {
                     require_meshlets,
                 );
             }
-            for sprite in &data.sprites {
+            if let Some(texture_ids) = cached_static_texture_ids.as_ref() {
+                for texture_id in texture_ids.iter().copied() {
+                    self.accumulate_texture_stream_request(
+                        texture_id,
+                        self.streaming_tuning.priority_near.max(priority_floor),
+                        false,
+                        priority_floor,
+                        critical_threshold,
+                    );
+                }
+            } else {
+                for sprite in data.static_sprites.iter() {
+                    self.accumulate_streaming_for_sprite(
+                        sprite,
+                        camera_pos,
+                        pressure,
+                        priority_floor,
+                        critical_threshold,
+                        sprite_animation_time_sec,
+                    );
+                }
+            }
+            for sprite in data.sprites.iter() {
                 self.accumulate_streaming_for_sprite(
                     sprite,
                     camera_pos,
@@ -7543,7 +9003,25 @@ impl GraphRenderer {
                 let mut scanned = 0usize;
                 while scanned < sprite_budget {
                     let idx = (start + scanned) % sprite_count;
-                    let sprite = &data.sprites[idx];
+                    if let Some(texture_ids) = cached_static_texture_ids.as_ref() {
+                        if idx < static_sprite_count {
+                            let texture_id = texture_ids[idx];
+                            self.accumulate_texture_stream_request(
+                                texture_id,
+                                self.streaming_tuning.priority_near.max(priority_floor),
+                                false,
+                                priority_floor,
+                                critical_threshold,
+                            );
+                            scanned += 1;
+                            continue;
+                        }
+                    }
+                    let sprite = if idx < static_sprite_count {
+                        &data.static_sprites[idx]
+                    } else {
+                        &data.sprites[idx - static_sprite_count]
+                    };
                     self.accumulate_streaming_for_sprite(
                         sprite,
                         camera_pos,
@@ -7574,6 +9052,9 @@ impl GraphRenderer {
 
                 match req.kind {
                     AssetStreamKind::Mesh => {
+                        if self.meshes.get(req.id).is_some_and(|mesh| !mesh.streamable) {
+                            continue;
+                        }
                         let mut desired_lod = req.max_lod.unwrap_or(0);
                         let mut lod_bias = base_lod_bias;
                         if priority > self.streaming_tuning.priority_near {
@@ -7656,41 +9137,9 @@ impl GraphRenderer {
                             None,
                             priority,
                             material_estimated_bytes,
-                            false,
+                            force_low_res,
                             critical,
                         );
-
-                        if let Some(mat) = self.material_meta(req.id) {
-                            let tex_ids = [
-                                mat.albedo_texture_id,
-                                mat.normal_texture_id,
-                                mat.metallic_roughness_texture_id,
-                                mat.emission_texture_id,
-                            ];
-                            for tex in tex_ids.iter().flatten() {
-                                let texture_resource = self
-                                    .pool
-                                    .asset_id_to_resource(ResourceKind::Texture, *tex as u32);
-                                let texture_priority =
-                                    self.adjust_request_priority(texture_resource, *tex, priority);
-                                let texture_estimated_bytes = self.estimate_stream_request_bytes(
-                                    AssetStreamKind::Texture,
-                                    *tex,
-                                    None,
-                                    force_low_res,
-                                );
-                                self.streaming_texture_scratch.upsert(
-                                    *tex,
-                                    texture_resource,
-                                    AssetStreamKind::Texture,
-                                    None,
-                                    texture_priority,
-                                    texture_estimated_bytes,
-                                    force_low_res,
-                                    critical,
-                                );
-                            }
-                        }
                     }
                     AssetStreamKind::Texture => {
                         if !critical && priority_floor > 0.0 && priority < priority_floor {
@@ -7764,6 +9213,24 @@ impl GraphRenderer {
             .drain_into(&mut self.streaming_mesh_requests);
         self.streaming_material_scratch
             .drain_into(&mut self.streaming_material_requests);
+        for index in 0..self.streaming_material_requests.len() {
+            let (material_id, priority, force_low_res, critical) = {
+                let request = &self.streaming_material_requests[index];
+                (
+                    request.asset_id,
+                    request.priority,
+                    request.force_low_res,
+                    request.critical,
+                )
+            };
+            self.accumulate_texture_streaming_for_material_request(
+                material_id,
+                priority,
+                force_low_res,
+                critical,
+            );
+            self.streaming_material_requests[index].force_low_res = false;
+        }
         self.streaming_texture_scratch
             .drain_into(&mut self.streaming_texture_requests);
 
@@ -8564,6 +10031,157 @@ impl GraphRenderer {
         }
     }
 
+    fn ensure_cached_static_sprite_draw_data(&mut self, render_data: &RenderData) {
+        if self
+            .cached_static_sprite_draw_data
+            .source
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &render_data.static_sprites))
+        {
+            return;
+        }
+
+        let mut opaque_instances = Vec::new();
+        let mut texture_slots = vec![None];
+        let mut texture_slot_map: HashMap<usize, u32> = HashMap::new();
+        let mut stream_texture_ids: Vec<usize> = Vec::new();
+        let mut seen_stream_textures: HashSet<usize> = HashSet::new();
+
+        for sprite in render_data.static_sprites.iter() {
+            if let Some(texture_id) = sprite.texture_id {
+                if seen_stream_textures.insert(texture_id) {
+                    stream_texture_ids.push(texture_id);
+                }
+            }
+            if let Some(sequence) = sprite
+                .image_sequence
+                .as_ref()
+                .filter(|sequence| sequence.enabled)
+            {
+                for texture_id in sequence.texture_ids.iter().copied() {
+                    if seen_stream_textures.insert(texture_id) {
+                        stream_texture_ids.push(texture_id);
+                    }
+                }
+            }
+
+            if !sprite_is_cacheable_static_opaque(sprite) {
+                continue;
+            }
+
+            let texture_slot = if let Some(texture_id) = sprite.texture_id {
+                if let Some(slot) = texture_slot_map.get(&texture_id).copied() {
+                    slot
+                } else {
+                    let slot = texture_slots.len() as u32;
+                    texture_slots.push(Some(texture_id));
+                    texture_slot_map.insert(texture_id, slot);
+                    slot
+                }
+            } else {
+                0
+            };
+
+            let mut flags = SPRITE_FLAG_WORLD_SPACE | SPRITE_FLAG_DEPTH_WRITE;
+            let clip = if let Some(rect) = sprite.clip_rect {
+                flags |= SPRITE_FLAG_CLIP_ENABLED;
+                rect
+            } else {
+                [0.0, 0.0, 0.0, 0.0]
+            };
+            let (right, up, size, pivot, correction) =
+                if let (Some(raw_right), Some(raw_up)) = (sprite.world_right, sprite.world_up) {
+                    (
+                        raw_right,
+                        raw_up,
+                        Vec2::ONE,
+                        sprite.pivot,
+                        sprite.quad_correction,
+                    )
+                } else {
+                    let rotation = sprite.rotation;
+                    (
+                        rotation * -Vec3::X,
+                        rotation * -Vec3::Y,
+                        sprite.size,
+                        sprite.pivot,
+                        Vec3::ZERO,
+                    )
+                };
+            let pick_id = if sprite.pick_id != 0 {
+                sprite.pick_id
+            } else {
+                sprite.id as u32
+            };
+            let (pivot_clip_min, clip_max_layer) = if correction.length_squared() > f32::EPSILON {
+                flags |= SPRITE_FLAG_QUAD_CORRECTION;
+                (
+                    [pivot[0], pivot[1], correction.x, correction.y],
+                    [correction.z, 0.0, sprite.layer, 0.0],
+                )
+            } else {
+                (
+                    [pivot[0], pivot[1], clip[0], clip[1]],
+                    [clip[2], clip[3], sprite.layer, 0.0],
+                )
+            };
+
+            opaque_instances.push(SpriteInstanceRaw {
+                origin_mode: [sprite.position.x, sprite.position.y, sprite.position.z, 1.0],
+                right_size_x: [right.x, right.y, right.z, size.x],
+                up_size_y: [up.x, up.y, up.z, size.y],
+                uv_rect: resolve_sprite_uv_rect(sprite, 0.0),
+                color: sprite.color,
+                pivot_clip_min,
+                clip_max_layer,
+                meta: [texture_slot, flags, pick_id, SpriteBlendMode::Alpha as u32],
+            });
+        }
+
+        self.cached_static_sprite_draw_data = CachedStaticSpriteDrawData {
+            source: Some(Arc::clone(&render_data.static_sprites)),
+            opaque_instances: Arc::new(opaque_instances),
+            texture_slots: Arc::new(texture_slots),
+            stream_texture_ids: Arc::new(stream_texture_ids),
+        };
+    }
+
+    fn resolve_cached_sprite_texture_views(
+        &mut self,
+        texture_slots: &[Option<usize>],
+    ) -> (Vec<wgpu::TextureView>, HashMap<usize, u32>) {
+        let mut sprite_textures = Vec::with_capacity(texture_slots.len().max(1));
+        let mut resolved_slots = HashMap::new();
+
+        if texture_slots.is_empty() {
+            sprite_textures.push(self.fallback_albedo_view.clone());
+            return (sprite_textures, resolved_slots);
+        }
+
+        for (slot_index, texture_id) in texture_slots.iter().enumerate() {
+            let view = if let Some(texture_id) = texture_id {
+                resolved_slots.insert(*texture_id, slot_index as u32);
+                let rid = self
+                    .pool
+                    .asset_id_to_resource(ResourceKind::Texture, *texture_id as u32);
+                let view = self
+                    .pool
+                    .texture_view(rid)
+                    .cloned()
+                    .unwrap_or_else(|| self.fallback_albedo_view.clone());
+                if self.pool.entry(rid).is_some() {
+                    self.pool.mark_used(rid, self.frame_index);
+                }
+                view
+            } else {
+                self.fallback_albedo_view.clone()
+            };
+            sprite_textures.push(view);
+        }
+
+        (sprite_textures, resolved_slots)
+    }
+
     fn build_sprite_draw_data(
         &mut self,
         render_data: &RenderData,
@@ -8572,9 +10190,19 @@ impl GraphRenderer {
         Arc<Vec<SpriteDrawBatch>>,
         Arc<Vec<wgpu::TextureView>>,
     ) {
-        let mut sprite_instances: Vec<SpriteInstanceRaw> = Vec::new();
-        let mut sprite_textures: Vec<wgpu::TextureView> = vec![self.fallback_albedo_view.clone()];
-        let mut texture_slots: HashMap<usize, u32> = HashMap::new();
+        #[derive(Clone, Copy)]
+        struct OrderedSpriteInstance {
+            insertion_order: usize,
+            raw: SpriteInstanceRaw,
+        }
+
+        self.ensure_cached_static_sprite_draw_data(render_data);
+
+        let mut opaque_world_instances: Vec<SpriteInstanceRaw> = Vec::new();
+        let mut sorted_sprite_instances: Vec<OrderedSpriteInstance> = Vec::new();
+        let cached_texture_slots = Arc::clone(&self.cached_static_sprite_draw_data.texture_slots);
+        let (mut sprite_textures, mut texture_slots) =
+            self.resolve_cached_sprite_texture_views(cached_texture_slots.as_slice());
         let mut missing_sprite_requests: HashMap<usize, AssetStreamingRequest> = HashMap::new();
         let mut glyph_texture_slot: Option<u32> = None;
         let sprite_animation_time_sec = self.sprite_animation_epoch.elapsed().as_secs_f32();
@@ -8621,6 +10249,12 @@ impl GraphRenderer {
             Mat4::perspective_infinite_reverse_rh(camera_fov, camera_aspect, camera_near)
                 * camera_view;
 
+        for instance in self.cached_static_sprite_draw_data.opaque_instances.iter() {
+            if sprite_instance_world_visible(instance, camera_view_proj) {
+                opaque_world_instances.push(*instance);
+            }
+        }
+
         let mut resolve_texture_slot =
             |renderer: &mut Self, texture_id: Option<usize>, request_priority: f32| -> u32 {
                 let Some(texture_id) = texture_id else {
@@ -8653,27 +10287,72 @@ impl GraphRenderer {
                 texture_slots.insert(texture_id, slot);
                 slot
             };
+        let mut push_sprite_instance = |raw: SpriteInstanceRaw| {
+            if raw.origin_mode[3] > 0.5 && sprite_depth_write_enabled(&raw) {
+                opaque_world_instances.push(raw);
+            } else {
+                sorted_sprite_instances.push(OrderedSpriteInstance {
+                    insertion_order: sorted_sprite_instances.len(),
+                    raw,
+                });
+            }
+        };
 
-        for sprite in &render_data.sprites {
+        for sprite in render_data
+            .static_sprites
+            .iter()
+            .filter(|sprite| !sprite_is_cacheable_static_opaque(sprite))
+            .chain(render_data.sprites.iter())
+        {
             let size = Vec2::new(sprite.size.x.max(0.0), sprite.size.y.max(0.0));
             if size.x <= 0.0 || size.y <= 0.0 {
                 continue;
             }
-            let (right, up, mode) = match sprite.space {
+            let is_world_space = matches!(sprite.space, SpriteSpace::World);
+            let (right, up, basis_size, mode, quad_correction) = match sprite.space {
                 SpriteSpace::World => {
-                    let rotation = if sprite.billboard {
-                        Quat::IDENTITY
+                    if let (Some(raw_right), Some(raw_up)) = (sprite.world_right, sprite.world_up) {
+                        (raw_right, raw_up, Vec2::ONE, 1.0f32, sprite.quad_correction)
                     } else {
-                        sprite.rotation
-                    };
-                    if sprite.billboard {
-                        (camera_right, camera_up, 1.0f32)
-                    } else {
-                        (rotation * -Vec3::X, rotation * -Vec3::Y, 1.0f32)
+                        let rotation = if sprite.billboard {
+                            Quat::IDENTITY
+                        } else {
+                            sprite.rotation
+                        };
+                        if sprite.billboard {
+                            (camera_right, camera_up, size, 1.0f32, Vec3::ZERO)
+                        } else {
+                            (
+                                rotation * -Vec3::X,
+                                rotation * -Vec3::Y,
+                                size,
+                                1.0f32,
+                                Vec3::ZERO,
+                            )
+                        }
                     }
                 }
-                SpriteSpace::Screen => (Vec3::X, Vec3::Y, 0.0f32),
+                SpriteSpace::Screen => {
+                    if let (Some(raw_right), Some(raw_up)) = (sprite.world_right, sprite.world_up) {
+                        (raw_right, raw_up, Vec2::ONE, 0.0f32, sprite.quad_correction)
+                    } else {
+                        (Vec3::X, Vec3::Y, size, 0.0f32, Vec3::ZERO)
+                    }
+                }
             };
+            if is_world_space
+                && !sprite_world_visible(
+                    sprite.position,
+                    right,
+                    up,
+                    basis_size,
+                    sprite.pivot,
+                    quad_correction,
+                    camera_view_proj,
+                )
+            {
+                continue;
+            }
             let mut flags = 0u32;
             let clip = if let Some(rect) = sprite.clip_rect {
                 flags |= SPRITE_FLAG_CLIP_ENABLED;
@@ -8681,6 +10360,15 @@ impl GraphRenderer {
             } else {
                 [0.0, 0.0, 0.0, 0.0]
             };
+            if is_world_space {
+                flags |= SPRITE_FLAG_WORLD_SPACE;
+                if matches!(sprite.blend_mode, SpriteBlendMode::Alpha) && sprite.color[3] >= 0.999 {
+                    flags |= SPRITE_FLAG_DEPTH_WRITE;
+                }
+            }
+            if quad_correction.length_squared() > f32::EPSILON {
+                flags |= SPRITE_FLAG_QUAD_CORRECTION;
+            }
             let texture_id = resolve_sprite_sequence_texture_id(sprite, sprite_animation_time_sec)
                 .or(sprite.texture_id);
             let stream_priority =
@@ -8693,19 +10381,35 @@ impl GraphRenderer {
                 sprite.id as u32
             };
             let uv_rect = resolve_sprite_uv_rect(sprite, sprite_animation_time_sec);
-            sprite_instances.push(SpriteInstanceRaw {
+            let (pivot_clip_min, clip_max_layer) = if (flags & SPRITE_FLAG_QUAD_CORRECTION) != 0 {
+                (
+                    [
+                        sprite.pivot[0],
+                        sprite.pivot[1],
+                        quad_correction.x,
+                        quad_correction.y,
+                    ],
+                    [quad_correction.z, 0.0, sprite.layer, 0.0],
+                )
+            } else {
+                (
+                    [sprite.pivot[0], sprite.pivot[1], clip[0], clip[1]],
+                    [clip[2], clip[3], sprite.layer, 0.0],
+                )
+            };
+            push_sprite_instance(SpriteInstanceRaw {
                 origin_mode: [
                     sprite.position.x,
                     sprite.position.y,
                     sprite.position.z,
                     mode,
                 ],
-                right_size_x: [right.x, right.y, right.z, size.x],
-                up_size_y: [up.x, up.y, up.z, size.y],
+                right_size_x: [right.x, right.y, right.z, basis_size.x],
+                up_size_y: [up.x, up.y, up.z, basis_size.y],
                 uv_rect,
                 color: sprite.color,
-                pivot_clip_min: [sprite.pivot[0], sprite.pivot[1], clip[0], clip[1]],
-                clip_max_layer: [clip[2], clip[3], sprite.layer, 0.0],
+                pivot_clip_min,
+                clip_max_layer,
                 meta: [texture_slot, flags, pick_id, sprite.blend_mode as u32],
             });
         }
@@ -8954,6 +10658,9 @@ impl GraphRenderer {
             };
 
             let mut text_flags = SPRITE_FLAG_TEXT_ALPHA;
+            if is_world_space {
+                text_flags |= SPRITE_FLAG_WORLD_SPACE;
+            }
             let clip = if let Some(rect) = text.clip_rect {
                 text_flags |= SPRITE_FLAG_CLIP_ENABLED;
                 rect
@@ -8986,7 +10693,7 @@ impl GraphRenderer {
                 let local_y = glyph.y + glyph.entry.top + align_y;
                 let origin = text.position + right * local_x + up * local_y;
 
-                sprite_instances.push(SpriteInstanceRaw {
+                push_sprite_instance(SpriteInstanceRaw {
                     origin_mode: [origin.x, origin.y, origin.z, mode],
                     right_size_x: [right.x, right.y, right.z, glyph.entry.width],
                     up_size_y: [up.x, up.y, up.z, glyph.entry.height],
@@ -9011,7 +10718,7 @@ impl GraphRenderer {
                 let local_x = decoration.x + align_x;
                 let local_y = decoration.y + align_y;
                 let origin = text.position + right * local_x + up * local_y;
-                sprite_instances.push(SpriteInstanceRaw {
+                push_sprite_instance(SpriteInstanceRaw {
                     origin_mode: [origin.x, origin.y, origin.z, mode],
                     right_size_x: [right.x, right.y, right.z, decoration.width],
                     up_size_y: [up.x, up.y, up.z, decoration.height],
@@ -9044,6 +10751,25 @@ impl GraphRenderer {
             }
             self.streaming_dirty = true;
         }
+
+        if !sorted_sprite_instances.is_empty() {
+            sorted_sprite_instances.sort_by(|left, right| {
+                compare_sprite_instances(
+                    left.insertion_order,
+                    &left.raw,
+                    right.insertion_order,
+                    &right.raw,
+                    sprite_stream_camera_pos,
+                    camera_forward,
+                )
+            });
+        }
+        let mut sprite_instances = opaque_world_instances;
+        sprite_instances.extend(
+            sorted_sprite_instances
+                .into_iter()
+                .map(|instance| instance.raw),
+        );
 
         let sprite_batches = if sprite_instances.is_empty() {
             Vec::new()
@@ -9989,9 +11715,15 @@ impl GraphRenderer {
             .shared_stats
             .profiling_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
-        let alpha = 1.0;
+        let logic_frame_duration = self.logic_frame_duration.as_secs_f32().max(f32::EPSILON);
+        let elapsed_since_logic = Instant::now().saturating_duration_since(render_data.timestamp);
+        let alpha = (elapsed_since_logic.as_secs_f32() / logic_frame_duration).clamp(0.0, 1.0);
         let prev_view_proj = self.prev_view_proj;
         let mut frame_render_config = render_data.render_config;
+        self.apply_pending_mesh_binding_changes(
+            scene,
+            frame_render_config.bundle_cache_stable_frames,
+        );
         let frames_in_flight = frame_render_config.frames_in_flight.max(1) as usize;
         if frames_in_flight != self.frames_in_flight {
             self.frames_in_flight = frames_in_flight;
@@ -10009,6 +11741,12 @@ impl GraphRenderer {
             self.gpu_draws_dirty = true;
             self.gpu_instance_updates.clear();
             self.gpu_cull_dirty = true;
+            if !gpu_driven {
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+            }
         }
         if self.bundle_invalidate_pending {
             self.bundle_invalidate_pending = false;
@@ -10246,16 +11984,19 @@ impl GraphRenderer {
         };
 
         if self.streaming_pressure != self.last_instance_pressure {
-            self.instances_dirty = true;
-            self.shadow_instances_dirty = true;
-            self.shadow_uniforms_dirty = true;
-            self.shadow_bounds_dirty = true;
-            self.gbuffer_draws_dirty = true;
-            self.shadow_draws_dirty = true;
+            if gpu_driven {
+                self.last_instance_pressure = self.streaming_pressure;
+            } else {
+                self.instances_dirty = true;
+                self.shadow_instances_dirty = true;
+                self.gbuffer_draws_dirty = true;
+                self.shadow_draws_dirty = true;
+            }
         }
 
         let materials_dirty = self.materials_dirty;
         let material_needs_rebuild = materials_dirty || self.cached_texture_array_size == 0;
+        let mut shadow_bundle_force_rebuild = false;
         let mut texture_overflow = self.cached_texture_overflow;
         let (
             material_buffer,
@@ -10315,6 +12056,7 @@ impl GraphRenderer {
             self.gpu_instances_dirty = true;
             self.gpu_instance_updates.clear();
             self.gpu_cull_dirty = true;
+            shadow_bundle_force_rebuild = true;
             tracing::warn!(
                 max_sampled_textures_per_shader_stage = self
                     .device_caps
@@ -10340,8 +12082,9 @@ impl GraphRenderer {
             let build = self.build_material_textures(materials_dirty);
             if build.changed {
                 self.cached_material_textures = Some(build.textures.clone());
+                self.cached_material_binding_indices = build.binding_indices.clone();
                 self.cached_material_textures_signature = build.signature;
-                self.material_bindings_version = self.material_bindings_version.wrapping_add(1);
+                self.bump_material_bindings_version();
             }
             self.cached_material_textures.clone()
         } else {
@@ -10366,7 +12109,7 @@ impl GraphRenderer {
 
         let mut gpu_frame = None;
         if gpu_driven && (gbuffer_pass || shadow_pass) {
-            gpu_frame = self.prepare_gpu_driven_frame(render_data, alpha);
+            gpu_frame = self.prepare_gpu_driven_frame(scene, alpha);
         }
         let use_gpu_driven = gpu_frame.is_some();
         if gpu_driven && (gbuffer_pass || shadow_pass) && !use_gpu_driven {
@@ -10374,6 +12117,16 @@ impl GraphRenderer {
             self.shared_stats
                 .gpu_fallbacks
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.instances_dirty = true;
+            self.shadow_instances_dirty = true;
+            self.gbuffer_draws_dirty = true;
+            self.shadow_draws_dirty = true;
+        } else if use_gpu_driven {
+            self.instances_dirty = false;
+            self.shadow_instances_dirty = false;
+            self.gbuffer_draws_dirty = false;
+            self.shadow_draws_dirty = false;
+            self.last_instance_pressure = self.streaming_pressure;
         }
 
         let (
@@ -10419,31 +12172,91 @@ impl GraphRenderer {
                 shadow_matrices_buffer,
             )
         } else {
-            let (gbuffer_instances, gbuffer_batches) = if gbuffer_pass {
-                if self.instances_dirty || self.cached_gbuffer_instances.is_none() {
-                    let (instances, batches) =
-                        self.build_gbuffer_instances(render_data, alpha, draw_require_meshlets);
-                    self.cached_gbuffer_instances = instances.clone();
-                    self.cached_gbuffer_batches = batches.clone();
-                    if self.gbuffer_draws_dirty {
-                        self.gbuffer_draws_version = self.gbuffer_draws_version.wrapping_add(1);
-                    }
-                    self.gbuffer_draws_dirty = false;
-                    self.instances_dirty = false;
-                    self.last_instance_pressure = self.streaming_pressure;
-                    (instances, batches)
-                } else {
-                    (
-                        self.cached_gbuffer_instances.clone(),
-                        self.cached_gbuffer_batches.clone(),
-                    )
-                }
-            } else {
-                (None, Arc::new(Vec::new()))
-            };
+            let rebuild_gbuffer_instances =
+                gbuffer_pass && (self.instances_dirty || self.cached_gbuffer_instances.is_none());
+            let rebuild_shadow_instances = shadow_pass
+                && (self.shadow_instances_dirty
+                    || self.cached_shadow_instances.is_none()
+                    || self.cached_shadow_uniforms_buffer.is_none());
 
-            let (shadow_instances, shadow_batches, shadow_uniforms_buffer, shadow_matrices_buffer) =
-                if shadow_pass {
+            if rebuild_gbuffer_instances && rebuild_shadow_instances {
+                let build = self.build_opaque_cpu_pass_data(
+                    render_data,
+                    alpha,
+                    view_matrix,
+                    draw_require_meshlets,
+                );
+                self.cached_gbuffer_instances = build.gbuffer_instances.clone();
+                self.cached_gbuffer_batches = build.gbuffer_batches.clone();
+                self.cached_shadow_instances = build.shadow_instances.clone();
+                self.cached_shadow_batches = build.shadow_batches.clone();
+                self.cached_shadow_uniforms_buffer = build.shadow_uniforms_buffer.clone();
+                self.cached_shadow_matrices_buffer = build.shadow_matrices_buffer.clone();
+                if self.gbuffer_draws_dirty {
+                    self.gbuffer_draws_version = self.gbuffer_draws_version.wrapping_add(1);
+                    self.record_bundle_layout_change(BundleInvalidationMask {
+                        any: true,
+                        gbuffer: true,
+                        shadow: false,
+                    });
+                }
+                if self.shadow_draws_dirty {
+                    self.shadow_draws_version = self.shadow_draws_version.wrapping_add(1);
+                    self.record_bundle_layout_change(BundleInvalidationMask {
+                        any: true,
+                        gbuffer: false,
+                        shadow: true,
+                    });
+                }
+                self.gbuffer_draws_dirty = false;
+                self.shadow_draws_dirty = false;
+                self.instances_dirty = false;
+                self.shadow_instances_dirty = false;
+                self.shadow_uniforms_dirty = false;
+                self.last_instance_pressure = self.streaming_pressure;
+                (
+                    build.gbuffer_instances,
+                    build.gbuffer_batches,
+                    build.shadow_instances,
+                    build.shadow_batches,
+                    build.shadow_uniforms_buffer,
+                    build.shadow_matrices_buffer,
+                )
+            } else {
+                let (gbuffer_instances, gbuffer_batches) = if gbuffer_pass {
+                    if self.instances_dirty || self.cached_gbuffer_instances.is_none() {
+                        let (instances, batches) =
+                            self.build_gbuffer_instances(render_data, alpha, draw_require_meshlets);
+                        self.cached_gbuffer_instances = instances.clone();
+                        self.cached_gbuffer_batches = batches.clone();
+                        if self.gbuffer_draws_dirty {
+                            self.gbuffer_draws_version = self.gbuffer_draws_version.wrapping_add(1);
+                            self.record_bundle_layout_change(BundleInvalidationMask {
+                                any: true,
+                                gbuffer: true,
+                                shadow: false,
+                            });
+                        }
+                        self.gbuffer_draws_dirty = false;
+                        self.instances_dirty = false;
+                        self.last_instance_pressure = self.streaming_pressure;
+                        (instances, batches)
+                    } else {
+                        (
+                            self.cached_gbuffer_instances.clone(),
+                            self.cached_gbuffer_batches.clone(),
+                        )
+                    }
+                } else {
+                    (None, Arc::new(Vec::new()))
+                };
+
+                let (
+                    shadow_instances,
+                    shadow_batches,
+                    shadow_uniforms_buffer,
+                    shadow_matrices_buffer,
+                ) = if shadow_pass {
                     let needs_instances = self.shadow_instances_dirty
                         || self.cached_shadow_instances.is_none()
                         || self.cached_shadow_uniforms_buffer.is_none();
@@ -10460,6 +12273,11 @@ impl GraphRenderer {
                         self.cached_shadow_matrices_buffer = matrices.clone();
                         if self.shadow_draws_dirty {
                             self.shadow_draws_version = self.shadow_draws_version.wrapping_add(1);
+                            self.record_bundle_layout_change(BundleInvalidationMask {
+                                any: true,
+                                gbuffer: false,
+                                shadow: true,
+                            });
                         }
                         self.shadow_draws_dirty = false;
                         self.shadow_instances_dirty = false;
@@ -10490,14 +12308,15 @@ impl GraphRenderer {
                     (None, Arc::new(Vec::new()), None, None)
                 };
 
-            (
-                gbuffer_instances,
-                gbuffer_batches,
-                shadow_instances,
-                shadow_batches,
-                shadow_uniforms_buffer,
-                shadow_matrices_buffer,
-            )
+                (
+                    gbuffer_instances,
+                    gbuffer_batches,
+                    shadow_instances,
+                    shadow_batches,
+                    shadow_uniforms_buffer,
+                    shadow_matrices_buffer,
+                )
+            }
         };
 
         let (transparent_instances, transparent_batches) = if frame_render_config.transparent_pass {
@@ -10530,12 +12349,54 @@ impl GraphRenderer {
             }
         };
 
+        let render_bundles_requested = frame_render_config.render_bundles;
+        let gbuffer_bundle_cache_stable = bundle_cache_is_stable(
+            self.frame_index,
+            self.gbuffer_bundle_change_frame,
+            frame_render_config.bundle_cache_stable_frames,
+        );
+        let shadow_bundle_cache_stable = bundle_cache_is_stable(
+            self.frame_index,
+            self.shadow_bundle_change_frame,
+            frame_render_config.bundle_cache_stable_frames,
+        );
+        let gbuffer_bundle_rebuild_in_flight = if use_gpu_driven {
+            material_needs_rebuild || self.gpu_instances_dirty || self.gpu_draws_dirty
+        } else {
+            material_needs_rebuild || self.instances_dirty || self.gbuffer_draws_dirty
+        };
+        let shadow_bundle_rebuild_in_flight = shadow_bundle_force_rebuild
+            || if use_gpu_driven {
+                material_needs_rebuild || self.gpu_instances_dirty || self.gpu_draws_dirty
+            } else {
+                material_needs_rebuild || self.shadow_instances_dirty || self.shadow_draws_dirty
+            };
+        let gbuffer_render_bundles = render_bundles_requested
+            && !gbuffer_bundle_rebuild_in_flight
+            && gbuffer_bundle_cache_stable;
+        let shadow_render_bundles = render_bundles_requested
+            && !shadow_bundle_rebuild_in_flight
+            && shadow_bundle_cache_stable;
+        if render_bundles_requested
+            && (gbuffer_bundle_rebuild_in_flight
+                || shadow_bundle_rebuild_in_flight
+                || !gbuffer_bundle_cache_stable
+                || !shadow_bundle_cache_stable)
+        {
+            frame_render_config.render_bundles = false;
+        }
+
         let bundle_mode = if use_gpu_driven {
             BundleMode::Gpu
         } else {
             BundleMode::Cpu
         };
-        let bundle_resource_epoch = if frame_render_config.render_bundles {
+        let bundle_resource_epoch = if gbuffer_render_bundles {
+            self.bundle_resource_epoch
+        } else {
+            0
+        };
+        let shadow_bundle_resource_epoch = if shadow_render_bundles {
             self.bundle_resource_epoch
         } else {
             0
@@ -10563,7 +12424,7 @@ impl GraphRenderer {
             material_bindings_version: self.material_bindings_version,
             texture_array_size,
             binding_backend: frame_binding_backend,
-            resource_epoch: bundle_resource_epoch,
+            resource_epoch: shadow_bundle_resource_epoch,
         };
 
         self.prev_view_proj = view_proj;
@@ -10820,8 +12681,16 @@ impl GraphRenderer {
             }
         };
 
-        let (sprite_instances, sprite_batches, sprite_textures) =
-            self.build_sprite_draw_data(render_data);
+        let (sprite_instances, sprite_batches, sprite_textures) = if frame_render_config.sprite_pass
+        {
+            self.build_sprite_draw_data(render_data)
+        } else {
+            (
+                None,
+                Arc::new(Vec::new()),
+                Arc::new(vec![self.fallback_albedo_view.clone()]),
+            )
+        };
         let (ui_instances, ui_batches, ui_textures) = if include_ui && frame_render_config.ui_pass {
             let mut ui_rebuilt = 0u32;
             let mut ui_build_us = 0u64;
@@ -11006,6 +12875,8 @@ impl GraphRenderer {
             render_config: frame_render_config,
             clear_swapchain_before_egui: !render_data.render_main_scene_to_swapchain,
             occlusion_camera_stable,
+            gbuffer_render_bundles,
+            shadow_render_bundles,
             gbuffer_bundle_key,
             shadow_bundle_key,
         })
@@ -11883,8 +13754,9 @@ impl GraphRenderer {
         let lod0 = globals.render_config.gpu_lod0_distance.max(0.0);
         let lod1 = globals.render_config.gpu_lod1_distance.max(lod0);
         let lod2 = globals.render_config.gpu_lod2_distance.max(lod1);
-        let mesh_tasks_enabled =
-            globals.render_config.use_mesh_shaders && globals.device_caps.supports_mesh_pipeline();
+        let mesh_tasks_enabled = globals.render_config.use_mesh_shaders
+            && globals.device_caps.supports_mesh_pipeline()
+            && !globals.render_config.gpu_driven;
         let current_signature = GpuCullSignature {
             frustum_culling: globals.render_config.frustum_culling,
             occlusion_culling: globals.render_config.occlusion_culling,
@@ -12353,7 +14225,7 @@ impl GraphRenderer {
 
         let texture_array_size = textures.len().max(1) as u32;
         if force_rebuild && !signature_changed {
-            self.material_bindings_version = self.material_bindings_version.wrapping_add(1);
+            self.bump_material_bindings_version();
             return MaterialBuildResult {
                 buffer: self.cached_material_buffer.clone(),
                 uniform_buffer: self.cached_material_uniform_buffer.clone(),
@@ -12366,7 +14238,7 @@ impl GraphRenderer {
             };
         }
 
-        self.material_bindings_version = self.material_bindings_version.wrapping_add(1);
+        self.bump_material_bindings_version();
         let fallback_material = MaterialShaderData {
             albedo: [1.0, 1.0, 1.0, 1.0],
             metallic: 0.0,
@@ -12488,6 +14360,17 @@ impl GraphRenderer {
     }
 
     fn build_material_textures(&mut self, force_rebuild: bool) -> MaterialTextureBuildResult {
+        if !force_rebuild {
+            if let Some(textures) = self.cached_material_textures.clone() {
+                return MaterialTextureBuildResult {
+                    textures,
+                    binding_indices: self.cached_material_binding_indices.clone(),
+                    signature: self.cached_material_textures_signature,
+                    changed: false,
+                };
+            }
+        }
+
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -12569,19 +14452,38 @@ impl GraphRenderer {
                     .cached_material_textures
                     .clone()
                     .unwrap_or_else(|| Arc::new(Vec::new())),
+                binding_indices: self.cached_material_binding_indices.clone(),
                 signature,
                 changed: false,
             };
         }
 
-        let mut textures = Vec::with_capacity(self.material_index_order.len().saturating_add(1));
         let fallback = MaterialTextureSet {
             albedo: self.fallback_albedo_view.clone(),
             normal: self.fallback_normal_view.clone(),
             metallic_roughness: self.fallback_mra_view.clone(),
             emission: self.fallback_emission_view.clone(),
         };
+        let mut textures = Vec::with_capacity(self.material_index_order.len().saturating_add(1));
         textures.push(fallback);
+        let mut binding_indices = vec![0u32; self.material_index_order.len().saturating_add(1)];
+        let mut texture_binding_indices: HashMap<
+            (Option<usize>, Option<usize>, Option<usize>, Option<usize>),
+            u32,
+        > = HashMap::new();
+        texture_binding_indices.insert((None, None, None, None), 0);
+        let frame_index = self.frame_index;
+
+        let resolve_texture_key = |pool: &mut GpuResourcePool, opt_id: Option<usize>| {
+            let id = opt_id?;
+            let rid = pool.asset_id_to_resource(ResourceKind::Texture, id as u32);
+            if pool.texture_view(rid).is_some() {
+                pool.mark_used(rid, frame_index);
+                Some(id)
+            } else {
+                None
+            }
+        };
 
         let mut resolve_tex = |pool: &mut GpuResourcePool,
                                frame_index: u32,
@@ -12602,14 +14504,13 @@ impl GraphRenderer {
 
         for mat_id in &material_ids {
             let Some(entry) = self.materials.get(*mat_id) else {
-                textures.push(MaterialTextureSet {
-                    albedo: self.fallback_albedo_view.clone(),
-                    normal: self.fallback_normal_view.clone(),
-                    metallic_roughness: self.fallback_mra_view.clone(),
-                    emission: self.fallback_emission_view.clone(),
-                });
                 continue;
             };
+            let material_index = self
+                .material_index_map
+                .get(*mat_id)
+                .map(|entry| entry.index as usize)
+                .unwrap_or(0);
             let (albedo_id, normal_id, mra_id, emission_id) = {
                 let meta = &entry.meta;
                 (
@@ -12619,36 +14520,54 @@ impl GraphRenderer {
                     meta.emission_texture_id,
                 )
             };
-            textures.push(MaterialTextureSet {
-                albedo: resolve_tex(
-                    &mut self.pool,
-                    self.frame_index,
-                    albedo_id,
-                    &self.fallback_albedo_view,
-                ),
-                normal: resolve_tex(
-                    &mut self.pool,
-                    self.frame_index,
-                    normal_id,
-                    &self.fallback_normal_view,
-                ),
-                metallic_roughness: resolve_tex(
-                    &mut self.pool,
-                    self.frame_index,
-                    mra_id,
-                    &self.fallback_mra_view,
-                ),
-                emission: resolve_tex(
-                    &mut self.pool,
-                    self.frame_index,
-                    emission_id,
-                    &self.fallback_emission_view,
-                ),
-            });
+            let key = (
+                resolve_texture_key(&mut self.pool, albedo_id),
+                resolve_texture_key(&mut self.pool, normal_id),
+                resolve_texture_key(&mut self.pool, mra_id),
+                resolve_texture_key(&mut self.pool, emission_id),
+            );
+            let binding_index = match texture_binding_indices.get(&key).copied() {
+                Some(index) => index,
+                None => {
+                    let index = textures.len() as u32;
+                    textures.push(MaterialTextureSet {
+                        albedo: resolve_tex(
+                            &mut self.pool,
+                            self.frame_index,
+                            key.0,
+                            &self.fallback_albedo_view,
+                        ),
+                        normal: resolve_tex(
+                            &mut self.pool,
+                            self.frame_index,
+                            key.1,
+                            &self.fallback_normal_view,
+                        ),
+                        metallic_roughness: resolve_tex(
+                            &mut self.pool,
+                            self.frame_index,
+                            key.2,
+                            &self.fallback_mra_view,
+                        ),
+                        emission: resolve_tex(
+                            &mut self.pool,
+                            self.frame_index,
+                            key.3,
+                            &self.fallback_emission_view,
+                        ),
+                    });
+                    texture_binding_indices.insert(key, index);
+                    index
+                }
+            };
+            if material_index < binding_indices.len() {
+                binding_indices[material_index] = binding_index;
+            }
         }
 
         MaterialTextureBuildResult {
             textures: Arc::new(textures),
+            binding_indices: Arc::new(binding_indices),
             signature,
             changed: true,
         }
@@ -12898,107 +14817,64 @@ impl GraphRenderer {
         })
     }
 
-    fn build_gbuffer_instances(
+    fn interpolate_render_object_transform(object: &RenderObject, alpha: f32) -> Transform {
+        if alpha > 0.0 && alpha < 1.0 {
+            Transform {
+                position: object
+                    .previous_transform
+                    .position
+                    .lerp(object.current_transform.position, alpha),
+                rotation: object
+                    .previous_transform
+                    .rotation
+                    .slerp(object.current_transform.rotation, alpha),
+                scale: object
+                    .previous_transform
+                    .scale
+                    .lerp(object.current_transform.scale, alpha),
+            }
+        } else if alpha <= 0.0 {
+            object.previous_transform
+        } else {
+            object.current_transform
+        }
+    }
+
+    fn draw_batch_for_key(
+        &self,
+        key: MeshLodMaterialKey,
+        instance_range: std::ops::Range<u32>,
+    ) -> Option<crate::graphics::passes::DrawBatch> {
+        let mesh = if key.mesh_id == FALLBACK_MESH_KEY {
+            self.fallback_mesh.as_ref()
+        } else {
+            self.meshes.get(key.mesh_id)
+        };
+        let Some(mesh) = mesh else {
+            return None;
+        };
+        let lod = mesh.lods.get(key.lod)?;
+        Some(crate::graphics::passes::DrawBatch {
+            mesh_id: key.mesh_id,
+            lod: key.lod,
+            index_count: lod.index_count,
+            instance_range,
+            material_id: key.material_id,
+            vertex: lod.vertex,
+            index: lod.buffer,
+            meshlet_descs: lod.meshlets.descs,
+            meshlet_vertices: lod.meshlets.vertices,
+            meshlet_indices: lod.meshlets.indices,
+            meshlet_count: lod.meshlets.count,
+        })
+    }
+
+    fn upload_gbuffer_batches(
         &mut self,
-        render_data: &RenderData,
-        alpha: f32,
-        require_meshlets: bool,
     ) -> (
         Option<crate::graphics::passes::InstanceBuffer>,
         Arc<Vec<crate::graphics::passes::DrawBatch>>,
     ) {
-        let pressure = self.streaming_pressure;
-        let lod_bias = match pressure {
-            MemoryPressure::Hard => self.streaming_tuning.lod_bias_hard,
-            MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
-            MemoryPressure::None => 0,
-        };
-        let force_lowest =
-            matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
-        let meshes = &self.meshes;
-        let material_version = self.material_version;
-
-        self.gbuffer_batcher.reset();
-        let interp = alpha > 0.0 && alpha < 1.0;
-
-        for object in &render_data.objects {
-            let alpha_mode = self.material_alpha_mode(object.material_id);
-            if matches!(
-                alpha_mode,
-                AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Additive
-            ) {
-                continue;
-            }
-            let mat_idx = self.material_index_for(object.material_id, material_version);
-
-            let mut desired_lod = object.lod_index.saturating_add(lod_bias);
-            if force_lowest {
-                desired_lod = usize::MAX;
-            } else if let Some(mesh) = meshes.get(object.mesh_id) {
-                let max_idx = mesh.available_lods.saturating_sub(1);
-                desired_lod = desired_lod.min(max_idx);
-            }
-            let resolved =
-                match self.resolve_draw_mesh(object.mesh_id, desired_lod, require_meshlets) {
-                    Some(resolved) => resolved,
-                    None => continue,
-                };
-            let batch_material_id = if self.use_material_batches() {
-                mat_idx
-            } else {
-                0
-            };
-            let key = MeshLodMaterialKey {
-                mesh_id: resolved.mesh_id,
-                lod: resolved.lod_index,
-                material_id: batch_material_id,
-            };
-
-            let position = if interp {
-                object
-                    .previous_transform
-                    .position
-                    .lerp(object.current_transform.position, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.position
-            } else {
-                object.current_transform.position
-            };
-            let rotation = if interp {
-                Quat::from(object.previous_transform.rotation)
-                    .slerp(object.current_transform.rotation, alpha)
-            } else if alpha <= 0.0 {
-                Quat::from(object.previous_transform.rotation)
-            } else {
-                Quat::from(object.current_transform.rotation)
-            };
-            let scale = if interp {
-                object
-                    .previous_transform
-                    .scale
-                    .lerp(object.current_transform.scale, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.scale
-            } else {
-                object.current_transform.scale
-            };
-            let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
-            let bounds_center = resolved.bounds_center;
-            let bounds_extents = resolved.bounds_extents;
-
-            let instance = GBufferInstanceRaw {
-                model_matrix: model_matrix.to_cols_array_2d(),
-                material_id: mat_idx,
-                visibility: 1,
-                skin_offset: object.skin_offset,
-                skin_count: object.skin_count,
-                bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
-                bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
-            };
-
-            self.gbuffer_batcher.push(key, instance);
-        }
-
         let batches = self.gbuffer_batcher.active_batches();
         if batches.is_empty() {
             return (None, Arc::new(Vec::new()));
@@ -13018,28 +14894,8 @@ impl GraphRenderer {
             if count == 0 {
                 continue;
             }
-            let mesh = if batch.key.mesh_id == FALLBACK_MESH_KEY {
-                self.fallback_mesh.as_ref()
-            } else {
-                meshes.get(batch.key.mesh_id)
-            };
-            let Some(mesh) = mesh else {
-                continue;
-            };
-            if let Some(lod) = mesh.lods.get(batch.key.lod) {
-                draw_batches.push(crate::graphics::passes::DrawBatch {
-                    mesh_id: batch.key.mesh_id,
-                    lod: batch.key.lod,
-                    index_count: lod.index_count,
-                    instance_range: offset..(offset + count),
-                    material_id: batch.key.material_id,
-                    vertex: lod.vertex,
-                    index: lod.buffer,
-                    meshlet_descs: lod.meshlets.descs,
-                    meshlet_vertices: lod.meshlets.vertices,
-                    meshlet_indices: lod.meshlets.indices,
-                    meshlet_count: lod.meshlets.count,
-                });
+            if let Some(draw_batch) = self.draw_batch_for_key(batch.key, offset..(offset + count)) {
+                draw_batches.push(draw_batch);
             }
         }
 
@@ -13073,6 +14929,280 @@ impl GraphRenderer {
             }),
             Arc::new(draw_batches),
         )
+    }
+
+    fn upload_shadow_batches(
+        &mut self,
+    ) -> (
+        Option<crate::graphics::passes::InstanceBuffer>,
+        Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    ) {
+        let batches = self.shadow_batcher.active_batches();
+        let total_instances: usize = batches.iter().map(|b| b.instances.len()).sum();
+        if total_instances == 0 {
+            return (None, Arc::new(Vec::new()));
+        }
+
+        let mut instance_data: Vec<ShadowInstanceRaw> = Vec::with_capacity(total_instances);
+        let mut draw_batches = Vec::with_capacity(batches.len());
+
+        for batch in batches {
+            let offset = instance_data.len() as u32;
+            instance_data.extend_from_slice(&batch.instances);
+            let count = batch.instances.len() as u32;
+            if count == 0 {
+                continue;
+            }
+            if let Some(draw_batch) = self.draw_batch_for_key(batch.key, offset..(offset + count)) {
+                draw_batches.push(draw_batch);
+            }
+        }
+
+        if instance_data.is_empty() {
+            return (None, Arc::new(Vec::new()));
+        }
+
+        let bytes = bytemuck::cast_slice(&instance_data);
+        let instance_buffer = {
+            let (buf, reallocated) = self.buffer_cache.shadow_instances.ensure_with_status(
+                &self.device,
+                bytes.len() as u64,
+                wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::STORAGE,
+                self.frame_index,
+            );
+            self.queue.write_buffer(buf, 0, bytes);
+            let buffer = buf.clone();
+            if reallocated {
+                self.note_bundle_resource_change();
+            }
+            buffer
+        };
+
+        (
+            Some(crate::graphics::passes::InstanceBuffer {
+                buffer: instance_buffer,
+                count: instance_data.len() as u32,
+                stride: std::mem::size_of::<ShadowInstanceRaw>() as u64,
+            }),
+            Arc::new(draw_batches),
+        )
+    }
+
+    fn build_opaque_cpu_pass_data(
+        &mut self,
+        render_data: &RenderData,
+        alpha: f32,
+        view_matrix: Mat4,
+        require_meshlets: bool,
+    ) -> CpuOpaquePassBuild {
+        let pressure = self.streaming_pressure;
+        let lod_bias = match pressure {
+            MemoryPressure::Hard => self.streaming_tuning.lod_bias_hard,
+            MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
+            MemoryPressure::None => 0,
+        };
+        let force_lowest =
+            matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
+        let material_version = self.material_version;
+        let batch_materials = self.use_material_batches();
+        let transparent_shadows = render_data.render_config.transparent_shadows;
+
+        self.gbuffer_batcher.reset();
+        self.shadow_batcher.reset();
+
+        let mut scene_bounds_min = Vec3::splat(f32::MAX);
+        let mut scene_bounds_max = Vec3::splat(f32::MIN);
+        let mut has_bounds = false;
+
+        for object in &render_data.objects {
+            let alpha_mode = self.material_alpha_mode(object.material_id);
+            let opaque = !matches!(
+                alpha_mode,
+                AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Additive
+            );
+            let shadow_visible = object.casts_shadow && (opaque || transparent_shadows);
+            if !opaque && !shadow_visible {
+                continue;
+            }
+
+            let mat_idx = self.material_index_for(object.material_id, material_version);
+
+            let mut desired_lod = object.lod_index.saturating_add(lod_bias);
+            if force_lowest {
+                desired_lod = usize::MAX;
+            } else if let Some(mesh) = self.meshes.get(object.mesh_id) {
+                let max_idx = mesh.available_lods.saturating_sub(1);
+                desired_lod = desired_lod.min(max_idx);
+            }
+            let resolved =
+                match self.resolve_draw_mesh(object.mesh_id, desired_lod, require_meshlets) {
+                    Some(resolved) => resolved,
+                    None => continue,
+                };
+            let batch_material_id = if batch_materials {
+                self.material_binding_index_for(mat_idx)
+            } else {
+                0
+            };
+            let key = MeshLodMaterialKey {
+                mesh_id: resolved.mesh_id,
+                lod: resolved.lod_index,
+                material_id: batch_material_id,
+            };
+
+            let transform = Self::interpolate_render_object_transform(object, alpha);
+            let position = transform.position;
+            let rotation = transform.rotation;
+            let scale = transform.scale;
+            let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
+            let bounds_center = resolved.bounds_center;
+            let bounds_extents = resolved.bounds_extents;
+
+            if opaque {
+                let instance = GBufferInstanceRaw {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    material_id: mat_idx,
+                    visibility: 1,
+                    skin_offset: object.skin_offset,
+                    skin_count: object.skin_count,
+                    bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
+                    bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
+                };
+                self.gbuffer_batcher.push(key, instance);
+            }
+
+            if shadow_visible {
+                let scale_abs = scale.abs();
+                let world_center = position + rotation * (bounds_center * scale);
+                let rot = Mat3::from_quat(rotation);
+                let abs_rot = Mat3::from_cols(rot.x_axis.abs(), rot.y_axis.abs(), rot.z_axis.abs());
+                let world_extents = abs_rot * (bounds_extents * scale_abs);
+                let world_min = world_center - world_extents;
+                let world_max = world_center + world_extents;
+                scene_bounds_min = scene_bounds_min.min(world_min);
+                scene_bounds_max = scene_bounds_max.max(world_max);
+                has_bounds = true;
+
+                let instance = ShadowInstanceRaw {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    material_id: mat_idx,
+                    skin_offset: object.skin_offset,
+                    skin_count: object.skin_count,
+                    _pad0: 0,
+                };
+                self.shadow_batcher.push(key, instance);
+            }
+        }
+
+        let bounds = if !has_bounds {
+            Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            }
+        } else {
+            Aabb {
+                min: scene_bounds_min,
+                max: scene_bounds_max,
+            }
+        };
+        self.shadow_bounds = Some(bounds);
+        self.shadow_bounds_dirty = false;
+
+        let (gbuffer_instances, gbuffer_batches) = self.upload_gbuffer_batches();
+        let (shadow_instances, shadow_batches) = self.upload_shadow_batches();
+        let (shadow_uniforms_buffer, shadow_matrices_buffer) =
+            self.build_shadow_uniform_buffers_for_bounds(render_data, view_matrix, bounds);
+
+        CpuOpaquePassBuild {
+            gbuffer_instances,
+            gbuffer_batches,
+            shadow_instances,
+            shadow_batches,
+            shadow_uniforms_buffer,
+            shadow_matrices_buffer,
+        }
+    }
+
+    fn build_gbuffer_instances(
+        &mut self,
+        render_data: &RenderData,
+        alpha: f32,
+        require_meshlets: bool,
+    ) -> (
+        Option<crate::graphics::passes::InstanceBuffer>,
+        Arc<Vec<crate::graphics::passes::DrawBatch>>,
+    ) {
+        let pressure = self.streaming_pressure;
+        let lod_bias = match pressure {
+            MemoryPressure::Hard => self.streaming_tuning.lod_bias_hard,
+            MemoryPressure::Soft => self.streaming_tuning.lod_bias_soft,
+            MemoryPressure::None => 0,
+        };
+        let force_lowest =
+            matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
+        let material_version = self.material_version;
+        let batch_materials = self.use_material_batches();
+
+        self.gbuffer_batcher.reset();
+
+        for object in &render_data.objects {
+            let alpha_mode = self.material_alpha_mode(object.material_id);
+            if matches!(
+                alpha_mode,
+                AlphaMode::Blend | AlphaMode::Premultiplied | AlphaMode::Additive
+            ) {
+                continue;
+            }
+            let mat_idx = self.material_index_for(object.material_id, material_version);
+
+            let mut desired_lod = object.lod_index.saturating_add(lod_bias);
+            if force_lowest {
+                desired_lod = usize::MAX;
+            } else if let Some(mesh) = self.meshes.get(object.mesh_id) {
+                let max_idx = mesh.available_lods.saturating_sub(1);
+                desired_lod = desired_lod.min(max_idx);
+            }
+            let resolved =
+                match self.resolve_draw_mesh(object.mesh_id, desired_lod, require_meshlets) {
+                    Some(resolved) => resolved,
+                    None => continue,
+                };
+            let batch_material_id = if batch_materials {
+                self.material_binding_index_for(mat_idx)
+            } else {
+                0
+            };
+            let key = MeshLodMaterialKey {
+                mesh_id: resolved.mesh_id,
+                lod: resolved.lod_index,
+                material_id: batch_material_id,
+            };
+
+            let transform = Self::interpolate_render_object_transform(object, alpha);
+            let model_matrix = Mat4::from_scale_rotation_translation(
+                transform.scale,
+                transform.rotation,
+                transform.position,
+            );
+            let bounds_center = resolved.bounds_center;
+            let bounds_extents = resolved.bounds_extents;
+
+            let instance = GBufferInstanceRaw {
+                model_matrix: model_matrix.to_cols_array_2d(),
+                material_id: mat_idx,
+                visibility: 1,
+                skin_offset: object.skin_offset,
+                skin_count: object.skin_count,
+                bounds_center: [bounds_center.x, bounds_center.y, bounds_center.z, 1.0],
+                bounds_extents: [bounds_extents.x, bounds_extents.y, bounds_extents.z, 0.0],
+            };
+
+            self.gbuffer_batcher.push(key, instance);
+        }
+
+        self.upload_gbuffer_batches()
     }
 
     fn build_transparent_instances(
@@ -13130,7 +15260,7 @@ impl GraphRenderer {
                     None => continue,
                 };
             let batch_material_id = if self.use_material_batches() {
-                mat_idx
+                self.material_binding_index_for(mat_idx)
             } else {
                 0
             };
@@ -13343,11 +15473,10 @@ impl GraphRenderer {
         };
         let force_lowest =
             matches!(pressure, MemoryPressure::Hard) && self.streaming_tuning.force_lowest_lod_hard;
-        let meshes = &self.meshes;
         let material_version = self.material_version;
+        let batch_materials = self.use_material_batches();
 
         self.shadow_batcher.reset();
-        let interp = alpha > 0.0 && alpha < 1.0;
 
         let mut scene_bounds_min = Vec3::splat(f32::MAX);
         let mut scene_bounds_max = Vec3::splat(f32::MIN);
@@ -13368,7 +15497,7 @@ impl GraphRenderer {
             let mut desired_lod = object.lod_index.saturating_add(lod_bias);
             if force_lowest {
                 desired_lod = usize::MAX;
-            } else if let Some(mesh) = meshes.get(object.mesh_id) {
+            } else if let Some(mesh) = self.meshes.get(object.mesh_id) {
                 let max_idx = mesh.available_lods.saturating_sub(1);
                 desired_lod = desired_lod.min(max_idx);
             }
@@ -13378,34 +15507,10 @@ impl GraphRenderer {
                     None => continue,
                 };
 
-            let position = if interp {
-                object
-                    .previous_transform
-                    .position
-                    .lerp(object.current_transform.position, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.position
-            } else {
-                object.current_transform.position
-            };
-            let rotation = if interp {
-                Quat::from(object.previous_transform.rotation)
-                    .slerp(object.current_transform.rotation, alpha)
-            } else if alpha <= 0.0 {
-                Quat::from(object.previous_transform.rotation)
-            } else {
-                Quat::from(object.current_transform.rotation)
-            };
-            let scale = if interp {
-                object
-                    .previous_transform
-                    .scale
-                    .lerp(object.current_transform.scale, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.scale
-            } else {
-                object.current_transform.scale
-            };
+            let transform = Self::interpolate_render_object_transform(object, alpha);
+            let position = transform.position;
+            let rotation = transform.rotation;
+            let scale = transform.scale;
             let model_matrix = Mat4::from_scale_rotation_translation(scale, rotation, position);
 
             let bounds_center = resolved.bounds_center;
@@ -13422,8 +15527,8 @@ impl GraphRenderer {
             has_bounds = true;
 
             let mat_idx = self.material_index_for(object.material_id, material_version);
-            let batch_material_id = if self.use_material_batches() {
-                mat_idx
+            let batch_material_id = if batch_materials {
+                self.material_binding_index_for(mat_idx)
             } else {
                 0
             };
@@ -13444,64 +15549,6 @@ impl GraphRenderer {
             self.shadow_batcher.push(key, instance);
         }
 
-        let batches = self.shadow_batcher.active_batches();
-        let total_instances: usize = batches.iter().map(|b| b.instances.len()).sum();
-
-        let mut instance_data: Vec<ShadowInstanceRaw> = Vec::with_capacity(total_instances);
-        let mut draw_batches = Vec::with_capacity(batches.len());
-
-        for batch in batches {
-            let offset = instance_data.len() as u32;
-            instance_data.extend_from_slice(&batch.instances);
-            let count = batch.instances.len() as u32;
-            if count == 0 {
-                continue;
-            }
-            let mesh = if batch.key.mesh_id == FALLBACK_MESH_KEY {
-                self.fallback_mesh.as_ref()
-            } else {
-                meshes.get(batch.key.mesh_id)
-            };
-            let Some(mesh) = mesh else {
-                continue;
-            };
-            if let Some(lod) = mesh.lods.get(batch.key.lod) {
-                draw_batches.push(crate::graphics::passes::DrawBatch {
-                    mesh_id: batch.key.mesh_id,
-                    lod: batch.key.lod,
-                    index_count: lod.index_count,
-                    instance_range: offset..(offset + count),
-                    material_id: batch.key.material_id,
-                    vertex: lod.vertex,
-                    index: lod.buffer,
-                    meshlet_descs: lod.meshlets.descs,
-                    meshlet_vertices: lod.meshlets.vertices,
-                    meshlet_indices: lod.meshlets.indices,
-                    meshlet_count: lod.meshlets.count,
-                });
-            }
-        }
-
-        let instance_buffer = if instance_data.is_empty() {
-            None
-        } else {
-            let bytes = bytemuck::cast_slice(&instance_data);
-            let (buf, reallocated) = self.buffer_cache.shadow_instances.ensure_with_status(
-                &self.device,
-                bytes.len() as u64,
-                wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::STORAGE,
-                self.frame_index,
-            );
-            self.queue.write_buffer(buf, 0, bytes);
-            let buffer = buf.clone();
-            if reallocated {
-                self.note_bundle_resource_change();
-            }
-            Some(buffer)
-        };
-
         let bounds = if !has_bounds {
             Aabb {
                 min: Vec3::ZERO,
@@ -13516,55 +15563,15 @@ impl GraphRenderer {
         self.shadow_bounds = Some(bounds);
         self.shadow_bounds_dirty = false;
 
-        let (shadow_uniforms, matrices) =
-            self.calculate_cascades(render_data, &view_matrix, &bounds);
-
-        let shadow_uniforms_buffer = {
-            let buf = self.buffer_cache.shadow_uniforms.ensure(
-                &self.device,
-                std::mem::size_of::<ShadowUniforms>() as u64,
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                self.frame_index,
-            );
-            self.queue
-                .write_buffer(buf, 0, bytemuck::bytes_of(&shadow_uniforms));
-            buf.clone()
-        };
-
-        let mat4_size = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
-        let alignment = self.device.limits().min_uniform_buffer_offset_alignment as u64;
-        let aligned = wgpu::util::align_to(mat4_size, alignment);
-        let total_size = aligned * matrices.len() as u64;
-        let shadow_matrices_buffer = {
-            let (buf, reallocated) = self.buffer_cache.shadow_matrices.ensure_with_status(
-                &self.device,
-                total_size,
-                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                self.frame_index,
-            );
-            if reallocated {
-                self.shadow_matrices_version = self.shadow_matrices_version.wrapping_add(1);
-            }
-            for (i, m) in matrices.iter().enumerate() {
-                self.queue
-                    .write_buffer(buf, i as u64 * aligned, bytemuck::bytes_of(m));
-            }
-            let buffer = buf.clone();
-            if reallocated {
-                self.note_bundle_resource_change();
-            }
-            buffer
-        };
+        let (instance_buffer, draw_batches) = self.upload_shadow_batches();
+        let (shadow_uniforms_buffer, shadow_matrices_buffer) =
+            self.build_shadow_uniform_buffers_for_bounds(render_data, view_matrix, bounds);
 
         (
-            instance_buffer.map(|buffer| crate::graphics::passes::InstanceBuffer {
-                buffer,
-                count: instance_data.len() as u32,
-                stride: std::mem::size_of::<ShadowInstanceRaw>() as u64,
-            }),
-            Arc::new(draw_batches),
-            Some(shadow_uniforms_buffer),
-            Some(shadow_matrices_buffer),
+            instance_buffer,
+            draw_batches,
+            shadow_uniforms_buffer,
+            shadow_matrices_buffer,
         )
     }
 
@@ -13585,7 +15592,6 @@ impl GraphRenderer {
     }
 
     fn compute_shadow_bounds(&self, render_data: &RenderData, alpha: f32) -> Option<Aabb> {
-        let interp = alpha > 0.0 && alpha < 1.0;
         let mut scene_bounds_min = Vec3::splat(f32::MAX);
         let mut scene_bounds_max = Vec3::splat(f32::MIN);
         let mut has_bounds = false;
@@ -13605,34 +15611,10 @@ impl GraphRenderer {
                 continue;
             }
 
-            let position = if interp {
-                object
-                    .previous_transform
-                    .position
-                    .lerp(object.current_transform.position, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.position
-            } else {
-                object.current_transform.position
-            };
-            let rotation = if interp {
-                Quat::from(object.previous_transform.rotation)
-                    .slerp(object.current_transform.rotation, alpha)
-            } else if alpha <= 0.0 {
-                Quat::from(object.previous_transform.rotation)
-            } else {
-                Quat::from(object.current_transform.rotation)
-            };
-            let scale = if interp {
-                object
-                    .previous_transform
-                    .scale
-                    .lerp(object.current_transform.scale, alpha)
-            } else if alpha <= 0.0 {
-                object.previous_transform.scale
-            } else {
-                object.current_transform.scale
-            };
+            let transform = Self::interpolate_render_object_transform(object, alpha);
+            let position = transform.position;
+            let rotation = transform.rotation;
+            let scale = transform.scale;
 
             let bounds_center = mesh.bounds.center();
             let bounds_extents = mesh.bounds.extents();
@@ -13665,6 +15647,15 @@ impl GraphRenderer {
         alpha: f32,
     ) -> (Option<wgpu::Buffer>, Option<wgpu::Buffer>) {
         let bounds = self.shadow_bounds_for(render_data, alpha);
+        self.build_shadow_uniform_buffers_for_bounds(render_data, view_matrix, bounds)
+    }
+
+    fn build_shadow_uniform_buffers_for_bounds(
+        &mut self,
+        render_data: &RenderData,
+        view_matrix: Mat4,
+        bounds: Aabb,
+    ) -> (Option<wgpu::Buffer>, Option<wgpu::Buffer>) {
         let (shadow_uniforms, matrices) =
             self.calculate_cascades(render_data, &view_matrix, &bounds);
 
@@ -13720,20 +15711,102 @@ impl GraphRenderer {
             && self.buffer_resident(lod.meshlets.indices)
     }
 
-    fn collect_resident_lods(&self, mesh: &MeshGpu, require_meshlets: bool) -> Vec<usize> {
+    fn single_resident_lod_per_mesh_enabled(&self) -> bool {
+        self.current_render_data
+            .as_ref()
+            .map(|scene| scene.data.render_config.single_resident_lod_per_mesh)
+            .unwrap_or_else(|| RenderConfig::default().single_resident_lod_per_mesh)
+    }
+
+    fn effective_mesh_desired_lod(&self, mesh_id: usize, desired: usize) -> usize {
+        if !self.single_resident_lod_per_mesh_enabled() {
+            return desired;
+        }
+        self.mesh_lod_state
+            .get(mesh_id)
+            .copied()
+            .map(|mesh_lod| desired.min(mesh_lod))
+            .unwrap_or(desired)
+    }
+
+    fn stable_draw_lod_selections(
+        &self,
+        mesh_id: usize,
+        mesh: &MeshGpu,
+        require_meshlets: bool,
+    ) -> Vec<MeshDrawLodSelection> {
         if mesh.lods.is_empty() {
             return Vec::new();
         }
-        let mut lods = Vec::with_capacity(mesh.lods.len());
-        for (idx, lod) in mesh.lods.iter().enumerate() {
+
+        let mut resident_lod_indices = Vec::with_capacity(mesh.lods.len());
+        for lod in &mesh.lods {
             if self.buffer_resident(lod.vertex)
                 && self.buffer_resident(lod.buffer)
                 && (!require_meshlets || self.meshlet_resident(lod))
             {
-                lods.push(idx);
+                resident_lod_indices.push(lod.lod_index);
             }
         }
-        lods
+        if resident_lod_indices.is_empty() {
+            return Vec::new();
+        }
+
+        if self.single_resident_lod_per_mesh_enabled() {
+            let desired = self
+                .mesh_lod_state
+                .get(mesh_id)
+                .copied()
+                .unwrap_or_else(|| resident_lod_indices.iter().copied().min().unwrap_or(0));
+            let Some(selected_index) = self.select_resident_lod(mesh, desired, require_meshlets)
+            else {
+                return Vec::new();
+            };
+            let Some(lod) = mesh.lods.get(selected_index) else {
+                return Vec::new();
+            };
+            return single_resident_lod_draw_selections(
+                MeshDrawLodSelection {
+                    lod_index: lod.lod_index,
+                    index_count: lod.index_count,
+                    vertex: lod.vertex,
+                    index: lod.buffer,
+                    meshlet_descs: lod.meshlets.descs,
+                    meshlet_vertices: lod.meshlets.vertices,
+                    meshlet_indices: lod.meshlets.indices,
+                    meshlet_count: lod.meshlets.count,
+                },
+                mesh.available_lods,
+            );
+        }
+
+        let stable_slots =
+            stable_lod_slot_selection(mesh.available_lods.max(1), resident_lod_indices.as_slice());
+        let mut selections = Vec::with_capacity(stable_slots.len());
+        for selected_lod in stable_slots {
+            let Some(lod) = mesh.lods.iter().find(|lod| lod.lod_index == selected_lod) else {
+                continue;
+            };
+            selections.push(MeshDrawLodSelection {
+                lod_index: lod.lod_index,
+                index_count: lod.index_count,
+                vertex: lod.vertex,
+                index: lod.buffer,
+                meshlet_descs: lod.meshlets.descs,
+                meshlet_vertices: lod.meshlets.vertices,
+                meshlet_indices: lod.meshlets.indices,
+                meshlet_count: lod.meshlets.count,
+            });
+        }
+        selections
+    }
+
+    fn mesh_draw_selection_changed(&self, mesh_id: usize, require_meshlets: bool) -> bool {
+        let Some(mesh) = self.meshes.get(mesh_id) else {
+            return self.gpu_mesh_draw_selections.contains_key(&mesh_id);
+        };
+        self.gpu_mesh_draw_selections.get(&mesh_id)
+            != Some(&self.stable_draw_lod_selections(mesh_id, mesh, require_meshlets))
     }
 
     fn select_resident_lod(
@@ -13776,6 +15849,7 @@ impl GraphRenderer {
         require_meshlets: bool,
     ) -> Option<ResolvedDrawMesh> {
         if let Some(mesh) = self.meshes.get(mesh_id) {
+            let desired_lod = self.effective_mesh_desired_lod(mesh_id, desired_lod);
             if let Some(lod) = self.select_resident_lod(mesh, desired_lod, require_meshlets) {
                 return Some(ResolvedDrawMesh {
                     mesh_id,
@@ -13819,23 +15893,220 @@ impl GraphRenderer {
             || self.bindless_requires_uniform_indexing
     }
 
+    fn material_binding_index_for(&self, material_index: u32) -> u32 {
+        if self.use_uniform_materials {
+            return material_index;
+        }
+        self.cached_material_binding_indices
+            .get(material_index as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn gpu_mesh_index(&self, mesh_id: usize) -> u32 {
         self.gpu_mesh_indices
-            .get(mesh_id)
+            .get(&mesh_id)
+            .copied()
+            .unwrap_or(GPU_FALLBACK_MESH_INDEX)
+    }
+
+    fn gpu_mesh_index_from_mapping(mesh_id: usize, mesh_indices: &HashMap<usize, u32>) -> u32 {
+        mesh_indices
+            .get(&mesh_id)
             .copied()
             .unwrap_or(GPU_FALLBACK_MESH_INDEX)
     }
 
     fn gpu_mesh_material_index(&self, mesh_id: usize, material_id: u32) -> u32 {
+        Self::gpu_mesh_material_index_from_mapping(
+            mesh_id,
+            material_id,
+            &self.gpu_mesh_material_indices,
+        )
+    }
+
+    fn gpu_mesh_material_index_from_mapping(
+        mesh_id: usize,
+        material_id: u32,
+        mesh_material_indices: &HashMap<(usize, u32), u32>,
+    ) -> u32 {
         let key = (mesh_id, material_id);
-        if let Some(index) = self.gpu_mesh_material_indices.get(&key) {
+        if let Some(index) = mesh_material_indices.get(&key) {
             return *index;
         }
         let fallback_key = (FALLBACK_MESH_KEY, material_id);
-        if let Some(index) = self.gpu_mesh_material_indices.get(&fallback_key) {
+        if let Some(index) = mesh_material_indices.get(&fallback_key) {
             return *index;
         }
         u32::MAX
+    }
+
+    fn queue_gpu_instance_updates_for_mesh_in_scene(
+        &mut self,
+        scene: &RenderSceneState,
+        mesh_id: usize,
+    ) -> usize {
+        let Some(indices) = scene.mesh_object_indices(mesh_id) else {
+            return 0;
+        };
+        for &idx in indices {
+            self.gpu_instance_updates.push(idx);
+        }
+        indices.len()
+    }
+
+    fn queue_gpu_instance_updates_for_mesh(&mut self, mesh_id: usize) -> usize {
+        let Some(scene) = self.current_render_data.as_ref() else {
+            self.gpu_instances_dirty = true;
+            self.gpu_instance_updates.clear();
+            return 0;
+        };
+        let Some(indices) = scene.mesh_object_indices(mesh_id) else {
+            return 0;
+        };
+        for &idx in indices {
+            self.gpu_instance_updates.push(idx);
+        }
+        indices.len()
+    }
+
+    fn queue_gpu_instance_updates_for_meshes_in_scene(
+        &mut self,
+        scene: &RenderSceneState,
+        mesh_ids: &[usize],
+    ) -> usize {
+        let mut updated = 0usize;
+        for &mesh_id in mesh_ids {
+            let Some(indices) = scene.mesh_object_indices(mesh_id) else {
+                continue;
+            };
+            updated = updated.saturating_add(indices.len());
+            for &idx in indices {
+                self.gpu_instance_updates.push(idx);
+            }
+        }
+        updated
+    }
+
+    fn queue_gpu_instance_updates_for_meshes(&mut self, mesh_ids: &[usize]) -> usize {
+        let Some(scene) = self.current_render_data.as_ref() else {
+            self.gpu_instances_dirty = true;
+            self.gpu_instance_updates.clear();
+            return 0;
+        };
+
+        let mut updated = 0usize;
+        for &mesh_id in mesh_ids {
+            let Some(indices) = scene.mesh_object_indices(mesh_id) else {
+                continue;
+            };
+            updated = updated.saturating_add(indices.len());
+            for &idx in indices {
+                self.gpu_instance_updates.push(idx);
+            }
+        }
+        updated
+    }
+
+    fn queue_gpu_instance_updates_for_mapping_changes_full_scan(
+        &mut self,
+        render_data: &RenderData,
+        previous_mesh_indices: &HashMap<usize, u32>,
+        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
+        use_material_batches: bool,
+    ) -> usize {
+        let material_version = self.material_version;
+        let mut updated = 0usize;
+        for (idx, obj) in render_data.objects.iter().enumerate() {
+            let material_id = self.material_index_for(obj.material_id, material_version);
+            let material_binding_id = self.material_binding_index_for(material_id);
+            let old_mesh_index = if use_material_batches {
+                Self::gpu_mesh_material_index_from_mapping(
+                    obj.mesh_id,
+                    material_binding_id,
+                    previous_mesh_material_indices,
+                )
+            } else {
+                Self::gpu_mesh_index_from_mapping(obj.mesh_id, previous_mesh_indices)
+            };
+            let new_mesh_index = if use_material_batches {
+                self.gpu_mesh_material_index(obj.mesh_id, material_binding_id)
+            } else {
+                self.gpu_mesh_index(obj.mesh_id)
+            };
+            if old_mesh_index != new_mesh_index {
+                self.gpu_instance_updates.push(idx);
+                updated = updated.saturating_add(1);
+            }
+        }
+        updated
+    }
+
+    fn queue_gpu_instance_updates_for_mapping_changes(
+        &mut self,
+        render_data: &RenderData,
+        previous_mesh_indices: &HashMap<usize, u32>,
+        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
+        use_material_batches: bool,
+    ) -> usize {
+        let changed_mesh_ids = if use_material_batches {
+            match changed_mesh_ids_from_material_mapping(
+                previous_mesh_material_indices,
+                &self.gpu_mesh_material_indices,
+            ) {
+                Some(mesh_ids) => mesh_ids,
+                None => {
+                    return self.queue_gpu_instance_updates_for_mapping_changes_full_scan(
+                        render_data,
+                        previous_mesh_indices,
+                        previous_mesh_material_indices,
+                        use_material_batches,
+                    );
+                }
+            }
+        } else {
+            changed_mesh_ids_from_mapping(previous_mesh_indices, &self.gpu_mesh_indices)
+        };
+
+        if changed_mesh_ids.is_empty() {
+            0
+        } else {
+            self.queue_gpu_instance_updates_for_meshes(&changed_mesh_ids)
+        }
+    }
+
+    fn queue_gpu_instance_updates_for_mapping_changes_in_scene(
+        &mut self,
+        scene: &RenderSceneState,
+        render_data: &RenderData,
+        previous_mesh_indices: &HashMap<usize, u32>,
+        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
+        use_material_batches: bool,
+    ) -> usize {
+        let changed_mesh_ids = if use_material_batches {
+            match changed_mesh_ids_from_material_mapping(
+                previous_mesh_material_indices,
+                &self.gpu_mesh_material_indices,
+            ) {
+                Some(mesh_ids) => mesh_ids,
+                None => {
+                    return self.queue_gpu_instance_updates_for_mapping_changes_full_scan(
+                        render_data,
+                        previous_mesh_indices,
+                        previous_mesh_material_indices,
+                        use_material_batches,
+                    );
+                }
+            }
+        } else {
+            changed_mesh_ids_from_mapping(previous_mesh_indices, &self.gpu_mesh_indices)
+        };
+
+        if changed_mesh_ids.is_empty() {
+            0
+        } else {
+            self.queue_gpu_instance_updates_for_meshes_in_scene(scene, &changed_mesh_ids)
+        }
     }
 
     fn build_gpu_instance_input(
@@ -13859,6 +16130,7 @@ impl GraphRenderer {
             curr
         };
         let material_id = self.material_index_for(obj.material_id, material_version);
+        let material_binding_id = self.material_binding_index_for(material_id);
         let (bounds_center, bounds_extents) = match self.meshes.get(obj.mesh_id) {
             Some(mesh) => (mesh.bounds.center(), mesh.bounds.extents()),
             None => match self.fallback_mesh.as_ref() {
@@ -13867,7 +16139,7 @@ impl GraphRenderer {
             },
         };
         let mesh_id = if self.use_material_batches() {
-            self.gpu_mesh_material_index(obj.mesh_id, material_id)
+            self.gpu_mesh_material_index(obj.mesh_id, material_binding_id)
         } else {
             self.gpu_mesh_index(obj.mesh_id)
         };
@@ -13916,7 +16188,8 @@ impl GraphRenderer {
 
     fn rebuild_gpu_draw_data(
         &mut self,
-        render_data: &RenderData,
+        scene: &RenderSceneState,
+        previous_mesh_indices: &HashMap<usize, u32>,
     ) -> (
         Vec<GpuMeshMeta>,
         Vec<IndirectDrawBatch>,
@@ -13924,52 +16197,96 @@ impl GraphRenderer {
         usize,
         Vec<MeshTaskMeta>,
         u32,
-        Vec<u32>,
+        HashMap<usize, u32>,
+        HashMap<usize, Vec<MeshDrawLodSelection>>,
     ) {
+        let render_data = &scene.data;
         // GPU-driven draws should tolerate missing meshlets; passes choose mesh path.
         let require_meshlets = false;
-        let mesh_count = self.meshes.len().saturating_add(1);
-        let mut mesh_counts = vec![0u32; mesh_count];
-        let mut mesh_lods: Vec<Option<Vec<usize>>> = vec![None; self.meshes.len()];
-        let mut mesh_indices = vec![GPU_FALLBACK_MESH_INDEX; self.meshes.len()];
+        let active_mesh_ids = scene.active_mesh_ids_sorted();
+        struct ActiveGpuMesh {
+            mesh_index: u32,
+            instance_count: u32,
+            selections: Vec<MeshDrawLodSelection>,
+        }
+
+        let mut pending_active_meshes = Vec::with_capacity(active_mesh_ids.len());
+        let mut ordered_mesh_ids = Vec::with_capacity(active_mesh_ids.len());
+        let mut assigned_instance_count = 0usize;
         let fallback_lods = self
             .fallback_mesh
             .as_ref()
-            .map(|mesh| self.collect_resident_lods(mesh, require_meshlets))
+            .map(|mesh| self.stable_draw_lod_selections(FALLBACK_MESH_KEY, mesh, require_meshlets))
             .unwrap_or_default();
         let fallback_available = !fallback_lods.is_empty();
 
-        for mesh_id in 0..self.meshes.len() {
+        for mesh_id in active_mesh_ids {
             let Some(mesh) = self.meshes.get(mesh_id) else {
                 continue;
             };
-            let lods = self.collect_resident_lods(mesh, require_meshlets);
-            let has_lods = !lods.is_empty();
-            mesh_lods[mesh_id] = Some(lods);
-            if has_lods && mesh_id < u32::MAX as usize {
-                mesh_indices[mesh_id] = (mesh_id as u32).saturating_add(1);
+            let selections = self.stable_draw_lod_selections(mesh_id, mesh, require_meshlets);
+            if !selections.is_empty() && mesh_id < u32::MAX as usize {
+                let instance_count = scene
+                    .mesh_object_indices(mesh_id)
+                    .map(|indices| indices.len())
+                    .unwrap_or(0)
+                    .min(u32::MAX as usize) as u32;
+                assigned_instance_count =
+                    assigned_instance_count.saturating_add(instance_count as usize);
+                ordered_mesh_ids.push(mesh_id);
+                pending_active_meshes.push((mesh_id, selections, instance_count));
             }
         }
-
-        for obj in &render_data.objects {
-            let mesh_index = mesh_indices
-                .get(obj.mesh_id)
-                .copied()
-                .unwrap_or(GPU_FALLBACK_MESH_INDEX);
-            if mesh_index == GPU_FALLBACK_MESH_INDEX && !fallback_available {
+        let mesh_indices = assign_stable_sparse_indices(
+            previous_mesh_indices,
+            &ordered_mesh_ids,
+            GPU_FALLBACK_MESH_INDEX + 1,
+        );
+        let mut active_meshes = Vec::with_capacity(pending_active_meshes.len());
+        let mut mesh_draw_selections = HashMap::with_capacity(pending_active_meshes.len());
+        for (mesh_id, selections, instance_count) in pending_active_meshes {
+            let Some(&mesh_index) = mesh_indices.get(&mesh_id) else {
                 continue;
-            }
-            if let Some(slot) = mesh_counts.get_mut(mesh_index as usize) {
-                *slot = slot.saturating_add(1);
-            }
+            };
+            mesh_draw_selections.insert(mesh_id, selections.clone());
+            active_meshes.push(ActiveGpuMesh {
+                mesh_index,
+                instance_count,
+                selections,
+            });
         }
 
+        let fallback_count = if fallback_available {
+            render_data
+                .objects
+                .len()
+                .saturating_sub(assigned_instance_count)
+                .min(u32::MAX as usize) as u32
+        } else {
+            0
+        };
+        let max_mesh_index = mesh_indices
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(GPU_FALLBACK_MESH_INDEX)
+            .max(if fallback_count > 0 {
+                GPU_FALLBACK_MESH_INDEX
+            } else {
+                0
+            }) as usize;
+        let mesh_count = if fallback_count > 0 || !active_meshes.is_empty() {
+            max_mesh_index.saturating_add(1)
+        } else {
+            0
+        };
         let mut meta = vec![
             GpuMeshMeta {
                 lod_count: 0,
                 base_draw: 0,
                 instance_capacity: 0,
                 base_instance: 0,
+                lod_slot_map: [0; GPU_LOD_BAND_COUNT],
             };
             mesh_count
         ];
@@ -13980,44 +16297,96 @@ impl GraphRenderer {
         let mut draw_index: u32 = 0;
         let mut instance_base: u32 = 0;
 
-        for mesh_index in 0..mesh_count {
-            let count = mesh_counts[mesh_index];
+        if fallback_count > 0 {
+            let (draw_lods, lod_slot_map, lod_count) = compress_lod_draw_selections(&fallback_lods);
+            if draw_lods.is_empty() {
+                return (
+                    meta,
+                    draws,
+                    indirect,
+                    instance_base as usize,
+                    mesh_task_meta,
+                    mesh_task_offset,
+                    mesh_indices,
+                    mesh_draw_selections,
+                );
+            }
+            meta[GPU_FALLBACK_MESH_INDEX as usize] = GpuMeshMeta {
+                lod_count,
+                base_draw: draw_index,
+                instance_capacity: fallback_count,
+                base_instance: instance_base,
+                lod_slot_map,
+            };
+            for (draw_lod_idx, lod) in draw_lods.iter().enumerate() {
+                let base_instance = instance_base + (draw_lod_idx as u32) * fallback_count;
+                let meshlet_count = lod.meshlet_count;
+                let tiling =
+                    mesh_task_tiling(&self.device_caps.limits, meshlet_count, fallback_count);
+                let task_offset = mesh_task_offset;
+                mesh_task_offset = mesh_task_offset.saturating_add(tiling.task_count);
+                indirect.push(DrawIndexedIndirectArgs {
+                    index_count: lod.index_count,
+                    instance_count: 0,
+                    first_index: 0,
+                    base_vertex: 0,
+                    first_instance: base_instance,
+                });
+                draws.push(IndirectDrawBatch {
+                    mesh_id: GPU_FALLBACK_MESH_INDEX as usize,
+                    lod: draw_lod_idx,
+                    material_id: 0,
+                    vertex: lod.vertex,
+                    index: lod.index,
+                    meshlet_descs: lod.meshlet_descs,
+                    meshlet_vertices: lod.meshlet_vertices,
+                    meshlet_indices: lod.meshlet_indices,
+                    meshlet_count,
+                    instance_base: base_instance,
+                    instance_capacity: fallback_count,
+                    indirect_offset: (draw_index as u64)
+                        * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64,
+                    mesh_task_offset: (task_offset as u64)
+                        * std::mem::size_of::<DrawMeshTasksIndirectArgs>() as u64,
+                    mesh_task_count: tiling.task_count,
+                    mesh_task_tile_meshlets: tiling.tile_meshlets,
+                    mesh_task_tile_instances: tiling.tile_instances,
+                });
+                mesh_task_meta.push(MeshTaskMeta {
+                    meshlet_count,
+                    instance_capacity: fallback_count,
+                    tile_meshlets: tiling.tile_meshlets,
+                    tile_instances: tiling.tile_instances,
+                    task_offset,
+                    _pad0: [0; 3],
+                });
+                draw_index = draw_index.wrapping_add(1);
+            }
+            instance_base =
+                instance_base.saturating_add(fallback_count.saturating_mul(draw_lods.len() as u32));
+        }
+
+        for active in active_meshes {
+            let count = active.instance_count;
             if count == 0 {
                 continue;
             }
-            let (mesh, lod_indices) = if mesh_index == GPU_FALLBACK_MESH_INDEX as usize {
-                let Some(mesh) = self.fallback_mesh.as_ref() else {
-                    continue;
-                };
-                if fallback_lods.is_empty() {
-                    continue;
-                }
-                (mesh, fallback_lods.as_slice())
-            } else {
-                let mesh_id = mesh_index.saturating_sub(1);
-                let Some(mesh) = self.meshes.get(mesh_id) else {
-                    continue;
-                };
-                let Some(lods) = mesh_lods.get(mesh_id).and_then(|entry| entry.as_ref()) else {
-                    continue;
-                };
-                if lods.is_empty() {
-                    continue;
-                }
-                (mesh, lods.as_slice())
-            };
-
-            let lod_count = lod_indices.len() as u32;
+            let mesh_index = active.mesh_index as usize;
+            let (draw_lods, lod_slot_map, lod_count) =
+                compress_lod_draw_selections(active.selections.as_slice());
+            if draw_lods.is_empty() {
+                continue;
+            }
             meta[mesh_index] = GpuMeshMeta {
                 lod_count,
                 base_draw: draw_index,
                 instance_capacity: count,
                 base_instance: instance_base,
+                lod_slot_map,
             };
-            for (draw_lod_idx, lod_idx) in lod_indices.iter().enumerate() {
-                let lod = &mesh.lods[*lod_idx];
+            for (draw_lod_idx, lod) in draw_lods.iter().enumerate() {
                 let base_instance = instance_base + (draw_lod_idx as u32) * count;
-                let meshlet_count = lod.meshlets.count;
+                let meshlet_count = lod.meshlet_count;
                 let tiling = mesh_task_tiling(&self.device_caps.limits, meshlet_count, count);
                 let task_offset = mesh_task_offset;
                 mesh_task_offset = mesh_task_offset.saturating_add(tiling.task_count);
@@ -14033,10 +16402,10 @@ impl GraphRenderer {
                     lod: draw_lod_idx,
                     material_id: 0,
                     vertex: lod.vertex,
-                    index: lod.buffer,
-                    meshlet_descs: lod.meshlets.descs,
-                    meshlet_vertices: lod.meshlets.vertices,
-                    meshlet_indices: lod.meshlets.indices,
+                    index: lod.index,
+                    meshlet_descs: lod.meshlet_descs,
+                    meshlet_vertices: lod.meshlet_vertices,
+                    meshlet_indices: lod.meshlet_indices,
                     meshlet_count,
                     instance_base: base_instance,
                     instance_capacity: count,
@@ -14058,7 +16427,8 @@ impl GraphRenderer {
                 });
                 draw_index = draw_index.wrapping_add(1);
             }
-            instance_base = instance_base.saturating_add(count.saturating_mul(lod_count));
+            instance_base =
+                instance_base.saturating_add(count.saturating_mul(draw_lods.len() as u32));
         }
 
         (
@@ -14069,12 +16439,14 @@ impl GraphRenderer {
             mesh_task_meta,
             mesh_task_offset,
             mesh_indices,
+            mesh_draw_selections,
         )
     }
 
     fn rebuild_gpu_draw_data_per_material(
         &mut self,
-        render_data: &RenderData,
+        scene: &RenderSceneState,
+        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
     ) -> (
         Vec<GpuMeshMeta>,
         Vec<IndirectDrawBatch>,
@@ -14083,36 +16455,44 @@ impl GraphRenderer {
         Vec<MeshTaskMeta>,
         u32,
         HashMap<(usize, u32), u32>,
+        HashMap<usize, Vec<MeshDrawLodSelection>>,
     ) {
+        let render_data = &scene.data;
         // GPU-driven draws should tolerate missing meshlets; passes choose mesh path.
         let require_meshlets = false;
-        let mut mesh_lods: Vec<Option<Vec<usize>>> = vec![None; self.meshes.len()];
+        let active_mesh_ids = scene.active_mesh_ids_sorted();
+        let mut mesh_lods = HashMap::with_capacity(active_mesh_ids.len());
+        let mut mesh_draw_selections = HashMap::with_capacity(active_mesh_ids.len());
         let fallback_lods = self
             .fallback_mesh
             .as_ref()
-            .map(|mesh| self.collect_resident_lods(mesh, require_meshlets))
+            .map(|mesh| self.stable_draw_lod_selections(FALLBACK_MESH_KEY, mesh, require_meshlets))
             .unwrap_or_default();
         let fallback_available = !fallback_lods.is_empty();
 
-        for mesh_id in 0..self.meshes.len() {
+        for mesh_id in active_mesh_ids {
             let Some(mesh) = self.meshes.get(mesh_id) else {
                 continue;
             };
-            let lods = self.collect_resident_lods(mesh, require_meshlets);
-            mesh_lods[mesh_id] = Some(lods);
+            let selections = self.stable_draw_lod_selections(mesh_id, mesh, require_meshlets);
+            if !selections.is_empty() {
+                mesh_draw_selections.insert(mesh_id, selections.clone());
+                mesh_lods.insert(mesh_id, selections);
+            }
         }
 
         let material_version = self.material_version;
         let mut mesh_material_counts: HashMap<(usize, u32), u32> = HashMap::new();
         for obj in &render_data.objects {
-            let mesh_key = match mesh_lods.get(obj.mesh_id).and_then(|entry| entry.as_ref()) {
-                Some(lods) if !lods.is_empty() => obj.mesh_id,
+            let mesh_key = match mesh_lods.get(&obj.mesh_id) {
+                Some(_) => obj.mesh_id,
                 _ if fallback_available => FALLBACK_MESH_KEY,
                 _ => continue,
             };
             let material_id = self.material_index_for(obj.material_id, material_version);
+            let material_binding_id = self.material_binding_index_for(material_id);
             let count = mesh_material_counts
-                .entry((mesh_key, material_id))
+                .entry((mesh_key, material_binding_id))
                 .or_insert(0);
             *count = count.saturating_add(1);
         }
@@ -14120,16 +16500,31 @@ impl GraphRenderer {
         let mut mesh_material_keys: Vec<(usize, u32)> =
             mesh_material_counts.keys().copied().collect();
         mesh_material_keys.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        let mesh_material_indices =
+            assign_stable_sparse_indices(previous_mesh_material_indices, &mesh_material_keys, 0);
 
-        let mut meta = Vec::new();
+        let meta_len = mesh_material_indices
+            .values()
+            .copied()
+            .max()
+            .map(|index| index as usize + 1)
+            .unwrap_or(0);
+        let mut meta = vec![
+            GpuMeshMeta {
+                lod_count: 0,
+                base_draw: 0,
+                instance_capacity: 0,
+                base_instance: 0,
+                lod_slot_map: [0; GPU_LOD_BAND_COUNT],
+            };
+            meta_len
+        ];
         let mut draws = Vec::new();
         let mut indirect = Vec::new();
         let mut mesh_task_meta = Vec::new();
         let mut mesh_task_offset: u32 = 0;
         let mut draw_index: u32 = 0;
         let mut instance_base: u32 = 0;
-        let mut mesh_material_indices: HashMap<(usize, u32), u32> =
-            HashMap::with_capacity(mesh_material_keys.len());
 
         for (mesh_key, material_id) in mesh_material_keys {
             let count = match mesh_material_counts.get(&(mesh_key, material_id)) {
@@ -14137,41 +16532,37 @@ impl GraphRenderer {
                 _ => continue,
             };
 
-            let (mesh, lod_indices) = if mesh_key == FALLBACK_MESH_KEY {
-                let Some(mesh) = self.fallback_mesh.as_ref() else {
-                    continue;
-                };
+            let logical_lod_selections = if mesh_key == FALLBACK_MESH_KEY {
                 if fallback_lods.is_empty() {
                     continue;
                 }
-                (mesh, fallback_lods.as_slice())
+                fallback_lods.as_slice()
             } else {
-                let Some(mesh) = self.meshes.get(mesh_key) else {
+                let Some(selections) = mesh_lods.get(&mesh_key) else {
                     continue;
                 };
-                let Some(lods) = mesh_lods.get(mesh_key).and_then(|entry| entry.as_ref()) else {
-                    continue;
-                };
-                if lods.is_empty() {
-                    continue;
-                }
-                (mesh, lods.as_slice())
+                selections.as_slice()
             };
 
-            let lod_count = lod_indices.len() as u32;
-            let meta_index = meta.len() as u32;
-            mesh_material_indices.insert((mesh_key, material_id), meta_index);
-            meta.push(GpuMeshMeta {
+            let (draw_lods, lod_slot_map, lod_count) =
+                compress_lod_draw_selections(logical_lod_selections);
+            if draw_lods.is_empty() {
+                continue;
+            }
+            let Some(&meta_index) = mesh_material_indices.get(&(mesh_key, material_id)) else {
+                continue;
+            };
+            meta[meta_index as usize] = GpuMeshMeta {
                 lod_count,
                 base_draw: draw_index,
                 instance_capacity: count,
                 base_instance: instance_base,
-            });
+                lod_slot_map,
+            };
 
-            for (draw_lod_idx, lod_idx) in lod_indices.iter().enumerate() {
-                let lod = &mesh.lods[*lod_idx];
+            for (draw_lod_idx, lod) in draw_lods.iter().enumerate() {
                 let base_instance = instance_base + (draw_lod_idx as u32) * count;
-                let meshlet_count = lod.meshlets.count;
+                let meshlet_count = lod.meshlet_count;
                 let tiling = mesh_task_tiling(&self.device_caps.limits, meshlet_count, count);
                 let task_offset = mesh_task_offset;
                 mesh_task_offset = mesh_task_offset.saturating_add(tiling.task_count);
@@ -14187,10 +16578,10 @@ impl GraphRenderer {
                     lod: draw_lod_idx,
                     material_id,
                     vertex: lod.vertex,
-                    index: lod.buffer,
-                    meshlet_descs: lod.meshlets.descs,
-                    meshlet_vertices: lod.meshlets.vertices,
-                    meshlet_indices: lod.meshlets.indices,
+                    index: lod.index,
+                    meshlet_descs: lod.meshlet_descs,
+                    meshlet_vertices: lod.meshlet_vertices,
+                    meshlet_indices: lod.meshlet_indices,
                     meshlet_count,
                     instance_base: base_instance,
                     instance_capacity: count,
@@ -14212,7 +16603,8 @@ impl GraphRenderer {
                 });
                 draw_index = draw_index.wrapping_add(1);
             }
-            instance_base = instance_base.saturating_add(count.saturating_mul(lod_count));
+            instance_base =
+                instance_base.saturating_add(count.saturating_mul(draw_lods.len() as u32));
         }
 
         (
@@ -14223,11 +16615,15 @@ impl GraphRenderer {
             mesh_task_meta,
             mesh_task_offset,
             mesh_material_indices,
+            mesh_draw_selections,
         )
     }
 
-    fn rebuild_gpu_draw_buffers(&mut self, render_data: &RenderData) {
+    fn rebuild_gpu_draw_buffers(&mut self, scene: &RenderSceneState) {
+        let render_data = &scene.data;
         let use_material_batches = self.use_material_batches();
+        let previous_mesh_indices = std::mem::take(&mut self.gpu_mesh_indices);
+        let previous_mesh_material_indices = std::mem::take(&mut self.gpu_mesh_material_indices);
         let (
             meta,
             draws,
@@ -14236,6 +16632,7 @@ impl GraphRenderer {
             mesh_task_meta,
             mesh_task_total,
             mapping_changed,
+            mesh_draw_selections,
         ) = if use_material_batches {
             let (
                 meta,
@@ -14245,8 +16642,9 @@ impl GraphRenderer {
                 mesh_task_meta,
                 mesh_task_total,
                 mesh_material_indices,
-            ) = self.rebuild_gpu_draw_data_per_material(render_data);
-            let mapping_changed = mesh_material_indices != self.gpu_mesh_material_indices;
+                mesh_draw_selections,
+            ) = self.rebuild_gpu_draw_data_per_material(scene, &previous_mesh_material_indices);
+            let mapping_changed = mesh_material_indices != previous_mesh_material_indices;
             self.gpu_mesh_material_indices = mesh_material_indices;
             self.gpu_mesh_indices.clear();
             (
@@ -14257,6 +16655,7 @@ impl GraphRenderer {
                 mesh_task_meta,
                 mesh_task_total,
                 mapping_changed,
+                mesh_draw_selections,
             )
         } else {
             let (
@@ -14267,8 +16666,9 @@ impl GraphRenderer {
                 mesh_task_meta,
                 mesh_task_total,
                 mesh_indices,
-            ) = self.rebuild_gpu_draw_data(render_data);
-            let mapping_changed = mesh_indices != self.gpu_mesh_indices;
+                mesh_draw_selections,
+            ) = self.rebuild_gpu_draw_data(scene, &previous_mesh_indices);
+            let mapping_changed = mesh_indices != previous_mesh_indices;
             self.gpu_mesh_indices = mesh_indices;
             self.gpu_mesh_material_indices.clear();
             (
@@ -14279,17 +16679,33 @@ impl GraphRenderer {
                 mesh_task_meta,
                 mesh_task_total,
                 mapping_changed,
+                mesh_draw_selections,
             )
         };
         self.gpu_draws = Arc::new(draws);
         self.gpu_draw_count = indirect.len() as u32;
         self.gpu_mesh_meta_len = meta.len();
         self.gpu_total_capacity = total_capacity;
+        self.gpu_mesh_draw_selections = mesh_draw_selections;
         self.gpu_draws_dirty = false;
         self.gpu_bundle_version = self.gpu_bundle_version.wrapping_add(1);
+        self.record_bundle_layout_change(BundleInvalidationMask {
+            any: true,
+            gbuffer: true,
+            shadow: true,
+        });
         if mapping_changed {
-            self.gpu_instances_dirty = true;
-            self.gpu_instance_updates.clear();
+            let updated = self.queue_gpu_instance_updates_for_mapping_changes_in_scene(
+                scene,
+                render_data,
+                &previous_mesh_indices,
+                &previous_mesh_material_indices,
+                use_material_batches,
+            );
+            if updated >= render_data.objects.len() {
+                self.gpu_instances_dirty = true;
+                self.gpu_instance_updates.clear();
+            }
         }
         self.gpu_cull_dirty = true;
 
@@ -14448,9 +16864,10 @@ impl GraphRenderer {
 
     fn prepare_gpu_driven_frame(
         &mut self,
-        render_data: &RenderData,
+        scene: &RenderSceneState,
         _alpha: f32,
     ) -> Option<GpuDrivenFrame> {
+        let render_data = &scene.data;
         if render_data.objects.is_empty() {
             self.gpu_instance_updates.clear();
             self.set_gpu_driven_stats(0, 0, 0, 0, 0, 0);
@@ -14459,7 +16876,7 @@ impl GraphRenderer {
 
         let instance_count = render_data.objects.len();
         if self.gpu_draws_dirty {
-            self.rebuild_gpu_draw_buffers(render_data);
+            self.rebuild_gpu_draw_buffers(scene);
         }
 
         let material_version = self.material_version;
@@ -14559,7 +16976,7 @@ impl GraphRenderer {
         }
 
         if self.gpu_draw_count == 0 && !render_data.objects.is_empty() {
-            self.rebuild_gpu_draw_buffers(render_data);
+            self.rebuild_gpu_draw_buffers(scene);
         }
 
         if self.gpu_total_capacity == 0 || self.gpu_draw_count == 0 {
@@ -14603,6 +17020,11 @@ impl GraphRenderer {
         }
         if bundle_buffers_reallocated {
             self.gpu_bundle_version = self.gpu_bundle_version.wrapping_add(1);
+            self.record_bundle_layout_change(BundleInvalidationMask {
+                any: true,
+                gbuffer: true,
+                shadow: true,
+            });
         }
 
         let gbuffer_instances = self.gpu_visible_buffer.as_ref().map(|buffer| {

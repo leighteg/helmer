@@ -446,16 +446,18 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub tex_coord: [f32; 2],
     pub tangent: [f32; 4],
+    pub color: [f32; 4],
     pub joints: [u32; 4],
     pub weights: [f32; 4],
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
         0 => Float32x3, // position
         1 => Float32x3, // normal
         2 => Float32x2, // tex_coord
         3 => Float32x4, // tangent
+        14 => Float32x4, // color
         4 => Uint32x4,  // joints
         5 => Float32x4, // weights
     ];
@@ -466,11 +468,22 @@ impl Vertex {
         tex_coord: [f32; 2],
         tangent: [f32; 4],
     ) -> Self {
+        Self::new_colored(position, normal, tex_coord, tangent, [1.0, 1.0, 1.0, 1.0])
+    }
+
+    pub fn new_colored(
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coord: [f32; 2],
+        tangent: [f32; 4],
+        color: [f32; 4],
+    ) -> Self {
         Self {
             position,
             normal,
             tex_coord,
             tangent,
+            color,
             joints: [0; 4],
             weights: [1.0, 0.0, 0.0, 0.0],
         }
@@ -484,11 +497,32 @@ impl Vertex {
         joints: [u32; 4],
         weights: [f32; 4],
     ) -> Self {
+        Self::with_skinning_colored(
+            position,
+            normal,
+            tex_coord,
+            tangent,
+            [1.0, 1.0, 1.0, 1.0],
+            joints,
+            weights,
+        )
+    }
+
+    pub fn with_skinning_colored(
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coord: [f32; 2],
+        tangent: [f32; 4],
+        color: [f32; 4],
+        joints: [u32; 4],
+        weights: [f32; 4],
+    ) -> Self {
         Self {
             position,
             normal,
             tex_coord,
             tangent,
+            color,
             joints,
             weights,
         }
@@ -927,6 +961,9 @@ pub struct RenderSprite {
     pub position: Vec3,
     pub rotation: Quat,
     pub size: Vec2,
+    pub world_right: Option<Vec3>,
+    pub world_up: Option<Vec3>,
+    pub quad_correction: Vec3,
     pub color: [f32; 4],
     pub texture_id: Option<usize>,
     pub image_sequence: Option<RenderSpriteImageSequence>,
@@ -949,6 +986,9 @@ impl Default for RenderSprite {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             size: Vec2::splat(1.0),
+            world_right: None,
+            world_up: None,
+            quad_correction: Vec3::ZERO,
             color: [1.0; 4],
             texture_id: None,
             image_sequence: None,
@@ -1061,6 +1101,7 @@ pub struct MeshLodPayload {
 pub struct RenderData {
     pub objects: Vec<RenderObject>,
     pub lights: Vec<RenderLight>,
+    pub static_sprites: Arc<Vec<RenderSprite>>,
     pub sprites: Vec<RenderSprite>,
     pub text_2d: Vec<RenderText2d>,
     pub ui: UiRenderData,
@@ -1442,6 +1483,7 @@ pub struct RenderDelta {
     pub objects_remove: Vec<usize>,
     pub lights_upsert: Vec<RenderLightDelta>,
     pub lights_remove: Vec<usize>,
+    pub static_sprites: Option<Arc<Vec<RenderSprite>>>,
     pub sprites: Option<Vec<RenderSprite>>,
     pub text_2d: Option<Vec<RenderText2d>>,
     pub ui: Option<UiRenderData>,
@@ -1462,6 +1504,7 @@ impl RenderDelta {
             && self.objects_remove.is_empty()
             && self.lights_upsert.is_empty()
             && self.lights_remove.is_empty()
+            && self.static_sprites.is_none()
             && self.sprites.is_none()
             && self.text_2d.is_none()
             && self.ui.is_none()
@@ -1482,18 +1525,42 @@ impl RenderDelta {
         }
 
         if self.full {
-            self.apply_delta_to_full(&other);
+            if other.has_entity_changes() {
+                self.apply_delta_to_full(&other);
+            } else {
+                self.merge_metadata_from_owned(other);
+            }
             return;
         }
+
+        let RenderDelta {
+            full: _,
+            objects_upsert,
+            objects_remove,
+            lights_upsert,
+            lights_remove,
+            static_sprites,
+            sprites,
+            text_2d,
+            ui,
+            camera,
+            render_main_scene_to_swapchain,
+            viewports,
+            render_config,
+            render_graph,
+            gizmo,
+            skin_palette,
+            streaming_requests,
+        } = other;
 
         let mut object_updates: HashMap<usize, RenderObjectDelta> =
             self.objects_upsert.drain(..).map(|o| (o.id, o)).collect();
         let mut object_removals: HashSet<usize> = self.objects_remove.drain(..).collect();
-        for obj in other.objects_upsert {
+        for obj in objects_upsert {
             object_removals.remove(&obj.id);
             object_updates.insert(obj.id, obj);
         }
-        for id in other.objects_remove {
+        for id in objects_remove {
             object_updates.remove(&id);
             object_removals.insert(id);
         }
@@ -1503,77 +1570,160 @@ impl RenderDelta {
         let mut light_updates: HashMap<usize, RenderLightDelta> =
             self.lights_upsert.drain(..).map(|l| (l.id, l)).collect();
         let mut light_removals: HashSet<usize> = self.lights_remove.drain(..).collect();
-        for light in other.lights_upsert {
+        for light in lights_upsert {
             light_removals.remove(&light.id);
             light_updates.insert(light.id, light);
         }
-        for id in other.lights_remove {
+        for id in lights_remove {
             light_updates.remove(&id);
             light_removals.insert(id);
         }
         self.lights_upsert = light_updates.into_values().collect();
         self.lights_remove = light_removals.into_iter().collect();
 
-        if other.camera.is_some() {
-            self.camera = other.camera;
+        if camera.is_some() {
+            self.camera = camera;
         }
-        if other.sprites.is_some() {
-            self.sprites = other.sprites;
+        if static_sprites.is_some() {
+            self.static_sprites = static_sprites;
         }
-        if other.text_2d.is_some() {
-            self.text_2d = other.text_2d;
+        if sprites.is_some() {
+            self.sprites = sprites;
         }
-        if other.ui.is_some() {
-            self.ui = other.ui;
+        if text_2d.is_some() {
+            self.text_2d = text_2d;
         }
-        if other.render_main_scene_to_swapchain.is_some() {
-            self.render_main_scene_to_swapchain = other.render_main_scene_to_swapchain;
+        if ui.is_some() {
+            self.ui = ui;
         }
-        if other.viewports.is_some() {
-            self.viewports = other.viewports;
+        if render_main_scene_to_swapchain.is_some() {
+            self.render_main_scene_to_swapchain = render_main_scene_to_swapchain;
         }
-        if other.render_config.is_some() {
-            self.render_config = other.render_config;
+        if viewports.is_some() {
+            self.viewports = viewports;
         }
-        if other.render_graph.is_some() {
-            self.render_graph = other.render_graph;
+        if render_config.is_some() {
+            self.render_config = render_config;
         }
-        if other.gizmo.is_some() {
-            self.gizmo = other.gizmo;
+        if render_graph.is_some() {
+            self.render_graph = render_graph;
         }
-        if other.skin_palette.is_some() {
-            self.skin_palette = other.skin_palette;
+        if gizmo.is_some() {
+            self.gizmo = gizmo;
         }
-        if other.streaming_requests.is_some() {
-            self.streaming_requests = other.streaming_requests;
+        if skin_palette.is_some() {
+            self.skin_palette = skin_palette;
+        }
+        if streaming_requests.is_some() {
+            self.streaming_requests = streaming_requests;
         }
     }
 
     fn apply_delta_to_full(&mut self, delta: &RenderDelta) {
-        let mut object_updates: HashMap<usize, RenderObjectDelta> =
-            self.objects_upsert.drain(..).map(|o| (o.id, o)).collect();
-        for obj in &delta.objects_upsert {
-            object_updates.insert(obj.id, *obj);
+        if !delta.objects_upsert.is_empty() || !delta.objects_remove.is_empty() {
+            let mut object_updates = HashMap::with_capacity(delta.objects_upsert.len());
+            for obj in &delta.objects_upsert {
+                object_updates.insert(obj.id, *obj);
+            }
+            let object_removals: HashSet<usize> = delta.objects_remove.iter().copied().collect();
+            let mut merged = Vec::with_capacity(
+                self.objects_upsert
+                    .len()
+                    .saturating_add(object_updates.len()),
+            );
+            for existing in self.objects_upsert.drain(..) {
+                if object_removals.contains(&existing.id) {
+                    continue;
+                }
+                if let Some(updated) = object_updates.remove(&existing.id) {
+                    merged.push(updated);
+                } else {
+                    merged.push(existing);
+                }
+            }
+            merged.extend(object_updates.into_values());
+            self.objects_upsert = merged;
         }
-        for id in &delta.objects_remove {
-            object_updates.remove(id);
-        }
-        self.objects_upsert = object_updates.into_values().collect();
         self.objects_remove.clear();
 
-        let mut light_updates: HashMap<usize, RenderLightDelta> =
-            self.lights_upsert.drain(..).map(|l| (l.id, l)).collect();
-        for light in &delta.lights_upsert {
-            light_updates.insert(light.id, *light);
+        if !delta.lights_upsert.is_empty() || !delta.lights_remove.is_empty() {
+            let mut light_updates = HashMap::with_capacity(delta.lights_upsert.len());
+            for light in &delta.lights_upsert {
+                light_updates.insert(light.id, *light);
+            }
+            let light_removals: HashSet<usize> = delta.lights_remove.iter().copied().collect();
+            let mut merged =
+                Vec::with_capacity(self.lights_upsert.len().saturating_add(light_updates.len()));
+            for existing in self.lights_upsert.drain(..) {
+                if light_removals.contains(&existing.id) {
+                    continue;
+                }
+                if let Some(updated) = light_updates.remove(&existing.id) {
+                    merged.push(updated);
+                } else {
+                    merged.push(existing);
+                }
+            }
+            merged.extend(light_updates.into_values());
+            self.lights_upsert = merged;
         }
-        for id in &delta.lights_remove {
-            light_updates.remove(id);
-        }
-        self.lights_upsert = light_updates.into_values().collect();
         self.lights_remove.clear();
 
+        self.merge_metadata_from_ref(delta);
+    }
+
+    fn has_entity_changes(&self) -> bool {
+        !self.objects_upsert.is_empty()
+            || !self.objects_remove.is_empty()
+            || !self.lights_upsert.is_empty()
+            || !self.lights_remove.is_empty()
+    }
+
+    fn merge_metadata_from_owned(&mut self, delta: RenderDelta) {
         if delta.camera.is_some() {
             self.camera = delta.camera;
+        }
+        if delta.static_sprites.is_some() {
+            self.static_sprites = delta.static_sprites;
+        }
+        if delta.sprites.is_some() {
+            self.sprites = delta.sprites;
+        }
+        if delta.text_2d.is_some() {
+            self.text_2d = delta.text_2d;
+        }
+        if delta.ui.is_some() {
+            self.ui = delta.ui;
+        }
+        if delta.render_main_scene_to_swapchain.is_some() {
+            self.render_main_scene_to_swapchain = delta.render_main_scene_to_swapchain;
+        }
+        if delta.viewports.is_some() {
+            self.viewports = delta.viewports;
+        }
+        if delta.render_config.is_some() {
+            self.render_config = delta.render_config;
+        }
+        if delta.render_graph.is_some() {
+            self.render_graph = delta.render_graph;
+        }
+        if delta.gizmo.is_some() {
+            self.gizmo = delta.gizmo;
+        }
+        if delta.skin_palette.is_some() {
+            self.skin_palette = delta.skin_palette;
+        }
+        if delta.streaming_requests.is_some() {
+            self.streaming_requests = delta.streaming_requests;
+        }
+    }
+
+    fn merge_metadata_from_ref(&mut self, delta: &RenderDelta) {
+        if delta.camera.is_some() {
+            self.camera = delta.camera;
+        }
+        if delta.static_sprites.is_some() {
+            self.static_sprites = delta.static_sprites.clone();
         }
         if delta.sprites.is_some() {
             self.sprites = delta.sprites.clone();
@@ -1955,6 +2105,10 @@ pub enum RenderMessage {
         total_lods: usize,
         lods: Vec<MeshLodPayload>,
         bounds: Aabb,
+        pinned: bool,
+    },
+    RemoveMesh {
+        id: usize,
     },
     CreateTexture {
         id: usize,
@@ -1988,6 +2142,7 @@ pub fn render_message_payload_bytes(message: &RenderMessage) -> usize {
             }
             bytes
         }
+        RenderMessage::RemoveMesh { .. } => 0,
         RenderMessage::CreateTexture { data, .. } => data.len(),
         RenderMessage::CreateMaterial(mat) => std::mem::size_of_val(mat),
         _ => 0,
@@ -2212,9 +2367,14 @@ pub struct RendererStats {
     pub gpu_total_capacity: AtomicU64,
     pub gpu_fallbacks: AtomicU32,
     pub profiling_enabled: AtomicBool,
+    pub render_scene_update_us: AtomicU64,
+    pub render_viewports_us: AtomicU64,
+    pub render_graph_setup_us: AtomicU64,
+    pub render_backend_begin_frame_us: AtomicU64,
     pub render_prepare_globals_us: AtomicU64,
     pub render_streaming_plan_us: AtomicU64,
     pub render_occlusion_us: AtomicU64,
+    pub render_pre_graph_misc_us: AtomicU64,
     pub render_graph_us: AtomicU64,
     pub render_graph_pass_us: AtomicU64,
     pub render_graph_encoder_create_us: AtomicU64,
@@ -2439,9 +2599,14 @@ impl Default for RendererStats {
             gpu_total_capacity: AtomicU64::new(0),
             gpu_fallbacks: AtomicU32::new(0),
             profiling_enabled: AtomicBool::new(false),
+            render_scene_update_us: AtomicU64::new(0),
+            render_viewports_us: AtomicU64::new(0),
+            render_graph_setup_us: AtomicU64::new(0),
+            render_backend_begin_frame_us: AtomicU64::new(0),
             render_prepare_globals_us: AtomicU64::new(0),
             render_streaming_plan_us: AtomicU64::new(0),
             render_occlusion_us: AtomicU64::new(0),
+            render_pre_graph_misc_us: AtomicU64::new(0),
             render_graph_us: AtomicU64::new(0),
             render_graph_pass_us: AtomicU64::new(0),
             render_graph_encoder_create_us: AtomicU64::new(0),

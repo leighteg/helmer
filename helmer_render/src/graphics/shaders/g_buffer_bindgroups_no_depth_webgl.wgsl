@@ -62,7 +62,8 @@ struct GBufferInput {
     @location(2) tex_coord: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) world_bitangent: vec3<f32>,
-    @location(5) @interpolate(flat) material_id: u32,
+    @location(5) color: vec4<f32>,
+    @location(6) @interpolate(flat) material_id: u32,
 }
 
 struct GBufferOutput {
@@ -79,6 +80,7 @@ struct VertexInput {
     @location(3) tangent: vec4<f32>,
     @location(4) joints: vec4<u32>,
     @location(5) weights: vec4<f32>,
+    @location(14) color: vec4<f32>,
 }
 
 struct InstanceInput {
@@ -232,6 +234,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
         out.world_tangent = vec3<f32>(1.0, 0.0, 0.0);
         out.world_bitangent = vec3<f32>(0.0, 1.0, 0.0);
         out.tex_coord = vec2<f32>(0.0);
+        out.color = vec4<f32>(1.0);
         out.material_id = 0u;
         return out;
     }
@@ -265,6 +268,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> GBufferInput {
     out.world_bitangent = B;
 
     out.tex_coord = vertex.tex_coord;
+    out.color = vertex.color;
     out.material_id = instance.material_id;
 
     return out;
@@ -282,6 +286,8 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
         albedo_color *= albedo_sample.rgb; // Multiply factor by texture
         alpha *= albedo_sample.a;
     }
+    albedo_color *= in.color.rgb;
+    alpha *= in.color.a;
 
     // --- MRA Calculation ---
     var metallic = material.metallic;

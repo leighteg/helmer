@@ -278,12 +278,38 @@ struct GBufferBundleSlot {
     key: Option<GBufferBundleKey>,
     bundle: Option<wgpu::RenderBundle>,
     resources: Vec<ResourceId>,
-    draw_signature: u64,
 }
 
 struct MaterialBindGroupCache {
     version: u64,
     groups: Arc<Vec<wgpu::BindGroup>>,
+}
+
+fn indirect_draw_run_len(
+    draws: &[crate::graphics::passes::IndirectDrawBatch],
+    start: usize,
+    include_material: bool,
+) -> u32 {
+    let Some(draw) = draws.get(start) else {
+        return 0;
+    };
+    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
+    let mut count = 1u32;
+    let mut next_offset = draw.indirect_offset + stride;
+    let mut next_index = start + 1;
+    while let Some(next) = draws.get(next_index) {
+        if next.vertex != draw.vertex
+            || next.index != draw.index
+            || next.indirect_offset != next_offset
+            || (include_material && next.material_id != draw.material_id)
+        {
+            break;
+        }
+        count += 1;
+        next_offset += stride;
+        next_index += 1;
+    }
+    count
 }
 
 impl GBufferPass {
@@ -360,16 +386,16 @@ impl GBufferPass {
             slot.key = None;
             slot.bundle = None;
             slot.resources.clear();
-            slot.draw_signature = 0;
         }
     }
 
-    pub fn invalidate_bundles_for_resources(&self, evicted: &[ResourceId]) {
+    pub fn invalidate_bundles_for_resources(&self, evicted: &[ResourceId]) -> bool {
         if evicted.is_empty() {
-            return;
+            return false;
         }
 
         let mut cache = self.bundle_cache.write();
+        let mut invalidated = false;
         for slot in cache.iter_mut() {
             if slot.bundle.is_none() || slot.resources.is_empty() {
                 continue;
@@ -381,9 +407,10 @@ impl GBufferPass {
                 slot.key = None;
                 slot.bundle = None;
                 slot.resources.clear();
-                slot.draw_signature = 0;
+                invalidated = true;
             }
         }
+        invalidated
     }
 
     fn gather_bundle_resources(frame: &FrameGlobals, use_indirect: bool) -> Vec<ResourceId> {
@@ -402,38 +429,6 @@ impl GBufferPass {
         resources.sort_unstable();
         resources.dedup();
         resources
-    }
-
-    fn bundle_signature(pool: &GpuResourcePool, frame: &FrameGlobals, use_indirect: bool) -> u64 {
-        let mut hash = 0xcbf29ce484222325u64;
-        let mut mix = |value: u64| {
-            hash ^= value;
-            hash = hash.wrapping_mul(0x100000001b3);
-        };
-
-        mix(use_indirect as u64);
-        if use_indirect {
-            for draw in frame.gpu_draws.iter() {
-                mix(draw.vertex.raw());
-                mix(pool.binding_version(draw.vertex));
-                mix(draw.index.raw());
-                mix(pool.binding_version(draw.index));
-                mix(draw.indirect_offset);
-            }
-        } else {
-            for batch in frame.gbuffer_batches.iter() {
-                mix(batch.vertex.raw());
-                mix(pool.binding_version(batch.vertex));
-                mix(batch.index.raw());
-                mix(pool.binding_version(batch.index));
-                mix(batch.index_count as u64);
-                mix(batch.instance_range.start as u64);
-                mix(batch.instance_range.end as u64);
-                mix(batch.material_id as u64);
-            }
-        }
-
-        hash
     }
 
     fn ensure_target(
@@ -663,7 +658,7 @@ impl GBufferPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -692,7 +687,7 @@ impl GBufferPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -1052,7 +1047,7 @@ impl GBufferPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                    resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                 },
             ],
         }))
@@ -1113,7 +1108,7 @@ impl GBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                            resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                         },
                     ],
                 });
@@ -1148,7 +1143,7 @@ impl GBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                            resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                         },
                     ],
                 });
@@ -1172,9 +1167,6 @@ impl GBufferPass {
         let pipeline = self.pipeline.read();
         let pipeline = pipeline.as_ref()?;
         let binding_backend = frame.binding_backend;
-        if binding_backend == BindingBackendKind::BindGroups && use_indirect {
-            return None;
-        }
 
         let camera_bg = self.create_camera_bind_group(ctx.device(), frame)?;
         let constants_bg = self.create_constants_bind_group(ctx.device(), frame)?;
@@ -1215,11 +1207,21 @@ impl GBufferPass {
 
         if use_indirect {
             let indirect = frame.gbuffer_indirect.as_ref()?;
-            if let Some(groups) = material_groups.as_ref() {
-                let material_bg = groups.first()?;
-                encoder.set_bind_group(1, material_bg, &[]);
-            }
+            let mut last_material_idx = None;
+            let mut last_vertex = None;
+            let mut last_index = None;
             for draw in frame.gpu_draws.iter() {
+                if let Some(groups) = material_groups.as_ref() {
+                    let material_idx = draw.material_id as usize;
+                    if last_material_idx != Some(material_idx) {
+                        let material_bg = groups
+                            .get(material_idx)
+                            .or_else(|| groups.first())
+                            .expect("material bind groups empty");
+                        encoder.set_bind_group(1, material_bg, &[]);
+                        last_material_idx = Some(material_idx);
+                    }
+                }
                 let vertex = ctx
                     .rpctx
                     .pool
@@ -1233,11 +1235,20 @@ impl GBufferPass {
                 let (Some(vertex), Some(index)) = (vertex, index) else {
                     continue;
                 };
-                encoder.set_vertex_buffer(0, vertex.slice(..));
-                encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                if last_vertex != Some(draw.vertex) {
+                    encoder.set_vertex_buffer(0, vertex.slice(..));
+                    last_vertex = Some(draw.vertex);
+                }
+                if last_index != Some(draw.index) {
+                    encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    last_index = Some(draw.index);
+                }
                 encoder.draw_indexed_indirect(indirect, draw.indirect_offset);
             }
         } else {
+            let mut last_material_idx = None;
+            let mut last_vertex = None;
+            let mut last_index = None;
             for batch in frame.gbuffer_batches.iter() {
                 let vertex = ctx
                     .rpctx
@@ -1254,14 +1265,23 @@ impl GBufferPass {
                 };
                 if let Some(groups) = material_groups.as_ref() {
                     let material_idx = batch.material_id as usize;
-                    let material_bg = groups
-                        .get(material_idx)
-                        .or_else(|| groups.first())
-                        .expect("material bind groups empty");
-                    encoder.set_bind_group(1, material_bg, &[]);
+                    if last_material_idx != Some(material_idx) {
+                        let material_bg = groups
+                            .get(material_idx)
+                            .or_else(|| groups.first())
+                            .expect("material bind groups empty");
+                        encoder.set_bind_group(1, material_bg, &[]);
+                        last_material_idx = Some(material_idx);
+                    }
                 }
-                encoder.set_vertex_buffer(0, vertex.slice(..));
-                encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                if last_vertex != Some(batch.vertex) {
+                    encoder.set_vertex_buffer(0, vertex.slice(..));
+                    last_vertex = Some(batch.vertex);
+                }
+                if last_index != Some(batch.index) {
+                    encoder.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    last_index = Some(batch.index);
+                }
                 encoder.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
             }
         }
@@ -1281,8 +1301,8 @@ impl RenderPass for GBufferPass {
         self.clear_bundle_cache();
     }
 
-    fn invalidate_cached_bundles_for_resources(&self, resources: &[ResourceId]) {
-        self.invalidate_bundles_for_resources(resources);
+    fn invalidate_cached_bundles_for_resources(&self, resources: &[ResourceId]) -> bool {
+        self.invalidate_bundles_for_resources(resources)
     }
 
     fn setup(&self, ctx: &mut RenderGraphContext) {
@@ -1306,8 +1326,7 @@ impl RenderPass for GBufferPass {
             && !frame.gpu_draws.is_empty();
         let use_multi_draw = use_indirect
             && frame.render_config.gpu_multi_draw_indirect
-            && frame.device_caps.supports_multi_draw_indirect()
-            && binding_backend != BindingBackendKind::BindGroups;
+            && frame.device_caps.supports_multi_draw_indirect();
         let has_materials = frame.material_buffer.is_some()
             && (binding_backend != BindingBackendKind::BindGroups
                 || frame.material_textures.is_some());
@@ -1361,7 +1380,7 @@ impl RenderPass for GBufferPass {
                 use_mesh = false;
             }
         }
-        let bundles_active = frame.render_config.render_bundles && draw_enabled && !use_mesh;
+        let bundles_active = frame.gbuffer_render_bundles && draw_enabled && !use_mesh;
         if !bundles_active {
             let has_cached = self
                 .bundle_cache
@@ -1374,7 +1393,6 @@ impl RenderPass for GBufferPass {
                     slot.key = None;
                     slot.bundle = None;
                     slot.resources.clear();
-                    slot.draw_signature = 0;
                 }
             }
         }
@@ -1386,21 +1404,15 @@ impl RenderPass for GBufferPass {
             }
         }
         let cached_bundle = if draw_enabled && bundles_active {
-            let draw_signature =
-                Self::bundle_signature(ctx.rpctx.pool, frame.as_ref(), use_indirect);
             let frames_in_flight = frame.render_config.frames_in_flight.max(1) as usize;
             self.ensure_bundle_cache(frames_in_flight);
             let slot_index = (frame.frame_index as usize) % frames_in_flight;
             let mut cache = self.bundle_cache.write();
             let slot = &mut cache[slot_index];
-            if slot.key != Some(frame.gbuffer_bundle_key)
-                || slot.bundle.is_none()
-                || slot.draw_signature != draw_signature
-            {
+            if slot.key != Some(frame.gbuffer_bundle_key) || slot.bundle.is_none() {
                 slot.key = Some(frame.gbuffer_bundle_key);
                 slot.bundle = self.build_bundle(ctx, frame.as_ref(), use_indirect);
                 slot.resources = Self::gather_bundle_resources(frame.as_ref(), use_indirect);
-                slot.draw_signature = draw_signature;
             }
             slot.bundle.clone()
         } else {
@@ -2073,8 +2085,16 @@ impl RenderPass for GBufferPass {
             if use_indirect {
                 let indirect = frame.gbuffer_indirect.as_ref().unwrap();
                 if use_multi_draw {
-                    let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
                     let draws = frame.gpu_draws.as_ref();
+                    let material_groups = if binding_backend == BindingBackendKind::BindGroups {
+                        match material_groups.as_ref() {
+                            Some(groups) => Some(groups),
+                            None => return,
+                        }
+                    } else {
+                        None
+                    };
+                    let include_material = material_groups.is_some();
                     let mut i = 0usize;
                     while i < draws.len() {
                         let draw = &draws[i];
@@ -2102,24 +2122,18 @@ impl RenderPass for GBufferPass {
                                 continue;
                             }
                         };
+                        if let Some(groups) = material_groups.as_ref() {
+                            let material_idx = draw.material_id as usize;
+                            let material_bg = groups
+                                .get(material_idx)
+                                .or_else(|| groups.first())
+                                .expect("material bind groups empty");
+                            pass.set_bind_group(1, material_bg, &[]);
+                        }
                         pass.set_vertex_buffer(0, vertex.slice(..));
                         pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
-
-                        let mut count = 1u32;
-                        let mut next_offset = draw.indirect_offset + stride;
-                        let mut j = i + 1;
-                        while j < draws.len() {
-                            let next = &draws[j];
-                            if next.vertex != draw.vertex
-                                || next.index != draw.index
-                                || next.indirect_offset != next_offset
-                            {
-                                break;
-                            }
-                            count += 1;
-                            next_offset += stride;
-                            j += 1;
-                        }
+                        let count = indirect_draw_run_len(draws, i, include_material);
+                        let j = i + count as usize;
                         pass.multi_draw_indexed_indirect(indirect, draw.indirect_offset, count);
                         i = j;
                     }
@@ -2132,6 +2146,9 @@ impl RenderPass for GBufferPass {
                     } else {
                         None
                     };
+                    let mut last_material_idx = None;
+                    let mut last_vertex = None;
+                    let mut last_index = None;
                     for draw in frame.gpu_draws.iter() {
                         let vertex = match ctx
                             .rpctx
@@ -2153,14 +2170,23 @@ impl RenderPass for GBufferPass {
                         };
                         if let Some(groups) = material_groups.as_ref() {
                             let material_idx = draw.material_id as usize;
-                            let material_bg = groups
-                                .get(material_idx)
-                                .or_else(|| groups.first())
-                                .expect("material bind groups empty");
-                            pass.set_bind_group(1, material_bg, &[]);
+                            if last_material_idx != Some(material_idx) {
+                                let material_bg = groups
+                                    .get(material_idx)
+                                    .or_else(|| groups.first())
+                                    .expect("material bind groups empty");
+                                pass.set_bind_group(1, material_bg, &[]);
+                                last_material_idx = Some(material_idx);
+                            }
                         }
-                        pass.set_vertex_buffer(0, vertex.slice(..));
-                        pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                        if last_vertex != Some(draw.vertex) {
+                            pass.set_vertex_buffer(0, vertex.slice(..));
+                            last_vertex = Some(draw.vertex);
+                        }
+                        if last_index != Some(draw.index) {
+                            pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                            last_index = Some(draw.index);
+                        }
                         pass.draw_indexed_indirect(indirect, draw.indirect_offset);
                     }
                 }
@@ -2173,6 +2199,9 @@ impl RenderPass for GBufferPass {
                 } else {
                     None
                 };
+                let mut last_material_idx = None;
+                let mut last_vertex = None;
+                let mut last_index = None;
                 for batch in frame.gbuffer_batches.iter() {
                     let vertex = match ctx
                         .rpctx
@@ -2195,17 +2224,82 @@ impl RenderPass for GBufferPass {
 
                     if let Some(groups) = material_groups {
                         let material_idx = batch.material_id as usize;
-                        let material_bg = groups
-                            .get(material_idx)
-                            .or_else(|| groups.first())
-                            .expect("material bind groups empty");
-                        pass.set_bind_group(1, material_bg, &[]);
+                        if last_material_idx != Some(material_idx) {
+                            let material_bg = groups
+                                .get(material_idx)
+                                .or_else(|| groups.first())
+                                .expect("material bind groups empty");
+                            pass.set_bind_group(1, material_bg, &[]);
+                            last_material_idx = Some(material_idx);
+                        }
                     }
-                    pass.set_vertex_buffer(0, vertex.slice(..));
-                    pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    if last_vertex != Some(batch.vertex) {
+                        pass.set_vertex_buffer(0, vertex.slice(..));
+                        last_vertex = Some(batch.vertex);
+                    }
+                    if last_index != Some(batch.index) {
+                        pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                        last_index = Some(batch.index);
+                    }
                     pass.draw_indexed(0..batch.index_count, 0, batch.instance_range.clone());
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::indirect_draw_run_len;
+    use crate::graphics::graph::definition::resource_id::{ResourceId, ResourceKind};
+    use crate::graphics::passes::IndirectDrawBatch;
+
+    fn draw(vertex: u32, index: u32, material_id: u32, indirect_offset: u64) -> IndirectDrawBatch {
+        IndirectDrawBatch {
+            mesh_id: 0,
+            lod: 0,
+            material_id,
+            vertex: ResourceId::new(ResourceKind::Buffer, vertex, 0),
+            index: ResourceId::new(ResourceKind::Buffer, index, 0),
+            meshlet_descs: ResourceId::new(ResourceKind::Buffer, 100, 0),
+            meshlet_vertices: ResourceId::new(ResourceKind::Buffer, 101, 0),
+            meshlet_indices: ResourceId::new(ResourceKind::Buffer, 102, 0),
+            meshlet_count: 0,
+            instance_base: 0,
+            instance_capacity: 0,
+            indirect_offset,
+            mesh_task_offset: 0,
+            mesh_task_count: 0,
+            mesh_task_tile_meshlets: 0,
+            mesh_task_tile_instances: 0,
+        }
+    }
+
+    #[test]
+    fn indirect_draw_run_len_groups_contiguous_mesh_runs() {
+        let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
+        let draws = vec![
+            draw(1, 2, 0, 0),
+            draw(1, 2, 0, stride),
+            draw(1, 2, 0, stride * 2),
+            draw(1, 3, 0, stride * 3),
+        ];
+
+        assert_eq!(indirect_draw_run_len(&draws, 0, false), 3);
+        assert_eq!(indirect_draw_run_len(&draws, 3, false), 1);
+    }
+
+    #[test]
+    fn indirect_draw_run_len_respects_material_boundaries() {
+        let stride = std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
+        let draws = vec![
+            draw(1, 2, 0, 0),
+            draw(1, 2, 1, stride),
+            draw(1, 2, 1, stride * 2),
+        ];
+
+        assert_eq!(indirect_draw_run_len(&draws, 0, true), 1);
+        assert_eq!(indirect_draw_run_len(&draws, 1, true), 2);
+        assert_eq!(indirect_draw_run_len(&draws, 0, false), 3);
     }
 }

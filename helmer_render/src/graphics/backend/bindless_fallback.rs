@@ -12,7 +12,7 @@ use crate::graphics::graph::{
     definition::resource_desc::ResourceDesc,
     definition::resource_id::{ResourceId, ResourceKind},
     logic::gpu_resource_pool::GpuResourcePool,
-    logic::residency::Residency,
+    logic::residency::{GpuResourceEntry, Residency},
 };
 use crate::graphics::legacy_renderers::forward_pmu::MaterialLowEnd as MaterialGPU;
 
@@ -293,7 +293,10 @@ impl BindlessFallbackBackend {
             }
         }
 
-        // Rebuild bindgroup
+        self.rebuild_bind_group(device);
+    }
+
+    fn rebuild_bind_group(&self, device: &wgpu::Device) {
         let layout = self.ensure_layout(device);
         let (fallback_tex, fallback_sampler, fallback_buffer) = self.ensure_defaults(device);
         let features = device.features();
@@ -301,6 +304,10 @@ impl BindlessFallbackBackend {
         let use_sampler_array = use_texture_array;
         let use_buffer_array = features.contains(wgpu::Features::BUFFER_BINDING_ARRAY)
             && features.contains(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY);
+
+        let textures = self.texture_views.read();
+        let samplers = self.samplers.read();
+        let buffers = self.buffers.read();
 
         let tex_array: Vec<&wgpu::TextureView> = if use_texture_array {
             textures
@@ -379,6 +386,124 @@ impl BindlessFallbackBackend {
         *self.bind_group.write() = Some(Arc::new(bg));
     }
 
+    fn update_texture_binding(&self, id: ResourceId, entry: Option<&GpuResourceEntry>) -> bool {
+        if id.kind() != ResourceKind::Texture {
+            return false;
+        }
+        let handle = id.index();
+        if handle >= self.config.max_textures as usize {
+            return false;
+        }
+
+        let mut tex_slots = self.texture_slots.write();
+        let mut textures = self.texture_views.write();
+        tex_slots.remove(&handle);
+        let Some(slot_view) = textures.get_mut(handle) else {
+            return false;
+        };
+        *slot_view = None;
+
+        let Some(entry) = entry else {
+            return true;
+        };
+        if entry.kind != ResourceKind::Texture
+            || entry.residency != Residency::Resident
+            || !entry.is_streaming()
+        {
+            return true;
+        }
+        let (layers, usage) = match &entry.desc {
+            ResourceDesc::Texture2D { layers, usage, .. } => (*layers, *usage),
+            _ => (1, wgpu::TextureUsages::empty()),
+        };
+        if layers != 1
+            || !usage.contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            || entry.is_depth_texture()
+        {
+            return true;
+        }
+        if let Some(ref tex) = entry.texture {
+            let size = tex.size();
+            if tex.dimension() == wgpu::TextureDimension::D2 && size.depth_or_array_layers == 1 {
+                tex_slots.insert(handle, handle as u32);
+                *slot_view = Some(Arc::new(tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("BindlessFallback/TexView"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    ..Default::default()
+                })));
+            }
+        }
+        true
+    }
+
+    fn update_buffer_binding(&self, id: ResourceId, entry: Option<&GpuResourceEntry>) -> bool {
+        if id.kind() != ResourceKind::Buffer {
+            return false;
+        }
+        let handle = id.index();
+        if handle >= self.config.max_buffers as usize {
+            return false;
+        }
+
+        let mut buf_slots = self.buffer_slots.write();
+        let mut buffers = self.buffers.write();
+        buf_slots.remove(&handle);
+        let Some(slot_buf) = buffers.get_mut(handle) else {
+            return false;
+        };
+        *slot_buf = None;
+        if let Some(buffer) = entry
+            .filter(|entry| {
+                entry.kind == ResourceKind::Buffer && entry.residency == Residency::Resident
+            })
+            .and_then(|entry| entry.buffer.as_ref().map(|buffer| Arc::new(buffer.clone())))
+        {
+            buf_slots.insert(handle, handle as u32);
+            *slot_buf = Some(buffer);
+        }
+        true
+    }
+
+    fn update_sampler_binding(&self, id: ResourceId, entry: Option<&GpuResourceEntry>) -> bool {
+        if id.kind() != ResourceKind::Sampler {
+            return false;
+        }
+        let handle = id.index();
+        if handle >= self.config.max_samplers as usize {
+            return false;
+        }
+
+        let mut sam_slots = self.sampler_slots.write();
+        let mut samplers = self.samplers.write();
+        sam_slots.remove(&handle);
+        let Some(slot_sampler) = samplers.get_mut(handle) else {
+            return false;
+        };
+        *slot_sampler = None;
+        if let Some(sampler) = entry
+            .filter(|entry| {
+                entry.kind == ResourceKind::Sampler && entry.residency == Residency::Resident
+            })
+            .and_then(|entry| {
+                entry
+                    .sampler
+                    .as_ref()
+                    .map(|sampler| Arc::new(sampler.clone()))
+            })
+        {
+            sam_slots.insert(handle, handle as u32);
+            *slot_sampler = Some(sampler);
+        }
+        true
+    }
+
+    fn apply_binding_change(&self, pool: &GpuResourcePool, id: ResourceId) -> bool {
+        let entry = pool.entry(id);
+        self.update_texture_binding(id, entry)
+            || self.update_buffer_binding(id, entry)
+            || self.update_sampler_binding(id, entry)
+    }
+
     fn bg(&self) -> Option<Arc<wgpu::BindGroup>> {
         self.bind_group.read().clone()
     }
@@ -399,18 +524,37 @@ impl BindingBackend for BindlessFallbackBackend {
         _queue: &wgpu::Queue,
         pool: &GpuResourcePool,
         _frame_index: u32,
+        binding_changes: &[ResourceId],
     ) {
         let epoch = pool.binding_epoch();
-        let needs_rebuild = {
+        let (needs_rebuild, bind_group_missing, epoch_matches) = {
             let last = self.last_epoch.read();
             let epoch_matches = last.map_or(false, |prev| prev == epoch);
-            !epoch_matches || self.bind_group.read().is_none()
+            let bind_group_missing = self.bind_group.read().is_none();
+            (
+                !epoch_matches || bind_group_missing,
+                bind_group_missing,
+                epoch_matches,
+            )
         };
         if !needs_rebuild {
             return;
         }
+        let full_rebuild = bind_group_missing || !epoch_matches && binding_changes.is_empty();
+        let any_change = if full_rebuild {
+            self.update_from_pool(device, pool);
+            true
+        } else {
+            binding_changes
+                .iter()
+                .copied()
+                .any(|id| self.apply_binding_change(pool, id))
+        };
         *self.last_epoch.write() = Some(epoch);
-        self.update_from_pool(device, pool);
+        if !any_change && !bind_group_missing {
+            return;
+        }
+        self.rebuild_bind_group(device);
     }
 
     fn begin_pass(&self, rp: &mut wgpu::RenderPass, policy: PassBindingPolicy) {

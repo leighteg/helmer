@@ -1039,17 +1039,10 @@ impl System for RenderDataSystem {
             objects_remove,
             lights_upsert,
             lights_remove,
-            sprites: None,
-            text_2d: None,
-            ui: None,
-            camera: None,
-            render_main_scene_to_swapchain: None,
-            viewports: None,
-            render_config: None,
-            render_graph: None,
-            gizmo: None,
-            skin_palette: None,
-            streaming_requests: None,
+            static_sprites: full_snapshot.then(|| Arc::new(Vec::new())),
+            sprites: full_snapshot.then(Vec::new),
+            text_2d: full_snapshot.then(Vec::new),
+            ..RenderDelta::default()
         };
 
         let camera_changed = full_snapshot

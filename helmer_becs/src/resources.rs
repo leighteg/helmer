@@ -55,6 +55,8 @@ pub struct BecsRuntimeWindowControl(pub Arc<RuntimeWindowControl>);
 pub struct BecsRendererStats(pub Arc<RendererStats>);
 #[derive(Resource)]
 pub struct BecsRenderSender(pub Sender<RenderMessage>);
+#[derive(Resource)]
+pub struct BecsRenderControlSender(pub Sender<RenderMessage>);
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct BecsStreamingTuning(pub StreamingTuning);
 #[derive(Resource, Clone, Copy, Debug)]
@@ -95,9 +97,14 @@ pub struct ProfilingHistory {
     pub render_thread_messages_ms: VecDeque<f64>,
     pub render_thread_upload_ms: VecDeque<f64>,
     pub render_thread_render_ms: VecDeque<f64>,
+    pub render_scene_update_ms: VecDeque<f64>,
+    pub render_viewports_ms: VecDeque<f64>,
+    pub render_graph_setup_ms: VecDeque<f64>,
+    pub render_backend_begin_frame_ms: VecDeque<f64>,
     pub render_prepare_globals_ms: VecDeque<f64>,
     pub render_streaming_plan_ms: VecDeque<f64>,
     pub render_occlusion_ms: VecDeque<f64>,
+    pub render_pre_graph_misc_ms: VecDeque<f64>,
     pub render_graph_ms: VecDeque<f64>,
     pub render_graph_pass_ms: VecDeque<f64>,
     pub render_graph_encoder_create_ms: VecDeque<f64>,
@@ -142,6 +149,7 @@ pub type RuntimeCursorStateResource = BecsRuntimeCursorState;
 pub type RuntimeWindowControlResource = BecsRuntimeWindowControl;
 pub type RendererStatsResource = BecsRendererStats;
 pub type RenderSenderResource = BecsRenderSender;
+pub type RenderControlSenderResource = BecsRenderControlSender;
 pub type StreamingTuningResource = BecsStreamingTuning;
 pub type LodTuningResource = BecsLodTuning;
 pub type RenderWorkerTuningResource = BecsRenderWorkerTuning;
@@ -255,6 +263,24 @@ impl BecsRenderSender {
 }
 
 impl Deref for BecsRenderSender {
+    type Target = Sender<RenderMessage>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl BecsRenderControlSender {
+    #[inline]
+    pub fn send(
+        &self,
+        msg: RenderMessage,
+    ) -> Result<(), crossbeam_channel::SendError<RenderMessage>> {
+        self.0.send(msg)
+    }
+}
+
+impl Deref for BecsRenderControlSender {
     type Target = Sender<RenderMessage>;
 
     fn deref(&self) -> &Self::Target {

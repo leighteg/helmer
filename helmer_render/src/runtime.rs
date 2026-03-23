@@ -98,6 +98,7 @@ impl Default for RuntimeConfig {
 pub struct RuntimeTuning {
     pub task_worker_count: AtomicUsize,
     pub render_message_capacity: AtomicUsize,
+    pub asset_message_capacity: AtomicUsize,
     pub asset_stream_queue_capacity: AtomicUsize,
     pub asset_worker_queue_capacity: AtomicUsize,
     pub max_pending_asset_uploads: AtomicUsize,
@@ -127,7 +128,8 @@ impl Default for RuntimeTuning {
         } else {
             parallelism.saturating_sub(1).max(1)
         };
-        let message_capacity = if single_threaded_runtime {
+        let render_message_capacity = if single_threaded_runtime { 8 } else { 16 };
+        let asset_message_capacity = if single_threaded_runtime {
             64
         } else {
             (parallelism * 64).clamp(64, 1024)
@@ -156,8 +158,9 @@ impl Default for RuntimeTuning {
         };
         Self {
             task_worker_count: AtomicUsize::new(task_worker_count),
-            render_message_capacity: AtomicUsize::new(message_capacity),
-            asset_stream_queue_capacity: AtomicUsize::new(message_capacity),
+            render_message_capacity: AtomicUsize::new(render_message_capacity),
+            asset_message_capacity: AtomicUsize::new(asset_message_capacity),
+            asset_stream_queue_capacity: AtomicUsize::new(asset_message_capacity),
             asset_worker_queue_capacity: AtomicUsize::new(worker_queue_capacity),
             max_pending_asset_uploads: AtomicUsize::new(max_pending_asset_uploads),
             max_pending_asset_bytes: AtomicUsize::new(max_pending_asset_bytes),
@@ -177,6 +180,24 @@ impl Default for RuntimeTuning {
             pending_asset_uploads: AtomicUsize::new(0),
             pending_asset_bytes: AtomicUsize::new(0),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::RuntimeTuning;
+
+    #[test]
+    fn render_message_queue_stays_latency_bounded_relative_to_asset_queue() {
+        let tuning = RuntimeTuning::default();
+        let render_capacity = tuning.render_message_capacity.load(Ordering::Relaxed);
+        let asset_capacity = tuning.asset_message_capacity.load(Ordering::Relaxed);
+
+        assert!(render_capacity <= 16);
+        assert!(asset_capacity >= 64);
+        assert!(asset_capacity > render_capacity);
     }
 }
 

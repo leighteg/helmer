@@ -44,6 +44,7 @@ pub(super) struct BecsLogicState {
     runtime_profiling: Arc<RuntimeProfiling>,
     runtime_window_control: Arc<RuntimeWindowControl>,
     render_sender: Sender<RenderMessage>,
+    render_control_sender: Sender<RenderMessage>,
     logic_clock: helmer::runtime::LogicClock,
     fixed_timestep: bool,
     pending_resize: Option<(helmer_window::event::WindowState, web_time::Instant)>,
@@ -64,6 +65,7 @@ impl BecsLogicState {
         runtime_profiling: Arc<RuntimeProfiling>,
         runtime_window_control: Arc<RuntimeWindowControl>,
         render_sender: Sender<RenderMessage>,
+        render_control_sender: Sender<RenderMessage>,
     ) -> Self {
         let fixed_timestep = RuntimeConfig::default().fixed_timestep;
         let target_tickrate = RuntimeConfig::default().target_tickrate;
@@ -82,6 +84,7 @@ impl BecsLogicState {
             runtime_profiling,
             runtime_window_control,
             render_sender,
+            render_control_sender,
             logic_clock: helmer::runtime::LogicClock::new(target_tickrate, fixed_timestep),
             fixed_timestep,
             pending_resize: None,
@@ -102,11 +105,7 @@ impl BecsLogicState {
         }
         let resize =
             RenderMessage::Resize(winit::dpi::PhysicalSize::new(state.width, state.height));
-        if self.runtime.context().is_single_threaded() {
-            let _ = self.render_sender.try_send(resize);
-        } else {
-            let _ = self.render_sender.send(resize);
-        }
+        let _ = self.render_control_sender.send(resize);
         self.last_window_state = Some(state);
     }
 

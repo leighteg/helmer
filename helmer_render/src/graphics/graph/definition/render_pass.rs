@@ -27,5 +27,7 @@ pub trait RenderPass: DynClone + Send + Sync + 'static {
     fn clear_cached_bundles(&self) {}
 
     /// Optional hook for passes that cache render bundles keyed by resources.
-    fn invalidate_cached_bundles_for_resources(&self, _resources: &[ResourceId]) {}
+    fn invalidate_cached_bundles_for_resources(&self, _resources: &[ResourceId]) -> bool {
+        false
+    }
 }

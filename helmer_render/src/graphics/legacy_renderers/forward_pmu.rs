@@ -1979,9 +1979,11 @@ impl RenderTrait for ForwardRendererPMU {
                 total_lods: _,
                 lods,
                 bounds,
+                pinned: _,
             } => {
                 self.add_mesh(id, &lods, bounds).unwrap();
             }
+            RenderMessage::RemoveMesh { .. } => {}
             RenderMessage::RenderData(data) => self.update_render_data(data),
             RenderMessage::RenderDelta(_) => {}
             RenderMessage::EguiData(data) => {

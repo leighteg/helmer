@@ -76,6 +76,7 @@ impl BindingBackend for BindGroupBackend {
         _queue: &wgpu::Queue,
         _pool: &GpuResourcePool,
         _frame_index: u32,
+        _binding_changes: &[ResourceId],
     ) {
     }
 

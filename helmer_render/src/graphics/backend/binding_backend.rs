@@ -206,6 +206,7 @@ pub trait BindingBackend: Send + Sync {
         queue: &wgpu::Queue,
         pool: &GpuResourcePool,
         frame_index: u32,
+        binding_changes: &[ResourceId],
     );
 
     /// Called at pass begin (sets bindgroups / arrays)

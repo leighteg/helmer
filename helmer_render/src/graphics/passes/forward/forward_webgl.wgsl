@@ -135,6 +135,7 @@ struct VertexInput {
     @location(3) tangent: vec4<f32>,
     @location(4) joints: vec4<u32>,
     @location(5) weights: vec4<f32>,
+    @location(14) color: vec4<f32>,
 }
 
 struct InstanceInput {
@@ -155,7 +156,8 @@ struct VSOut {
     @location(2) tex_coord: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) world_bitangent: vec3<f32>,
-    @location(5) @interpolate(flat) material_id: u32,
+    @location(5) color: vec4<f32>,
+    @location(6) @interpolate(flat) material_id: u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -391,6 +393,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VSOut {
         out.world_tangent = vec3<f32>(1.0, 0.0, 0.0);
         out.world_bitangent = vec3<f32>(0.0, 1.0, 0.0);
         out.tex_coord = vec2<f32>(0.0);
+        out.color = vec4<f32>(1.0);
         out.material_id = 0u;
         return out;
     }
@@ -420,6 +423,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VSOut {
     out.world_tangent = T;
     out.world_bitangent = B;
     out.tex_coord = vertex.tex_coord;
+    out.color = vertex.color;
     out.material_id = instance.material_id;
     return out;
 }
@@ -432,8 +436,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let has_albedo = material.albedo_idx >= 0i;
     let albedo_idx = select(0i, material.albedo_idx, has_albedo);
     let albedo_sample = textureSampleBias(textures[albedo_idx], pbr_sampler, in.tex_coord, mip_bias);
-    var albedo = material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo);
-    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo);
+    var albedo = material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo) * in.color.rgb;
+    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo) * in.color.a;
 
     let has_mra = material.metallic_roughness_idx >= 0i;
     let mra_idx = select(0i, material.metallic_roughness_idx, has_mra);

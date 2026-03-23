@@ -943,10 +943,14 @@ fn build_default_graph(
     }
 
     if toggles.sprite_pass {
-        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
             let pass = SpritePass::new(
                 pool,
                 swapchain_id,
+                Some(gbuffer.depth_copy),
                 params.surface_format,
                 size.width,
                 size.height,
@@ -1312,10 +1316,14 @@ fn build_hybrid_graph(
     }
 
     if toggles.sprite_pass {
-        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
             let pass = SpritePass::new(
                 pool,
                 swapchain_id,
+                Some(gbuffer.depth_copy),
                 params.surface_format,
                 size.width,
                 size.height,
@@ -1661,10 +1669,14 @@ fn build_debug_graph(
     }
 
     if toggles.sprite_pass {
-        builder.add::<SpritePass, SpriteOutputs, _>(|pool, _store| {
+        builder.add::<SpritePass, SpriteOutputs, _>(|pool, store| {
+            let gbuffer = *store
+                .outputs::<GBufferOutputs>()
+                .expect("G-buffer pass missing");
             let pass = SpritePass::new(
                 pool,
                 swapchain_id,
+                Some(gbuffer.depth_copy),
                 params.surface_format,
                 size.width,
                 size.height,
@@ -1748,6 +1760,7 @@ fn build_traced_graph(
             let pass = SpritePass::new(
                 pool,
                 swapchain_id,
+                None,
                 params.surface_format,
                 size.width,
                 size.height,

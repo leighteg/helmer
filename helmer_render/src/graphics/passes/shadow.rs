@@ -63,7 +63,6 @@ struct ShadowBundleSlot {
     key: Option<ShadowBundleKey>,
     bundles: Option<Vec<wgpu::RenderBundle>>,
     resources: Vec<ResourceId>,
-    draw_signature: u64,
 }
 
 fn shadow_format_is_rg(format: wgpu::TextureFormat) -> bool {
@@ -151,16 +150,16 @@ impl ShadowPass {
             slot.key = None;
             slot.bundles = None;
             slot.resources.clear();
-            slot.draw_signature = 0;
         }
     }
 
-    pub fn invalidate_bundles_for_resources(&self, evicted: &[ResourceId]) {
+    pub fn invalidate_bundles_for_resources(&self, evicted: &[ResourceId]) -> bool {
         if evicted.is_empty() {
-            return;
+            return false;
         }
 
         let mut cache = self.bundle_cache.write();
+        let mut invalidated = false;
         for slot in cache.iter_mut() {
             if slot.bundles.is_none() || slot.resources.is_empty() {
                 continue;
@@ -172,9 +171,10 @@ impl ShadowPass {
                 slot.key = None;
                 slot.bundles = None;
                 slot.resources.clear();
-                slot.draw_signature = 0;
+                invalidated = true;
             }
         }
+        invalidated
     }
 
     fn gather_bundle_resources(frame: &FrameGlobals, use_indirect: bool) -> Vec<ResourceId> {
@@ -193,37 +193,6 @@ impl ShadowPass {
         resources.sort_unstable();
         resources.dedup();
         resources
-    }
-
-    fn bundle_signature(pool: &GpuResourcePool, frame: &FrameGlobals, use_indirect: bool) -> u64 {
-        let mut hash = 0xcbf29ce484222325u64;
-        let mut mix = |value: u64| {
-            hash ^= value;
-            hash = hash.wrapping_mul(0x100000001b3);
-        };
-
-        mix(use_indirect as u64);
-        if use_indirect {
-            for draw in frame.gpu_draws.iter() {
-                mix(draw.vertex.raw());
-                mix(pool.binding_version(draw.vertex));
-                mix(draw.index.raw());
-                mix(pool.binding_version(draw.index));
-                mix(draw.indirect_offset);
-            }
-        } else {
-            for batch in frame.shadow_batches.iter() {
-                mix(batch.vertex.raw());
-                mix(pool.binding_version(batch.vertex));
-                mix(batch.index.raw());
-                mix(pool.binding_version(batch.index));
-                mix(batch.index_count as u64);
-                mix(batch.instance_range.start as u64);
-                mix(batch.instance_range.end as u64);
-            }
-        }
-
-        hash
     }
 
     fn ensure_targets(
@@ -492,7 +461,7 @@ impl ShadowPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -521,7 +490,7 @@ impl ShadowPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -836,7 +805,7 @@ impl ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                     },
                 ],
             }),
@@ -875,7 +844,7 @@ impl ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                     },
                 ],
             });
@@ -1033,8 +1002,8 @@ impl RenderPass for ShadowPass {
         self.clear_bundle_cache();
     }
 
-    fn invalidate_cached_bundles_for_resources(&self, resources: &[ResourceId]) {
-        self.invalidate_bundles_for_resources(resources);
+    fn invalidate_cached_bundles_for_resources(&self, resources: &[ResourceId]) -> bool {
+        self.invalidate_bundles_for_resources(resources)
     }
 
     fn setup(&self, ctx: &mut RenderGraphContext) {
@@ -1766,7 +1735,7 @@ impl RenderPass for ShadowPass {
         if !clear_only {
             self.ensure_pipeline(&device, binding_backend, texture_array_size);
         }
-        let bundles_active = frame.render_config.render_bundles && !clear_only;
+        let bundles_active = frame.shadow_render_bundles && !clear_only;
         if !bundles_active {
             let has_cached = self
                 .bundle_cache
@@ -1779,28 +1748,21 @@ impl RenderPass for ShadowPass {
                     slot.key = None;
                     slot.bundles = None;
                     slot.resources.clear();
-                    slot.draw_signature = 0;
                 }
             }
         }
 
         let cached_bundles = if bundles_active {
-            let draw_signature =
-                Self::bundle_signature(ctx.rpctx.pool, frame.as_ref(), use_indirect);
             let frames_in_flight = frame.render_config.frames_in_flight.max(1) as usize;
             self.ensure_bundle_cache(frames_in_flight);
             let slot_index = (frame.frame_index as usize) % frames_in_flight;
             let mut cache = self.bundle_cache.write();
             let slot = &mut cache[slot_index];
-            if slot.key != Some(frame.shadow_bundle_key)
-                || slot.bundles.is_none()
-                || slot.draw_signature != draw_signature
-            {
+            if slot.key != Some(frame.shadow_bundle_key) || slot.bundles.is_none() {
                 slot.key = Some(frame.shadow_bundle_key);
                 slot.bundles =
                     self.build_bundles(ctx, frame.as_ref(), binding_backend, use_indirect);
                 slot.resources = Self::gather_bundle_resources(frame.as_ref(), use_indirect);
-                slot.draw_signature = draw_signature;
             }
             slot.bundles.clone()
         } else {

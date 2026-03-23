@@ -387,7 +387,7 @@ impl ForwardPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -416,7 +416,7 @@ impl ForwardPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ]
@@ -882,7 +882,7 @@ impl ForwardPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                     },
                 ],
             }),
@@ -933,7 +933,7 @@ impl ForwardPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
+                        resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
                     },
                 ],
             });

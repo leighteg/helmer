@@ -521,6 +521,7 @@ fn to_render_sprite(
         blend_mode: sprite.blend_mode,
         billboard: sprite.billboard,
         pick_id: sprite.pick_id.unwrap_or(entity.to_bits() as u32),
+        ..RenderSprite::default()
     }
 }
 
@@ -1249,8 +1250,9 @@ impl RenderWorkerCore {
             || streaming_interval_ok
             || !*has_sent_any
             || !streaming_queue.is_empty();
+        let lod_affects_renderer = !gpu_driven || render_config.transparent_pass;
         let per_object_lod =
-            worker_tuning.per_object_lod && lod_enabled && (!gpu_driven || send_streaming);
+            worker_tuning.per_object_lod && lod_enabled && (lod_affects_renderer || send_streaming);
         let mut streaming_hints: Option<HashMap<(AssetStreamKind, usize), AssetStreamingRequest>> =
             send_streaming.then(HashMap::new);
         if let Some(hints) = streaming_hints.as_mut() {
@@ -1490,7 +1492,7 @@ impl RenderWorkerCore {
                 };
 
                 let lod_changed = lod_index != entry.last_sent_lod_index;
-                let should_send_lod = !gpu_driven || send_streaming;
+                let should_send_lod = lod_affects_renderer;
                 let needs_update = !entry.last_sent_visible
                     || !transform_approx_eq(
                         &current_transform,
@@ -1923,17 +1925,7 @@ impl RenderWorkerCore {
             objects_remove,
             lights_upsert,
             lights_remove,
-            sprites: None,
-            text_2d: None,
-            ui: None,
-            camera: None,
-            render_main_scene_to_swapchain: None,
-            viewports: None,
-            render_config: None,
-            render_graph: None,
-            gizmo: None,
-            skin_palette: None,
-            streaming_requests: None,
+            ..RenderDelta::default()
         };
 
         if send_camera {
@@ -2596,6 +2588,7 @@ pub fn render_data_system(
             }
             sprites.push(to_render_sprite(entity, transform, &sprite, image_sequence));
         }
+        direct_delta.static_sprites = Some(Arc::new(Vec::new()));
         direct_delta.sprites = Some(sprites);
     }
 

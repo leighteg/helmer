@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::components::LightType;
-use bevy_ecs::prelude::{Entity, World};
+use bevy_ecs::prelude::World;
 use egui::{Align2, Color32, ComboBox, Stroke, StrokeKind, TextStyle, pos2, vec2};
 use hashbrown::HashSet;
 use helmer_render::graphics::{
@@ -28,7 +28,7 @@ use tracing::warn;
 
 use crate::{
     ActiveCamera, AudioBackendResource, BecsAssetServer, BecsLodTuning, BecsPerformanceMetrics,
-    BecsRenderSender, BecsRenderWorkerTuning, BecsRendererStats, BecsRuntimeConfig,
+    BecsRenderControlSender, BecsRenderWorkerTuning, BecsRendererStats, BecsRuntimeConfig,
     BecsRuntimeProfiling, BecsRuntimeTuning, BecsSceneTuning, BecsStreamingTuning, Camera,
     DebugGraphHistory, Light, ProfilingHistory, Transform,
     egui_integration::{EguiResource, EguiWindowSpec},
@@ -155,9 +155,14 @@ fn clear_profiling_history(history: &mut ProfilingHistory) {
     history.render_thread_messages_ms.clear();
     history.render_thread_upload_ms.clear();
     history.render_thread_render_ms.clear();
+    history.render_scene_update_ms.clear();
+    history.render_viewports_ms.clear();
+    history.render_graph_setup_ms.clear();
+    history.render_backend_begin_frame_ms.clear();
     history.render_prepare_globals_ms.clear();
     history.render_streaming_plan_ms.clear();
     history.render_occlusion_ms.clear();
+    history.render_pre_graph_misc_ms.clear();
     history.render_graph_ms.clear();
     history.render_graph_pass_ms.clear();
     history.render_graph_encoder_create_ms.clear();
@@ -436,6 +441,19 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                             }
 
                             if let Some(stats) = renderer_stats.as_ref() {
+                                let render_scene_update_ms = micros_to_ms(
+                                    stats.render_scene_update_us.load(Ordering::Relaxed),
+                                );
+                                let render_viewports_ms =
+                                    micros_to_ms(stats.render_viewports_us.load(Ordering::Relaxed));
+                                let render_graph_setup_ms = micros_to_ms(
+                                    stats.render_graph_setup_us.load(Ordering::Relaxed),
+                                );
+                                let render_backend_begin_frame_ms = micros_to_ms(
+                                    stats
+                                        .render_backend_begin_frame_us
+                                        .load(Ordering::Relaxed),
+                                );
                                 let render_prepare_globals_ms = micros_to_ms(
                                     stats.render_prepare_globals_us.load(Ordering::Relaxed),
                                 );
@@ -444,6 +462,9 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                 );
                                 let render_occlusion_ms =
                                     micros_to_ms(stats.render_occlusion_us.load(Ordering::Relaxed));
+                                let render_pre_graph_misc_ms = micros_to_ms(
+                                    stats.render_pre_graph_misc_us.load(Ordering::Relaxed),
+                                );
                                 let render_graph_ms =
                                     micros_to_ms(stats.render_graph_us.load(Ordering::Relaxed));
                                 let render_graph_pass_ms = micros_to_ms(
@@ -469,6 +490,26 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                     micros_to_ms(stats.render_present_us.load(Ordering::Relaxed));
 
                                 push_history(
+                                    &mut history.render_scene_update_ms,
+                                    render_scene_update_ms,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.render_viewports_ms,
+                                    render_viewports_ms,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.render_graph_setup_ms,
+                                    render_graph_setup_ms,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.render_backend_begin_frame_ms,
+                                    render_backend_begin_frame_ms,
+                                    history_limit,
+                                );
+                                push_history(
                                     &mut history.render_prepare_globals_ms,
                                     render_prepare_globals_ms,
                                     history_limit,
@@ -481,6 +522,11 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                 push_history(
                                     &mut history.render_occlusion_ms,
                                     render_occlusion_ms,
+                                    history_limit,
+                                );
+                                push_history(
+                                    &mut history.render_pre_graph_misc_ms,
+                                    render_pre_graph_misc_ms,
                                     history_limit,
                                 );
                                 push_history(
@@ -836,6 +882,23 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                 .back()
                                 .copied()
                                 .unwrap_or(0.0);
+                            let scene_update_ms = history
+                                .render_scene_update_ms
+                                .back()
+                                .copied()
+                                .unwrap_or(0.0);
+                            let viewports_ms =
+                                history.render_viewports_ms.back().copied().unwrap_or(0.0);
+                            let graph_setup_ms = history
+                                .render_graph_setup_ms
+                                .back()
+                                .copied()
+                                .unwrap_or(0.0);
+                            let backend_begin_frame_ms = history
+                                .render_backend_begin_frame_ms
+                                .back()
+                                .copied()
+                                .unwrap_or(0.0);
                             let streaming_ms = history
                                 .render_streaming_plan_ms
                                 .back()
@@ -843,6 +906,11 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                 .unwrap_or(0.0);
                             let occlusion_ms =
                                 history.render_occlusion_ms.back().copied().unwrap_or(0.0);
+                            let pre_graph_misc_ms = history
+                                .render_pre_graph_misc_ms
+                                .back()
+                                .copied()
+                                .unwrap_or(0.0);
                             let graph_ms = history.render_graph_ms.back().copied().unwrap_or(0.0);
                             let resource_ms = history
                                 .render_resource_mgmt_ms
@@ -854,15 +922,40 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                             let submit_ms = history.render_submit_ms.back().copied().unwrap_or(0.0);
                             let present_ms =
                                 history.render_present_ms.back().copied().unwrap_or(0.0);
+                            ui.label(format!("scene update: {:.3} ms", scene_update_ms));
+                            ui.label(format!("viewports: {:.3} ms", viewports_ms));
+                            ui.label(format!("graph setup: {:.3} ms", graph_setup_ms));
+                            ui.label(format!("backend frame: {:.3} ms", backend_begin_frame_ms));
                             ui.label(format!("prepare globals: {:.3} ms", globals_ms));
                             ui.label(format!("streaming plan: {:.3} ms", streaming_ms));
                             ui.label(format!("occlusion: {:.3} ms", occlusion_ms));
+                            ui.label(format!("pre-graph misc: {:.3} ms", pre_graph_misc_ms));
                             ui.label(format!("render graph: {:.3} ms", graph_ms));
                             ui.label(format!("resource mgmt: {:.3} ms", resource_ms));
                             draw_history_plot(
                                 ui,
                                 160.0,
                                 &[
+                                    (
+                                        "scene update",
+                                        &history.render_scene_update_ms,
+                                        Color32::from_rgb(255, 120, 210),
+                                    ),
+                                    (
+                                        "viewports",
+                                        &history.render_viewports_ms,
+                                        Color32::from_rgb(160, 150, 255),
+                                    ),
+                                    (
+                                        "graph setup",
+                                        &history.render_graph_setup_ms,
+                                        Color32::from_rgb(140, 190, 255),
+                                    ),
+                                    (
+                                        "backend frame",
+                                        &history.render_backend_begin_frame_ms,
+                                        Color32::from_rgb(255, 130, 170),
+                                    ),
                                     (
                                         "prepare globals",
                                         &history.render_prepare_globals_ms,
@@ -877,6 +970,11 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                         "occlusion",
                                         &history.render_occlusion_ms,
                                         Color32::from_rgb(240, 120, 120),
+                                    ),
+                                    (
+                                        "pre-graph misc",
+                                        &history.render_pre_graph_misc_ms,
+                                        Color32::from_rgb(255, 170, 110),
                                     ),
                                     (
                                         "render graph",
@@ -1669,7 +1767,7 @@ impl StatsUI {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
                 let sender = world
-                    .get_resource::<BecsRenderSender>()
+                    .get_resource::<BecsRenderControlSender>()
                     .map(|s| s.0.clone());
                 {
                     let mut runtime_cfg = world
@@ -1942,6 +2040,10 @@ impl StatsUI {
                             "Occlusion Culling (Hi-Z)",
                         );
                         ui.checkbox(&mut render_cfg.lod, "LOD");
+                        ui.checkbox(
+                            &mut render_cfg.single_resident_lod_per_mesh,
+                            "single resident LOD per mesh",
+                        );
                         ui.checkbox(&mut render_cfg.gpu_driven, "GPU-driven (indirect)");
                         ui.checkbox(
                             &mut render_cfg.gpu_multi_draw_indirect,
@@ -2896,7 +2998,7 @@ impl StatsUI {
         egui_res.windows.push((
             Box::new(move |ui, world, _input_arc| {
                 let sender = world
-                    .get_resource::<BecsRenderSender>()
+                    .get_resource::<BecsRenderControlSender>()
                     .map(|s| s.0.clone());
                 let asset_server = {
                     #[cfg(target_arch = "wasm32")]
@@ -3853,7 +3955,7 @@ impl StatsUI {
                 ui.separator();
 
                 let sender = world
-                    .get_resource::<BecsRenderSender>()
+                    .get_resource::<BecsRenderControlSender>()
                     .map(|s| s.0.clone());
                 let (pass_timings, profiling_enabled) = world
                     .get_resource::<BecsRendererStats>()

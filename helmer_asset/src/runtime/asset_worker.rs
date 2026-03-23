@@ -8,10 +8,10 @@ use wasm_bindgen::prelude::wasm_bindgen;
 
 use crate::runtime::asset_server::{
     AssetKind, AssetStreamingTuning, IntermediateMaterial, MeshPayload, MeshPrimitiveDesc,
-    StreamedBuffer, TextureRequest, WebAssetIo, build_mesh_payload, decode_texture_asset_web,
-    decode_texture_file_bytes, estimate_primitive_bounds, generate_low_res_from_parts,
-    is_gltf_path, load_gltf_streaming_web, load_scene_buffers_web, parse_glb, parse_mesh_document,
-    parse_ron_material, parse_scene_document, process_primitive,
+    StreamedBuffer, TextureRequest, WebAssetIo, build_mesh_payload, build_procedural_mesh_payload,
+    decode_texture_asset_web, decode_texture_file_bytes, estimate_primitive_bounds,
+    generate_low_res_from_parts, is_gltf_path, load_gltf_streaming_web, load_scene_buffers_web,
+    parse_glb, parse_mesh_document, parse_ron_material, parse_scene_document, process_primitive,
 };
 use helmer_render::graphics::common::renderer::{
     Aabb, AssetStreamKind, MeshletDesc, MeshletLodData, Vertex,
@@ -389,7 +389,7 @@ async fn process_request(request: WorkerRequest) -> WorkerResponse {
             id,
             vertices,
             indices,
-            tuning,
+            ..
         } => {
             if vertices.len() % std::mem::size_of::<Vertex>() != 0 {
                 return WorkerResponse::Error {
@@ -398,7 +398,7 @@ async fn process_request(request: WorkerRequest) -> WorkerResponse {
             }
             let vertex_data: Vec<Vertex> = cast_slice(&vertices).to_vec();
             let bounds = Aabb::calculate(&vertex_data);
-            match build_mesh_payload(vertex_data, indices, bounds, &tuning) {
+            match build_procedural_mesh_payload(vertex_data, indices, bounds) {
                 Some(payload) => WorkerResponse::Mesh {
                     id,
                     scene_id: None,

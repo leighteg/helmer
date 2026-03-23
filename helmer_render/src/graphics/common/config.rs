@@ -29,6 +29,23 @@ impl Default for TransparentSortMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpriteLightingMode {
+    Fragment,
+    Vertex,
+}
+
+impl Default for SpriteLightingMode {
+    fn default() -> Self {
+        SpriteLightingMode::Fragment
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RenderConfig {
     pub gbuffer_pass: bool,
@@ -66,6 +83,7 @@ pub struct RenderConfig {
     pub max_lights_forward: usize,
     pub max_lights_deferred: usize,
     pub transparent_sort_mode: TransparentSortMode,
+    pub sprite_lighting_mode: SpriteLightingMode,
     pub transparent_shadows: bool,
     pub alpha_cutoff_default: f32,
 
@@ -77,6 +95,7 @@ pub struct RenderConfig {
     pub frustum_culling: bool,
     pub occlusion_culling: bool,
     pub lod: bool,
+    pub single_resident_lod_per_mesh: bool,
     pub gpu_driven: bool,
     pub gpu_multi_draw_indirect: bool,
     pub render_bundles: bool,
@@ -260,6 +279,7 @@ impl Default for RenderConfig {
             max_lights_forward: 256,
             max_lights_deferred: 2048,
             transparent_sort_mode: TransparentSortMode::BackToFront,
+            sprite_lighting_mode: SpriteLightingMode::Fragment,
             transparent_shadows: false,
             alpha_cutoff_default: 0.5,
 
@@ -271,6 +291,7 @@ impl Default for RenderConfig {
             frustum_culling: true,
             occlusion_culling: true,
             lod: true,
+            single_resident_lod_per_mesh: true,
             gpu_driven: true,
             gpu_multi_draw_indirect: true,
             #[cfg(target_arch = "wasm32")]

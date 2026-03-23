@@ -34,10 +34,10 @@ use crate::{
     provided::ui::inspector::InspectorSelectedEntityResource,
     resources::{
         AudioBackendResource, BecsAssetServer, BecsInputManager, BecsLodTuning,
-        BecsPerformanceMetrics, BecsRenderSender, BecsRenderWorkerTuning, BecsRendererStats,
-        BecsRuntimeConfig, BecsRuntimeCursorState, BecsRuntimeProfiling, BecsRuntimeTuning,
-        BecsRuntimeWindowControl, BecsSceneTuning, BecsStreamingTuning, BecsSystemProfiler,
-        DebugGraphHistory, DeltaTime, DraggedFile, ProfilingHistory,
+        BecsPerformanceMetrics, BecsRenderControlSender, BecsRenderSender, BecsRenderWorkerTuning,
+        BecsRendererStats, BecsRuntimeConfig, BecsRuntimeCursorState, BecsRuntimeProfiling,
+        BecsRuntimeTuning, BecsRuntimeWindowControl, BecsSceneTuning, BecsStreamingTuning,
+        BecsSystemProfiler, DebugGraphHistory, DeltaTime, DraggedFile, ProfilingHistory,
     },
     systems::{
         animation_system::{SkinningResource, skinning_system},
@@ -162,6 +162,10 @@ fn helmer_becs_init_impl<F>(
         .get::<helmer_render::extension::RenderMessageSender>()
         .map(|resource| resource.0.clone())
         .expect("RenderExtension did not register RenderMessageSender");
+    let render_control_sender = resources
+        .get::<helmer_render::extension::RenderControlMessageSender>()
+        .map(|resource| resource.0.clone())
+        .expect("RenderExtension did not register RenderControlMessageSender");
     let runtime_tuning = resources
         .get::<helmer_render::extension::RenderRuntimeTuningResource>()
         .map(|resource| resource.0.clone())
@@ -214,6 +218,9 @@ fn helmer_becs_init_impl<F>(
     world.insert_resource::<BecsPerformanceMetrics>(BecsPerformanceMetrics(metrics.clone()));
     world.insert_resource::<BecsRendererStats>(BecsRendererStats(renderer_stats));
     world.insert_resource::<BecsRenderSender>(BecsRenderSender(render_sender.clone()));
+    world.insert_resource::<BecsRenderControlSender>(BecsRenderControlSender(
+        render_control_sender.clone(),
+    ));
     world.insert_resource::<BecsStreamingTuning>(BecsStreamingTuning::default());
     world.insert_resource::<BecsLodTuning>(BecsLodTuning::default());
     world.insert_resource::<BecsRenderWorkerTuning>(BecsRenderWorkerTuning::default());
@@ -319,7 +326,7 @@ fn helmer_becs_init_impl<F>(
     #[cfg(not(target_arch = "wasm32"))]
     let threaded_logic = !runtime.context().is_single_threaded();
     #[cfg(not(target_arch = "wasm32"))]
-    let render_sender_for_window_events = render_sender.clone();
+    let render_sender_for_window_events = render_control_sender.clone();
 
     let logic_state = BecsLogicState::new(
         world,
@@ -331,6 +338,7 @@ fn helmer_becs_init_impl<F>(
         runtime_profiling,
         runtime_window_control_for_events,
         render_sender,
+        render_control_sender,
     );
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -361,6 +369,12 @@ fn helmer_becs_init_impl<F>(
         on_event: Some(Box::new(move |event| {
             let logic_event = match &event.kind {
                 helmer_window::event::WindowRuntimeEventKind::CloseRequested => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let _ = render_sender_for_window_events.send(
+                            helmer_render::graphics::common::renderer::RenderMessage::Shutdown,
+                        );
+                    }
                     Some(BecsLogicEvent::CloseRequested(None))
                 }
                 helmer_window::event::WindowRuntimeEventKind::Started { window, state } => {
@@ -377,6 +391,11 @@ fn helmer_becs_init_impl<F>(
                         if let Some((_, pending_state)) = pending_render_bootstrap.as_mut() {
                             *pending_state = *state;
                         }
+                        let _ = render_sender_for_window_events.send(
+                            helmer_render::graphics::common::renderer::RenderMessage::Resize(
+                                winit::dpi::PhysicalSize::new(state.width, state.height),
+                            ),
+                        );
                     }
                     Some(BecsLogicEvent::Resized(*state))
                 }
@@ -435,12 +454,6 @@ fn helmer_becs_init_impl<F>(
                 {
                     if let Some(sender) = logic_sender_for_events.as_ref() {
                         if matches!(logic_event, BecsLogicEvent::Tick(_)) {
-                            return;
-                        }
-                        if matches!(logic_event, BecsLogicEvent::CloseRequested(_)) {
-                            let (done_tx, done_rx) = mpsc::channel();
-                            let _ = sender.send(BecsLogicEvent::CloseRequested(Some(done_tx)));
-                            let _ = done_rx.recv_timeout(Duration::from_secs(2));
                             return;
                         }
                         if sender.send(logic_event).is_err() {

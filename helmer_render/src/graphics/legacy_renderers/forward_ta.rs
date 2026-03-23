@@ -2007,9 +2007,11 @@ impl RenderTrait for ForwardRendererTA {
                 total_lods: _,
                 lods,
                 bounds,
+                pinned: _,
             } => {
                 self.add_mesh(id, &lods, bounds).unwrap();
             }
+            RenderMessage::RemoveMesh { .. } => {}
             RenderMessage::CreateTexture {
                 id,
                 name: _,

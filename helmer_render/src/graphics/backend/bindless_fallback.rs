@@ -199,7 +199,7 @@ impl BindlessFallbackBackend {
         Some(slot)
     }
 
-    fn update_from_pool(&self, device: &wgpu::Device, pool: &GpuResourcePool) {
+    fn update_from_pool(&self, pool: &GpuResourcePool) {
         let mut tex_slots = self.texture_slots.write();
         let mut buf_slots = self.buffer_slots.write();
         let mut sam_slots = self.sampler_slots.write();
@@ -292,8 +292,6 @@ impl BindlessFallbackBackend {
                 _ => {}
             }
         }
-
-        self.rebuild_bind_group(device);
     }
 
     fn rebuild_bind_group(&self, device: &wgpu::Device) {
@@ -542,7 +540,7 @@ impl BindingBackend for BindlessFallbackBackend {
         }
         let full_rebuild = bind_group_missing || !epoch_matches && binding_changes.is_empty();
         let any_change = if full_rebuild {
-            self.update_from_pool(device, pool);
+            self.update_from_pool(pool);
             true
         } else {
             binding_changes

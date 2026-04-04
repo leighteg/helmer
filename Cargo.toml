@@ -7,6 +7,7 @@ members = [
     "helmer_asset",
     "helmer_window",
     "helmer_input",
+    "helmer_networking",
     "helmer_ui",
     "helmer_ui_layout",
     "helmer_ui_docking",

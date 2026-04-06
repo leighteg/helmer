@@ -255,7 +255,7 @@ fn ms_main(
         let meshlet_desc_len = arrayLength(&meshlet_descs);
         let meshlet_vert_len = arrayLength(&meshlet_vertices);
         let meshlet_index_len = arrayLength(&meshlet_indices);
-        mesh_max_vertex = arrayLength(&vertex_data) / 20u;
+        mesh_max_vertex = arrayLength(&vertex_data) / 24u;
 
         if (workgroup_id.y >= draw_params.instance_count) {
             mesh_visible = 0u;

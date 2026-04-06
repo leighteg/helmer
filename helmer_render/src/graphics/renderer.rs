@@ -651,8 +651,8 @@ fn select_atmosphere_lut_format(
 
 fn select_shadow_format(adapter: &wgpu::Adapter) -> (wgpu::TextureFormat, bool) {
     let candidates = [
-        wgpu::TextureFormat::Rg16Float,
         wgpu::TextureFormat::Rg32Float,
+        wgpu::TextureFormat::Rg16Float,
         wgpu::TextureFormat::Rgba16Float,
         wgpu::TextureFormat::Rgba8Unorm,
     ];
@@ -2840,6 +2840,7 @@ pub struct GraphRenderer {
     gpu_mesh_meta_capacity: usize,
     gpu_mesh_indices: HashMap<usize, u32>,
     gpu_mesh_material_indices: HashMap<(usize, u32), u32>,
+    gpu_material_binding_indices: Arc<Vec<u32>>,
     gpu_mesh_draw_selections: HashMap<usize, Vec<MeshDrawLodSelection>>,
     empty_meshlets: Option<MeshletGpu>,
     gpu_indirect_capacity: usize,
@@ -2882,6 +2883,9 @@ pub struct GraphRenderer {
     streaming_request_cursor: usize,
     streaming_scan_cursor: usize,
     streaming_sprite_scan_cursor: usize,
+    active_streaming_resources: Vec<ResourceId>,
+    active_streaming_resources_dirty: bool,
+    active_streaming_require_meshlets: bool,
     asset_upload_batch_active: bool,
     egui_texture_cache: EguiTextureCache,
     sprite_font_ctx: ParleyFontContext,
@@ -4157,6 +4161,7 @@ impl GraphRenderer {
             gpu_mesh_meta_capacity: 0,
             gpu_mesh_indices: HashMap::new(),
             gpu_mesh_material_indices: HashMap::new(),
+            gpu_material_binding_indices: Arc::new(vec![0]),
             gpu_mesh_draw_selections: HashMap::new(),
             empty_meshlets: None,
             gpu_indirect_capacity: 0,
@@ -4199,6 +4204,9 @@ impl GraphRenderer {
             streaming_request_cursor: 0,
             streaming_scan_cursor: 0,
             streaming_sprite_scan_cursor: 0,
+            active_streaming_resources: Vec::new(),
+            active_streaming_resources_dirty: true,
+            active_streaming_require_meshlets: false,
             asset_upload_batch_active: false,
             egui_texture_cache: EguiTextureCache::default(),
             sprite_font_ctx,
@@ -4374,8 +4382,7 @@ impl GraphRenderer {
         );
         let graph_sig = RenderGraphConfigSignature::from_render_config(&main_render_config);
         let tracing_active_for_config = |graph_name: &str, config: &RenderConfig| {
-            graph_name == "traced-graph"
-                || (graph_name == "hybrid-graph" && (config.ddgi_pass || config.rt_reflections))
+            Self::graph_uses_ray_tracing(graph_name, config)
         };
 
         let graph_setup_start = if profiling_enabled {
@@ -4961,16 +4968,17 @@ impl GraphRenderer {
                 .get(*node_id)
                 .copied()
                 .unwrap_or("unknown");
-            valid.insert(name.to_string());
+            valid.insert(name);
             let enabled = self.pass_overrides.get(name).copied().unwrap_or(true);
             self.pass_timings.push(RenderPassTiming {
-                name: name.to_string(),
+                name,
                 order,
                 enabled,
                 duration_us: 0,
             });
         }
-        self.pass_overrides.retain(|name, _| valid.contains(name));
+        self.pass_overrides
+            .retain(|name, _| valid.contains(name.as_str()));
         *self.shared_stats.pass_timings.write() = self.pass_timings.clone();
     }
 
@@ -5041,9 +5049,7 @@ impl GraphRenderer {
                     || self.current_render_data.as_ref().is_some_and(|state| {
                         let graph = &state.data.render_graph;
                         let config = &state.data.render_config;
-                        graph.name == "traced-graph"
-                            || (graph.name == "hybrid-graph"
-                                && (config.ddgi_pass || config.rt_reflections))
+                        Self::graph_uses_ray_tracing(graph.name, config)
                     });
                 if reset_rt {
                     self.reset_ray_tracing_state();
@@ -5387,6 +5393,7 @@ impl GraphRenderer {
         }
         let gpu_driven =
             state.data.render_config.gpu_driven && self.supports_indirect_first_instance;
+        let mut active_streaming_usage_changed = full;
 
         if prev_config != state.data.render_config {
             ui_changed = true;
@@ -5398,6 +5405,7 @@ impl GraphRenderer {
         for id in objects_remove {
             if let Some((removed, moved_idx)) = state.remove_object(id) {
                 objects_changed = true;
+                active_streaming_usage_changed = true;
                 self.gpu_draws_dirty = true;
                 self.gbuffer_draws_dirty = true;
                 if removed.casts_shadow {
@@ -5417,6 +5425,7 @@ impl GraphRenderer {
             match state.upsert_object(obj) {
                 ObjectUpdateResult::Inserted { index, material_id } => {
                     objects_changed = true;
+                    active_streaming_usage_changed = true;
                     self.gpu_instance_updates.push(index);
                     self.gpu_draws_dirty = true;
                     self.gbuffer_draws_dirty = true;
@@ -5452,6 +5461,9 @@ impl GraphRenderer {
                         || skin_changed;
                     if any_change {
                         objects_changed = true;
+                    }
+                    if mesh_changed || material_changed || lod_changed {
+                        active_streaming_usage_changed = true;
                     }
                     if mesh_changed {
                         self.gpu_draws_dirty = true;
@@ -5519,6 +5531,7 @@ impl GraphRenderer {
         }
         if state.take_material_usage_dirty() {
             self.materials_dirty = true;
+            active_streaming_usage_changed = true;
         }
         if camera_changed {
             self.shadow_uniforms_dirty = true;
@@ -5535,6 +5548,7 @@ impl GraphRenderer {
             }
             if next.single_resident_lod_per_mesh != prev_config.single_resident_lod_per_mesh {
                 self.streaming_dirty = true;
+                active_streaming_usage_changed = true;
                 self.instances_dirty = true;
                 self.shadow_instances_dirty = true;
                 self.gbuffer_draws_dirty = true;
@@ -5543,6 +5557,9 @@ impl GraphRenderer {
                 self.gpu_cull_dirty = true;
                 self.gpu_instance_updates.clear();
             }
+        }
+        if active_streaming_usage_changed {
+            self.invalidate_active_streaming_usage();
         }
         if let Some(requests) = streaming_requests {
             self.streaming_requests = Some(requests);
@@ -5583,6 +5600,42 @@ impl GraphRenderer {
         let evicted = self.pool.tick_eviction(self.frame_index);
         self.track_evicted_resources(evicted);
         self.frame_inputs.set(streaming_plan);
+    }
+
+    fn invalidate_active_streaming_usage(&mut self) {
+        self.active_streaming_resources_dirty = true;
+    }
+
+    fn active_scene_uses_mesh(&self, mesh_id: usize) -> bool {
+        self.current_render_data.as_ref().is_some_and(|scene| {
+            scene
+                .mesh_object_indices(mesh_id)
+                .is_some_and(|indices| !indices.is_empty())
+        })
+    }
+
+    fn active_scene_uses_material(&self, material_id: usize) -> bool {
+        self.current_render_data.as_ref().is_some_and(|scene| {
+            scene
+                .material_active
+                .get(material_id)
+                .copied()
+                .unwrap_or(false)
+        })
+    }
+
+    fn active_scene_uses_texture(&self, texture_id: usize) -> bool {
+        let Some(scene) = self.current_render_data.as_ref() else {
+            return false;
+        };
+        scene.active_material_ids().any(|material_id| {
+            self.material_meta(material_id)
+                .map(material_texture_ids)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|id| id == texture_id)
+        })
     }
 
     fn bump_egui_epoch(&mut self) {
@@ -5765,6 +5818,9 @@ impl GraphRenderer {
         self.streaming_request_cursor = 0;
         self.streaming_scan_cursor = 0;
         self.streaming_sprite_scan_cursor = 0;
+        self.active_streaming_resources.clear();
+        self.active_streaming_resources_dirty = true;
+        self.active_streaming_require_meshlets = false;
         self.force_bindgroups_backend = self.use_uniform_materials;
         self.rt_blas_targets.clear();
         self.rt_blas_last_rebuild_frame = self.frame_index;
@@ -5917,18 +5973,30 @@ impl GraphRenderer {
 
         let mut texture_changed = false;
         let mut material_buffer_changed = false;
+        let mut active_mesh_binding_changed = false;
         for id in &changes {
             match id.kind() {
-                ResourceKind::Texture => texture_changed = true,
+                ResourceKind::Texture => {
+                    let active_texture = self
+                        .pool
+                        .entry(*id)
+                        .and_then(|entry| entry.asset_stream_id)
+                        .map(|asset_id| self.active_scene_uses_texture(asset_id as usize))
+                        .unwrap_or(false);
+                    texture_changed |= active_texture;
+                }
                 ResourceKind::Buffer => {
                     if let Some(entry) = self.pool.entry(*id) {
                         if let Some(asset_id) = entry.asset_stream_id.map(|v| v as usize) {
                             if self.meshes.get(asset_id).is_some() {
                                 self.pending_mesh_binding_changes.push(asset_id);
+                                active_mesh_binding_changed |=
+                                    self.active_scene_uses_mesh(asset_id);
                             } else if self.materials.get(asset_id).is_some()
                                 || self.pending_materials.contains_key(&asset_id)
                             {
-                                material_buffer_changed = true;
+                                material_buffer_changed |=
+                                    self.active_scene_uses_material(asset_id);
                             }
                         }
                     }
@@ -5946,6 +6014,9 @@ impl GraphRenderer {
         }
         if texture_changed || material_buffer_changed {
             self.materials_dirty = true;
+        }
+        if material_buffer_changed || active_mesh_binding_changed {
+            self.invalidate_active_streaming_usage();
         }
     }
 
@@ -6045,7 +6116,14 @@ impl GraphRenderer {
         let mut material_buffer_evicted = false;
         for id in evicted {
             match id.kind() {
-                ResourceKind::Texture => texture_evicted = true,
+                ResourceKind::Texture => {
+                    texture_evicted |= self
+                        .pool
+                        .entry(id)
+                        .and_then(|entry| entry.asset_stream_id)
+                        .map(|asset_id| self.active_scene_uses_texture(asset_id as usize))
+                        .unwrap_or(false);
+                }
                 ResourceKind::Buffer => {
                     if let Some(entry) = self.pool.entry(id) {
                         if let Some(asset_id) = entry.asset_stream_id.map(|v| v as usize) {
@@ -6054,7 +6132,8 @@ impl GraphRenderer {
                             } else if self.materials.get(asset_id).is_some()
                                 || self.pending_materials.contains_key(&asset_id)
                             {
-                                material_buffer_evicted = true;
+                                material_buffer_evicted |=
+                                    self.active_scene_uses_material(asset_id);
                             }
                         }
                     }
@@ -6082,6 +6161,9 @@ impl GraphRenderer {
         if texture_evicted || material_buffer_evicted {
             self.materials_dirty = true;
         }
+        if material_buffer_evicted || !mesh_buffer_evicted.is_empty() {
+            self.invalidate_active_streaming_usage();
+        }
         if !mesh_buffer_evicted.is_empty() {
             let active_mesh_evicted = self.current_render_data.as_ref().map_or(true, |scene| {
                 mesh_buffer_evicted.iter().any(|mesh_id| {
@@ -6105,7 +6187,11 @@ impl GraphRenderer {
         }
     }
 
-    fn apply_pending_mesh_binding_changes(&mut self, scene: &RenderSceneState, stable_frames: u32) {
+    fn apply_pending_mesh_binding_changes(
+        &mut self,
+        scene: &RenderSceneState,
+        _stable_frames: u32,
+    ) {
         if self.pending_mesh_binding_changes.is_empty() {
             return;
         }
@@ -6114,22 +6200,17 @@ impl GraphRenderer {
             self.pending_mesh_binding_changes.dedup();
         }
 
-        let interval = stable_frames.max(1);
-        if self.last_mesh_binding_apply_frame != u32::MAX
-            && self
-                .frame_index
-                .saturating_sub(self.last_mesh_binding_apply_frame)
-                < interval
-        {
-            return;
-        }
-
-        let active_mesh_changed = self.pending_mesh_binding_changes.iter().any(|mesh_id| {
-            scene
-                .mesh_object_indices(*mesh_id)
-                .is_some_and(|indices| !indices.is_empty())
-                && self.mesh_draw_selection_changed(*mesh_id, false)
-        });
+        let active_mesh_changed = self
+            .pending_mesh_binding_changes
+            .iter()
+            .copied()
+            .filter(|mesh_id| {
+                scene
+                    .mesh_object_indices(*mesh_id)
+                    .is_some_and(|indices| !indices.is_empty())
+                    && self.mesh_draw_selection_changed(*mesh_id, false)
+            })
+            .any(|_| true);
         self.pending_mesh_binding_changes.clear();
         if !active_mesh_changed {
             return;
@@ -6224,9 +6305,8 @@ impl GraphRenderer {
     }
 
     fn update_rt_blas_targets(&mut self, data: &RenderData, plan: &StreamingPlan) {
-        let tracing_active = data.render_graph.name == "traced-graph"
-            || (data.render_graph.name == "hybrid-graph"
-                && (data.render_config.ddgi_pass || data.render_config.rt_reflections));
+        let tracing_active =
+            Self::graph_uses_ray_tracing(data.render_graph.name, &data.render_config);
         self.rt_requires_blas = tracing_active;
         if !tracing_active || plan.pressure != MemoryPressure::Hard {
             self.rt_blas_targets.clear();
@@ -7753,6 +7833,9 @@ impl GraphRenderer {
                 .is_some_and(|indices| !indices.is_empty())
         });
         if active_mesh_in_scene {
+            self.invalidate_active_streaming_usage();
+        }
+        if active_mesh_in_scene {
             if self.gpu_driven_active {
                 if !mesh_had_gpu_resources || self.mesh_draw_selection_changed(id, false) {
                     self.pending_mesh_binding_changes.push(id);
@@ -7774,6 +7857,9 @@ impl GraphRenderer {
             self.mesh_lod_min.remove(id);
             self.streaming_inflight.remove(id);
             self.rt_blas_targets.remove(&id);
+            if self.active_scene_uses_mesh(id) {
+                self.invalidate_active_streaming_usage();
+            }
             return;
         };
 
@@ -7802,6 +7888,9 @@ impl GraphRenderer {
                 .mesh_object_indices(id)
                 .is_some_and(|indices| !indices.is_empty())
         });
+        if active_mesh_in_scene {
+            self.invalidate_active_streaming_usage();
+        }
         if active_mesh_in_scene {
             if self.gpu_driven_active {
                 self.gpu_draws_dirty = true;
@@ -7962,7 +8051,9 @@ impl GraphRenderer {
             .unwrap_or(false);
         self.texture_low_res_state.insert(id, low_res);
         self.streaming_inflight.remove(id);
-        self.materials_dirty = true;
+        if self.active_scene_uses_texture(id) {
+            self.materials_dirty = true;
+        }
         Ok(())
     }
 
@@ -8056,6 +8147,9 @@ impl GraphRenderer {
         );
         self.materials_dirty = true;
         self.streaming_inflight.remove(mat_id);
+        if self.active_scene_uses_material(mat_id) {
+            self.invalidate_active_streaming_usage();
+        }
         true
     }
 
@@ -8371,10 +8465,8 @@ impl GraphRenderer {
         }
     }
 
-    fn mark_active_scene_usage(&mut self, scene: &RenderSceneState) {
-        let require_meshlets = scene.data.render_config.use_mesh_shaders
-            && self.device_caps.supports_mesh_pipeline()
-            && !scene.data.render_config.gpu_driven;
+    fn rebuild_active_streaming_usage(&mut self, scene: &RenderSceneState, require_meshlets: bool) {
+        self.active_streaming_resources.clear();
 
         for mesh_id in scene.active_mesh_ids_sorted() {
             let Some(mesh) = self.meshes.get(mesh_id) else {
@@ -8383,35 +8475,35 @@ impl GraphRenderer {
             let selections = self.stable_draw_lod_selections(mesh_id, mesh, require_meshlets);
             if selections.is_empty() && require_meshlets {
                 for selection in self.stable_draw_lod_selections(mesh_id, mesh, false) {
-                    self.pool.mark_used(selection.vertex, self.frame_index);
-                    self.pool.mark_used(selection.index, self.frame_index);
+                    self.active_streaming_resources.push(selection.vertex);
+                    self.active_streaming_resources.push(selection.index);
                     if self.buffer_resident(selection.meshlet_descs)
                         && self.buffer_resident(selection.meshlet_vertices)
                         && self.buffer_resident(selection.meshlet_indices)
                     {
-                        self.pool
-                            .mark_used(selection.meshlet_descs, self.frame_index);
-                        self.pool
-                            .mark_used(selection.meshlet_vertices, self.frame_index);
-                        self.pool
-                            .mark_used(selection.meshlet_indices, self.frame_index);
+                        self.active_streaming_resources
+                            .push(selection.meshlet_descs);
+                        self.active_streaming_resources
+                            .push(selection.meshlet_vertices);
+                        self.active_streaming_resources
+                            .push(selection.meshlet_indices);
                     }
                 }
                 continue;
             }
             for selection in selections {
-                self.pool.mark_used(selection.vertex, self.frame_index);
-                self.pool.mark_used(selection.index, self.frame_index);
+                self.active_streaming_resources.push(selection.vertex);
+                self.active_streaming_resources.push(selection.index);
                 if self.buffer_resident(selection.meshlet_descs)
                     && self.buffer_resident(selection.meshlet_vertices)
                     && self.buffer_resident(selection.meshlet_indices)
                 {
-                    self.pool
-                        .mark_used(selection.meshlet_descs, self.frame_index);
-                    self.pool
-                        .mark_used(selection.meshlet_vertices, self.frame_index);
-                    self.pool
-                        .mark_used(selection.meshlet_indices, self.frame_index);
+                    self.active_streaming_resources
+                        .push(selection.meshlet_descs);
+                    self.active_streaming_resources
+                        .push(selection.meshlet_vertices);
+                    self.active_streaming_resources
+                        .push(selection.meshlet_indices);
                 }
             }
         }
@@ -8420,7 +8512,7 @@ impl GraphRenderer {
             let rid = self
                 .pool
                 .asset_id_to_resource(ResourceKind::Buffer, material_id as u32);
-            self.pool.mark_used(rid, self.frame_index);
+            self.active_streaming_resources.push(rid);
 
             let Some(entry) = self.materials.get(material_id) else {
                 continue;
@@ -8435,8 +8527,32 @@ impl GraphRenderer {
                 let rid = self
                     .pool
                     .asset_id_to_resource(ResourceKind::Texture, texture_id as u32);
-                self.pool.mark_used(rid, self.frame_index);
+                self.active_streaming_resources.push(rid);
             }
+        }
+
+        if self.active_streaming_resources.len() > 1 {
+            self.active_streaming_resources.sort_unstable();
+            self.active_streaming_resources.dedup();
+        }
+        self.active_streaming_resources_dirty = false;
+        self.active_streaming_require_meshlets = require_meshlets;
+    }
+
+    fn mark_active_scene_usage(&mut self, scene: &RenderSceneState) {
+        let require_meshlets = scene.data.render_config.use_mesh_shaders
+            && self.device_caps.supports_mesh_pipeline()
+            && !scene.data.render_config.gpu_driven;
+        if self.active_streaming_resources_dirty
+            || self.active_streaming_require_meshlets != require_meshlets
+        {
+            self.rebuild_active_streaming_usage(scene, require_meshlets);
+        }
+        let frame_index = self.frame_index;
+        let resources = &self.active_streaming_resources;
+        let pool = &mut self.pool;
+        for &resource in resources {
+            pool.mark_used(resource, frame_index);
         }
     }
 
@@ -8518,6 +8634,9 @@ impl GraphRenderer {
         };
         if should_update {
             self.mesh_lod_min.insert(mesh_id, new_floor);
+            if self.active_scene_uses_mesh(mesh_id) {
+                self.invalidate_active_streaming_usage();
+            }
         }
         should_update
     }
@@ -9521,6 +9640,9 @@ impl GraphRenderer {
                 {
                     if let Some(desired) = req.max_lod {
                         self.mesh_lod_state.insert(req.asset_id, desired);
+                        if self.active_scene_uses_mesh(req.asset_id) {
+                            self.invalidate_active_streaming_usage();
+                        }
                     }
                     advance(&mut index, &mut processed);
                     continue;
@@ -11705,6 +11827,20 @@ impl GraphRenderer {
         config
     }
 
+    fn graph_uses_ray_tracing(graph_name: &str, config: &RenderConfig) -> bool {
+        graph_name == "traced-graph"
+            || (graph_name == "hybrid-graph" && (config.ddgi_pass || config.rt_reflections))
+    }
+
+    fn graph_needs_rt_texture_arrays(graph_name: &str, config: &RenderConfig) -> bool {
+        Self::graph_uses_ray_tracing(graph_name, config) && config.rt_use_textures
+    }
+
+    fn clear_rt_texture_arrays(&mut self) {
+        self.rt_texture_arrays = None;
+        self.rt_texture_arrays_signature = 0;
+    }
+
     fn prepare_frame_globals(
         &mut self,
         scene: &RenderSceneState,
@@ -12079,22 +12215,35 @@ impl GraphRenderer {
             };
 
         let material_textures = if frame_binding_backend == BindingBackendKind::BindGroups {
-            let build = self.build_material_textures(materials_dirty);
+            let build = self.build_material_textures(scene, materials_dirty);
             if build.changed {
+                let binding_indices_changed =
+                    self.cached_material_binding_indices.as_ref() != build.binding_indices.as_ref();
                 self.cached_material_textures = Some(build.textures.clone());
                 self.cached_material_binding_indices = build.binding_indices.clone();
                 self.cached_material_textures_signature = build.signature;
                 self.bump_material_bindings_version();
+                if binding_indices_changed && self.use_material_batches() {
+                    self.gbuffer_draws_dirty = true;
+                    self.shadow_draws_dirty = true;
+                    self.gpu_draws_dirty = true;
+                }
             }
             self.cached_material_textures.clone()
         } else {
             None
         };
-        let rt_texture_arrays = if frame_binding_backend == BindingBackendKind::BindGroups {
+        let needs_rt_texture_arrays = frame_binding_backend == BindingBackendKind::BindGroups
+            && Self::graph_needs_rt_texture_arrays(
+                render_data.render_graph.name,
+                &frame_render_config,
+            );
+        let rt_texture_arrays = if needs_rt_texture_arrays {
             material_textures
                 .as_ref()
                 .and_then(|textures| self.ensure_rt_texture_arrays(textures, &frame_render_config))
         } else {
+            self.clear_rt_texture_arrays();
             None
         };
 
@@ -14210,7 +14359,7 @@ impl GraphRenderer {
         let signature_changed = signature != self.cached_material_signature
             || self.cached_texture_array_size == 0
             || mapping_changed;
-        if !force_rebuild && !signature_changed {
+        if !signature_changed {
             return MaterialBuildResult {
                 buffer: self.cached_material_buffer.clone(),
                 uniform_buffer: self.cached_material_uniform_buffer.clone(),
@@ -14224,20 +14373,6 @@ impl GraphRenderer {
         }
 
         let texture_array_size = textures.len().max(1) as u32;
-        if force_rebuild && !signature_changed {
-            self.bump_material_bindings_version();
-            return MaterialBuildResult {
-                buffer: self.cached_material_buffer.clone(),
-                uniform_buffer: self.cached_material_uniform_buffer.clone(),
-                uniform_stride: self.cached_material_uniform_stride,
-                views: textures,
-                size: texture_array_size,
-                signature,
-                changed: true,
-                texture_overflow,
-            };
-        }
-
         self.bump_material_bindings_version();
         let fallback_material = MaterialShaderData {
             albedo: [1.0, 1.0, 1.0, 1.0],
@@ -14359,27 +14494,21 @@ impl GraphRenderer {
         }
     }
 
-    fn build_material_textures(&mut self, force_rebuild: bool) -> MaterialTextureBuildResult {
-        if !force_rebuild {
-            if let Some(textures) = self.cached_material_textures.clone() {
-                return MaterialTextureBuildResult {
-                    textures,
-                    binding_indices: self.cached_material_binding_indices.clone(),
-                    signature: self.cached_material_textures_signature,
-                    changed: false,
-                };
-            }
-        }
-
+    fn build_material_textures(
+        &mut self,
+        scene: &RenderSceneState,
+        _force_rebuild: bool,
+    ) -> MaterialTextureBuildResult {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let mut active_material_ids: Vec<usize> = scene.active_material_ids().collect();
+        active_material_ids.sort_unstable();
         let mut sig_hasher = DefaultHasher::new();
         self.material_version.hash(&mut sig_hasher);
-        self.material_index_order.len().hash(&mut sig_hasher);
-        let material_ids: Vec<usize> = self.material_index_order.clone();
+        active_material_ids.len().hash(&mut sig_hasher);
 
-        for mat_id in &material_ids {
+        for mat_id in &active_material_ids {
             mat_id.hash(&mut sig_hasher);
             let Some(entry) = self.materials.get(*mat_id) else {
                 0u8.hash(&mut sig_hasher);
@@ -14446,7 +14575,7 @@ impl GraphRenderer {
         let signature = sig_hasher.finish();
         let signature_changed = signature != self.cached_material_textures_signature
             || self.cached_material_textures.is_none();
-        if !force_rebuild && !signature_changed {
+        if !signature_changed {
             return MaterialTextureBuildResult {
                 textures: self
                     .cached_material_textures
@@ -14464,16 +14593,7 @@ impl GraphRenderer {
             metallic_roughness: self.fallback_mra_view.clone(),
             emission: self.fallback_emission_view.clone(),
         };
-        let mut textures = Vec::with_capacity(self.material_index_order.len().saturating_add(1));
-        textures.push(fallback);
-        let mut binding_indices = vec![0u32; self.material_index_order.len().saturating_add(1)];
-        let mut texture_binding_indices: HashMap<
-            (Option<usize>, Option<usize>, Option<usize>, Option<usize>),
-            u32,
-        > = HashMap::new();
-        texture_binding_indices.insert((None, None, None, None), 0);
         let frame_index = self.frame_index;
-
         let resolve_texture_key = |pool: &mut GpuResourcePool, opt_id: Option<usize>| {
             let id = opt_id?;
             let rid = pool.asset_id_to_resource(ResourceKind::Texture, id as u32);
@@ -14502,7 +14622,79 @@ impl GraphRenderer {
             view
         };
 
-        for mat_id in &material_ids {
+        let material_capacity = self.material_index_order.len().saturating_add(1);
+        let mut binding_indices = vec![0u32; material_capacity];
+
+        if self.use_uniform_materials {
+            let max_material_index = active_material_ids
+                .iter()
+                .filter_map(|mat_id| self.material_index_map.get(*mat_id))
+                .map(|entry| entry.index as usize)
+                .max()
+                .unwrap_or(0);
+            let mut textures = vec![fallback.clone(); max_material_index.saturating_add(1).max(1)];
+
+            for mat_id in &active_material_ids {
+                let Some(entry) = self.materials.get(*mat_id) else {
+                    continue;
+                };
+                let material_index = self
+                    .material_index_map
+                    .get(*mat_id)
+                    .map(|entry| entry.index as usize)
+                    .unwrap_or(0);
+                if material_index >= textures.len() {
+                    textures.resize(material_index + 1, fallback.clone());
+                }
+                let meta = &entry.meta;
+                textures[material_index] = MaterialTextureSet {
+                    albedo: resolve_tex(
+                        &mut self.pool,
+                        self.frame_index,
+                        meta.albedo_texture_id,
+                        &self.fallback_albedo_view,
+                    ),
+                    normal: resolve_tex(
+                        &mut self.pool,
+                        self.frame_index,
+                        meta.normal_texture_id,
+                        &self.fallback_normal_view,
+                    ),
+                    metallic_roughness: resolve_tex(
+                        &mut self.pool,
+                        self.frame_index,
+                        meta.metallic_roughness_texture_id,
+                        &self.fallback_mra_view,
+                    ),
+                    emission: resolve_tex(
+                        &mut self.pool,
+                        self.frame_index,
+                        meta.emission_texture_id,
+                        &self.fallback_emission_view,
+                    ),
+                };
+                if material_index < binding_indices.len() {
+                    binding_indices[material_index] = material_index as u32;
+                }
+            }
+
+            return MaterialTextureBuildResult {
+                textures: Arc::new(textures),
+                binding_indices: Arc::new(binding_indices),
+                signature,
+                changed: true,
+            };
+        }
+
+        let mut textures = Vec::with_capacity(active_material_ids.len().saturating_add(1));
+        textures.push(fallback);
+        let mut texture_binding_indices: HashMap<
+            (Option<usize>, Option<usize>, Option<usize>, Option<usize>),
+            u32,
+        > = HashMap::new();
+        texture_binding_indices.insert((None, None, None, None), 0);
+
+        for mat_id in &active_material_ids {
             let Some(entry) = self.materials.get(*mat_id) else {
                 continue;
             };
@@ -15903,6 +16095,20 @@ impl GraphRenderer {
             .unwrap_or(0)
     }
 
+    fn material_binding_index_from_indices(
+        &self,
+        material_index: u32,
+        binding_indices: &[u32],
+    ) -> u32 {
+        if self.use_uniform_materials {
+            return material_index;
+        }
+        binding_indices
+            .get(material_index as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn gpu_mesh_index(&self, mesh_id: usize) -> u32 {
         self.gpu_mesh_indices
             .get(&mesh_id)
@@ -15941,89 +16147,27 @@ impl GraphRenderer {
         u32::MAX
     }
 
-    fn queue_gpu_instance_updates_for_mesh_in_scene(
-        &mut self,
-        scene: &RenderSceneState,
-        mesh_id: usize,
-    ) -> usize {
-        let Some(indices) = scene.mesh_object_indices(mesh_id) else {
-            return 0;
-        };
-        for &idx in indices {
-            self.gpu_instance_updates.push(idx);
-        }
-        indices.len()
-    }
-
-    fn queue_gpu_instance_updates_for_mesh(&mut self, mesh_id: usize) -> usize {
-        let Some(scene) = self.current_render_data.as_ref() else {
-            self.gpu_instances_dirty = true;
-            self.gpu_instance_updates.clear();
-            return 0;
-        };
-        let Some(indices) = scene.mesh_object_indices(mesh_id) else {
-            return 0;
-        };
-        for &idx in indices {
-            self.gpu_instance_updates.push(idx);
-        }
-        indices.len()
-    }
-
-    fn queue_gpu_instance_updates_for_meshes_in_scene(
-        &mut self,
-        scene: &RenderSceneState,
-        mesh_ids: &[usize],
-    ) -> usize {
-        let mut updated = 0usize;
-        for &mesh_id in mesh_ids {
-            let Some(indices) = scene.mesh_object_indices(mesh_id) else {
-                continue;
-            };
-            updated = updated.saturating_add(indices.len());
-            for &idx in indices {
-                self.gpu_instance_updates.push(idx);
-            }
-        }
-        updated
-    }
-
-    fn queue_gpu_instance_updates_for_meshes(&mut self, mesh_ids: &[usize]) -> usize {
-        let Some(scene) = self.current_render_data.as_ref() else {
-            self.gpu_instances_dirty = true;
-            self.gpu_instance_updates.clear();
-            return 0;
-        };
-
-        let mut updated = 0usize;
-        for &mesh_id in mesh_ids {
-            let Some(indices) = scene.mesh_object_indices(mesh_id) else {
-                continue;
-            };
-            updated = updated.saturating_add(indices.len());
-            for &idx in indices {
-                self.gpu_instance_updates.push(idx);
-            }
-        }
-        updated
-    }
-
     fn queue_gpu_instance_updates_for_mapping_changes_full_scan(
         &mut self,
         render_data: &RenderData,
         previous_mesh_indices: &HashMap<usize, u32>,
         previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
+        previous_material_binding_indices: &[u32],
         use_material_batches: bool,
     ) -> usize {
         let material_version = self.material_version;
         let mut updated = 0usize;
         for (idx, obj) in render_data.objects.iter().enumerate() {
             let material_id = self.material_index_for(obj.material_id, material_version);
+            let previous_material_binding_id = self.material_binding_index_from_indices(
+                material_id,
+                previous_material_binding_indices,
+            );
             let material_binding_id = self.material_binding_index_for(material_id);
             let old_mesh_index = if use_material_batches {
                 Self::gpu_mesh_material_index_from_mapping(
                     obj.mesh_id,
-                    material_binding_id,
+                    previous_material_binding_id,
                     previous_mesh_material_indices,
                 )
             } else {
@@ -16040,73 +16184,6 @@ impl GraphRenderer {
             }
         }
         updated
-    }
-
-    fn queue_gpu_instance_updates_for_mapping_changes(
-        &mut self,
-        render_data: &RenderData,
-        previous_mesh_indices: &HashMap<usize, u32>,
-        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
-        use_material_batches: bool,
-    ) -> usize {
-        let changed_mesh_ids = if use_material_batches {
-            match changed_mesh_ids_from_material_mapping(
-                previous_mesh_material_indices,
-                &self.gpu_mesh_material_indices,
-            ) {
-                Some(mesh_ids) => mesh_ids,
-                None => {
-                    return self.queue_gpu_instance_updates_for_mapping_changes_full_scan(
-                        render_data,
-                        previous_mesh_indices,
-                        previous_mesh_material_indices,
-                        use_material_batches,
-                    );
-                }
-            }
-        } else {
-            changed_mesh_ids_from_mapping(previous_mesh_indices, &self.gpu_mesh_indices)
-        };
-
-        if changed_mesh_ids.is_empty() {
-            0
-        } else {
-            self.queue_gpu_instance_updates_for_meshes(&changed_mesh_ids)
-        }
-    }
-
-    fn queue_gpu_instance_updates_for_mapping_changes_in_scene(
-        &mut self,
-        scene: &RenderSceneState,
-        render_data: &RenderData,
-        previous_mesh_indices: &HashMap<usize, u32>,
-        previous_mesh_material_indices: &HashMap<(usize, u32), u32>,
-        use_material_batches: bool,
-    ) -> usize {
-        let changed_mesh_ids = if use_material_batches {
-            match changed_mesh_ids_from_material_mapping(
-                previous_mesh_material_indices,
-                &self.gpu_mesh_material_indices,
-            ) {
-                Some(mesh_ids) => mesh_ids,
-                None => {
-                    return self.queue_gpu_instance_updates_for_mapping_changes_full_scan(
-                        render_data,
-                        previous_mesh_indices,
-                        previous_mesh_material_indices,
-                        use_material_batches,
-                    );
-                }
-            }
-        } else {
-            changed_mesh_ids_from_mapping(previous_mesh_indices, &self.gpu_mesh_indices)
-        };
-
-        if changed_mesh_ids.is_empty() {
-            0
-        } else {
-            self.queue_gpu_instance_updates_for_meshes_in_scene(scene, &changed_mesh_ids)
-        }
     }
 
     fn build_gpu_instance_input(
@@ -16624,6 +16701,7 @@ impl GraphRenderer {
         let use_material_batches = self.use_material_batches();
         let previous_mesh_indices = std::mem::take(&mut self.gpu_mesh_indices);
         let previous_mesh_material_indices = std::mem::take(&mut self.gpu_mesh_material_indices);
+        let previous_material_binding_indices = self.gpu_material_binding_indices.clone();
         let (
             meta,
             draws,
@@ -16646,6 +16724,7 @@ impl GraphRenderer {
             ) = self.rebuild_gpu_draw_data_per_material(scene, &previous_mesh_material_indices);
             let mapping_changed = mesh_material_indices != previous_mesh_material_indices;
             self.gpu_mesh_material_indices = mesh_material_indices;
+            self.gpu_material_binding_indices = self.cached_material_binding_indices.clone();
             self.gpu_mesh_indices.clear();
             (
                 meta,
@@ -16671,6 +16750,7 @@ impl GraphRenderer {
             let mapping_changed = mesh_indices != previous_mesh_indices;
             self.gpu_mesh_indices = mesh_indices;
             self.gpu_mesh_material_indices.clear();
+            self.gpu_material_binding_indices = Arc::new(vec![0]);
             (
                 meta,
                 draws,
@@ -16695,11 +16775,11 @@ impl GraphRenderer {
             shadow: true,
         });
         if mapping_changed {
-            let updated = self.queue_gpu_instance_updates_for_mapping_changes_in_scene(
-                scene,
+            let updated = self.queue_gpu_instance_updates_for_mapping_changes_full_scan(
                 render_data,
                 &previous_mesh_indices,
                 &previous_mesh_material_indices,
+                previous_material_binding_indices.as_slice(),
                 use_material_batches,
             );
             if updated >= render_data.objects.len() {

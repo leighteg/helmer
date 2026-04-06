@@ -83,6 +83,7 @@ impl RenderGraphExecutor {
         let pass_names = &compilation.pass_names;
         if let Some(entries) = pass_timings.as_mut() {
             entries.clear();
+            entries.reserve(pass_names.len().saturating_sub(entries.capacity()));
         }
         if let Some(stats) = exec_stats.as_mut() {
             stats.reset();
@@ -143,7 +144,7 @@ impl RenderGraphExecutor {
                 }
                 if let Some(entries) = pass_timings.as_mut() {
                     entries.push(RenderPassTiming {
-                        name: name.to_string(),
+                        name,
                         order: pass_order.get(*node_id).copied().unwrap_or(0) as usize,
                         enabled,
                         duration_us,

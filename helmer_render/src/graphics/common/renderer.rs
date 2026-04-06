@@ -2627,9 +2627,9 @@ impl Default for RendererStats {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct RenderPassTiming {
-    pub name: String,
+    pub name: &'static str,
     pub order: usize,
     pub enabled: bool,
     pub duration_us: u64,

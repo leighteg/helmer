@@ -230,9 +230,6 @@ impl BindlessFallbackBackend {
 
             match entry.kind {
                 ResourceKind::Texture => {
-                    if !entry.is_streaming() {
-                        continue;
-                    }
                     let (layers, usage) = match &entry.desc {
                         ResourceDesc::Texture2D { layers, usage, .. } => (*layers, *usage),
                         _ => (1, wgpu::TextureUsages::empty()),
@@ -404,10 +401,7 @@ impl BindlessFallbackBackend {
         let Some(entry) = entry else {
             return true;
         };
-        if entry.kind != ResourceKind::Texture
-            || entry.residency != Residency::Resident
-            || !entry.is_streaming()
-        {
+        if entry.kind != ResourceKind::Texture || entry.residency != Residency::Resident {
             return true;
         }
         let (layers, usage) = match &entry.desc {

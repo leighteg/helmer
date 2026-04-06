@@ -131,7 +131,8 @@ struct GBufferInput {
     @location(2) tex_coord: vec2<f32>,
     @location(3) world_tangent: vec3<f32>,
     @location(4) world_bitangent: vec3<f32>,
-    @location(5) @interpolate(flat) material_id: u32,
+    @location(5) color: vec4<f32>,
+    @location(6) @interpolate(flat) material_id: u32,
 }
 
 struct GBufferOutput {
@@ -360,7 +361,7 @@ fn ms_main(
         let meshlet_desc_len = arrayLength(&meshlet_descs);
         let meshlet_vert_len = arrayLength(&meshlet_vertices);
         let meshlet_index_len = arrayLength(&meshlet_indices);
-        mesh_max_vertex = arrayLength(&vertex_data) / 20u;
+        mesh_max_vertex = arrayLength(&vertex_data) / 24u;
 
         if (workgroup_id.y >= draw_params.instance_count) {
             mesh_visible = 0u;
@@ -536,13 +537,14 @@ fn ms_main(
     if (local_id.x < mesh_vert_count) {
         let global_index = meshlet_vertices[meshlet_vertex_offset + local_id.x];
         let safe_index = min(global_index, mesh_max_vertex - 1u);
-        let base = safe_index * 20u;
+        let base = safe_index * 24u;
         let position = load_vec3(base);
         let normal = load_vec3(base + 3u);
         let tex_coord = load_vec2(base + 6u);
         let tangent = load_vec4(base + 8u);
-        let joints = load_uvec4(base + 12u);
-        let weights = load_vec4(base + 16u);
+        let color = load_vec4(base + 12u);
+        let joints = load_uvec4(base + 16u);
+        let weights = load_vec4(base + 20u);
         let skinned = apply_skinning(
             position,
             normal,
@@ -567,6 +569,7 @@ fn ms_main(
         mesh_output.vertices[local_id.x].tex_coord = tex_coord;
         mesh_output.vertices[local_id.x].world_tangent = T;
         mesh_output.vertices[local_id.x].world_bitangent = B;
+        mesh_output.vertices[local_id.x].color = color;
         mesh_output.vertices[local_id.x].material_id = mesh_material_id;
     }
 
@@ -592,8 +595,9 @@ fn fs_main(in: GBufferInput) -> GBufferOutput {
         in.tex_coord,
         mip_bias
     );
-    var albedo = material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo);
-    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo);
+    var albedo =
+        material.albedo.rgb * select(vec3<f32>(1.0), albedo_sample.rgb, has_albedo) * in.color.rgb;
+    var alpha = material.albedo.a * select(1.0, albedo_sample.a, has_albedo) * in.color.a;
 
     let has_emission = material.emission_idx >= 0i;
     let emission_sample = textureSampleBias(

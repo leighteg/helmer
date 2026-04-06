@@ -587,17 +587,19 @@ pub fn draw_runtime_profiling_panel(ui: &mut egui::Ui, world: &mut World) {
                                     let mut seen = HashSet::new();
                                     history.render_pass_order = pass_timings
                                         .iter()
-                                        .map(|timing| timing.name.clone())
+                                        .map(|timing| timing.name.to_string())
                                         .collect();
                                     for timing in pass_timings.iter() {
                                         let ms = micros_to_ms(timing.duration_us);
                                         let entry = history
                                             .render_pass_ms
-                                            .entry(timing.name.clone())
+                                            .entry(timing.name.to_string())
                                             .or_insert_with(VecDeque::new);
                                         push_history(entry, ms, history_limit);
-                                        history.render_pass_last_ms.insert(timing.name.clone(), ms);
-                                        seen.insert(timing.name.clone());
+                                        history
+                                            .render_pass_last_ms
+                                            .insert(timing.name.to_string(), ms);
+                                        seen.insert(timing.name.to_string());
                                     }
                                     history.render_pass_ms.retain(|name, _| seen.contains(name));
                                     history
@@ -4030,7 +4032,7 @@ impl StatsUI {
                                 if !pass.enabled {
                                     let _ = sender.try_send(RenderMessage::Control(
                                         RenderControl::SetPassEnabled {
-                                            pass: pass.name.clone(),
+                                            pass: pass.name.to_string(),
                                             enabled: true,
                                         },
                                     ));
@@ -4042,7 +4044,7 @@ impl StatsUI {
                                 if pass.enabled {
                                     let _ = sender.try_send(RenderMessage::Control(
                                         RenderControl::SetPassEnabled {
-                                            pass: pass.name.clone(),
+                                            pass: pass.name.to_string(),
                                             enabled: false,
                                         },
                                     ));
@@ -4068,13 +4070,13 @@ impl StatsUI {
                                             continue;
                                         }
                                         ui.label(pass.order.to_string());
-                                        ui.label(&pass.name);
+                                        ui.label(pass.name);
                                         let mut enabled = pass.enabled;
                                         if ui.checkbox(&mut enabled, "").changed() {
                                             if let Some(sender) = sender.as_ref() {
                                                 let _ = sender.try_send(RenderMessage::Control(
                                                     RenderControl::SetPassEnabled {
-                                                        pass: pass.name.clone(),
+                                                        pass: pass.name.to_string(),
                                                         enabled,
                                                     },
                                                 ));

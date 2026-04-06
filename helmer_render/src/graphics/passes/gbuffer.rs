@@ -658,7 +658,7 @@ impl GBufferPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ]
@@ -687,7 +687,7 @@ impl GBufferPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ]
@@ -1047,7 +1047,7 @@ impl GBufferPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
+                    resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
                 },
             ],
         }))
@@ -1108,7 +1108,7 @@ impl GBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
+                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
                         },
                     ],
                 });
@@ -1143,7 +1143,7 @@ impl GBufferPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&frame.point_sampler),
+                            resource: wgpu::BindingResource::Sampler(&frame.pbr_sampler),
                         },
                     ],
                 });

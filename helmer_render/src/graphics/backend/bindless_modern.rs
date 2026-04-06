@@ -245,9 +245,6 @@ impl BindlessModernBackend {
             if entry.residency != Residency::Resident {
                 continue;
             }
-            if !entry.is_streaming() {
-                continue;
-            }
             let (layers, usage) = match &entry.desc {
                 ResourceDesc::Texture2D { layers, usage, .. } => (*layers, *usage),
                 _ => (1, wgpu::TextureUsages::empty()),
@@ -341,10 +338,7 @@ impl BindlessModernBackend {
         let Some(entry) = entry else {
             return true;
         };
-        if entry.kind != ResourceKind::Texture
-            || entry.residency != Residency::Resident
-            || !entry.is_streaming()
-        {
+        if entry.kind != ResourceKind::Texture || entry.residency != Residency::Resident {
             return true;
         }
         let (layers, usage) = match &entry.desc {
